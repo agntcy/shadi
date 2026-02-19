@@ -6,6 +6,8 @@ edition = "2021"
 [lib]
 name = "shadi"
 crate-type = ["cdylib"]
+test = false
+doctest = false
 
 [dependencies]
 agent_secrets = { path = "../agent_secrets" }
