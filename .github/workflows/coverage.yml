@@ -14,7 +14,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install Homebrew dependencies
-        run: brew install python@3.12 just
+        run: brew install python@3.12 just llvm nettle pkg-config
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
