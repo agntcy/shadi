@@ -1,0 +1,240 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct MasConfig {
+    pub mas: Option<MasSettings>,
+    #[serde(default)]
+    pub groups: BTreeMap<String, GroupConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MasSettings {
+    pub default_group: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GroupConfig {
+    pub moderator_did: Option<String>,
+    #[serde(default)]
+    pub members: Vec<MemberConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemberConfig {
+    pub did: String,
+    pub role: Option<String>,
+}
+
+impl MasConfig {
+    pub fn default_group(&self) -> Option<&str> {
+        self.mas.as_ref()?.default_group.as_deref()
+    }
+
+    pub fn group(&self, name: &str) -> Option<&GroupConfig> {
+        self.groups.get(name)
+    }
+}
+
+pub fn load_config(path: &Path) -> Result<MasConfig, String> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
+    toml::from_str(&data).map_err(|err| format!("invalid config {}: {}", path.display(), err))
+}
+
+pub fn resolve_group<'a>(config: &'a MasConfig, group: Option<&'a str>) -> Result<&'a str, String> {
+    if let Some(group) = group {
+        return Ok(group);
+    }
+    config
+        .default_group()
+        .ok_or_else(|| "group is required (no default_group set)".to_string())
+}
+
+pub fn is_member_allowed(group: &GroupConfig, did: &str, role: Option<&str>) -> bool {
+    group.members.iter().any(|member| {
+        if member.did != did {
+            return false;
+        }
+        match (role, member.role.as_deref()) {
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+    })
+}
+
+pub fn resolve_did_ref<F>(did_ref: &str, mut fetch: F) -> Result<String, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    let prefix = "shadi://";
+    if let Some(key) = did_ref.strip_prefix(prefix) {
+        if key.is_empty() {
+            return Err("empty SHADI key in DID reference".to_string());
+        }
+        return fetch(key);
+    }
+    Ok(did_ref.to_string())
+}
+
+pub fn resolve_group_dids<F>(group: &GroupConfig, mut fetch: F) -> Result<GroupConfig, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    let moderator_did = match group.moderator_did.as_deref() {
+        Some(did_ref) => Some(resolve_did_ref(did_ref, &mut fetch)?),
+        None => None,
+    };
+    let mut members = Vec::with_capacity(group.members.len());
+    for member in &group.members {
+        let resolved = resolve_did_ref(&member.did, &mut fetch)?;
+        members.push(MemberConfig {
+            did: resolved,
+            role: member.role.clone(),
+        });
+    }
+    Ok(GroupConfig {
+        moderator_did,
+        members,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(contents: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(file.path(), contents).expect("write config");
+        file
+    }
+
+    #[test]
+    fn load_config_parses_groups_and_default() {
+        let contents = r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+moderator_did = "did:key:moderator"
+members = [
+  { did = "did:key:human", role = "human" },
+  { did = "did:key:agent", role = "agent" }
+]
+"#;
+        let file = write_config(contents);
+        let config = load_config(file.path()).expect("load");
+        assert_eq!(config.default_group(), Some("team-a"));
+        let group = config.group("team-a").expect("group");
+        assert_eq!(group.moderator_did.as_deref(), Some("did:key:moderator"));
+        assert_eq!(group.members.len(), 2);
+    }
+
+    #[test]
+    fn resolve_group_prefers_argument() {
+        let config = MasConfig {
+            mas: Some(MasSettings {
+                default_group: Some("team-a".to_string()),
+            }),
+            groups: BTreeMap::new(),
+        };
+        let group = resolve_group(&config, Some("team-b")).expect("group");
+        assert_eq!(group, "team-b");
+    }
+
+    #[test]
+    fn resolve_group_uses_default() {
+        let config = MasConfig {
+            mas: Some(MasSettings {
+                default_group: Some("team-a".to_string()),
+            }),
+            groups: BTreeMap::new(),
+        };
+        let group = resolve_group(&config, None).expect("group");
+        assert_eq!(group, "team-a");
+    }
+
+    #[test]
+    fn resolve_group_errors_without_default() {
+        let config = MasConfig {
+            mas: None,
+            groups: BTreeMap::new(),
+        };
+        let err = resolve_group(&config, None).unwrap_err();
+        assert!(err.contains("group is required"));
+    }
+
+    #[test]
+    fn is_member_allowed_matches_role_when_required() {
+        let group = GroupConfig {
+            moderator_did: None,
+            members: vec![MemberConfig {
+                did: "did:key:human".to_string(),
+                role: Some("human".to_string()),
+            }],
+        };
+        assert!(is_member_allowed(&group, "did:key:human", Some("human")));
+        assert!(!is_member_allowed(&group, "did:key:human", Some("agent")));
+    }
+
+    #[test]
+    fn is_member_allowed_accepts_when_role_not_required() {
+        let group = GroupConfig {
+            moderator_did: None,
+            members: vec![MemberConfig {
+                did: "did:key:agent".to_string(),
+                role: None,
+            }],
+        };
+        assert!(is_member_allowed(&group, "did:key:agent", None));
+        assert!(!is_member_allowed(&group, "did:key:agent", Some("agent")));
+    }
+
+    #[test]
+    fn is_member_allowed_rejects_unknown_did() {
+        let group = GroupConfig {
+            moderator_did: None,
+            members: vec![MemberConfig {
+                did: "did:key:human".to_string(),
+                role: Some("human".to_string()),
+            }],
+        };
+        assert!(!is_member_allowed(&group, "did:key:unknown", None));
+    }
+
+    #[test]
+    fn resolve_did_ref_returns_literal() {
+        let did = resolve_did_ref("did:key:abc", |_| Ok("x".to_string())).expect("did");
+        assert_eq!(did, "did:key:abc");
+    }
+
+    #[test]
+    fn resolve_did_ref_fetches_shadi_key() {
+        let did = resolve_did_ref("shadi://github/user/did", |key| Ok(format!("did:{}", key)))
+            .expect("did");
+        assert_eq!(did, "did:github/user/did");
+    }
+
+    #[test]
+    fn resolve_did_ref_rejects_empty_key() {
+        let err = resolve_did_ref("shadi://", |_| Ok("did".to_string())).unwrap_err();
+        assert!(err.contains("empty SHADI key"));
+    }
+
+    #[test]
+    fn resolve_group_dids_resolves_members() {
+        let group = GroupConfig {
+            moderator_did: Some("shadi://mod".to_string()),
+            members: vec![MemberConfig {
+                did: "shadi://member".to_string(),
+                role: Some("human".to_string()),
+            }],
+        };
+        let resolved = resolve_group_dids(&group, |key| Ok(format!("did:{}", key))).expect("group");
+        assert_eq!(resolved.moderator_did.as_deref(), Some("did:mod"));
+        assert_eq!(resolved.members[0].did, "did:member");
+    }
+}

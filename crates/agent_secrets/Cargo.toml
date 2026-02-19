@@ -1,0 +1,21 @@
+[package]
+name = "agent_secrets"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["std"]
+std = []
+windows = []
+macos = []
+ios = []
+android = []
+linux = []
+coverage = []
+
+[dependencies]
+zeroize = "1.7"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.10"
+security-framework-sys = "2.15"

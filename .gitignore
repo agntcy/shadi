@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python
+.venv/
+.venv-py312/
+__pycache__/
+**/*.py[cod]
+.adk/
+
+# MkDocs
+/site/
+
+# Coverage
+/coverage/
+
+# Local data
+.tmp/
+tmp/
+*.db
+did-document.json
+
+# Editors
+.vscode/
+
+# OS
+.DS_Store

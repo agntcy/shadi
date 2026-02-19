@@ -1,0 +1,2038 @@
+// Copyright AGNTCY Contributors (https://github.com/agntcy)
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
+
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
+use base64::Engine;
+use clap::{ArgAction, Parser, Subcommand};
+use ed25519_dalek::SigningKey;
+use hkdf::Hkdf;
+#[cfg(not(test))]
+use reqwest::blocking::Client;
+#[cfg(not(test))]
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sha2::Sha256;
+use shadi_sandbox::{spawn_sandboxed, SandboxPolicy};
+use agent_secrets::{SecretPolicy, SecretStore};
+use shadi_memory::{MemoryEntry, SqlCipherStore};
+use sequoia_openpgp as openpgp;
+
+#[derive(Parser, Debug)]
+#[command(name = "shadi")]
+#[command(about = "Secure Host Agentic AI Dynamic Instantiation")]
+struct Cli {
+    #[arg(long = "policy", value_name = "FILE")]
+    policy_file: Option<PathBuf>,
+
+    #[arg(long = "allow", value_name = "PATH", action = ArgAction::Append)]
+    allow: Vec<PathBuf>,
+
+    #[arg(long = "read", value_name = "PATH", action = ArgAction::Append)]
+    read: Vec<PathBuf>,
+
+    #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
+    write: Vec<PathBuf>,
+
+    #[arg(long = "net-block", action = ArgAction::SetTrue)]
+    net_block: bool,
+
+    #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
+    allow_command: Vec<String>,
+
+    #[arg(long = "inject-keychain", value_name = "KEY=ENV", action = ArgAction::Append)]
+    inject_keychain: Vec<String>,
+
+    #[arg(long = "list-keychain", action = ArgAction::SetTrue)]
+    list_keychain: bool,
+
+    #[arg(long = "list-prefix", value_name = "PREFIX")]
+    list_prefix: Option<String>,
+
+    #[arg(long = "print-policy", action = ArgAction::SetTrue)]
+    print_policy: bool,
+
+    #[arg(last = true)]
+    command: Vec<String>,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "memory", about = "Query SQLCipher memory using SHADI secrets")]
+struct MemoryCli {
+    #[arg(long, env = "SHADI_MEMORY_DB", value_name = "PATH")]
+    db: PathBuf,
+
+    #[arg(long, env = "SHADI_MEMORY_KEY")]
+    key: Option<String>,
+
+    #[arg(long = "key-name", env = "SHADI_MEMORY_KEY_NAME", default_value = "shadi/memory/sqlcipher_key")]
+    key_name: String,
+
+    #[command(subcommand)]
+    command: MemoryCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum MemoryCommand {
+    Init,
+    Put {
+        #[arg(long)]
+        scope: String,
+        #[arg(long = "entry-key")]
+        entry_key: String,
+        #[arg(long)]
+        payload: Option<String>,
+        #[arg(long = "payload-file")]
+        payload_file: Option<PathBuf>,
+    },
+    Get {
+        #[arg(long)]
+        scope: String,
+        #[arg(long = "entry-key")]
+        entry_key: String,
+    },
+    Search {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        query: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+    Delete {
+        #[arg(long)]
+        scope: String,
+        #[arg(long = "entry-key")]
+        entry_key: String,
+    },
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "did-from-gpg", about = "Create did:key DID document from a GPG Ed25519 public key")]
+struct DidFromGpgArgs {
+    #[arg(
+        short = 'k',
+        long = "key",
+        value_name = "SECRET",
+        required_unless_present = "input",
+        conflicts_with = "input"
+    )]
+    key_ref: Option<String>,
+
+    #[arg(
+        short = 'i',
+        long = "in",
+        value_name = "FILE",
+        required_unless_present = "key_ref",
+        conflicts_with = "key_ref"
+    )]
+    input: Option<PathBuf>,
+
+    #[arg(short = 'o', long = "out", value_name = "FILE", default_value = "did-document.json")]
+    out_file: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "did-from-github", about = "Create did:key DID document from a GitHub GPG public key")]
+struct DidFromGitHubArgs {
+    #[arg(long = "user", value_name = "USERNAME")]
+    user: String,
+
+    #[arg(long = "out", value_name = "FILE")]
+    out_file: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "get-secret", about = "Read a secret from the SHADI secret store")]
+struct GetSecretArgs {
+    #[arg(long = "key", value_name = "KEY")]
+    key: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "derive-agent-did", about = "Derive an agent DID from a human GPG key")]
+struct DeriveAgentDidArgs {
+    #[arg(
+        short = 's',
+        long = "secret",
+        value_name = "SECRET",
+        required_unless_present = "input",
+        conflicts_with = "input"
+    )]
+    secret: Option<String>,
+
+    #[arg(
+        short = 'i',
+        long = "in",
+        value_name = "FILE",
+        required_unless_present = "secret",
+        conflicts_with = "secret"
+    )]
+    input: Option<PathBuf>,
+
+    #[arg(short = 'n', long = "name", value_name = "NAME")]
+    agent_name: String,
+
+    #[arg(long = "prefix", value_name = "PATH", default_value = "agent_keys")]
+    prefix: String,
+
+    #[arg(short = 'o', long = "out", value_name = "FILE")]
+    out_file: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "put-key", about = "Store an OpenPGP key in the SHADI secret store")]
+struct PutKeyArgs {
+    #[arg(short = 'k', long = "key", value_name = "SECRET")]
+    key: String,
+
+    #[arg(short = 'i', long = "in", value_name = "FILE")]
+    input: PathBuf,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PolicyFile {
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    read: Vec<String>,
+    #[serde(default)]
+    write: Vec<String>,
+    #[serde(default)]
+    net_block: Option<bool>,
+    #[serde(default)]
+    allow_command: Vec<String>,
+    #[serde(default)]
+    block_command: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ResolvedPolicy {
+    policy: SandboxPolicy,
+    blocked: HashSet<String>,
+    allow: HashSet<String>,
+}
+
+#[cfg(test)]
+static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+
+#[cfg(test)]
+fn test_secret_store_map() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+    TEST_SECRET_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+struct TestSecretStore;
+
+#[cfg(test)]
+impl SecretStore for TestSecretStore {
+    fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> agent_secrets::SecretResult<()> {
+        let mut guard = test_secret_store_map()
+            .lock()
+            .map_err(|_| agent_secrets::SecretError::StorageFailure)?;
+        guard.insert(key.to_string(), secret.to_vec());
+        Ok(())
+    }
+
+    fn get(&self, key: &str) -> agent_secrets::SecretResult<agent_secrets::memory::SecretBytes> {
+        let guard = test_secret_store_map()
+            .lock()
+            .map_err(|_| agent_secrets::SecretError::StorageFailure)?;
+        let value = guard
+            .get(key)
+            .ok_or(agent_secrets::SecretError::InvalidInput)?
+            .clone();
+        Ok(agent_secrets::memory::SecretBytes::new(value))
+    }
+
+    fn delete(&self, key: &str) -> agent_secrets::SecretResult<()> {
+        let mut guard = test_secret_store_map()
+            .lock()
+            .map_err(|_| agent_secrets::SecretError::StorageFailure)?;
+        guard.remove(key);
+        Ok(())
+    }
+
+    fn list_keys(&self) -> agent_secrets::SecretResult<Vec<String>> {
+        let guard = test_secret_store_map()
+            .lock()
+            .map_err(|_| agent_secrets::SecretError::StorageFailure)?;
+        Ok(guard.keys().cloned().collect())
+    }
+}
+
+#[cfg(test)]
+fn default_secret_store() -> Box<dyn SecretStore> {
+    Box::new(TestSecretStore)
+}
+
+#[cfg(not(test))]
+fn default_secret_store() -> Box<dyn SecretStore> {
+    agent_secrets::default_store()
+}
+
+#[cfg(test)]
+fn test_store_put(key: &str, value: &[u8]) {
+    let mut guard = test_secret_store_map().lock().expect("test store lock");
+    guard.insert(key.to_string(), value.to_vec());
+}
+
+#[cfg(test)]
+fn test_store_get(key: &str) -> Option<Vec<u8>> {
+    let guard = test_secret_store_map().lock().expect("test store lock");
+    guard.get(key).cloned()
+}
+
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    run_cli(cli)
+}
+
+fn run_cli(cli: Cli) -> ExitCode {
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("memory")) {
+        return run_memory_command(&cli.command[1..]);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("did-from-gpg")) {
+        return run_did_from_gpg_command(&cli.command);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("did-from-github")) {
+        return run_did_from_github_command(&cli.command);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("get-secret")) {
+        return run_get_secret_command(&cli.command);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("derive-agent-did")) {
+        return run_derive_agent_did_command(&cli.command);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("put-key")) {
+        return run_put_key_command(&cli.command);
+    }
+
+    if cli.list_keychain {
+        return match list_keychain(cli.list_prefix.as_deref()) {
+            Ok(()) => ExitCode::from(0),
+            Err(err) => {
+                eprintln!("failed to list secrets: {}", err);
+                ExitCode::from(2)
+            }
+        };
+    }
+
+    if cli.print_policy && cli.command.is_empty() {
+        let file_policy = match cli.policy_file.as_ref() {
+            Some(path) => match load_policy_file(path) {
+                Ok(policy) => policy,
+                Err(err) => {
+                    eprintln!("failed to read policy {}: {}", path.display(), err);
+                    return ExitCode::from(2);
+                }
+            },
+            None => PolicyFile::default(),
+        };
+
+        let resolved = match resolve_policy(&cli, &file_policy) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                eprintln!("{}", err);
+                return ExitCode::from(2);
+            }
+        };
+
+        return match format_policy(&resolved.policy, &resolved.blocked, &resolved.allow) {
+            Ok(output) => {
+                println!("{}", output);
+                ExitCode::from(0)
+            }
+            Err(err) => {
+                eprintln!("failed to print policy: {}", err);
+                ExitCode::from(2)
+            }
+        };
+    }
+
+    if cli.command.is_empty() {
+        eprintln!("missing command to run");
+        return ExitCode::from(2);
+    }
+    let file_policy = match cli.policy_file.as_ref() {
+        Some(path) => match load_policy_file(path) {
+            Ok(policy) => policy,
+            Err(err) => {
+                eprintln!("failed to read policy {}: {}", path.display(), err);
+                return ExitCode::from(2);
+            }
+        },
+        None => PolicyFile::default(),
+    };
+
+    let resolved = match resolve_policy(&cli, &file_policy) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            eprintln!("{}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    let cmd_name = cli.command.first().map(|cmd| cmd.as_str()).unwrap_or("");
+    if is_command_blocked(cmd_name, &resolved.blocked, &resolved.allow) {
+        eprintln!("blocked command: {}", cmd_name);
+        return ExitCode::from(2);
+    }
+
+    if cli.print_policy {
+        return match format_policy(&resolved.policy, &resolved.blocked, &resolved.allow) {
+            Ok(output) => {
+                println!("{}", output);
+                ExitCode::from(0)
+            }
+            Err(err) => {
+                eprintln!("failed to print policy: {}", err);
+                ExitCode::from(2)
+            }
+        };
+    }
+
+    let mut command = Command::new(cmd_name);
+    if cli.command.len() > 1 {
+        command.args(&cli.command[1..]);
+    }
+
+    if let Err(err) = inject_keychain_secrets(&mut command, &cli.inject_keychain) {
+        eprintln!("failed to inject keychain secrets: {}", err);
+        return ExitCode::from(2);
+    }
+
+    match spawn_sandboxed(&mut command, &resolved.policy) {
+        Ok(mut child) => match child.wait() {
+            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+            Err(err) => {
+                eprintln!("failed to wait for child: {}", err);
+                ExitCode::from(1)
+            }
+        },
+        Err(err) => {
+            eprintln!("failed to start sandboxed command: {}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_memory_command(args: &[String]) -> ExitCode {
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push("shadictl-memory".to_string());
+    argv.extend_from_slice(args);
+    let cli = match MemoryCli::try_parse_from(argv) {
+        Ok(cli) => cli,
+        Err(err) => {
+            eprintln!("{}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    let key = match resolve_memory_key(&cli) {
+        Ok(key) => key,
+        Err(err) => {
+            eprintln!("{}", err);
+            return ExitCode::from(1);
+        }
+    };
+
+    let store = match SqlCipherStore::open(&cli.db, &key) {
+        Ok(store) => store,
+        Err(err) => {
+            eprintln!("{}", err);
+            return ExitCode::from(1);
+        }
+    };
+
+    match handle_memory_command(&cli, &store) {
+        Ok(output) => {
+            println!("{}", output);
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn handle_memory_command(cli: &MemoryCli, store: &SqlCipherStore) -> Result<String, String> {
+    match &cli.command {
+        MemoryCommand::Init => Ok("ok".to_string()),
+        MemoryCommand::Put {
+            scope,
+            entry_key,
+            payload,
+            payload_file,
+        } => {
+            let payload = read_memory_payload(payload.clone(), payload_file.clone())?;
+            let id = store
+                .put(scope, entry_key, &payload)
+                .map_err(|err| err.to_string())?;
+            Ok(serde_json::json!({"status": "saved", "id": id}).to_string())
+        }
+        MemoryCommand::Get { scope, entry_key } => {
+            let entry = store
+                .get_latest(scope, entry_key)
+                .map_err(|err| err.to_string())?;
+            match entry {
+                Some(entry) => serde_json::to_string_pretty(&entry).map_err(|err| err.to_string()),
+                None => Ok(serde_json::json!({"found": false}).to_string()),
+            }
+        }
+        MemoryCommand::Search {
+            scope,
+            query,
+            limit,
+        } => {
+            let entries = store
+                .search(scope.as_deref(), query, *limit)
+                .map_err(|err| err.to_string())?;
+            format_memory_entries(entries)
+        }
+        MemoryCommand::List { scope, limit } => {
+            let entries = store
+                .list(scope.as_deref(), *limit)
+                .map_err(|err| err.to_string())?;
+            format_memory_entries(entries)
+        }
+        MemoryCommand::Delete { scope, entry_key } => {
+            let affected = store
+                .delete(scope, entry_key)
+                .map_err(|err| err.to_string())?;
+            Ok(serde_json::json!({"deleted": affected}).to_string())
+        }
+    }
+}
+
+fn resolve_memory_key(cli: &MemoryCli) -> Result<String, String> {
+    if let Some(key) = cli.key.as_ref() {
+        if key.is_empty() {
+            return Err("SHADI_MEMORY_KEY is empty".to_string());
+        }
+        return Ok(key.to_string());
+    }
+
+    let store = default_secret_store();
+    let secret = store
+        .get(&cli.key_name)
+        .map_err(|_| format!("missing SHADI key: {}", cli.key_name))?;
+    let raw = secret.expose(|bytes| bytes.to_vec());
+    String::from_utf8(raw).map_err(|_| "SHADI memory key is not utf-8".to_string())
+}
+
+fn read_memory_payload(
+    payload: Option<String>,
+    payload_file: Option<PathBuf>,
+) -> Result<String, String> {
+    match (payload, payload_file) {
+        (Some(text), None) => Ok(text),
+        (None, Some(path)) => std::fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read payload file: {}", err)),
+        (None, None) => Err("payload or payload-file must be provided".to_string()),
+        (Some(_), Some(_)) => Err("use either payload or payload-file".to_string()),
+    }
+}
+
+fn format_memory_entries(entries: Vec<MemoryEntry>) -> Result<String, String> {
+    serde_json::to_string_pretty(&entries).map_err(|err| err.to_string())
+}
+
+fn run_derive_agent_did_command(args: &[String]) -> ExitCode {
+    let parsed = match DeriveAgentDidArgs::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
+
+    match run_derive_agent_did(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_get_secret_command(args: &[String]) -> ExitCode {
+    let parsed = match GetSecretArgs::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
+
+    match run_get_secret(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_did_from_github_command(args: &[String]) -> ExitCode {
+    let parsed = match DidFromGitHubArgs::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
+
+    match run_did_from_github(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_did_from_gpg_command(args: &[String]) -> ExitCode {
+    let parsed = match DidFromGpgArgs::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
+
+    match run_did_from_gpg(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_did_from_gpg(args: DidFromGpgArgs) -> Result<(), String> {
+    let public_key = read_openpgp_input("--key", args.key_ref.as_deref(), args.input.as_ref())?;
+
+    let pkey = extract_ed25519_public_key(&public_key)?;
+
+    let (did, vm_id, doc) = build_did_document(&pkey)?;
+    let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
+    std::fs::write(&args.out_file, format!("{}\n", output)).map_err(|err| {
+        format!("failed to write {}: {}", args.out_file.display(), err)
+    })?;
+
+    println!("DID: {}", did);
+    println!("Verification Method ID: {}", vm_id);
+    println!("Wrote DID Document: {}", args.out_file.display());
+    Ok(())
+}
+
+fn run_did_from_github(args: DidFromGitHubArgs) -> Result<(), String> {
+    let public_key = fetch_github_gpg_key(&args.user)?;
+    let pkey = extract_ed25519_public_key(&public_key)?;
+
+    let (did, vm_id, doc) = build_did_document(&pkey)?;
+    let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
+
+    let did_key = format!("github/{}/did", args.user);
+    let did_doc_key = format!("github/{}/diddoc", args.user);
+
+    let store = default_secret_store();
+    store
+        .put(&did_key, did.as_bytes(), SecretPolicy::default())
+        .map_err(|err| format!("failed to store secret {}: {}", did_key, err))?;
+    store
+        .put(&did_doc_key, output.as_bytes(), SecretPolicy::default())
+        .map_err(|err| format!("failed to store secret {}: {}", did_doc_key, err))?;
+
+    if let Some(out_file) = args.out_file.as_ref() {
+        std::fs::write(out_file, format!("{}\n", output)).map_err(|err| {
+            format!("failed to write {}: {}", out_file.display(), err)
+        })?;
+    }
+
+    println!("DID: {}", did);
+    println!("Verification Method ID: {}", vm_id);
+    println!("Stored DID in secret key: {}", did_key);
+    println!("Stored DID Document in secret key: {}", did_doc_key);
+    if let Some(out_file) = args.out_file.as_ref() {
+        println!("Wrote DID Document: {}", out_file.display());
+    }
+    Ok(())
+}
+
+fn run_get_secret(args: GetSecretArgs) -> Result<(), String> {
+    let store = default_secret_store();
+    let secret = store
+        .get(&args.key)
+        .map_err(|_| format!("keychain lookup failed for {}", args.key))?;
+    let value = secret.expose(|bytes| bytes.to_vec());
+    let value = secret_bytes_to_utf8(&value)?;
+    println!("{}", value);
+    Ok(())
+}
+
+fn run_derive_agent_did(args: DeriveAgentDidArgs) -> Result<(), String> {
+    let secret_key = read_openpgp_input("--secret", args.secret.as_deref(), args.input.as_ref())?;
+    let (private_key, public_key) = derive_agent_keypair(&secret_key, &args.agent_name)?;
+    let (did, vm_id, doc) = build_did_document(&public_key)?;
+    let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
+
+    let prefix = args.prefix.trim_end_matches('/');
+    let private_key_name = format!("{}/{}/private", prefix, args.agent_name);
+    let public_key_name = format!("{}/{}/public", prefix, args.agent_name);
+    let did_key_name = format!("{}/{}/did", prefix, args.agent_name);
+    let diddoc_key_name = format!("{}/{}/diddoc", prefix, args.agent_name);
+
+    let store = default_secret_store();
+    let private_b64 = base64::engine::general_purpose::STANDARD.encode(private_key);
+    let public_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
+
+    store
+        .put(&private_key_name, private_b64.as_bytes(), SecretPolicy::default())
+        .map_err(|err| format!("failed to store secret {}: {}", private_key_name, err))?;
+    store
+        .put(&public_key_name, public_b64.as_bytes(), SecretPolicy::default())
+        .map_err(|err| format!("failed to store secret {}: {}", public_key_name, err))?;
+    store
+        .put(&did_key_name, did.as_bytes(), SecretPolicy::default())
+        .map_err(|err| format!("failed to store secret {}: {}", did_key_name, err))?;
+    store
+        .put(&diddoc_key_name, output.as_bytes(), SecretPolicy::default())
+        .map_err(|err| format!("failed to store secret {}: {}", diddoc_key_name, err))?;
+
+    if let Some(out_file) = args.out_file.as_ref() {
+        std::fs::write(out_file, format!("{}\n", output)).map_err(|err| {
+            format!("failed to write {}: {}", out_file.display(), err)
+        })?;
+    }
+
+    println!("DID: {}", did);
+    println!("Verification Method ID: {}", vm_id);
+    println!("Stored private key: {}", private_key_name);
+    println!("Stored public key: {}", public_key_name);
+    println!("Stored DID: {}", did_key_name);
+    println!("Stored DID Document: {}", diddoc_key_name);
+    if let Some(out_file) = args.out_file.as_ref() {
+        println!("Wrote DID Document: {}", out_file.display());
+    }
+    Ok(())
+}
+
+fn build_did_document(pkey: &[u8]) -> Result<(String, String, serde_json::Value), String> {
+    let pubkey = if pkey.len() == 33 && pkey[0] == 0x40 {
+        pkey[1..].to_vec()
+    } else if pkey.len() == 32 {
+        pkey.to_vec()
+    } else {
+        return Err(format!(
+            "unexpected Ed25519 key material length: {}",
+            pkey.len()
+        ));
+    };
+
+    let mut multicodec = Vec::with_capacity(2 + pubkey.len());
+    multicodec.push(0xED);
+    multicodec.push(0x01);
+    multicodec.extend_from_slice(&pubkey);
+    let fingerprint = format!("z{}", bs58::encode(multicodec).into_string());
+
+    let did = format!("did:key:{}", fingerprint);
+    let vm_id = format!("{}#{}", did, fingerprint);
+
+    let doc = json!({
+        "@context": [
+            "https://www.w3.org/ns/did/v1",
+            "https://w3id.org/security/suites/ed25519-2020/v1"
+        ],
+        "id": did,
+        "verificationMethod": [
+            {
+                "id": vm_id,
+                "type": "Ed25519VerificationKey2020",
+                "controller": did,
+                "publicKeyMultibase": fingerprint
+            }
+        ],
+        "authentication": [vm_id],
+        "assertionMethod": [vm_id],
+        "capabilityDelegation": [vm_id],
+        "capabilityInvocation": [vm_id]
+    });
+
+    Ok((did, vm_id, doc))
+}
+
+fn run_put_key_command(args: &[String]) -> ExitCode {
+    let parsed = match PutKeyArgs::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
+
+    match run_put_key(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_put_key(args: PutKeyArgs) -> Result<(), String> {
+    let payload = std::fs::read(&args.input)
+        .map_err(|err| format!("failed to read {}: {}", args.input.display(), err))?;
+    let store = default_secret_store();
+    store
+        .put(&args.key, &payload, SecretPolicy::default())
+        .map_err(|err| format!("failed to store secret {}: {}", args.key, err))?;
+    println!("Stored OpenPGP key in secret: {}", args.key);
+    Ok(())
+}
+
+fn read_openpgp_input(
+    label: &str,
+    secret_key: Option<&str>,
+    input: Option<&PathBuf>,
+) -> Result<Vec<u8>, String> {
+    if let Some(secret_key) = secret_key {
+        let store = default_secret_store();
+        let secret = store
+            .get(secret_key)
+            .map_err(|_| format!("keychain lookup failed for {}", secret_key))?;
+        return Ok(secret.expose(|bytes| bytes.to_vec()));
+    }
+
+    if let Some(input) = input {
+        return std::fs::read(input)
+            .map_err(|err| format!("failed to read {}: {}", input.display(), err));
+    }
+
+    Err(format!("missing {} or --in", label))
+}
+
+fn fetch_github_gpg_key(user: &str) -> Result<Vec<u8>, String> {
+    let payload = github_api_get_gpg_keys(user)?;
+    extract_github_public_key(&payload).and_then(decode_github_public_key)
+}
+
+fn extract_github_public_key(payload: &str) -> Result<String, String> {
+    let value: Value = serde_json::from_str(payload).map_err(|err| err.to_string())?;
+    let keys = value
+        .as_array()
+        .ok_or_else(|| "unexpected GitHub response format".to_string())?;
+    let first = keys
+        .first()
+        .ok_or_else(|| "no GPG keys found for GitHub user".to_string())?;
+    let public_key = first
+        .get("public_key")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "missing public_key in GitHub response".to_string())?;
+    Ok(public_key.to_string())
+}
+
+fn decode_github_public_key(public_key: String) -> Result<Vec<u8>, String> {
+    if public_key.contains("BEGIN PGP PUBLIC KEY BLOCK") {
+        return Ok(public_key.into_bytes());
+    }
+
+    let compact = public_key
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("");
+    if compact.is_empty() {
+        return Err("GitHub public_key is empty".to_string());
+    }
+
+    base64::engine::general_purpose::STANDARD
+        .decode(compact.as_bytes())
+        .map_err(|err| format!("failed to decode GitHub public_key: {}", err))
+}
+
+#[cfg(test)]
+static TEST_GITHUB_PAYLOAD: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+#[cfg(test)]
+fn test_github_payload_slot() -> &'static Mutex<Option<String>> {
+    TEST_GITHUB_PAYLOAD.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn set_test_github_payload(payload: Option<String>) {
+    let mut guard = test_github_payload_slot().lock().expect("github payload lock");
+    *guard = payload;
+}
+
+#[cfg(test)]
+fn github_api_get_gpg_keys(_user: &str) -> Result<String, String> {
+    let guard = test_github_payload_slot().lock().expect("github payload lock");
+    guard
+        .clone()
+        .ok_or_else(|| "test github payload not set".to_string())
+}
+
+#[cfg(not(test))]
+fn github_api_get_gpg_keys(user: &str) -> Result<String, String> {
+    let token = std::env::var("GH_TOKEN")
+        .or_else(|_| std::env::var("GITHUB_TOKEN"))
+        .map_err(|_| "GH_TOKEN or GITHUB_TOKEN must be set for GitHub API".to_string())?;
+
+    let url = format!("https://api.github.com/users/{}/gpg_keys", user);
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("shadi-shadictl"));
+    let auth = format!("Bearer {}", token);
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&auth).map_err(|_| "invalid GitHub token".to_string())?,
+    );
+
+    let client = Client::builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|err| format!("failed to build HTTP client: {}", err))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|err| format!("GitHub API request failed: {}", err))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(format!("GitHub API error {}: {}", status, body));
+    }
+
+    response.text().map_err(|err| format!("failed to read GitHub response: {}", err))
+}
+
+
+fn derive_agent_keypair(secret_key: &[u8], agent_name: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    if agent_name.trim().is_empty() {
+        return Err("agent name cannot be empty".to_string());
+    }
+    let hk = Hkdf::<Sha256>::new(Some(b"shadi-agent-derive"), secret_key);
+    let mut seed = [0u8; 32];
+    hk.expand(agent_name.as_bytes(), &mut seed)
+        .map_err(|_| "failed to derive agent key".to_string())?;
+    let signing = SigningKey::from_bytes(&seed);
+    let verifying = signing.verifying_key();
+    Ok((signing.to_bytes().to_vec(), verifying.to_bytes().to_vec()))
+}
+
+fn extract_ed25519_public_key(openpgp_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use openpgp::crypto::mpi::PublicKey as MpiPublicKey;
+    use openpgp::crypto::Curve;
+    use openpgp::parse::Parse;
+    use openpgp::policy::StandardPolicy;
+
+    let cert = openpgp::Cert::from_reader(openpgp_bytes)
+        .map_err(|err| format!("failed to parse OpenPGP certificate: {}", err))?;
+    let policy = &StandardPolicy::new();
+
+    for key in cert
+        .keys()
+        .with_policy(policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+    {
+        match key.key().mpis() {
+            MpiPublicKey::Ed25519 { a } => return Ok(a.to_vec()),
+            MpiPublicKey::EdDSA { curve, q } if *curve == Curve::Ed25519 => {
+                return Ok(q.value().to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    Err("no Ed25519 public key found in OpenPGP certificate".to_string())
+}
+
+
+fn format_policy(
+    policy: &SandboxPolicy,
+    blocked: &HashSet<String>,
+    allow: &HashSet<String>,
+) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct PolicyDump {
+        allow: Vec<String>,
+        read: Vec<String>,
+        write: Vec<String>,
+        net_block: bool,
+        allow_command: Vec<String>,
+        block_command: Vec<String>,
+    }
+
+    let allow_paths = policy
+        .allow_read()
+        .iter()
+        .filter(|path| policy.allow_write().iter().any(|write| write == *path))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let read_paths = policy
+        .allow_read()
+        .iter()
+        .filter(|path| !policy.allow_write().iter().any(|write| write == *path))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let write_paths = policy
+        .allow_write()
+        .iter()
+        .filter(|path| !policy.allow_read().iter().any(|read| read == *path))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let mut blocked_list = blocked.iter().cloned().collect::<Vec<_>>();
+    blocked_list.sort();
+    let mut allow_list = allow.iter().cloned().collect::<Vec<_>>();
+    allow_list.sort();
+
+    let dump = PolicyDump {
+        allow: allow_paths,
+        read: read_paths,
+        write: write_paths,
+        net_block: policy.net_blocked(),
+        allow_command: allow_list,
+        block_command: blocked_list,
+    };
+
+    serde_json::to_string_pretty(&dump).map_err(|err| err.to_string())
+}
+
+fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy, String> {
+    let mut blocked = default_blocked_commands()
+        .into_iter()
+        .map(|cmd| cmd.to_string())
+        .collect::<HashSet<_>>();
+    for cmd in file_policy.block_command.iter() {
+        blocked.insert(cmd.to_string());
+    }
+
+    let mut allow = file_policy
+        .allow_command
+        .iter()
+        .map(|cmd| cmd.to_string())
+        .collect::<HashSet<_>>();
+    for cmd in cli.allow_command.iter() {
+        allow.insert(cmd.to_string());
+    }
+
+    let mut policy = SandboxPolicy::new().block_network(cli.net_block || file_policy.net_block.unwrap_or(false));
+
+    policy = apply_string_paths(policy, &file_policy.read, PathMode::Read)?;
+    policy = apply_string_paths(policy, &file_policy.write, PathMode::Write)?;
+    policy = apply_string_paths(policy, &file_policy.allow, PathMode::Allow)?;
+
+    policy = apply_paths(policy, &cli.read, PathMode::Read)?;
+    policy = apply_paths(policy, &cli.write, PathMode::Write)?;
+    policy = apply_paths(policy, &cli.allow, PathMode::Allow)?;
+
+    Ok(ResolvedPolicy {
+        policy,
+        blocked,
+        allow,
+    })
+}
+
+fn is_command_blocked(cmd: &str, blocked: &HashSet<String>, allow: &HashSet<String>) -> bool {
+    blocked.contains(cmd) && !allow.contains(cmd)
+}
+
+enum PathMode {
+    Read,
+    Write,
+    Allow,
+}
+
+fn apply_string_paths(
+    mut policy: SandboxPolicy,
+    paths: &[String],
+    mode: PathMode,
+) -> Result<SandboxPolicy, String> {
+    for path in paths.iter() {
+        let path = canonicalize_string_path(path)
+            .map_err(|err| format!("invalid {} path {}: {}", mode.label(), path, err))?;
+        policy = apply_path(policy, &path, &mode);
+    }
+    Ok(policy)
+}
+
+fn apply_paths(
+    mut policy: SandboxPolicy,
+    paths: &[PathBuf],
+    mode: PathMode,
+) -> Result<SandboxPolicy, String> {
+    for path in paths.iter() {
+        let path = canonicalize_path(path)
+            .map_err(|err| format!("invalid {} path {}: {}", mode.label(), path.display(), err))?;
+        policy = apply_path(policy, &path, &mode);
+    }
+    Ok(policy)
+}
+
+fn apply_path(mut policy: SandboxPolicy, path: &PathBuf, mode: &PathMode) -> SandboxPolicy {
+    match mode {
+        PathMode::Read => policy = policy.allow_read_path(path),
+        PathMode::Write => policy = policy.allow_write_path(path),
+        PathMode::Allow => policy = policy.allow_read_path(path).allow_write_path(path),
+    }
+    policy
+}
+
+impl PathMode {
+    fn label(&self) -> &'static str {
+        match self {
+            PathMode::Read => "read",
+            PathMode::Write => "write",
+            PathMode::Allow => "allow",
+        }
+    }
+}
+
+fn list_keychain(prefix: Option<&str>) -> Result<(), String> {
+    let store = default_secret_store();
+    let keys = list_keychain_with_store(store.as_ref(), prefix)?;
+    for key in keys {
+        println!("{}", key);
+    }
+    Ok(())
+}
+
+fn list_keychain_with_store(
+    store: &dyn SecretStore,
+    prefix: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut keys = store.list_keys().map_err(|err| err.to_string())?;
+    if let Some(prefix) = prefix {
+        keys.retain(|key| key.starts_with(prefix));
+    }
+    keys.sort();
+    Ok(keys)
+}
+
+fn canonicalize_path(path: &PathBuf) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
+}
+
+fn canonicalize_string_path(path: &str) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(Path::new(path))
+}
+
+fn load_policy_file(path: &Path) -> std::io::Result<PolicyFile> {
+    let data = std::fs::read_to_string(path)?;
+    serde_json::from_str(&data).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+fn inject_keychain_secrets(command: &mut Command, mappings: &[String]) -> Result<(), String> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let store = default_secret_store();
+    inject_keychain_with_store(store.as_ref(), command, mappings)
+}
+
+fn inject_keychain_with_store(
+    store: &dyn SecretStore,
+    command: &mut Command,
+    mappings: &[String],
+) -> Result<(), String> {
+    for mapping in mappings {
+        let (key, env) = parse_key_env(mapping)?;
+        let secret = store
+            .get(key)
+            .map_err(|_| format!("keychain lookup failed for {}", key))?;
+        let value = secret.expose(|bytes| bytes.to_vec());
+        let value = secret_bytes_to_utf8(&value)?;
+        command.env(env, value);
+    }
+
+    Ok(())
+}
+
+fn secret_bytes_to_utf8(value: &[u8]) -> Result<String, String> {
+    String::from_utf8(value.to_vec()).map_err(|_| "secret is not utf-8".to_string())
+}
+
+fn parse_key_env(value: &str) -> Result<(&str, &str), String> {
+    let mut parts = value.splitn(2, '=');
+    let key = parts.next().unwrap_or("");
+    let env = parts.next().unwrap_or("");
+    if key.is_empty() || env.is_empty() {
+        return Err("inject-keychain must be in KEY=ENV format".to_string());
+    }
+    Ok((key, env))
+}
+
+fn default_blocked_commands() -> HashSet<&'static str> {
+    [
+        "rm",
+        "rmdir",
+        "shred",
+        "srm",
+        "dd",
+        "mkfs",
+        "fdisk",
+        "parted",
+        "wipefs",
+        "chmod",
+        "chown",
+        "chgrp",
+        "chattr",
+        "shutdown",
+        "reboot",
+        "halt",
+        "systemctl",
+        "apt",
+        "brew",
+        "pip",
+        "yum",
+        "pacman",
+        "mv",
+        "cp",
+        "truncate",
+        "sudo",
+        "su",
+        "doas",
+        "pkexec",
+        "scp",
+        "rsync",
+        "sftp",
+        "ftp",
+    ]
+    .into_iter()
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use agent_secrets::{SecretError, SecretResult};
+    use agent_secrets::memory::SecretBytes;
+    use agent_secrets::policy::SecretPolicy;
+
+    fn temp_dir() -> TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    fn build_cli() -> Cli {
+        Cli {
+            policy_file: None,
+            allow: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            inject_keychain: Vec::new(),
+            list_keychain: false,
+            list_prefix: None,
+            print_policy: false,
+            command: vec!["echo".to_string(), "ok".to_string()],
+        }
+    }
+
+    fn sample_openpgp_cert_armored() -> Vec<u8> {
+        use openpgp::cert::prelude::*;
+        use openpgp::serialize::Serialize;
+
+        let (cert, _) = CertBuilder::general_purpose(Some("alice@example.org"))
+            .generate()
+            .expect("generate cert");
+        let mut exported = Vec::new();
+        cert.armored().export(&mut exported).expect("export cert");
+        exported
+    }
+
+    fn sample_openpgp_secret_armored() -> Vec<u8> {
+        use openpgp::cert::prelude::*;
+        use openpgp::serialize::Serialize;
+
+        let (cert, _) = CertBuilder::general_purpose(Some("alice@example.org"))
+            .generate()
+            .expect("generate cert");
+        let mut exported = Vec::new();
+        cert.as_tsk()
+            .armored()
+            .export(&mut exported)
+            .expect("export secret key");
+        exported
+    }
+
+    fn unique_key(prefix: &str) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        format!("{}-{}-{}", prefix, std::process::id(), nanos)
+    }
+
+    fn policy_from_paths(read: &[PathBuf], write: &[PathBuf], allow: &[PathBuf]) -> PolicyFile {
+        PolicyFile {
+            read: read.iter().map(|p| p.display().to_string()).collect(),
+            write: write.iter().map(|p| p.display().to_string()).collect(),
+            allow: allow.iter().map(|p| p.display().to_string()).collect(),
+            net_block: Some(false),
+            allow_command: Vec::new(),
+            block_command: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_policy_merges_paths_and_commands() {
+        let read_dir = temp_dir();
+        let write_dir = temp_dir();
+        let allow_dir = temp_dir();
+        let read_path = read_dir.path().canonicalize().expect("canonicalize");
+        let write_path = write_dir.path().canonicalize().expect("canonicalize");
+        let allow_path = allow_dir.path().canonicalize().expect("canonicalize");
+
+        let mut cli = build_cli();
+        cli.read.push(read_path.clone());
+        cli.allow_command.push("rm".to_string());
+
+        let policy_file = policy_from_paths(&[], &[write_path.clone()], &[allow_path.clone()]);
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+
+        assert!(resolved.policy.allow_read().iter().any(|p| p == &read_path));
+        assert!(resolved.policy.allow_write().iter().any(|p| p == &write_path));
+        assert!(resolved.policy.allow_read().iter().any(|p| p == &allow_path));
+        assert!(resolved.policy.allow_write().iter().any(|p| p == &allow_path));
+        assert!(resolved.allow.contains("rm"));
+    }
+
+    #[test]
+    fn resolve_policy_rejects_missing_paths() {
+        let cli = build_cli();
+        let policy_file = PolicyFile {
+            read: vec!["/path/does/not/exist".to_string()],
+            write: Vec::new(),
+            allow: Vec::new(),
+            net_block: Some(false),
+            allow_command: Vec::new(),
+            block_command: Vec::new(),
+        };
+
+        let err = resolve_policy(&cli, &policy_file).unwrap_err();
+        assert!(err.contains("invalid read path"));
+    }
+
+    #[test]
+    fn resolve_policy_sets_net_block() {
+        let mut cli = build_cli();
+        cli.net_block = true;
+        let policy_file = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert!(resolved.policy.net_blocked());
+    }
+
+    #[test]
+    fn resolve_policy_honors_file_net_block() {
+        let cli = build_cli();
+        let policy_file = PolicyFile {
+            net_block: Some(true),
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert!(resolved.policy.net_blocked());
+    }
+
+    #[test]
+    fn resolve_policy_merges_command_lists() {
+        let mut cli = build_cli();
+        cli.allow_command.push("rm".to_string());
+        let policy_file = PolicyFile {
+            allow_command: vec!["echo".to_string()],
+            block_command: vec!["rm".to_string()],
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert!(resolved.blocked.contains("rm"));
+        assert!(resolved.allow.contains("rm"));
+        assert!(resolved.allow.contains("echo"));
+    }
+
+    #[test]
+    fn is_command_blocked_allows_unknown_when_not_blocked() {
+        let blocked = default_blocked_commands()
+            .into_iter()
+            .map(|cmd| cmd.to_string())
+            .collect::<HashSet<_>>();
+        let allow = HashSet::new();
+        assert!(!is_command_blocked("echo", &blocked, &allow));
+    }
+
+    #[test]
+    fn command_blocking_respects_allowlist() {
+        let blocked = default_blocked_commands()
+            .into_iter()
+            .map(|cmd| cmd.to_string())
+            .collect::<HashSet<_>>();
+        let mut allow = HashSet::new();
+        allow.insert("rm".to_string());
+
+        assert!(!is_command_blocked("rm", &blocked, &allow));
+        assert!(is_command_blocked("mv", &blocked, &HashSet::new()));
+    }
+
+    #[test]
+    fn format_policy_sorts_commands() {
+        let policy = SandboxPolicy::new();
+        let blocked = ["rm".to_string(), "cp".to_string()].into_iter().collect();
+        let allow = ["zsh".to_string(), "bash".to_string()].into_iter().collect();
+
+        let output = format_policy(&policy, &blocked, &allow).expect("format");
+        assert!(output.contains("\"block_command\""));
+        assert!(output.contains("\"allow_command\""));
+    }
+
+    #[test]
+    fn format_policy_groups_allow_paths() {
+        let dir = temp_dir();
+        let path = dir.path().canonicalize().expect("canonicalize");
+        let policy = SandboxPolicy::new()
+            .allow_read_path(&path)
+            .allow_write_path(&path);
+        let output = format_policy(&policy, &HashSet::new(), &HashSet::new()).expect("format");
+        assert!(output.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn format_policy_separates_read_and_write() {
+        let read_dir = temp_dir();
+        let write_dir = temp_dir();
+        let read_path = read_dir.path().canonicalize().expect("canonicalize");
+        let write_path = write_dir.path().canonicalize().expect("canonicalize");
+        let policy = SandboxPolicy::new()
+            .allow_read_path(&read_path)
+            .allow_write_path(&write_path);
+        let output = format_policy(&policy, &HashSet::new(), &HashSet::new()).expect("format");
+        assert!(output.contains(&read_path.display().to_string()));
+        assert!(output.contains(&write_path.display().to_string()));
+    }
+
+    #[test]
+    fn load_policy_file_parses_json() {
+        let dir = temp_dir();
+        let path = dir.path().join("policy.json");
+        let tmp_dir = std::env::var("SHADI_TMP_DIR").unwrap_or_else(|_| "./.tmp".to_string());
+        std::fs::write(
+            &path,
+            format!(r#"{{"allow": ["{}"], "net_block": true}}"#, tmp_dir),
+        )
+        .expect("write");
+
+        let policy = load_policy_file(&path).expect("load");
+        assert_eq!(policy.allow, vec![tmp_dir]);
+        assert_eq!(policy.net_block, Some(true));
+    }
+
+    #[test]
+    fn load_policy_file_rejects_invalid_json() {
+        let dir = temp_dir();
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, "not-json").expect("write");
+        let err = load_policy_file(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn run_cli_missing_command_returns_error() {
+        let mut cli = build_cli();
+        cli.command.clear();
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_print_policy_returns_ok() {
+        let mut cli = build_cli();
+        cli.command.clear();
+        cli.print_policy = true;
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_blocks_disallowed_command() {
+        let mut cli = build_cli();
+        cli.command = vec!["rm".to_string()];
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_executes_allowed_command() {
+        let mut cli = build_cli();
+        cli.command = vec!["/usr/bin/true".to_string()];
+        cli.allow.push(PathBuf::from("/usr/bin"));
+        let code = run_cli(cli);
+        assert_ne!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn canonicalize_helpers_resolve_paths() {
+        let dir = temp_dir();
+        let path = canonicalize_path(&dir.path().to_path_buf()).expect("path");
+        let text = canonicalize_string_path(dir.path().to_str().expect("str")).expect("str path");
+        assert_eq!(path, text);
+    }
+
+    #[test]
+    fn read_openpgp_input_reads_file() {
+        let dir = temp_dir();
+        let path = dir.path().join("key.asc");
+        std::fs::write(&path, b"test-key").expect("write");
+
+        let payload = read_openpgp_input("--key", None, Some(&path)).expect("read");
+        assert_eq!(payload, b"test-key".to_vec());
+    }
+
+    #[test]
+    fn read_openpgp_input_reports_missing() {
+        let err = read_openpgp_input("--key", None, None).unwrap_err();
+        assert!(err.contains("missing --key"));
+    }
+
+    #[test]
+    fn read_openpgp_input_errors_on_missing_file() {
+        let dir = temp_dir();
+        let path = dir.path().join("missing.asc");
+        let err = read_openpgp_input("--key", None, Some(&path)).unwrap_err();
+        assert!(err.contains("failed to read"));
+    }
+
+    #[test]
+    fn inject_keychain_noop_when_empty() {
+        let mut command = Command::new("/usr/bin/true");
+        inject_keychain_secrets(&mut command, &[]).expect("inject");
+    }
+
+    struct MemoryStore {
+        entries: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl MemoryStore {
+        fn new() -> Self {
+            Self {
+                entries: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl SecretStore for MemoryStore {
+        fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+            let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            guard.insert(key.to_string(), secret.to_vec());
+            Ok(())
+        }
+
+        fn get(&self, key: &str) -> SecretResult<SecretBytes> {
+            let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            let value = guard.get(key).ok_or(SecretError::InvalidInput)?.clone();
+            Ok(SecretBytes::new(value))
+        }
+
+        fn delete(&self, key: &str) -> SecretResult<()> {
+            let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            guard.remove(key);
+            Ok(())
+        }
+
+        fn list_keys(&self) -> SecretResult<Vec<String>> {
+            let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            Ok(guard.keys().cloned().collect())
+        }
+    }
+
+    #[test]
+    fn list_keychain_with_store_filters_prefix() {
+        let store = MemoryStore::new();
+        store.put("secops/a", b"1", SecretPolicy::default()).unwrap();
+        store.put("other/b", b"2", SecretPolicy::default()).unwrap();
+
+        let keys = list_keychain_with_store(&store, Some("secops/")).unwrap();
+        assert_eq!(keys, vec!["secops/a".to_string()]);
+    }
+
+    #[test]
+    fn list_keychain_with_store_sorts_keys() {
+        let store = MemoryStore::new();
+        store.put("b", b"1", SecretPolicy::default()).unwrap();
+        store.put("a", b"2", SecretPolicy::default()).unwrap();
+
+        let keys = list_keychain_with_store(&store, None).unwrap();
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn inject_keychain_with_store_sets_env() {
+        let store = MemoryStore::new();
+        store.put("secops/token", b"value", SecretPolicy::default()).unwrap();
+
+        let mut command = Command::new("/usr/bin/true");
+        inject_keychain_with_store(&store, &mut command, &["secops/token=TOKEN".to_string()]).unwrap();
+
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("TOKEN")
+                && *value == Some(std::ffi::OsStr::new("value"))
+        }));
+    }
+
+    #[test]
+    fn inject_keychain_with_store_reports_missing_key() {
+        let store = MemoryStore::new();
+        let mut command = Command::new("/usr/bin/true");
+        let err = inject_keychain_with_store(&store, &mut command, &["missing=TOKEN".to_string()]).unwrap_err();
+        assert!(err.contains("keychain lookup failed"));
+    }
+
+    #[test]
+    fn inject_keychain_with_store_rejects_invalid_mapping() {
+        let store = MemoryStore::new();
+        let mut command = Command::new("/usr/bin/true");
+        let err = inject_keychain_with_store(&store, &mut command, &["invalid".to_string()]).unwrap_err();
+        assert!(err.contains("inject-keychain must be"));
+    }
+
+    #[test]
+    fn list_keychain_returns_ok_when_enabled() {
+        let key_a = unique_key("secops/key-a");
+        let key_b = unique_key("secops/key-b");
+        test_store_put(&key_a, b"a");
+        test_store_put(&key_b, b"b");
+
+        list_keychain(Some("secops/")).expect("list");
+    }
+
+    #[test]
+    fn inject_keychain_secrets_uses_default_store() {
+        let key = unique_key("shadi-test-secret");
+        test_store_put(&key, b"value");
+
+        let mut command = Command::new("/usr/bin/true");
+        inject_keychain_secrets(&mut command, &[format!("{}=TOKEN", key)]).expect("inject");
+
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(env_key, value)| {
+            *env_key == std::ffi::OsStr::new("TOKEN")
+                && *value == Some(std::ffi::OsStr::new("value"))
+        }));
+
+    }
+
+    #[test]
+    fn run_cli_list_keychain_routes_to_store() {
+        let key_a = unique_key("secops/key-a");
+        let key_b = unique_key("other/key-b");
+        test_store_put(&key_a, b"a");
+        test_store_put(&key_b, b"b");
+
+        let mut cli = build_cli();
+        cli.command.clear();
+        cli.list_keychain = true;
+        cli.list_prefix = Some("secops/".to_string());
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_put_key_command_stores_payload() {
+        let dir = temp_dir();
+        let path = dir.path().join("key.asc");
+        std::fs::write(&path, b"payload").expect("write");
+
+        let key = unique_key("openpgp/test");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "put-key".to_string(),
+            "--key".to_string(),
+            key.clone(),
+            "--in".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert_eq!(test_store_get(&key), Some(b"payload".to_vec()));
+    }
+
+    #[test]
+    fn run_cli_put_key_missing_file_returns_error() {
+        let dir = temp_dir();
+        let path = dir.path().join("missing.asc");
+        let key = unique_key("openpgp/missing");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "put-key".to_string(),
+            "--key".to_string(),
+            key,
+            "--in".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_get_secret_command_reads_store() {
+        let key = unique_key("secret/key");
+        test_store_put(&key, b"value");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "get-secret".to_string(),
+            "--key".to_string(),
+            key,
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_get_secret_missing_key_returns_error() {
+        let key = unique_key("missing/key");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "get-secret".to_string(),
+            "--key".to_string(),
+            key,
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_did_from_gpg_writes_document() {
+        let dir = temp_dir();
+        let input = dir.path().join("key.asc");
+        let output = dir.path().join("did.json");
+        std::fs::write(&input, sample_openpgp_cert_armored()).expect("write");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "did-from-gpg".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_did_stores_outputs() {
+        let root_key = unique_key("root-secret");
+        test_store_put(&root_key, b"root-secret");
+
+        let dir = temp_dir();
+        let output = dir.path().join("agent.json");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-did".to_string(),
+            "--secret".to_string(),
+            root_key.clone(),
+            "--name".to_string(),
+            "agent-a".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get("agents/agent-a/private").is_some());
+        assert!(test_store_get("agents/agent-a/public").is_some());
+        assert!(test_store_get("agents/agent-a/did").is_some());
+        assert!(test_store_get("agents/agent-a/diddoc").is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_did_from_openpgp_file() {
+        let dir = temp_dir();
+        let input = dir.path().join("human.sec");
+        std::fs::write(&input, sample_openpgp_secret_armored()).expect("write");
+
+        let agent_name = unique_key("agent-gpg");
+        let output = dir.path().join("agent.json");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-did".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get(&format!("agents/{}/private", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/public", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/did", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/diddoc", agent_name)).is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_put_key_then_derive_agent_did_from_keychain() {
+        let dir = temp_dir();
+        let input = dir.path().join("human.sec");
+        std::fs::write(&input, sample_openpgp_secret_armored()).expect("write");
+
+        let key_name = unique_key("human-gpg");
+        let mut cli = build_cli();
+        cli.command = vec![
+            "put-key".to_string(),
+            "--key".to_string(),
+            key_name.clone(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get(&key_name).is_some());
+
+        let agent_name = unique_key("agent-from-keychain");
+        let output = dir.path().join("agent.json");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-did".to_string(),
+            "--secret".to_string(),
+            key_name,
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get(&format!("agents/{}/private", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/public", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/did", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/diddoc", agent_name)).is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_did_from_github_stores_outputs() {
+        let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
+        let payload = serde_json::json!([
+            {"id": 1, "public_key": armored}
+        ])
+        .to_string();
+        set_test_github_payload(Some(payload));
+
+        let dir = temp_dir();
+        let output = dir.path().join("github.json");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "did-from-github".to_string(),
+            "--user".to_string(),
+            "alice".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get("github/alice/did").is_some());
+        assert!(test_store_get("github/alice/diddoc").is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+
+        set_test_github_payload(None);
+    }
+
+    #[test]
+    fn blocklist_blocks_default_command() {
+        let blocked = default_blocked_commands();
+        assert!(blocked.contains("rm"));
+    }
+
+    #[test]
+    fn allowlist_overrides_blocklist() {
+        let blocked = default_blocked_commands();
+        let allow = ["rm"].into_iter().collect::<HashSet<_>>();
+        assert!(blocked.contains("rm"));
+        assert!(allow.contains("rm"));
+    }
+
+    #[test]
+    fn parse_key_env_rejects_missing_parts() {
+        assert!(parse_key_env("onlykey").is_err());
+        assert!(parse_key_env("=ENV").is_err());
+        assert!(parse_key_env("KEY=").is_err());
+    }
+
+    #[test]
+    fn parse_key_env_accepts_valid_format() {
+        let (key, env) = parse_key_env("secret=ENV").unwrap();
+        assert_eq!(key, "secret");
+        assert_eq!(env, "ENV");
+    }
+
+    #[test]
+    fn extract_ed25519_public_key_from_cert() {
+        let public_key = extract_ed25519_public_key(&sample_openpgp_cert_armored()).expect("extract key");
+        assert!(public_key.len() == 32 || public_key.len() == 33);
+        if public_key.len() == 33 {
+            assert_eq!(public_key[0], 0x40);
+        }
+    }
+
+    #[test]
+    fn build_did_document_from_ed25519_key() {
+        let pubkey = vec![0x01; 32];
+        let mut pkey = vec![0x40];
+        pkey.extend_from_slice(&pubkey);
+
+        let (did, vm_id, doc) = build_did_document(&pkey).unwrap();
+
+        let mut multicodec = vec![0xED, 0x01];
+        multicodec.extend_from_slice(&pubkey);
+        let fingerprint = format!("z{}", bs58::encode(multicodec).into_string());
+
+        assert_eq!(did, format!("did:key:{}", fingerprint));
+        assert_eq!(vm_id, format!("{}#{}", did, fingerprint));
+        assert_eq!(doc["id"], did);
+        assert_eq!(doc["verificationMethod"][0]["id"], vm_id);
+        assert_eq!(doc["verificationMethod"][0]["publicKeyMultibase"], fingerprint);
+    }
+
+    #[test]
+    fn build_did_document_rejects_wrong_length() {
+        let err = build_did_document(&vec![0x01; 31]).unwrap_err();
+        assert!(err.contains("unexpected Ed25519"));
+    }
+
+    #[test]
+    fn extract_github_public_key_returns_first() {
+        let payload = r#"[
+            {"id": 1, "public_key": "KEY1"},
+            {"id": 2, "public_key": "KEY2"}
+        ]"#;
+
+        let key = extract_github_public_key(payload).unwrap();
+        assert_eq!(key, "KEY1");
+    }
+
+    #[test]
+    fn extract_github_public_key_errors_on_empty_list() {
+        let err = extract_github_public_key("[]").unwrap_err();
+        assert!(err.contains("no GPG keys"));
+    }
+
+    #[test]
+    fn extract_github_public_key_errors_on_missing_field() {
+        let payload = r#"[{"id": 1}]"#;
+        let err = extract_github_public_key(payload).unwrap_err();
+        assert!(err.contains("public_key"));
+    }
+
+    #[test]
+    fn extract_github_public_key_errors_on_unexpected_format() {
+        let err = extract_github_public_key("{}").unwrap_err();
+        assert!(err.contains("unexpected GitHub response"));
+    }
+
+    #[test]
+    fn decode_github_public_key_accepts_armored() {
+        let armored = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nabc\n-----END PGP PUBLIC KEY BLOCK-----\n";
+        let decoded = decode_github_public_key(armored.to_string()).unwrap();
+        assert_eq!(decoded, armored.as_bytes());
+    }
+
+    #[test]
+    fn decode_github_public_key_decodes_base64() {
+        let decoded = decode_github_public_key("AQID".to_string()).unwrap();
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn decode_github_public_key_rejects_empty() {
+        let err = decode_github_public_key("\n  \n".to_string()).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn secret_bytes_to_utf8_rejects_invalid_utf8() {
+        let err = secret_bytes_to_utf8(&[0xff, 0xff]).unwrap_err();
+        assert!(err.contains("utf-8"));
+    }
+
+    #[test]
+    fn derive_agent_keypair_is_deterministic() {
+        let seed = b"root-secret";
+        let (priv1, pub1) = derive_agent_keypair(seed, "agent-a").expect("derive");
+        let (priv2, pub2) = derive_agent_keypair(seed, "agent-a").expect("derive");
+        assert_eq!(priv1, priv2);
+        assert_eq!(pub1, pub2);
+    }
+
+    #[test]
+    fn derive_agent_keypair_changes_with_name() {
+        let seed = b"root-secret";
+        let (_, pub1) = derive_agent_keypair(seed, "agent-a").expect("derive");
+        let (_, pub2) = derive_agent_keypair(seed, "agent-b").expect("derive");
+        assert_ne!(pub1, pub2);
+    }
+
+    #[test]
+    fn derive_agent_keypair_rejects_empty_name() {
+        let err = derive_agent_keypair(b"root-secret", " ").unwrap_err();
+        assert!(err.contains("agent name"));
+    }
+}

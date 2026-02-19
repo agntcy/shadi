@@ -1,0 +1,16 @@
+[project]
+name = "shadi-secops"
+version = "0.1.0"
+description = "SecOps tooling for SHADI"
+requires-python = ">=3.12"
+dependencies = [
+  "openai",
+  "maturin",
+  "slima2a",
+  "slimrpc",
+  "a2a",
+]
+
+[build-system]
+requires = ["maturin>=1.0"]
+build-backend = "maturin"

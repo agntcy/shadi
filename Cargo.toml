@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "crates/agent_secrets",
+  "crates/agent_transport_slim",
+  "crates/slim_mas",
+  "crates/shadi_memory",
+  "crates/shadi_py",
+  "crates/shadi_sandbox",
+  "crates/shadictl"
+]
+resolver = "2"

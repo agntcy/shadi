@@ -1,0 +1,17 @@
+[package]
+name = "shadi_py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "shadi"
+crate-type = ["cdylib"]
+
+[dependencies]
+agent_secrets = { path = "../agent_secrets" }
+shadi_memory = { path = "../shadi_memory" }
+shadi_sandbox = { path = "../shadi_sandbox" }
+
+[dependencies.pyo3]
+version = "0.21"
+features = ["extension-module"]
