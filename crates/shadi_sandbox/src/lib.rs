@@ -122,7 +122,7 @@ mod tests {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) struct WindowsAclRollback {
+pub struct WindowsAclRollback {
     path: Vec<u16>,
     dacl: *mut core::ffi::c_void,
     security_descriptor: *mut core::ffi::c_void,
@@ -155,7 +155,6 @@ impl WindowsChild {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
         use std::os::windows::process::ExitStatusExt;
 
@@ -189,6 +188,8 @@ impl WindowsChild {
     }
 
     fn cleanup(&mut self) -> io::Result<()> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
         if self.cleaned {
             return Ok(());
         }
@@ -197,13 +198,13 @@ impl WindowsChild {
         restore_acl_rollbacks(&mut self.rollbacks);
 
         unsafe {
-            if self.thread != 0 {
+            if !self.thread.is_null() {
                 CloseHandle(self.thread);
-                self.thread = 0;
+                self.thread = std::ptr::null_mut();
             }
-            if self.process != 0 {
+            if !self.process.is_null() {
                 CloseHandle(self.process);
-                self.process = 0;
+                self.process = std::ptr::null_mut();
             }
         }
 
@@ -223,7 +224,7 @@ fn restore_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
     use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
     use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
     use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
-    use windows_sys::Win32::System::Memory::LocalFree;
+    use windows_sys::Win32::Foundation::LocalFree;
 
     for rollback in rollbacks.drain(..) {
         unsafe {
@@ -238,7 +239,7 @@ fn restore_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
             );
 
             if !rollback.security_descriptor.is_null() {
-                LocalFree(rollback.security_descriptor as isize);
+                LocalFree(rollback.security_descriptor);
             }
         }
     }

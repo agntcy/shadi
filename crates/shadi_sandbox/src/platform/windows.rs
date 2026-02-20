@@ -10,13 +10,16 @@ use crate::{SandboxError, SandboxPolicy, SandboxedChild, WindowsAclRollback, Win
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, ERROR_ALREADY_EXISTS};
 use windows_sys::Win32::Security::{
+    DeriveCapabilitySidsFromName, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, NO_INHERITANCE,
+};
+use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
-    DeriveCapabilitySidsFromName, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
 };
 use windows_sys::Win32::Security::Authorization::{
-    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, TRUSTEE_FORM, TRUSTEE_IS_SID,
-    TRUSTEE_W, GRANT_ACCESS, NO_INHERITANCE, SE_FILE_OBJECT,
+    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, TRUSTEE_IS_SID,
+    TRUSTEE_W, GRANT_ACCESS, SE_FILE_OBJECT,
 };
+use windows_sys::Win32::Security::ACL;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
     JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -25,10 +28,9 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
     DeleteProcThreadAttributeList, PROCESS_INFORMATION, STARTUPINFOEXW,
-    EXTENDED_STARTUPINFO_PRESENT,
+    EXTENDED_STARTUPINFO_PRESENT, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
 };
-use windows_sys::Win32::System::WindowsProgramming::PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES;
-use windows_sys::Win32::System::Memory::LocalFree;
+use windows_sys::Win32::Foundation::LocalFree;
 
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let program = command.get_program().to_string_lossy().to_string();
@@ -65,6 +67,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
 struct AppContainer {
     sid: *mut core::ffi::c_void,
     caps: *mut SID_AND_ATTRIBUTES,
+    group_caps: *mut SID_AND_ATTRIBUTES,
     cap_count: u32,
 }
 
@@ -98,16 +101,35 @@ impl AppContainer {
         }
 
         let mut caps: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
+        let mut group_caps: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
         let mut cap_count: u32 = 0;
+        let mut group_cap_count: u32 = 0;
         if !net_blocked {
             let cap_name = to_wide("internetClient");
-            let ok = unsafe { DeriveCapabilitySidsFromName(cap_name.as_ptr(), &mut caps, &mut cap_count) };
+            let mut caps_raw: *mut *mut core::ffi::c_void = std::ptr::null_mut();
+            let mut group_caps_raw: *mut *mut core::ffi::c_void = std::ptr::null_mut();
+            let ok = unsafe {
+                DeriveCapabilitySidsFromName(
+                    cap_name.as_ptr(),
+                    &mut group_caps_raw,
+                    &mut group_cap_count,
+                    &mut caps_raw,
+                    &mut cap_count,
+                )
+            };
+            caps = caps_raw as *mut SID_AND_ATTRIBUTES;
+            group_caps = group_caps_raw as *mut SID_AND_ATTRIBUTES;
             if ok == 0 || caps.is_null() || cap_count == 0 {
                 return Err("DeriveCapabilitySidsFromName failed".to_string());
             }
         }
 
-        Ok(Self { sid, caps, cap_count })
+        Ok(Self {
+            sid,
+            caps,
+            group_caps,
+            cap_count,
+        })
     }
 
     fn sid(&self) -> *mut core::ffi::c_void {
@@ -119,10 +141,13 @@ impl Drop for AppContainer {
     fn drop(&mut self) {
         unsafe {
             if !self.sid.is_null() {
-                LocalFree(self.sid as isize);
+                LocalFree(self.sid);
             }
             if !self.caps.is_null() {
-                LocalFree(self.caps as isize);
+                LocalFree(self.caps as *mut _);
+            }
+            if !self.group_caps.is_null() {
+                LocalFree(self.group_caps as *mut _);
             }
         }
     }
@@ -134,7 +159,7 @@ fn spawn_appcontainer_process(
     appcontainer: &AppContainer,
     rollbacks: Vec<WindowsAclRollback>,
 ) -> Result<WindowsChild, String> {
-    let mut cmdline = build_command_line(program, args);
+    let cmdline = build_command_line(program, args);
     let mut cmdline_w = to_wide(&cmdline);
 
     let mut caps = SECURITY_CAPABILITIES {
@@ -149,7 +174,7 @@ fn spawn_appcontainer_process(
         InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
     }
     let mut buffer = vec![0u8; size];
-    let list = buffer.as_mut_ptr() as *mut windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_LIST;
+    let list = buffer.as_mut_ptr() as windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST;
     let ok = unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut size) };
     if ok == 0 {
         return Err("InitializeProcThreadAttributeList failed".to_string());
@@ -247,10 +272,10 @@ fn grant_path_access(
 
     let rollback = capture_dacl(path)?;
 
-    let mut trustee = TRUSTEE_W {
+    let trustee = TRUSTEE_W {
         pMultipleTrustee: std::ptr::null_mut(),
         MultipleTrusteeOperation: 0,
-        TrusteeForm: TRUSTEE_FORM(TRUSTEE_IS_SID as i32),
+        TrusteeForm: TRUSTEE_IS_SID,
         TrusteeType: 0,
         ptstrName: sid as *mut u16,
     };
@@ -262,7 +287,7 @@ fn grant_path_access(
         Trustee: trustee,
     };
 
-    let mut acl: *mut core::ffi::c_void = std::ptr::null_mut();
+    let mut acl: *mut ACL = std::ptr::null_mut();
     let result = unsafe { SetEntriesInAclW(1, &mut entry, std::ptr::null_mut(), &mut acl) };
     if result != 0 {
         return Err("SetEntriesInAclW failed".to_string());
@@ -276,13 +301,13 @@ fn grant_path_access(
             windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            acl as *mut _,
+            acl,
             std::ptr::null_mut(),
         )
     };
     unsafe {
         if !acl.is_null() {
-            LocalFree(acl as isize);
+            LocalFree(acl as *mut _);
         }
     }
     if result != 0 {
@@ -322,7 +347,7 @@ fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
 fn apply_job_object(process: HANDLE) -> Result<(), String> {
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job == 0 {
+        if job.is_null() {
             return Err("CreateJobObjectW failed".to_string());
         }
 
@@ -335,13 +360,13 @@ fn apply_job_object(process: HANDLE) -> Result<(), String> {
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         );
         if ok == 0 {
-            CloseHandle(job as HANDLE);
+            CloseHandle(job);
             return Err("SetInformationJobObject failed".to_string());
         }
 
         let ok = AssignProcessToJobObject(job, process);
         if ok == 0 {
-            CloseHandle(job as HANDLE);
+            CloseHandle(job);
             return Err("AssignProcessToJobObject failed".to_string());
         }
 

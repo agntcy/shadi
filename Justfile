@@ -1,13 +1,20 @@
 set shell := ["zsh", "-uc"]
+set windows-shell := ["pwsh", "-NoLogo", "-Command"]
 
-python_prefix := `brew --prefix python@3.12`
-python312 := python_prefix + "/bin/python3.12"
+python_prefix := if os() == "windows" { "" } else { `brew --prefix python@3.12` }
+python312 := if os() == "windows" { if env_var_or_default("PYO3_PYTHON", "") != "" { env_var("PYO3_PYTHON") } else { `uv python find 3.12` } } else { python_prefix + "/bin/python3.12" }
 PROVIDER := "google"
 TIMEOUT := "60"
 REMEDIATE := "false"
 
 build:
   PYO3_PYTHON="{{python312}}" RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" cargo build
+
+windows-build:
+  $env:PYO3_PYTHON = "{{python312}}"; cargo build
+
+windows-test:
+  $env:PYO3_PYTHON = "{{python312}}"; cargo test --workspace
 
 test:
   PYO3_PYTHON="{{python312}}" RUSTFLAGS="-C link-arg=-L{{python_prefix}}/Frameworks/Python.framework/Versions/3.12/lib/python3.12/config-3.12-darwin -C link-arg=-lpython3.12 -C link-arg=-framework -C link-arg=CoreFoundation" cargo test

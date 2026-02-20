@@ -1418,7 +1418,8 @@ mod tests {
             .allow_read_path(&path)
             .allow_write_path(&path);
         let output = format_policy(&policy, &HashSet::new(), &HashSet::new()).expect("format");
-        assert!(output.contains(&path.display().to_string()));
+        let path_str = path.display().to_string().replace('\\', "\\\\");
+        assert!(output.contains(&path_str));
     }
 
     #[test]
@@ -1431,8 +1432,10 @@ mod tests {
             .allow_read_path(&read_path)
             .allow_write_path(&write_path);
         let output = format_policy(&policy, &HashSet::new(), &HashSet::new()).expect("format");
-        assert!(output.contains(&read_path.display().to_string()));
-        assert!(output.contains(&write_path.display().to_string()));
+        let read_str = read_path.display().to_string().replace('\\', "\\\\");
+        let write_str = write_path.display().to_string().replace('\\', "\\\\");
+        assert!(output.contains(&read_str));
+        assert!(output.contains(&write_str));
     }
 
     #[test]
@@ -1486,10 +1489,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn run_cli_executes_allowed_command() {
         let mut cli = build_cli();
         cli.command = vec!["/usr/bin/true".to_string()];
         cli.allow.push(PathBuf::from("/usr/bin"));
+        let code = run_cli(cli);
+        assert_ne!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn run_cli_executes_allowed_command() {
+        let mut cli = build_cli();
+        let system32 = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
+            + "\\System32";
+        cli.command = vec![format!("{}\\where.exe", system32), "cmd".to_string()];
+        cli.allow.push(PathBuf::from(&system32));
         let code = run_cli(cli);
         assert_ne!(code, ExitCode::from(2));
     }
