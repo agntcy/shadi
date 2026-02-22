@@ -17,3 +17,6 @@ shadi_sandbox = { path = "../shadi_sandbox" }
 [dependencies.pyo3]
 version = "0.21"
 features = ["extension-module"]
+
+[build-dependencies]
+pyo3-build-config = "0.21"
