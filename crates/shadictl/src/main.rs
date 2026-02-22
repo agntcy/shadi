@@ -1722,8 +1722,13 @@ mod tests {
     fn resolve_policy_uses_balanced_profile_by_default() {
         let cli = build_cli();
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        let default_read = canonicalize_string_path("/").expect("canonical root path");
         assert!(resolved.policy.net_blocked());
-        assert!(resolved.policy.allow_read().iter().any(|path| path == &PathBuf::from("/")));
+        assert!(resolved
+            .policy
+            .allow_read()
+            .iter()
+            .any(|path| path == &default_read));
     }
 
     #[test]
@@ -1739,8 +1744,13 @@ mod tests {
         let mut cli = build_cli();
         cli.profile = Some(LauncherProfile::Strict);
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        let default_read = canonicalize_string_path("/").expect("canonical root path");
         assert!(resolved.policy.net_blocked());
-        assert!(!resolved.policy.allow_read().iter().any(|path| path == &PathBuf::from("/")));
+        assert!(!resolved
+            .policy
+            .allow_read()
+            .iter()
+            .any(|path| path == &default_read));
     }
 
     #[test]
