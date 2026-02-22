@@ -59,7 +59,23 @@ cargo run -p shadictl -- \
   ./your-agent
 ```
 
-### Key and DID commands
+### Key, DID, and identity provenance
+
+#### Cryptographic derivation model
+
+Agent identities are deterministically derived from human identity material using
+an HKDF-based pipeline:
+
+- KDF: `HKDF-SHA256`
+- Salt: `"shadi-agent-derive"`
+- Input keying material (IKM): bytes from the selected human identity source
+  (`gpg` secret material or `seed` bytes)
+- Info: `agent_name` bytes
+- Output key bytes: 32-byte Ed25519 private key seed
+
+The derived Ed25519 public key is converted into a `did:key` DID document.
+This is the same derivation path used by `derive-agent-did` and
+`derive-agent-identity`.
 
 Create a DID document from an OpenPGP public key file:
 
@@ -99,6 +115,69 @@ cargo run -p shadictl -- \
   --out agent-a.did.json
 ```
 
+Automate identity creation for one or more agents from a human identity source
+(`gpg` or generic `seed`) using the same deterministic local-key to `did:key`
+derivation pipeline:
+
+```bash
+cargo run -p shadictl -- \
+  derive-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --name agent-a \
+  --name agent-b \
+  --prefix agents \
+  --out-dir ./agent-dids
+```
+
+For non-GPG identities, store source material in SHADI and use `--source seed`:
+
+```bash
+cargo run -p shadictl -- \
+  derive-agent-identity \
+  --source seed \
+  --human-secret human/seed \
+  --name agent-c \
+  --prefix agents
+```
+
+If you already store the human DID, bind derived identities to it:
+
+```bash
+cargo run -p shadictl -- \
+  derive-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --human-did-key humans/alice/did \
+  --name agent-a \
+  --prefix agents
+```
+
+Verify that a stored agent identity belongs to a human source by recomputing
+the key and DID from the same derivation pipeline:
+
+```bash
+cargo run -p shadictl -- \
+  verify-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --name agent-a \
+  --prefix agents
+```
+
+Require verification of stored human binding:
+
+```bash
+cargo run -p shadictl -- \
+  verify-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --name agent-a \
+  --prefix agents \
+  --human-did-key humans/alice/did \
+  --require-human-binding
+```
+
 Avoid printing secret values. Use `--list-keychain` for inventory and pass key
 names to commands that resolve secrets inside SHADI.
 
@@ -110,6 +189,9 @@ names to commands that resolve secrets inside SHADI.
 - `{prefix}/{agent}/public` (base64-encoded Ed25519 public key)
 - `{prefix}/{agent}/did` (DID string)
 - `{prefix}/{agent}/diddoc` (DID document JSON)
+
+`derive-agent-identity` writes the same entries for each `--name` and also
+stores `{prefix}/{agent}/human_did` when `--human-did-key` is provided.
 
 ## shadictl memory (`shadictl memory`)
 

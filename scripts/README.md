@@ -20,6 +20,37 @@ Open three terminals and run:
 ./scripts/launch_avatar.sh
 ```
 
+## Generic secure launcher
+
+Use the new profile-based launcher to run any command through SHADI sandboxing:
+
+```bash
+./scripts/launch_secure.sh balanced -- /usr/bin/env python3 --version
+```
+
+Available profiles:
+- `strict`: local-only policy, network blocked.
+- `balanced`: local workspace and temp writes, network blocked.
+- `connected`: like balanced, with network enabled.
+
+Policy files live in `policies/launcher/`.
+
+Common overrides:
+
+```bash
+SHADI_ALLOW_PATHS="./data:./logs" \
+SHADI_INJECT_KEYCHAIN="secops/github_token=GITHUB_TOKEN" \
+./scripts/launch_secure.sh strict -- uv run agents/secops/secops.py
+```
+
+Override profile and policy directory:
+
+```bash
+SHADI_POLICY_PROFILE=connected \
+SHADI_POLICY_DIR="$(pwd)/policies/launcher" \
+./scripts/launch_secure.sh -- /usr/bin/env echo hello
+```
+
 ## Environment variables
 
 These scripts default to local paths and can be overridden per terminal.

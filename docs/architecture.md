@@ -34,10 +34,27 @@ actions and prevent unauthorized data access or exfiltration.
 - `crates/agent_secrets/src/platform/macos.rs`: Keychain storage + key registry for listing.
 - `crates/shadictl/src/main.rs`: OpenPGP ingestion, DID derivation, and secret store helpers.
 
+### 1b) Identity derivation and provenance
+- **Deterministic derivation**: Agent keys are derived from human identity material
+  through a fixed KDF pipeline.
+- **KDF details**: HKDF-SHA256 with salt `shadi-agent-derive`, IKM from human
+  source bytes (`gpg` or `seed`), and `agent_name` as HKDF info.
+- **Output model**: 32-byte Ed25519 seed -> local agent keypair -> `did:key` DID document.
+- **Provenance binding**: Optional `{prefix}/{agent}/human_did` binding allows
+  explicit linkage from derived agent identity back to a stored human DID.
+- **Verification command**: `verify-agent-identity` recomputes derived key + DID
+  and compares with stored values; can also enforce human DID binding checks.
+
+#### Key modules
+- `crates/shadictl/src/main.rs`: `derive-agent-did`, `derive-agent-identity`,
+  `verify-agent-identity`, and derivation helpers.
+
 ### 2) Sandbox layer
 - **macOS**: Seatbelt profile enforcement for filesystem and network policies.
 - **Windows**: AppContainer + ACL allowlists + Job Objects (kill-on-close).
 - **CLI**: `shadi` provides command blocklists and a JSON policy format.
+- **Portable launcher model**: `shadi` supports built-in profiles
+  (`strict`, `balanced`, `connected`) for portable secure launch defaults.
 
 #### Key modules
 - `crates/shadi_sandbox/src/policy.rs`: policy model and helpers.
@@ -87,9 +104,10 @@ execution.
 - `SandboxPolicyHandle` + `run_sandboxed` for sandbox execution.
 
 ## CLI policy resolution
-The CLI combines policy file settings with explicit flags:
-- File policy is loaded first.
-- CLI flags override or extend file policy.
+The CLI combines profile defaults, policy file settings, and explicit flags:
+- Profile defaults are loaded first (`balanced` by default).
+- Policy file values are merged next.
+- CLI flags override or extend resulting policy.
 - The effective policy can be printed with `--print-policy`.
 
 ## SecOps agent architecture
@@ -109,13 +127,17 @@ plus GitHub APIs for security signals.
 4. Write `secops_security_report.json` to the workspace.
 
 ## Data flow (high level)
-1. Agent session starts and performs DID/VC verification.
-2. SHADI sandbox applies OS-level restrictions to the agent process.
-3. Agent requests secrets; access is granted only if verification succeeds.
-4. Agent communicates over SLIM/MLS; messages are encrypted end-to-end.
+1. Human identity material is ingested (OpenPGP or seed bytes).
+2. Agent local keypair + `did:key` are deterministically derived and stored.
+3. Optional human DID binding is stored for provenance checks.
+4. Agent session starts and performs DID/VC verification.
+5. SHADI sandbox applies OS-level restrictions to the agent process.
+6. Agent requests secrets; access is granted only if verification succeeds.
+7. Agent communicates over SLIM/MLS; messages are encrypted end-to-end.
 
 ```mermaid
 sequenceDiagram
+  participant Human
   participant Agent
   participant SHADI
   participant Sandbox
@@ -123,6 +145,9 @@ sequenceDiagram
   participant MemoryStore
   participant SLIM
 
+  Human->>SHADI: Provide source identity material
+  SHADI->>SHADI: HKDF derive agent local key + did:key
+  SHADI->>Keystore: Store agent keys + DID (+ optional human binding)
   Agent->>SHADI: Start session + DID/VC
   SHADI->>Sandbox: Apply OS policy
   Agent->>SHADI: Secret request
@@ -137,9 +162,15 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-  A[Policy JSON/CLI] --> B[Sandbox Policy]
+  A[Profile Defaults] --> B[Sandbox Policy]
+  A2[Policy JSON] --> B
+  A3[CLI Flags] --> B
   B --> C[macOS Seatbelt]
   B --> D[Windows AppContainer + ACL]
+  H0[Human Identity Source] --> H1[HKDF Derivation]
+  H1 --> H2[Agent Local Keypair]
+  H2 --> H3[did:key]
+  H3 --> G
   E[Session Verification] --> F[Secrets Access]
   F --> G[OS Keystore]
   G --> J[Memory Key]
@@ -155,6 +186,10 @@ flowchart LR
 - **Stopped**: Exfiltration of secrets from disk when keystore access is denied.
 - **Stopped**: Accidental logging of secrets by non-verified sessions.
 - **Mitigated**: In-memory exposure via zeroization and limited lifetime.
+
+### Identity spoofing / provenance ambiguity
+- **Stopped**: Undetected key substitution when `verify-agent-identity` is used.
+- **Mitigated**: Agent ownership ambiguity via stored `human_did` binding + verification.
 
 ### Filesystem abuse
 - **Stopped**: Accessing paths outside allowlists (kernel enforcement).
@@ -185,6 +220,7 @@ flowchart LR
 | Destructive commands | CLI blocklist | Blocked |
 | Message interception | MLS in SLIM | Blocked |
 | Message tampering | MLS integrity | Blocked |
+| Agent identity substitution | HKDF derivation + verify-agent-identity | Blocked (with verification) |
 | Process escape | Kernel enforcement | Mitigated |
 
 ## Residual risks

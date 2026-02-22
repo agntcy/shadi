@@ -30,6 +30,9 @@ use sequoia_openpgp as openpgp;
 #[command(name = "shadi")]
 #[command(about = "Secure Host Agentic AI Dynamic Instantiation")]
 struct Cli {
+    #[arg(long = "profile", value_enum, value_name = "PROFILE")]
+    profile: Option<LauncherProfile>,
+
     #[arg(long = "policy", value_name = "FILE")]
     policy_file: Option<PathBuf>,
 
@@ -62,6 +65,13 @@ struct Cli {
 
     #[arg(last = true)]
     command: Vec<String>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum LauncherProfile {
+    Strict,
+    Balanced,
+    Connected,
 }
 
 #[derive(Parser, Debug)]
@@ -194,6 +204,92 @@ struct DeriveAgentDidArgs {
     out_file: Option<PathBuf>,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum HumanIdentitySource {
+    Gpg,
+    Seed,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "derive-agent-identity", about = "Derive one or more local agent identities from a human identity source")]
+struct DeriveAgentIdentityArgs {
+    #[arg(long = "source", value_enum, default_value = "gpg")]
+    source: HumanIdentitySource,
+
+    #[arg(
+        short = 's',
+        long = "human-secret",
+        value_name = "SECRET",
+        required_unless_present = "input",
+        conflicts_with = "input"
+    )]
+    human_secret: Option<String>,
+
+    #[arg(
+        short = 'i',
+        long = "in",
+        value_name = "FILE",
+        required_unless_present = "human_secret",
+        conflicts_with = "human_secret"
+    )]
+    input: Option<PathBuf>,
+
+    #[arg(short = 'n', long = "name", value_name = "NAME", action = ArgAction::Append, required = true)]
+    agent_names: Vec<String>,
+
+    #[arg(long = "prefix", value_name = "PATH", default_value = "agent_keys")]
+    prefix: String,
+
+    #[arg(long = "human-did-key", value_name = "SECRET")]
+    human_did_key: Option<String>,
+
+    #[arg(long = "out-dir", value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "verify-agent-identity", about = "Verify an agent identity is derived from a human identity source")]
+struct VerifyAgentIdentityArgs {
+    #[arg(long = "source", value_enum, default_value = "gpg")]
+    source: HumanIdentitySource,
+
+    #[arg(
+        short = 's',
+        long = "human-secret",
+        value_name = "SECRET",
+        required_unless_present = "input",
+        conflicts_with = "input"
+    )]
+    human_secret: Option<String>,
+
+    #[arg(
+        short = 'i',
+        long = "in",
+        value_name = "FILE",
+        required_unless_present = "human_secret",
+        conflicts_with = "human_secret"
+    )]
+    input: Option<PathBuf>,
+
+    #[arg(short = 'n', long = "name", value_name = "NAME")]
+    agent_name: String,
+
+    #[arg(long = "prefix", value_name = "PATH", default_value = "agent_keys")]
+    prefix: String,
+
+    #[arg(long = "public-key-key", value_name = "SECRET")]
+    public_key_key: Option<String>,
+
+    #[arg(long = "did-key", value_name = "SECRET")]
+    did_key: Option<String>,
+
+    #[arg(long = "human-did-key", value_name = "SECRET")]
+    human_did_key: Option<String>,
+
+    #[arg(long = "require-human-binding", action = ArgAction::SetTrue)]
+    require_human_binding: bool,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "put-key", about = "Store an OpenPGP key in the SHADI secret store")]
 struct PutKeyArgs {
@@ -318,6 +414,12 @@ fn run_cli(cli: Cli) -> ExitCode {
     }
     if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("derive-agent-did")) {
         return run_derive_agent_did_command(&cli.command);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("derive-agent-identity")) {
+        return run_derive_agent_identity_command(&cli.command);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("verify-agent-identity")) {
+        return run_verify_agent_identity_command(&cli.command);
     }
     if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("put-key")) {
         return run_put_key_command(&cli.command);
@@ -572,6 +674,42 @@ fn run_derive_agent_did_command(args: &[String]) -> ExitCode {
     }
 }
 
+fn run_derive_agent_identity_command(args: &[String]) -> ExitCode {
+    let parsed = match DeriveAgentIdentityArgs::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
+
+    match run_derive_agent_identity(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_verify_agent_identity_command(args: &[String]) -> ExitCode {
+    let parsed = match VerifyAgentIdentityArgs::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(2);
+        }
+    };
+
+    match run_verify_agent_identity(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn run_get_secret_command(args: &[String]) -> ExitCode {
     let parsed = match GetSecretArgs::try_parse_from(args) {
         Ok(parsed) => parsed,
@@ -694,11 +832,181 @@ fn run_derive_agent_did(args: DeriveAgentDidArgs) -> Result<(), String> {
     let (did, vm_id, doc) = build_did_document(&public_key)?;
     let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
 
+    store_derived_agent_identity(
+        args.prefix.trim_end_matches('/'),
+        &args.agent_name,
+        &private_key,
+        &public_key,
+        &did,
+        &output,
+        None,
+    )?;
+
+    if let Some(out_file) = args.out_file.as_ref() {
+        std::fs::write(out_file, format!("{}\n", output)).map_err(|err| {
+            format!("failed to write {}: {}", out_file.display(), err)
+        })?;
+    }
+
+    println!("DID: {}", did);
+    println!("Verification Method ID: {}", vm_id);
+    println!("Stored private key: {}/{}/private", args.prefix.trim_end_matches('/'), args.agent_name);
+    println!("Stored public key: {}/{}/public", args.prefix.trim_end_matches('/'), args.agent_name);
+    println!("Stored DID: {}/{}/did", args.prefix.trim_end_matches('/'), args.agent_name);
+    println!("Stored DID Document: {}/{}/diddoc", args.prefix.trim_end_matches('/'), args.agent_name);
+    if let Some(out_file) = args.out_file.as_ref() {
+        println!("Wrote DID Document: {}", out_file.display());
+    }
+    Ok(())
+}
+
+fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result<(), String> {
+    let seed_material = match args.source {
+        HumanIdentitySource::Gpg => read_openpgp_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?,
+        HumanIdentitySource::Seed => read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?,
+    };
+
+    let human_did = match args.human_did_key.as_deref() {
+        Some(key) => {
+            let store = default_secret_store();
+            let secret = store
+                .get(key)
+                .map_err(|_| format!("keychain lookup failed for {}", key))?;
+            Some(secret_bytes_to_utf8(&secret.expose(|bytes| bytes.to_vec()))?)
+        }
+        None => None,
+    };
+
     let prefix = args.prefix.trim_end_matches('/');
-    let private_key_name = format!("{}/{}/private", prefix, args.agent_name);
-    let public_key_name = format!("{}/{}/public", prefix, args.agent_name);
-    let did_key_name = format!("{}/{}/did", prefix, args.agent_name);
-    let diddoc_key_name = format!("{}/{}/diddoc", prefix, args.agent_name);
+    if let Some(out_dir) = args.out_dir.as_ref() {
+        std::fs::create_dir_all(out_dir)
+            .map_err(|err| format!("failed to create {}: {}", out_dir.display(), err))?;
+    }
+
+    for agent_name in &args.agent_names {
+        let (private_key, public_key) = derive_agent_keypair(&seed_material, agent_name)?;
+        let (did, vm_id, doc) = build_did_document(&public_key)?;
+        let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
+
+        store_derived_agent_identity(
+            prefix,
+            agent_name,
+            &private_key,
+            &public_key,
+            &did,
+            &output,
+            human_did.as_deref(),
+        )?;
+
+        if let Some(out_dir) = args.out_dir.as_ref() {
+            let out_file = out_dir.join(format!("{}.did.json", agent_name));
+            std::fs::write(&out_file, format!("{}\n", output)).map_err(|err| {
+                format!("failed to write {}: {}", out_file.display(), err)
+            })?;
+            println!("Wrote DID Document: {}", out_file.display());
+        }
+
+        println!("Agent: {}", agent_name);
+        println!("DID: {}", did);
+        println!("Verification Method ID: {}", vm_id);
+        println!("Stored private key: {}/{}/private", prefix, agent_name);
+        println!("Stored public key: {}/{}/public", prefix, agent_name);
+        println!("Stored DID: {}/{}/did", prefix, agent_name);
+        println!("Stored DID Document: {}/{}/diddoc", prefix, agent_name);
+        if args.human_did_key.is_some() {
+            println!("Stored human binding: {}/{}/human_did", prefix, agent_name);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_verify_agent_identity(args: VerifyAgentIdentityArgs) -> Result<(), String> {
+    let seed_material = match args.source {
+        HumanIdentitySource::Gpg => read_openpgp_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?,
+        HumanIdentitySource::Seed => read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?,
+    };
+
+    let (_private_key, expected_public_key) = derive_agent_keypair(&seed_material, &args.agent_name)?;
+    let (expected_did, _vm_id, _doc) = build_did_document(&expected_public_key)?;
+
+    let prefix = args.prefix.trim_end_matches('/');
+    let public_key_name = args
+        .public_key_key
+        .clone()
+        .unwrap_or_else(|| format!("{}/{}/public", prefix, args.agent_name));
+    let did_key_name = args
+        .did_key
+        .clone()
+        .unwrap_or_else(|| format!("{}/{}/did", prefix, args.agent_name));
+
+    let store = default_secret_store();
+    let stored_public_b64 = store
+        .get(&public_key_name)
+        .map_err(|_| format!("keychain lookup failed for {}", public_key_name))?
+        .expose(|bytes| bytes.to_vec());
+    let stored_public_b64 = secret_bytes_to_utf8(&stored_public_b64)?;
+    let stored_public_key = base64::engine::general_purpose::STANDARD
+        .decode(stored_public_b64.as_bytes())
+        .map_err(|err| format!("failed to decode {}: {}", public_key_name, err))?;
+
+    if stored_public_key != expected_public_key {
+        return Err("agent public key mismatch: derived key does not match stored key".to_string());
+    }
+
+    let stored_did = store
+        .get(&did_key_name)
+        .map_err(|_| format!("keychain lookup failed for {}", did_key_name))?
+        .expose(|bytes| bytes.to_vec());
+    let stored_did = secret_bytes_to_utf8(&stored_did)?;
+
+    if stored_did != expected_did {
+        return Err("agent DID mismatch: derived DID does not match stored DID".to_string());
+    }
+
+    if args.require_human_binding || args.human_did_key.is_some() {
+        let binding_key = format!("{}/{}/human_did", prefix, args.agent_name);
+        let bound_human_did = store
+            .get(&binding_key)
+            .map_err(|_| format!("missing human binding at {}", binding_key))?
+            .expose(|bytes| bytes.to_vec());
+        let bound_human_did = secret_bytes_to_utf8(&bound_human_did)?;
+
+        if let Some(human_did_key) = args.human_did_key.as_deref() {
+            let expected_human_did = store
+                .get(human_did_key)
+                .map_err(|_| format!("keychain lookup failed for {}", human_did_key))?
+                .expose(|bytes| bytes.to_vec());
+            let expected_human_did = secret_bytes_to_utf8(&expected_human_did)?;
+
+            if bound_human_did != expected_human_did {
+                return Err("human binding mismatch: agent bound DID does not match expected human DID".to_string());
+            }
+        }
+    }
+
+    println!("verified: true");
+    println!("agent: {}", args.agent_name);
+    println!("stored_public_key: {}", public_key_name);
+    println!("stored_did: {}", did_key_name);
+    println!("derived_did: {}", expected_did);
+
+    Ok(())
+}
+
+fn store_derived_agent_identity(
+    prefix: &str,
+    agent_name: &str,
+    private_key: &[u8],
+    public_key: &[u8],
+    did: &str,
+    diddoc_json: &str,
+    human_did: Option<&str>,
+) -> Result<(), String> {
+    let private_key_name = format!("{}/{}/private", prefix, agent_name);
+    let public_key_name = format!("{}/{}/public", prefix, agent_name);
+    let did_key_name = format!("{}/{}/did", prefix, agent_name);
+    let diddoc_key_name = format!("{}/{}/diddoc", prefix, agent_name);
 
     let store = default_secret_store();
     let private_b64 = base64::engine::general_purpose::STANDARD.encode(private_key);
@@ -714,25 +1022,38 @@ fn run_derive_agent_did(args: DeriveAgentDidArgs) -> Result<(), String> {
         .put(&did_key_name, did.as_bytes(), SecretPolicy::default())
         .map_err(|err| format!("failed to store secret {}: {}", did_key_name, err))?;
     store
-        .put(&diddoc_key_name, output.as_bytes(), SecretPolicy::default())
+        .put(&diddoc_key_name, diddoc_json.as_bytes(), SecretPolicy::default())
         .map_err(|err| format!("failed to store secret {}: {}", diddoc_key_name, err))?;
 
-    if let Some(out_file) = args.out_file.as_ref() {
-        std::fs::write(out_file, format!("{}\n", output)).map_err(|err| {
-            format!("failed to write {}: {}", out_file.display(), err)
-        })?;
+    if let Some(human_did) = human_did {
+        let binding_key = format!("{}/{}/human_did", prefix, agent_name);
+        store
+            .put(&binding_key, human_did.as_bytes(), SecretPolicy::default())
+            .map_err(|err| format!("failed to store secret {}: {}", binding_key, err))?;
     }
 
-    println!("DID: {}", did);
-    println!("Verification Method ID: {}", vm_id);
-    println!("Stored private key: {}", private_key_name);
-    println!("Stored public key: {}", public_key_name);
-    println!("Stored DID: {}", did_key_name);
-    println!("Stored DID Document: {}", diddoc_key_name);
-    if let Some(out_file) = args.out_file.as_ref() {
-        println!("Wrote DID Document: {}", out_file.display());
-    }
     Ok(())
+}
+
+fn read_seed_input(
+    label: &str,
+    secret_key: Option<&str>,
+    input: Option<&PathBuf>,
+) -> Result<Vec<u8>, String> {
+    if let Some(secret_key) = secret_key {
+        let store = default_secret_store();
+        let secret = store
+            .get(secret_key)
+            .map_err(|_| format!("keychain lookup failed for {}", secret_key))?;
+        return Ok(secret.expose(|bytes| bytes.to_vec()));
+    }
+
+    if let Some(input) = input {
+        return std::fs::read(input)
+            .map_err(|err| format!("failed to read {}: {}", input.display(), err));
+    }
+
+    Err(format!("missing {} or --in", label))
 }
 
 fn build_did_document(pkey: &[u8]) -> Result<(String, String, serde_json::Value), String> {
@@ -1037,7 +1358,13 @@ fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy,
         allow.insert(cmd.to_string());
     }
 
-    let mut policy = SandboxPolicy::new().block_network(cli.net_block || file_policy.net_block.unwrap_or(false));
+    let profile = profile_defaults(cli.profile);
+    let profile_net_block = profile.net_block.unwrap_or(false);
+    let mut policy = SandboxPolicy::new().block_network(cli.net_block || file_policy.net_block.unwrap_or(profile_net_block));
+
+    policy = apply_string_paths(policy, &profile.read, PathMode::Read)?;
+    policy = apply_string_paths(policy, &profile.write, PathMode::Write)?;
+    policy = apply_string_paths(policy, &profile.allow, PathMode::Allow)?;
 
     policy = apply_string_paths(policy, &file_policy.read, PathMode::Read)?;
     policy = apply_string_paths(policy, &file_policy.write, PathMode::Write)?;
@@ -1052,6 +1379,35 @@ fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy,
         blocked,
         allow,
     })
+}
+
+fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
+    match profile.unwrap_or(LauncherProfile::Balanced) {
+        LauncherProfile::Strict => PolicyFile {
+            allow: vec![".".to_string()],
+            read: vec![".".to_string()],
+            write: Vec::new(),
+            net_block: Some(true),
+            allow_command: Vec::new(),
+            block_command: Vec::new(),
+        },
+        LauncherProfile::Balanced => PolicyFile {
+            allow: vec![".".to_string()],
+            read: vec!["/".to_string()],
+            write: Vec::new(),
+            net_block: Some(true),
+            allow_command: Vec::new(),
+            block_command: Vec::new(),
+        },
+        LauncherProfile::Connected => PolicyFile {
+            allow: vec![".".to_string()],
+            read: vec!["/".to_string()],
+            write: Vec::new(),
+            net_block: Some(false),
+            allow_command: Vec::new(),
+            block_command: Vec::new(),
+        },
+    }
 }
 
 fn is_command_blocked(cmd: &str, blocked: &HashSet<String>, allow: &HashSet<String>) -> bool {
@@ -1240,6 +1596,7 @@ mod tests {
 
     fn build_cli() -> Cli {
         Cli {
+            profile: None,
             policy_file: None,
             allow: Vec::new(),
             read: Vec::new(),
@@ -1359,6 +1716,31 @@ mod tests {
         };
         let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
         assert!(resolved.policy.net_blocked());
+    }
+
+    #[test]
+    fn resolve_policy_uses_balanced_profile_by_default() {
+        let cli = build_cli();
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        assert!(resolved.policy.net_blocked());
+        assert!(resolved.policy.allow_read().iter().any(|path| path == &PathBuf::from("/")));
+    }
+
+    #[test]
+    fn resolve_policy_uses_connected_profile() {
+        let mut cli = build_cli();
+        cli.profile = Some(LauncherProfile::Connected);
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        assert!(!resolved.policy.net_blocked());
+    }
+
+    #[test]
+    fn resolve_policy_uses_strict_profile() {
+        let mut cli = build_cli();
+        cli.profile = Some(LauncherProfile::Strict);
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        assert!(resolved.policy.net_blocked());
+        assert!(!resolved.policy.allow_read().iter().any(|path| path == &PathBuf::from("/")));
     }
 
     #[test]
@@ -1879,6 +2261,185 @@ mod tests {
         assert!(test_store_get(&format!("agents/{}/diddoc", agent_name)).is_some());
         let content = std::fs::read_to_string(&output).expect("read did doc");
         assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_from_seed_for_multiple_agents() {
+        let seed_key = unique_key("human-seed");
+        test_store_put(&seed_key, b"human-seed-material");
+
+        let dir = temp_dir();
+        let out_dir = dir.path().join("idents");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            "agent-a".to_string(),
+            "--name".to_string(),
+            "agent-b".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out-dir".to_string(),
+            out_dir.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get("agents/agent-a/private").is_some());
+        assert!(test_store_get("agents/agent-a/did").is_some());
+        assert!(test_store_get("agents/agent-b/private").is_some());
+        assert!(test_store_get("agents/agent-b/did").is_some());
+        let a_doc = std::fs::read_to_string(out_dir.join("agent-a.did.json")).expect("read did doc");
+        let b_doc = std::fs::read_to_string(out_dir.join("agent-b.did.json")).expect("read did doc");
+        assert!(a_doc.contains("\"did:key:"));
+        assert!(b_doc.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_stores_human_did_binding() {
+        let root_key = unique_key("human-gpg");
+        test_store_put(&root_key, b"root-secret");
+        let human_did_key = unique_key("human-did");
+        test_store_put(&human_did_key, b"did:key:zHuman");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            root_key,
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--name".to_string(),
+            "agent-bound".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        let stored = test_store_get("agents/agent-bound/human_did").expect("human did binding");
+        assert_eq!(stored, b"did:key:zHuman".to_vec());
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_succeeds() {
+        let seed_key = unique_key("verify-human-seed");
+        test_store_put(&seed_key, b"verify-seed-material");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            "agent-verify".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            "agent-verify".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_fails_on_mismatch() {
+        let seed_key = unique_key("verify-human-seed-a");
+        test_store_put(&seed_key, b"seed-a");
+        let other_seed_key = unique_key("verify-human-seed-b");
+        test_store_put(&other_seed_key, b"seed-b");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            "agent-mismatch".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            other_seed_key,
+            "--name".to_string(),
+            "agent-mismatch".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_checks_human_binding() {
+        let seed_key = unique_key("verify-binding-seed");
+        test_store_put(&seed_key, b"binding-seed");
+        let human_did_key = unique_key("verify-human-did");
+        test_store_put(&human_did_key, b"did:key:zHumanBinding");
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--human-did-key".to_string(),
+            human_did_key.clone(),
+            "--name".to_string(),
+            "agent-binding".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            "agent-binding".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
     }
 
     #[test]

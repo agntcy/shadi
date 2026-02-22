@@ -16,6 +16,38 @@ cargo run -p shadictl -- \
   ./your-agent --arg value
 ```
 
+### Portable launcher profiles (no shell wrapper)
+
+`shadictl` now has a built-in policy profile model so you can launch securely
+without platform-specific Bash/PowerShell wrappers:
+
+```bash
+cargo run -p shadictl -- --profile strict -- -- ./your-agent
+```
+
+Profiles:
+- `strict`: local workspace only, network blocked.
+- `balanced` (default): workspace + system reads, network blocked.
+- `connected`: workspace + system reads, network allowed.
+
+### Starter profile matrix
+
+Use this matrix as a baseline when selecting a profile:
+
+| Workload | Recommended profile | Why |
+| --- | --- | --- |
+| Local processing agent (no network calls) | `strict` | Smallest blast radius and full network block. |
+| Typical development agent (reads toolchain/system paths) | `balanced` | Keeps network off while allowing common runtime reads. |
+| API-integrated agent (GitHub/LLM calls) | `connected` | Enables network while keeping filesystem policy centralized. |
+
+Then tighten with explicit path flags (`--allow`, `--read`, `--write`) and only open command exceptions with `--allow-command` when strictly required.
+
+Print the resolved profile policy:
+
+```bash
+cargo run -p shadictl -- --profile balanced --print-policy
+```
+
 ### JSON Policy
 
 You can pass a JSON policy file to avoid long CLI arguments:
@@ -39,9 +71,11 @@ cargo run -p shadictl -- --policy ./sandbox.json -- ./your-agent
 ```
 
 CLI flags override policy file settings. Paths are canonicalized before use.
+Profile defaults are applied first, then policy file values, then CLI flags.
 
 ### Flags
 - `--policy FILE`: Load policy settings from a JSON file.
+- `--profile PROFILE`: Built-in launcher profile (`strict`, `balanced`, `connected`).
 - `--allow PATH`: Allow read+write under the path.
 - `--read PATH`: Allow read-only access under the path.
 - `--write PATH`: Allow write access under the path.

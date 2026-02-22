@@ -19,8 +19,10 @@ gating, and OS-level restrictions.
 
 - Secure secrets storage for agents across platforms.
 - OpenPGP key ingestion and DID derivation via `shadictl` (no OS `gpg` dependency).
+- Deterministic human->agent identity derivation (HKDF-SHA256) with verifiable provenance.
 - MLS-backed secure agent messaging via SLIM/A2A integration.
 - Kernel-enforced sandboxing for agent processes.
+- Portable profile-based secure launcher defaults (`strict`, `balanced`, `connected`).
 - Encrypted local memory via SQLCipher.
 - Python bindings for secrets, SQLCipher memory, and sandbox execution.
 - A SecOps agent for security monitoring and reporting.

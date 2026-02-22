@@ -165,3 +165,12 @@ launch-avatar-example:
 
 import-secops-secrets:
   ./scripts/import_secops_secrets.sh
+
+secure-profile-strict:
+  cargo run -p shadictl -- --profile strict --print-policy
+
+secure-profile-balanced:
+  cargo run -p shadictl -- --profile balanced --print-policy
+
+secure-profile-connected:
+  cargo run -p shadictl -- --profile connected --print-policy
