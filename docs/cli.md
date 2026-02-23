@@ -1,0 +1,377 @@
+# CLI Reference
+
+This page documents the command-line tools shipped with SHADI:
+
+- `shadictl` (binary name `shadi`): sandbox runner and key management.
+- `shadi-memory` (binary name `shadi-memory`): SQLCipher-backed encrypted store.
+- `slim-mas` (binary name `slim-mas`): SLIM multi-agent moderator helper.
+
+Most agents use the Python bindings (`shadi` module) for secrets, SQLCipher
+memory, and sandbox execution. The CLIs remain useful for ops and debugging.
+
+## shadictl (`shadi`)
+
+`shadictl` is the main CLI for running sandboxed commands, printing policy, and
+managing OpenPGP keys and DIDs. In development, run it with:
+
+```bash
+cargo run -p shadictl -- [FLAGS] -- [COMMAND]
+```
+
+### Global flags
+
+- `--policy FILE`: JSON policy file to load before flags are applied.
+- `--allow PATH`: Allow read+write under PATH (can be repeated).
+- `--read PATH`: Allow read-only access under PATH (can be repeated).
+- `--write PATH`: Allow write access under PATH (can be repeated).
+- `--net-block`: Block network access.
+- `--allow-command CMD`: Allow a command that is blocked by default (repeatable).
+- `--inject-keychain KEY=ENV`: Read a secret and inject it as an env var before launch (repeatable).
+- `--list-keychain`: List secrets in the SHADI store.
+- `--list-prefix PREFIX`: Optional prefix filter for `--list-keychain`.
+- `--print-policy`: Print the resolved policy and exit.
+
+### Sandbox execution
+
+Run a command inside the sandbox after flags:
+
+```bash
+cargo run -p shadictl -- \
+  --allow . \
+  --read / \
+  --net-block \
+  -- \
+  ./your-agent --arg value
+```
+
+Print the effective policy after merging JSON and flags:
+
+```bash
+cargo run -p shadictl -- --policy ./sandbox.json --print-policy
+```
+
+Inject a secret into the command environment (brokered secrets):
+
+```bash
+cargo run -p shadictl -- \
+  --inject-keychain secops/token=GITHUB_TOKEN \
+  -- \
+  ./your-agent
+```
+
+### Key, DID, and identity provenance
+
+#### Cryptographic derivation model
+
+Agent identities are deterministically derived from human identity material using
+an HKDF-based pipeline:
+
+- KDF: `HKDF-SHA256`
+- Salt: `"shadi-agent-derive"`
+- Input keying material (IKM): bytes from the selected human identity source
+  (`gpg` secret material or `seed` bytes)
+- Info: `agent_name` bytes
+- Output key bytes: 32-byte Ed25519 private key seed
+
+The derived Ed25519 public key is converted into a `did:key` DID document.
+This is the same derivation path used by `derive-agent-did` and
+`derive-agent-identity`.
+
+Create a DID document from an OpenPGP public key file:
+
+```bash
+cargo run -p shadictl -- \
+  did-from-gpg \
+  --in /path/to/human-public.asc \
+  --out human.did.json
+```
+
+Fetch an OpenPGP key from GitHub and create a DID document:
+
+```bash
+cargo run -p shadictl -- \
+  did-from-github \
+  --user octocat \
+  --out github.did.json
+```
+
+Store an OpenPGP secret key in the SHADI secret store:
+
+```bash
+cargo run -p shadictl -- \
+  put-key \
+  --key human/gpg \
+  --in /path/to/human-secret.asc
+```
+
+Derive an agent DID and keypair from a human OpenPGP secret key:
+
+```bash
+cargo run -p shadictl -- \
+  derive-agent-did \
+  --secret human/gpg \
+  --name agent-a \
+  --prefix agents \
+  --out agent-a.did.json
+```
+
+Automate identity creation for one or more agents from a human identity source
+(`gpg` or generic `seed`) using the same deterministic local-key to `did:key`
+derivation pipeline:
+
+```bash
+cargo run -p shadictl -- \
+  derive-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --name agent-a \
+  --name agent-b \
+  --prefix agents \
+  --out-dir ./agent-dids
+```
+
+For non-GPG identities, store source material in SHADI and use `--source seed`:
+
+```bash
+cargo run -p shadictl -- \
+  derive-agent-identity \
+  --source seed \
+  --human-secret human/seed \
+  --name agent-c \
+  --prefix agents
+```
+
+If you already store the human DID, bind derived identities to it:
+
+```bash
+cargo run -p shadictl -- \
+  derive-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --human-did-key humans/alice/did \
+  --name agent-a \
+  --prefix agents
+```
+
+Verify that a stored agent identity belongs to a human source by recomputing
+the key and DID from the same derivation pipeline:
+
+```bash
+cargo run -p shadictl -- \
+  verify-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --name agent-a \
+  --prefix agents
+```
+
+Require verification of stored human binding:
+
+```bash
+cargo run -p shadictl -- \
+  verify-agent-identity \
+  --source gpg \
+  --human-secret human/gpg \
+  --name agent-a \
+  --prefix agents \
+  --human-did-key humans/alice/did \
+  --require-human-binding
+```
+
+Avoid printing secret values. Use `--list-keychain` for inventory and pass key
+names to commands that resolve secrets inside SHADI.
+
+### Key storage layout
+
+`derive-agent-did` writes the following entries under the prefix:
+
+- `{prefix}/{agent}/private` (base64-encoded Ed25519 private key)
+- `{prefix}/{agent}/public` (base64-encoded Ed25519 public key)
+- `{prefix}/{agent}/did` (DID string)
+- `{prefix}/{agent}/diddoc` (DID document JSON)
+
+`derive-agent-identity` writes the same entries for each `--name` and also
+stores `{prefix}/{agent}/human_did` when `--human-did-key` is provided.
+
+## shadictl memory (`shadictl memory`)
+
+`shadictl memory` proxies SQLCipher memory access while resolving the key from
+the SHADI secret store (no key material is printed).
+
+### Commands
+
+Initialize a store:
+
+```bash
+cargo run -p shadictl -- -- memory init \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key
+```
+
+Put a memory entry from inline payload or file:
+
+```bash
+cargo run -p shadictl -- -- memory put \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  --scope secops --entry-key report --payload '{"status":"ok"}'
+```
+
+```bash
+cargo run -p shadictl -- -- memory put \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  --scope secops --entry-key report --payload-file ./report.json
+```
+
+Get the latest entry:
+
+```bash
+cargo run -p shadictl -- -- memory get \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  --scope secops --entry-key report
+```
+
+Search entries:
+
+```bash
+cargo run -p shadictl -- -- memory search \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  --scope secops --query dependabot --limit 10
+```
+
+List entries:
+
+```bash
+cargo run -p shadictl -- -- memory list \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  --scope secops --limit 50
+```
+
+Delete an entry:
+
+```bash
+cargo run -p shadictl -- -- memory delete \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  --scope secops --entry-key report
+```
+
+## shadi-memory (`shadi-memory`)
+
+`shadi-memory` manages SQLCipher-backed encrypted memory entries.
+Prefer `shadictl memory` when you want keys resolved from SHADI without
+exporting them, or the Python bindings (`SqlCipherMemoryStore`) in apps.
+
+### Global flags
+
+- `--db PATH`: Path to the SQLCipher database file.
+- `--key VALUE`: Raw SQLCipher key value (optional).
+- `--key-name NAME`: Secret store key name for the SQLCipher key (default `shadi/memory/sqlcipher_key`).
+
+### Commands
+
+Initialize a store:
+
+```bash
+cargo run -p shadi_memory -- \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  init
+```
+
+Put a memory entry from inline payload or file:
+
+```bash
+cargo run -p shadi_memory -- \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  put --scope secops --entry-key report --payload '{"status":"ok"}'
+```
+
+```bash
+cargo run -p shadi_memory -- \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  put --scope secops --entry-key report --payload-file ./report.json
+```
+
+Get the latest entry:
+
+```bash
+cargo run -p shadi_memory -- \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  get --scope secops --entry-key report
+```
+
+Search entries:
+
+```bash
+cargo run -p shadi_memory -- \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  search --scope secops --query dependabot --limit 10
+```
+
+List entries:
+
+```bash
+cargo run -p shadi_memory -- \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  list --scope secops --limit 50
+```
+
+Delete an entry:
+
+```bash
+cargo run -p shadi_memory -- \
+  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
+  --key-name shadi/memory/sqlcipher_key \
+  delete --scope secops --entry-key report
+```
+
+## slim-mas (`slim-mas`)
+
+`slim-mas` evaluates SLIM multi-agent membership rules from a TOML config.
+
+### Global flags
+
+- `--config FILE`: Path to the MAS config (default `mas.toml`).
+
+### Commands
+
+List available groups:
+
+```bash
+cargo run -p slim_mas -- list-groups
+```
+
+List members for a group:
+
+```bash
+cargo run -p slim_mas -- list-members --group team-a
+```
+
+Validate config (ensures a default group exists):
+
+```bash
+cargo run -p slim_mas -- validate
+```
+
+Admit or deny a member:
+
+```bash
+cargo run -p slim_mas -- \
+  admit --group team-a --did did:key:human --role human
+```
+
+Exit codes:
+
+- `0`: allow / success
+- `3`: deny (member not allowed)
+- `2`: error

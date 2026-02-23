@@ -1,0 +1,50 @@
+site_name: SHADI
+site_description: Secure Host Agentic AI Dynamic Instantiation
+site_url: https://example.com/shadi
+repo_url: https://github.com/your-org/shadi
+repo_name: shadi
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.top
+    - content.code.copy
+
+nav:
+  - Overview: index.md
+  - CLI Reference: cli.md
+  - API & Integration: api_integration.md
+  - Architecture: architecture.md
+  - Demo: demo.md
+  - SecOps Agent: secops_agent.md
+  - Security: security.md
+  - Design: design.md
+  - Sandbox: sandbox.md
+
+exclude_docs: |
+  README.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight
+  - toc:
+      permalink: true
+  - codehilite
+
+plugins:
+  - search
