@@ -10,7 +10,7 @@ test = false
 doctest = false
 
 [dependencies]
-agent_secrets = { path = "../agent_secrets" }
+agent_secrets = { path = "../agent_secrets", features = ["onepassword"] }
 shadi_memory = { path = "../shadi_memory" }
 shadi_sandbox = { path = "../shadi_sandbox" }
 

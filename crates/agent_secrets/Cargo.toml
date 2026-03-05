@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = ["std"]
 std = []
+onepassword = ["serde", "serde_json", "base64"]
 windows = []
 macos = []
 ios = []
@@ -15,6 +16,9 @@ coverage = []
 
 [dependencies]
 zeroize = "1.7"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2.10"
