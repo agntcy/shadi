@@ -15,6 +15,7 @@ const DEFAULT_READ_PATHS: &[&str] = &[
     "/Library",
     "/etc",
     "/private/var",
+    "/opt/homebrew",
 ];
 
 #[cfg(not(any(test, feature = "coverage")))]
@@ -49,10 +50,8 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     rules.push("(deny default)".to_string());
     rules.push("(allow process*)".to_string());
     rules.push("(allow process-exec)".to_string());
-    rules.push("(allow mach-lookup (global-name \"com.apple.securityd\"))".to_string());
-    rules.push("(allow mach-lookup (global-name \"com.apple.trustd\"))".to_string());
-    rules.push("(allow mach-lookup (global-name \"com.apple.trustd.agent\"))".to_string());
-    rules.push("(allow mach-lookup (global-name \"com.apple.secd\"))".to_string());
+    rules.push("(allow sysctl-read)".to_string());
+    rules.push("(allow mach-lookup)".to_string());
 
     for path in DEFAULT_READ_PATHS {
         rules.push(format!(
@@ -75,28 +74,57 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
             "(allow file-read* file-write* (subpath \"{}/Library\"))",
             home
         ));
+        // Allow the 1Password CLI config dir (socket, config, lock files).
+        rules.push(format!(
+            "(allow file-read* file-write* (subpath \"{}/.config\"))",
+            home
+        ));
+        // Allow the slim_bindings local storage directory (~/.slim).
+        rules.push(format!(
+            "(allow file-read* file-write* (subpath \"{}/.slim\"))",
+            home
+        ));
+        rules.push(format!(
+            "(allow file-read* file-write* (subpath \"{}/.local\"))",
+            home
+        ));
     }
+    // Allow /var/folders (op daemon temp dir). /var → /private/var but Seatbelt
+    // matches on the literal path seen by the caller, so cover both spellings.
+    rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
+    rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        let canonical = tmpdir.trim_end_matches('/').to_string();
+        rules.push(format!(
+            "(allow file-read* file-write* (subpath \"{canonical}\"))"
+        ));
+    }
+    // Allow Mach IPC and POSIX IPC for child processes (op daemon, system services).
+    rules.push("(allow ipc-posix-shm)".to_string());
+    // Allow Unix-domain socket connections (op daemon uses ~/.config/op/op-daemon.sock).
+    rules.push("(allow network-outbound (local unix-socket))".to_string());
+    rules.push("(allow network-inbound (local unix-socket))".to_string());
 
     for path in policy.allow_read() {
-        if let Some(path) = path.to_str() {
-            rules.push(format!(
-                "(allow file-read* file-map-executable (subpath \"{}\"))",
-                path
-            ));
-        } else {
+        let abs = resolve_path(path);
+        let Some(s) = abs.to_str() else {
             return Err(SandboxError::InvalidConfig);
-        }
+        };
+        rules.push(format!(
+            "(allow file-read* file-map-executable (subpath \"{}\"))",
+            s
+        ));
     }
 
     for path in policy.allow_write() {
-        if let Some(path) = path.to_str() {
-            rules.push(format!(
-                "(allow file-write* file-map-executable (subpath \"{}\"))",
-                path
-            ));
-        } else {
+        let abs = resolve_path(path);
+        let Some(s) = abs.to_str() else {
             return Err(SandboxError::InvalidConfig);
-        }
+        };
+        rules.push(format!(
+            "(allow file-write* file-map-executable (subpath \"{}\"))",
+            s
+        ));
     }
 
     if !policy.net_blocked() {
@@ -104,6 +132,18 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     }
 
     Ok(rules.join("\n"))
+}
+
+/// Resolve a path to absolute.  Seatbelt requires absolute paths for
+/// `subpath` matchers; relative ones are silently ignored.
+fn resolve_path(path: &std::path::Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 #[cfg(not(any(test, feature = "coverage")))]
@@ -161,13 +201,15 @@ mod tests {
             .block_network(false);
 
         let profile = build_profile(&policy).unwrap();
+        let abs_tmp = resolve_path(std::path::Path::new(&tmp_dir));
+        let abs_str = abs_tmp.to_str().unwrap();
         assert!(profile.contains(&format!(
             "(allow file-read* file-map-executable (subpath \"{}\"))",
-            tmp_dir
+            abs_str
         )));
         assert!(profile.contains(&format!(
             "(allow file-write* file-map-executable (subpath \"{}\"))",
-            tmp_dir
+            abs_str
         )));
         assert!(profile.contains("(allow network*)"));
     }

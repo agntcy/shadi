@@ -29,7 +29,7 @@ def main():
         tmp_dir = str(Path(tmp_dir) / agent_id)
     workspace_dir = secops_config.get("workspace_dir", str(Path(tmp_dir) / "shadi-secops"))
     llm_key_prefix = secops_config.get("llm_key_prefix", "secops/llm")
-    llm_provider = secops_config.get("llm_provider", "google")
+    llm_provider = secops_config.get("llm_provider", os.getenv("LLM_PROVIDER", "anthropic"))
     memory_key_name = secops_config.get("memory_key", "secops/memory_key")
     slim_shared_secret_key = secops_config.get("slim_shared_secret_key", "secops/slim_shared_secret")
     slim_local_did_key = secops_config.get("slim_local_did_key", "secops/slim_local_did")

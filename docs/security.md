@@ -26,6 +26,18 @@ DID from the same human source and compare them to stored values.
 If a human DID binding is stored (`{prefix}/{agent}/human_did`), verification
 can additionally assert that the binding matches a specific human DID key.
 
+## 1Password backend
+
+When `SHADI_SECRET_BACKEND=onepassword` is set, secrets are stored in a
+1Password vault instead of the OS keychain. The backend shells out to the `op`
+CLI (1Password CLI v2). No secrets are cached in memory beyond the lifetime of
+each operation.
+
+- Items are stored as Secure Notes with base64-encoded content, tagged `shadi`.
+- For CI/headless environments, set `OP_SERVICE_ACCOUNT_TOKEN` (never stored
+  by SHADI; consumed directly by `op`).
+- The vault name defaults to `shadi` and can be overridden via `SHADI_OP_VAULT`.
+
 ## Non-goals
 - Protecting against a fully compromised host OS.
 - Metadata privacy beyond message content when using SLIM/MLS.

@@ -9,6 +9,7 @@ REMEDIATE := "false"
 
 build:
   PYO3_PYTHON="{{python312}}" RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" cargo build
+  cp target/debug/libshadi.dylib .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so
 
 windows-build:
   $env:PYO3_PYTHON = "{{python312}}"; cargo build
@@ -110,6 +111,9 @@ secops-run-anthropic:
 secops-secrets:
   cargo run -p shadictl -- --list-keychain --list-prefix secops/
 
+secops-secrets-op:
+  SHADI_SECRET_BACKEND=onepassword cargo run -p shadictl -- --list-keychain --list-prefix secops/
+
 secops-policy:
   cargo run -p shadictl -- --policy policies/demo/secops-a.json --print-policy
 
@@ -157,14 +161,24 @@ launch-secops-a2a-example:
   SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/import_secops_secrets.sh
   SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/launch_secops_a2a.sh
 
+launch-secops-a2a-example-op:
+  SHADI_SECRET_BACKEND=onepassword SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/import_secops_secrets.sh
+  SHADI_SECRET_BACKEND=onepassword SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/launch_secops_a2a.sh
+
 launch-avatar:
   ./scripts/launch_avatar.sh
 
 launch-avatar-example:
   SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="avatar-1" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/launch_avatar.sh
 
+launch-avatar-example-op:
+  SHADI_SECRET_BACKEND=onepassword SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="avatar-1" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/launch_avatar.sh
+
 import-secops-secrets:
   ./scripts/import_secops_secrets.sh
+
+import-secops-secrets-op:
+  SHADI_SECRET_BACKEND=onepassword ./scripts/import_secops_secrets.sh
 
 secure-profile-strict:
   cargo run -p shadictl -- --profile strict --print-policy

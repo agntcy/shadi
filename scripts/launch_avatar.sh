@@ -14,6 +14,18 @@ export SHADI_AGENT_ID
 export SHADI_OPERATOR_PRESENTATION
 export SHADI_SECOPS_CONFIG
 export SHADI_POLICY_PATH
+export SHADI_PYTHON
+
+# Optional: 1Password backend
+if [[ -n "${SHADI_SECRET_BACKEND:-}" ]]; then
+	export SHADI_SECRET_BACKEND
+fi
+if [[ -n "${SHADI_OP_VAULT:-}" ]]; then
+	export SHADI_OP_VAULT
+fi
+if [[ -n "${SHADI_OP_ACCOUNT:-}" ]]; then
+	export SHADI_OP_ACCOUNT
+fi
 
 : "${SLIM_TLS_CERT:="${SHADI_TMP_DIR}/shadi-slim-mtls/client-avatar.crt"}"
 : "${SLIM_TLS_KEY:="${SHADI_TMP_DIR}/shadi-slim-mtls/client-avatar.key"}"
@@ -24,6 +36,6 @@ export SLIM_TLS_KEY
 export SLIM_TLS_CA
 
 cd "${ROOT_DIR}"
-"${SHADI_PYTHON}" "${ROOT_DIR}/tools/run_sandboxed_agent.py" \
+uv run --no-project --python "${SHADI_PYTHON}" "${ROOT_DIR}/tools/run_sandboxed_agent.py" \
 	--policy "${SHADI_POLICY_PATH}" \
 	-- "${SHADI_PYTHON}" "${ROOT_DIR}/agents/avatar/adk_agent/run_shadi_memory.py"
