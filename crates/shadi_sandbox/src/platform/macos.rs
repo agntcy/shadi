@@ -88,6 +88,11 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
             "(allow file-read* file-write* (subpath \"{}/.local\"))",
             home
         ));
+        // Allow gh CLI cache directory (~/.cache) used by gh and git credential helpers.
+        rules.push(format!(
+            "(allow file-read* file-write* (subpath \"{}/.cache\"))",
+            home
+        ));
     }
     // Allow /var/folders (op daemon temp dir). /var → /private/var but Seatbelt
     // matches on the literal path seen by the caller, so cover both spellings.

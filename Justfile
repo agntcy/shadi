@@ -10,6 +10,7 @@ REMEDIATE := "false"
 build:
   PYO3_PYTHON="{{python312}}" RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" cargo build
   cp target/debug/libshadi.dylib .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so
+  codesign --sign - --force .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so
 
 windows-build:
   $env:PYO3_PYTHON = "{{python312}}"; cargo build
@@ -152,7 +153,7 @@ launch-slim:
   ./scripts/launch_slim.sh
 
 launch-slim-example:
-  SHADI_TMP_DIR="./.tmp" SLIM_ENDPOINT="127.0.0.1:47357" ./scripts/launch_slim.sh
+  SHADI_TMP_DIR="./.tmp" ./scripts/launch_slim.sh
 
 launch-secops-a2a:
   ./scripts/launch_secops_a2a.sh
@@ -179,6 +180,58 @@ import-secops-secrets:
 
 import-secops-secrets-op:
   SHADI_SECRET_BACKEND=onepassword ./scripts/import_secops_secrets.sh
+
+# ── Demo orchestration ────────────────────────────────────────────────────────
+# Stop all demo processes (SLIM + SecOps A2A + Avatar).
+demo-stop:
+  -kill $(cat .tmp/slim.pid 2>/dev/null) 2>/dev/null; rm -f .tmp/slim.pid
+  -kill $(cat .tmp/secops-a2a.pid 2>/dev/null) 2>/dev/null; rm -f .tmp/secops-a2a.pid
+  -pkill -f "run_sandboxed_agent\.py|a2a_server\.py|run_shadi_memory\.py" 2>/dev/null || true
+  -pkill -f slimctl 2>/dev/null || true
+  @echo "Demo stopped."
+
+# Start SLIM + SecOps A2A in the background and write PIDs to .tmp/.
+# Use SHADI_HUMAN_GITHUB=<handle> to enable PR creation via gh CLI.
+demo-start: demo-stop
+  mkdir -p .tmp
+  slimctl slim start --config ".tmp/shadi-slim-mtls/server-config.yaml" >.tmp/slim.log 2>&1 & echo $! >.tmp/slim.pid
+  sleep 2
+  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" \
+    ./scripts/launch_secops_a2a.sh >.tmp/secops-a2a.log 2>&1 & echo $! >.tmp/secops-a2a.pid
+  @echo "Demo started. Tail logs: just demo-logs"
+  @echo "Launch interactive avatar: just demo-avatar"
+
+# Same as demo-start but uses 1Password as the secret backend.
+demo-start-op: demo-stop
+  @OP_ACCOUNT="${SHADI_OP_ACCOUNT:-my.1password.com}"; \
+    op vault list --account "$OP_ACCOUNT" >/dev/null 2>&1 || \
+    { echo "ERROR: 1Password not unlocked for $OP_ACCOUNT. Open the 1Password app and authenticate (Touch ID) first."; exit 1; }
+  mkdir -p .tmp
+  slimctl slim start --config ".tmp/shadi-slim-mtls/server-config.yaml" >.tmp/slim.log 2>&1 & echo $! >.tmp/slim.pid
+  sleep 2
+  SHADI_SECRET_BACKEND=onepassword SHADI_OP_ACCOUNT="${SHADI_OP_ACCOUNT:-my.1password.com}" \
+  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" \
+    ./scripts/launch_secops_a2a.sh >.tmp/secops-a2a.log 2>&1 & echo $! >.tmp/secops-a2a.pid
+  @echo "Demo started (1Password). Tail logs: just demo-logs"
+  @echo "Launch interactive avatar: just demo-avatar-op"
+
+# Launch the interactive Avatar agent (foreground REPL).
+demo-avatar:
+  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="avatar-1" SHADI_OPERATOR_PRESENTATION="local-operator" \
+    ./scripts/launch_avatar.sh
+
+# Same as demo-avatar but uses 1Password as the secret backend.
+demo-avatar-op:
+  @OP_ACCOUNT="${SHADI_OP_ACCOUNT:-my.1password.com}"; \
+    op vault list --account "$OP_ACCOUNT" >/dev/null 2>&1 || \
+    { echo "ERROR: 1Password not unlocked for $OP_ACCOUNT. Open the 1Password app and authenticate (Touch ID) first."; exit 1; }
+  SHADI_SECRET_BACKEND=onepassword SHADI_OP_ACCOUNT="${SHADI_OP_ACCOUNT:-my.1password.com}" \
+  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="avatar-1" SHADI_OPERATOR_PRESENTATION="local-operator" \
+    ./scripts/launch_avatar.sh
+
+# Tail background demo logs (SLIM + SecOps A2A).
+demo-logs:
+  tail -f .tmp/slim.log .tmp/secops-a2a.log
 
 secure-profile-strict:
   cargo run -p shadictl -- --profile strict --print-policy

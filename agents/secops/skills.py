@@ -22,7 +22,15 @@ def load_secops_config():
         return config_path, tomllib.load(handle)
 
 
+def _secret_env_var(key_name):
+    """Return the env var name that can cache a secret to avoid calling op in background."""
+    return "SHADI_SECRET_" + key_name.upper().replace("/", "_").replace("-", "_").replace(".", "_")
+
+
 def require_shadi_secret(store, session, key_name, label):
+    env_val = os.environ.get(_secret_env_var(key_name), "").strip()
+    if env_val:
+        return env_val.encode("utf-8")
     try:
         return store.get(session, key_name)
     except Exception as exc:

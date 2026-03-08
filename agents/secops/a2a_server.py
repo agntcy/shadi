@@ -103,13 +103,16 @@ async def run_remediate(command):
     provider = command.get("provider")
     labels = command.get("labels", "security,cve,vulnerability")
     report_name = command.get("report_name", "secops_security_report.md")
+    create_prs = bool(command.get("create_prs", False))
+    human_github = command.get("human_github") or os.getenv("SHADI_HUMAN_GITHUB", "").strip() or None
     return await asyncio.to_thread(
         skill_collect_security_issues,
         labels=labels,
         report_name=report_name,
         provider=provider,
         remediate=True,
-        create_prs=False,
+        create_prs=create_prs,
+        human_github_handle=human_github,
     )
 
 
@@ -209,6 +212,7 @@ def create_executor(types):
 
     class SecopsExecutor(AgentExecutor):
         async def execute(self, context, event_queue):
+            print(f"[SecopsExecutor.execute] user_input={context.get_user_input()!r}", flush=True)
             command = parse_command(context.get_user_input())
             await emit_status(event_queue, context, types["TaskState"].working, types)
             await emit_text(event_queue, context, f"Command: {command}", types)
@@ -238,12 +242,14 @@ def create_executor(types):
                                 },
                             },
                             "remediate": {
-                                "description": "Run remediation planning without opening PRs.",
+                                "description": "Run remediation planning. Set create_prs=true and human_github=<handle> to open PRs via gh CLI.",
                                 "payload": {
                                     "command": "remediate",
                                     "labels": "security,cve,vulnerability",
                                     "provider": "(optional: override LLM provider)",
                                     "report_name": "secops_security_report.md",
+                                    "create_prs": False,
+                                    "human_github": "(optional: GitHub handle for fork/PR ownership, or set SHADI_HUMAN_GITHUB)",
                                 },
                             },
                             "approve_prs": {
@@ -324,6 +330,7 @@ async def main():
         )
     )
     types["add_A2AServiceServicer_to_server"](servicer, server)
+    print(f"SecOps A2A server ready (agent_id={slim_config['identity']}, endpoint={slim_config['endpoint']})", flush=True)
     await server.run()
 
 
