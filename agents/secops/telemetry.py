@@ -13,7 +13,7 @@ Without any configuration, all telemetry is a no-op.
 """
 import os
 
-SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "shadi-secops")
+SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME") or "shadi-secops"
 
 try:
     from opentelemetry import trace
@@ -22,7 +22,14 @@ try:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
-    _resource = Resource.create({RES_SERVICE_NAME: SERVICE_NAME})
+    # Use Resource() directly (not Resource.create()) so the SDK's environment
+    # detectors cannot override our explicit service.name with "unknown_service".
+    _resource = Resource(
+        attributes={
+            RES_SERVICE_NAME: SERVICE_NAME,
+            "telemetry.sdk.language": "python",
+        }
+    )
     _provider = TracerProvider(resource=_resource)
 
     _endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()

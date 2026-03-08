@@ -64,10 +64,11 @@ async def main():
 
 
 if __name__ == "__main__":
+    timeout = int(sys.argv[2]) if len(sys.argv) > 2 else 300
     try:
-        asyncio.run(asyncio.wait_for(main(), timeout=30))
+        asyncio.run(asyncio.wait_for(main(), timeout=timeout))
     except asyncio.TimeoutError:
-        print("TIMEOUT: no response from SecOps within 30s", flush=True)
+        print(f"TIMEOUT: no response from SecOps within {timeout}s", flush=True)
     except Exception:
         traceback.print_exc()
 

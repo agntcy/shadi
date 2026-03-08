@@ -211,6 +211,9 @@ demo-start-op: demo-stop
   sleep 2
   SHADI_SECRET_BACKEND=onepassword SHADI_OP_ACCOUNT="${SHADI_OP_ACCOUNT:-my.1password.com}" \
   SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" \
+  SHADI_OTEL_CONSOLE="${SHADI_OTEL_CONSOLE:-}" \
+  OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}" \
+  OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-}" \
     ./scripts/launch_secops_a2a.sh >.tmp/secops-a2a.log 2>&1 & echo $! >.tmp/secops-a2a.pid
   @echo "Demo started (1Password). Tail logs: just demo-logs"
   @echo "Launch interactive avatar: just demo-avatar-op"

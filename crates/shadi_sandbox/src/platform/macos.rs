@@ -141,14 +141,35 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
 
 /// Resolve a path to absolute.  Seatbelt requires absolute paths for
 /// `subpath` matchers; relative ones are silently ignored.
+/// The result is also lexically normalized (`.` and `..` components removed)
+/// because macOS Seatbelt does NOT normalize `subpath` arguments, so a
+/// trailing `/./` or similar makes the rule silently ineffective.
 fn resolve_path(path: &std::path::Path) -> std::path::PathBuf {
-    if path.is_absolute() {
+    let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
+    };
+    normalize_path(abs)
+}
+
+/// Lexically normalize a path by resolving `.` and `..` components without
+/// hitting the filesystem (so it works for paths that don't exist yet).
+fn normalize_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
     }
+    out
 }
 
 #[cfg(not(any(test, feature = "coverage")))]

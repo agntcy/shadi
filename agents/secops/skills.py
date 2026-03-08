@@ -931,7 +931,7 @@ def record_secops_memory(config, summary):
         or default_db
     )
 
-    memory_key = secops_config.get("memory_key", "secops/memory_key")
+    memory_key_name = secops_config.get("memory_key", "secops/memory_key")
     scope = secops_config.get("memory_scope", "secops")
 
     payload = json.dumps(summary, indent=2)
@@ -941,8 +941,11 @@ def record_secops_memory(config, summary):
         f"security_report_{report_day}",
     ]
     try:
+        # Resolve the actual encryption key value (not just the key name).
+        shadi_store, session = create_secops_session()
+        memory_key = require_shadi_secret(shadi_store, session, memory_key_name, "memory key").decode("utf-8").strip()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        store = SqlCipherMemoryStore(db_path, None, memory_key)
+        store = SqlCipherMemoryStore(db_path, memory_key)
         results = []
         for entry_key in entry_keys:
             record_id = store.put(scope, entry_key, payload)

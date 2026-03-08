@@ -11,8 +11,6 @@ from shadi import ShadiStore, PySessionContext
 
 
 def require_slima2a_packages():
-import tomllib
-from pathlib import Path
     try:
         import httpx
         import slimrpc
@@ -26,23 +24,27 @@ from pathlib import Path
 
     return {
         "httpx": httpx,
-def load_secops_config():
-    config_path = Path(os.getenv("SHADI_SECOPS_CONFIG", "secops.toml"))
-    if not config_path.exists():
-        return config_path, {}
-    with config_path.open("rb") as handle:
-        return config_path, tomllib.load(handle)
         "slimrpc": slimrpc,
         "ClientFactory": ClientFactory,
-    parser.add_argument("--endpoint", default=os.getenv("SHADI_SLIM_ENDPOINT", "http://localhost:46357"))
-    parser.add_argument("--local-did", default=os.getenv("SHADI_SLIM_LOCAL_DID"))
-    parser.add_argument("--remote-did", default=os.getenv("SHADI_SLIM_REMOTE_DID"))
-    parser.add_argument("--secret-key", default="secops/slim_shared_secret")
+        "minimal_agent_card": minimal_agent_card,
+        "Message": Message,
+        "Part": Part,
+        "Role": Role,
         "TextPart": TextPart,
         "ClientConfig": ClientConfig,
         "SRPCTransport": SRPCTransport,
         "slimrpc_channel_factory": slimrpc_channel_factory,
     }
+
+
+def load_secops_config():
+    import tomllib
+    from pathlib import Path
+    config_path = Path(os.getenv("SHADI_SECOPS_CONFIG", "secops.toml"))
+    if not config_path.exists():
+        return config_path, {}
+    with config_path.open("rb") as handle:
+        return config_path, tomllib.load(handle)
 
 
 def create_prompt_session():
@@ -59,12 +61,8 @@ def create_prompt_session():
     store.set_verifier(verify_operator)
     ok = store.verify_session(session, presentation)
     if not ok:
-    shared_secret = require_shadi_secret_value(
-        store,
-        session,
-        shared_secret_key,
-        "SLIM shared secret",
-    )
+        raise RuntimeError("Prompt session verification failed")
+    return store, session
 
 
 def require_shadi_secret_value(store, session, key_name, label):

@@ -89,6 +89,8 @@ async def emit_status(event_queue, context, state, types, final=False):
 async def run_scan(command):
     provider = command.get("provider")
     labels = command.get("labels", "security,cve,vulnerability")
+    if isinstance(labels, list):
+        labels = ",".join(labels)
     report_name = command.get("report_name", "secops_security_report.md")
     with tracer.start_as_current_span("secops.scan") as span:
         span.set_attribute("scan.labels", labels)
@@ -108,6 +110,8 @@ async def run_scan(command):
 async def run_remediate(command):
     provider = command.get("provider")
     labels = command.get("labels", "security,cve,vulnerability")
+    if isinstance(labels, list):
+        labels = ",".join(labels)
     report_name = command.get("report_name", "secops_security_report.md")
     create_prs = bool(command.get("create_prs", False))
     human_github = command.get("human_github") or os.getenv("SHADI_HUMAN_GITHUB", "").strip() or None
