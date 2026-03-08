@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from shadi import ShadiStore, PySessionContext, SqlCipherMemoryStore
+from telemetry import tracer
 
 
 def load_secops_config():
@@ -778,32 +779,47 @@ def collect_security_report(config, github_token, allowlisted_repos, labels):
     total_alerts = 0
     total_issues = 0
 
-    for repo in allowlisted_repos:
-        repo_entry = {"dependabot": [], "issues": {}}
-        try:
-            alerts = fetch_dependabot_alerts(api_base, github_token, repo)
-            repo_entry["dependabot"] = alerts
-            total_alerts += len(alerts)
-        except (HTTPError, URLError, ValueError) as exc:
-            repo_entry["dependabot_error"] = str(exc)
-
-        for label in labels:
+    with tracer.start_as_current_span("secops.github_fetch") as span:
+        span.set_attribute("github.repo_count", len(allowlisted_repos))
+        span.add_event("github_fetch.started", {"repos": ",".join(allowlisted_repos)})
+        for repo in allowlisted_repos:
+            repo_entry = {"dependabot": [], "issues": {}}
             try:
-                issues = fetch_security_issues(api_base, github_token, repo, label)
-                repo_entry["issues"][label] = issues
-                total_issues += len(issues)
+                alerts = fetch_dependabot_alerts(api_base, github_token, repo)
+                repo_entry["dependabot"] = alerts
+                total_alerts += len(alerts)
             except (HTTPError, URLError, ValueError) as exc:
-                repo_entry["issues"][label] = {"error": str(exc), "items": []}
+                repo_entry["dependabot_error"] = str(exc)
 
-        report["repos"][repo] = {
-            "dependabot_count": len(repo_entry.get("dependabot", [])),
-            "issue_counts": {
-                label: len(items) if isinstance(items, list) else 0
-                for label, items in repo_entry["issues"].items()
-            },
-            "data": repo_entry,
-        }
+            for label in labels:
+                try:
+                    issues = fetch_security_issues(api_base, github_token, repo, label)
+                    repo_entry["issues"][label] = issues
+                    total_issues += len(issues)
+                except (HTTPError, URLError, ValueError) as exc:
+                    repo_entry["issues"][label] = {"error": str(exc), "items": []}
 
+            repo_alerts = len(repo_entry.get("dependabot", []))
+            repo_issues = sum(
+                len(v) if isinstance(v, list) else 0 for v in repo_entry["issues"].values()
+            )
+            span.add_event(
+                "github_fetch.repo_done",
+                {"repo": repo, "alerts": repo_alerts, "issues": repo_issues},
+            )
+            report["repos"][repo] = {
+                "dependabot_count": repo_alerts,
+                "issue_counts": {
+                    label: len(items) if isinstance(items, list) else 0
+                    for label, items in repo_entry["issues"].items()
+                },
+                "data": repo_entry,
+            }
+
+        span.add_event(
+            "github_fetch.done",
+            {"total_alerts": total_alerts, "total_issues": total_issues},
+        )
     return report, total_alerts, total_issues
 
 
@@ -850,23 +866,30 @@ def generate_llm_markdown(report, total_alerts, total_issues, llm_settings):
             base_url=base_url,
         )
     timeout_seconds = float(os.getenv("SHADI_LLM_TIMEOUT", "60"))
-    try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=timeout_seconds,
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"LLM report generation failed for provider '{provider}' and model '{model_name}'. "
-            "Verify the secops/llm secrets for provider, endpoint, model, and API key."
-        ) from exc
-    choices = getattr(response, "choices", None) or []
-    if choices:
-        message = getattr(choices[0], "message", None)
-        content = getattr(message, "content", None)
-        if content:
-            return content.strip()
+    with tracer.start_as_current_span("secops.llm_generate") as span:
+        span.set_attribute("llm.provider", provider)
+        span.set_attribute("llm.model", model_name)
+        span.add_event("llm.request_sent", {"provider": provider, "model": model_name})
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:
+            span.record_exception(exc)
+            span.add_event("llm.request_failed", {"error": str(exc)})
+            raise RuntimeError(
+                f"LLM report generation failed for provider '{provider}' and model '{model_name}'. "
+                "Verify the secops/llm secrets for provider, endpoint, model, and API key."
+            ) from exc
+        span.add_event("llm.response_received")
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", None)
+            if content:
+                return content.strip()
     raise RuntimeError("LLM response did not contain text")
 
 
@@ -875,7 +898,11 @@ def write_report(report, workspace_dir, filename, total_alerts, total_issues, ll
     workspace_path.mkdir(parents=True, exist_ok=True)
     report_path = workspace_path / filename
     markdown = generate_llm_markdown(report, total_alerts, total_issues, llm_settings)
-    report_path.write_text(markdown, encoding="utf-8")
+    with tracer.start_as_current_span("secops.write_report") as span:
+        span.set_attribute("report.path", str(report_path))
+        report_path.write_text(markdown, encoding="utf-8")
+        span.set_attribute("report.bytes", len(markdown.encode()))
+        span.add_event("report.written", {"path": str(report_path)})
     return report_path
 
 
@@ -940,58 +967,68 @@ def skill_collect_security_issues(
     create_prs=False,
     human_github_handle=None,
 ):
-    config_path, config = load_secops_config()
-    secops_config = config.get("secops", {})
-    allowlisted_repos = secops_config.get("allowlist", [])
-    store, session = create_secops_session()
-    github_token, workspace, _, _ = get_secops_credentials(config, store, session)
-    llm_settings = get_llm_settings(config, store, session, provider_override=provider)
+    with tracer.start_as_current_span("secops.skill") as span:
+        span.set_attribute("skill.labels", labels)
+        span.set_attribute("skill.report_name", report_name)
+        span.set_attribute("skill.remediate", remediate)
+        span.set_attribute("skill.create_prs", create_prs)
 
-    human_did = ""
-    if human_github_handle:
-        human_did = get_human_did(store, session, human_github_handle)
+        config_path, config = load_secops_config()
+        secops_config = config.get("secops", {})
+        allowlisted_repos = secops_config.get("allowlist", [])
+        store, session = create_secops_session()
+        github_token, workspace, _, _ = get_secops_credentials(config, store, session)
+        llm_settings = get_llm_settings(config, store, session, provider_override=provider)
 
-    label_list = [item.strip() for item in labels.split(",") if item.strip()]
-    report, total_alerts, total_issues = collect_security_report(
-        config, github_token, allowlisted_repos, label_list
-    )
-    if human_did:
-        report["human"] = {
-            "github_handle": human_github_handle,
-            "did": human_did,
+        human_did = ""
+        if human_github_handle:
+            human_did = get_human_did(store, session, human_github_handle)
+
+        label_list = [item.strip() for item in labels.split(",") if item.strip()]
+        report, total_alerts, total_issues = collect_security_report(
+            config, github_token, allowlisted_repos, label_list
+        )
+        if human_did:
+            report["human"] = {
+                "github_handle": human_github_handle,
+                "did": human_did,
+            }
+        remediation = None
+        if remediate or secops_config.get("auto_remediate"):
+            allow_prs = create_prs or secops_config.get("auto_pr", False)
+            remediation = remediate_repos(config, github_token, report, workspace, create_prs=allow_prs)
+            report["remediation"] = remediation
+
+        report_path = write_report(report, workspace, report_name, total_alerts, total_issues, llm_settings)
+        span.set_attribute("skill.total_alerts", total_alerts)
+        span.set_attribute("skill.total_issues", total_issues)
+        span.set_attribute("skill.repos", ",".join(allowlisted_repos))
+
+        summary = {
+            "generated_at": report["generated_at"],
+            "report_day": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "dependabot_alerts": total_alerts,
+            "labeled_issues": total_issues,
+            "repos": allowlisted_repos,
+            "report_path": str(report_path),
+            "model": llm_settings["model"],
+            "provider": llm_settings["provider"],
+            "remediation": remediation,
+            "human_github_handle": human_github_handle,
+            "human_did": human_did,
         }
-    remediation = None
-    if remediate or secops_config.get("auto_remediate"):
-        allow_prs = create_prs or secops_config.get("auto_pr", False)
-        remediation = remediate_repos(config, github_token, report, workspace, create_prs=allow_prs)
-        report["remediation"] = remediation
+        memory_status = record_secops_memory(config, summary)
+        span.add_event("memory.recorded", {"status": memory_status.get("status", "unknown")})
 
-    report_path = write_report(report, workspace, report_name, total_alerts, total_issues, llm_settings)
-
-    summary = {
-        "generated_at": report["generated_at"],
-        "report_day": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "dependabot_alerts": total_alerts,
-        "labeled_issues": total_issues,
-        "repos": allowlisted_repos,
-        "report_path": str(report_path),
-        "model": llm_settings["model"],
-        "provider": llm_settings["provider"],
-        "remediation": remediation,
-        "human_github_handle": human_github_handle,
-        "human_did": human_did,
-    }
-    memory_status = record_secops_memory(config, summary)
-
-    return {
-        "status": "success",
-        "config": str(config_path),
-        "report_path": str(report_path),
-        "dependabot_alerts": total_alerts,
-        "labeled_issues": total_issues,
-        "repos": allowlisted_repos,
-        "memory": memory_status,
-        "remediation": remediation,
-        "human_github_handle": human_github_handle,
-        "human_did": human_did,
-    }
+        return {
+            "status": "success",
+            "config": str(config_path),
+            "report_path": str(report_path),
+            "dependabot_alerts": total_alerts,
+            "labeled_issues": total_issues,
+            "repos": allowlisted_repos,
+            "memory": memory_status,
+            "remediation": remediation,
+            "human_github_handle": human_github_handle,
+            "human_did": human_did,
+        }

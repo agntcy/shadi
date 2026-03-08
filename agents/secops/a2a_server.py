@@ -14,6 +14,7 @@ from skills import (
     resolve_tmp_dir,
     skill_collect_security_issues,
 )
+from telemetry import tracer
 
 
 def require_slima2a_packages():
@@ -89,14 +90,19 @@ async def run_scan(command):
     provider = command.get("provider")
     labels = command.get("labels", "security,cve,vulnerability")
     report_name = command.get("report_name", "secops_security_report.md")
-    return await asyncio.to_thread(
-        skill_collect_security_issues,
-        labels=labels,
-        report_name=report_name,
-        provider=provider,
-        remediate=False,
-        create_prs=False,
-    )
+    with tracer.start_as_current_span("secops.scan") as span:
+        span.set_attribute("scan.labels", labels)
+        span.set_attribute("scan.report_name", report_name)
+        if provider:
+            span.set_attribute("scan.provider", provider)
+        return await asyncio.to_thread(
+            skill_collect_security_issues,
+            labels=labels,
+            report_name=report_name,
+            provider=provider,
+            remediate=False,
+            create_prs=False,
+        )
 
 
 async def run_remediate(command):
@@ -105,15 +111,23 @@ async def run_remediate(command):
     report_name = command.get("report_name", "secops_security_report.md")
     create_prs = bool(command.get("create_prs", False))
     human_github = command.get("human_github") or os.getenv("SHADI_HUMAN_GITHUB", "").strip() or None
-    return await asyncio.to_thread(
-        skill_collect_security_issues,
-        labels=labels,
-        report_name=report_name,
-        provider=provider,
-        remediate=True,
-        create_prs=create_prs,
-        human_github_handle=human_github,
-    )
+    with tracer.start_as_current_span("secops.remediate") as span:
+        span.set_attribute("remediate.labels", labels)
+        span.set_attribute("remediate.report_name", report_name)
+        span.set_attribute("remediate.create_prs", create_prs)
+        if provider:
+            span.set_attribute("remediate.provider", provider)
+        if human_github:
+            span.set_attribute("remediate.human_github", human_github)
+        return await asyncio.to_thread(
+            skill_collect_security_issues,
+            labels=labels,
+            report_name=report_name,
+            provider=provider,
+            remediate=True,
+            create_prs=create_prs,
+            human_github_handle=human_github,
+        )
 
 
 async def run_approve_prs():
@@ -214,73 +228,81 @@ def create_executor(types):
         async def execute(self, context, event_queue):
             print(f"[SecopsExecutor.execute] user_input={context.get_user_input()!r}", flush=True)
             command = parse_command(context.get_user_input())
-            await emit_status(event_queue, context, types["TaskState"].working, types)
-            await emit_text(event_queue, context, f"Command: {command}", types)
-            try:
-                if command.get("command") in ("scan", "run_scan"):
-                    result = await run_scan(command)
-                elif command.get("command") in ("remediate", "run_remediate"):
-                    result = await run_remediate(command)
-                elif command.get("command") in ("approve_prs", "approve"):
-                    result = await run_approve_prs()
-                elif command.get("command") in ("report", "get_report"):
-                    result = await run_get_report(command)
-                elif command.get("command") in ("status", "info"):
-                    result = await run_status()
-                elif command.get("command") in ("allowlist", "repos"):
-                    result = await run_allowlist()
-                elif command.get("command") in ("help", "commands"):
-                    result = {
-                        "commands": {
-                            "scan": {
-                                "description": "Collect Dependabot alerts and security issues.",
-                                "payload": {
-                                    "command": "scan",
-                                    "labels": "security,cve,vulnerability",
-                                    "provider": "(optional: override LLM provider)",
-                                    "report_name": "secops_security_report.md",
+            command_name = command.get("command", "unknown")
+            with tracer.start_as_current_span("secops.command") as span:
+                span.set_attribute("secops.command", command_name)
+                span.set_attribute("task.id", str(context.task_id))
+                span.add_event("command.received", {"command": command_name})
+                await emit_status(event_queue, context, types["TaskState"].working, types)
+                await emit_text(event_queue, context, f"Command: {command}", types)
+                try:
+                    if command.get("command") in ("scan", "run_scan"):
+                        result = await run_scan(command)
+                    elif command.get("command") in ("remediate", "run_remediate"):
+                        result = await run_remediate(command)
+                    elif command.get("command") in ("approve_prs", "approve"):
+                        result = await run_approve_prs()
+                    elif command.get("command") in ("report", "get_report"):
+                        result = await run_get_report(command)
+                    elif command.get("command") in ("status", "info"):
+                        result = await run_status()
+                    elif command.get("command") in ("allowlist", "repos"):
+                        result = await run_allowlist()
+                    elif command.get("command") in ("help", "commands"):
+                        result = {
+                            "commands": {
+                                "scan": {
+                                    "description": "Collect Dependabot alerts and security issues.",
+                                    "payload": {
+                                        "command": "scan",
+                                        "labels": "security,cve,vulnerability",
+                                        "provider": "(optional: override LLM provider)",
+                                        "report_name": "secops_security_report.md",
+                                    },
+                                },
+                                "remediate": {
+                                    "description": "Run remediation planning. Set create_prs=true and human_github=<handle> to open PRs via gh CLI.",
+                                    "payload": {
+                                        "command": "remediate",
+                                        "labels": "security,cve,vulnerability",
+                                        "provider": "(optional: override LLM provider)",
+                                        "report_name": "secops_security_report.md",
+                                        "create_prs": False,
+                                        "human_github": "(optional: GitHub handle for fork/PR ownership, or set SHADI_HUMAN_GITHUB)",
+                                    },
+                                },
+                                "approve_prs": {
+                                    "description": "Approve and finalize pending remediation PRs.",
+                                    "payload": {"command": "approve_prs"},
+                                },
+                                "report": {
+                                    "description": "Return the latest report content.",
+                                    "payload": {
+                                        "command": "report",
+                                        "report_name": "secops_security_report.md",
+                                    },
+                                },
+                                "status": {
+                                    "description": "Show SLIM + workspace configuration and allowlist.",
+                                    "payload": {"command": "status"},
+                                },
+                                "allowlist": {
+                                    "description": "List allowlisted repositories.",
+                                    "payload": {"command": "allowlist"},
                                 },
                             },
-                            "remediate": {
-                                "description": "Run remediation planning. Set create_prs=true and human_github=<handle> to open PRs via gh CLI.",
-                                "payload": {
-                                    "command": "remediate",
-                                    "labels": "security,cve,vulnerability",
-                                    "provider": "(optional: override LLM provider)",
-                                    "report_name": "secops_security_report.md",
-                                    "create_prs": False,
-                                    "human_github": "(optional: GitHub handle for fork/PR ownership, or set SHADI_HUMAN_GITHUB)",
-                                },
-                            },
-                            "approve_prs": {
-                                "description": "Approve and finalize pending remediation PRs.",
-                                "payload": {"command": "approve_prs"},
-                            },
-                            "report": {
-                                "description": "Return the latest report content.",
-                                "payload": {
-                                    "command": "report",
-                                    "report_name": "secops_security_report.md",
-                                },
-                            },
-                            "status": {
-                                "description": "Show SLIM + workspace configuration and allowlist.",
-                                "payload": {"command": "status"},
-                            },
-                            "allowlist": {
-                                "description": "List allowlisted repositories.",
-                                "payload": {"command": "allowlist"},
-                            },
-                        },
-                        "notes": "Payloads can be plain text commands or JSON objects.",
-                    }
-                else:
-                    result = {"status": "unknown_command", "command": command}
-                await emit_text(event_queue, context, json.dumps(result, indent=2), types)
-                await emit_status(event_queue, context, types["TaskState"].completed, types, final=True)
-            except Exception as exc:
-                await emit_text(event_queue, context, f"error: {exc}", types)
-                await emit_status(event_queue, context, types["TaskState"].failed, types, final=True)
+                            "notes": "Payloads can be plain text commands or JSON objects.",
+                        }
+                    else:
+                        result = {"status": "unknown_command", "command": command}
+                    span.add_event("command.completed", {"command": command_name, "status": "success"})
+                    await emit_text(event_queue, context, json.dumps(result, indent=2), types)
+                    await emit_status(event_queue, context, types["TaskState"].completed, types, final=True)
+                except Exception as exc:
+                    span.record_exception(exc)
+                    span.add_event("command.failed", {"command": command_name, "error": str(exc)})
+                    await emit_text(event_queue, context, f"error: {exc}", types)
+                    await emit_status(event_queue, context, types["TaskState"].failed, types, final=True)
 
         async def cancel(self, context, event_queue):
             await emit_text(event_queue, context, "cancel not supported", types)

@@ -16,6 +16,15 @@ export SHADI_SECOPS_CONFIG
 export SHADI_POLICY_PATH
 export SHADI_PYTHON
 
+# Optional: OpenTelemetry configuration (passed through to the sandboxed agent).
+# Set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 to export traces via OTLP.
+# Set SHADI_OTEL_CONSOLE=1 to print spans to stdout for local debugging.
+for _otel_var in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME SHADI_OTEL_CONSOLE; do
+	if [[ -n "${!_otel_var:-}" ]]; then
+		export "${_otel_var?}"
+	fi
+done
+
 # Optional: 1Password backend
 if [[ -n "${SHADI_SECRET_BACKEND:-}" ]]; then
 	export SHADI_SECRET_BACKEND
