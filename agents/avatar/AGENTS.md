@@ -33,3 +33,6 @@ export SLIM_TLS_CA=./.tmp/shadi-slim-mtls/ca.crt
   SLIM endpoint and shared secret stored in SHADI.
 - Memory defaults to $SHADI_TMP_DIR/$SHADI_AGENT_ID/shadi-secops/secops_memory.db
   unless overridden by SHADI_ADK_MEMORY_DB.
+- To target a specific repo say "scan agentic-apps" or "remediate agntcy/agentic-apps".
+  The avatar will set `repos` in the SecOps command so only that repo is processed.
+  Omit the repo name to operate on all allowlisted repos.

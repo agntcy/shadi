@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import re
@@ -90,7 +89,7 @@ def get_optional_shadi_secret_value(store, session, key_name):
 
 def get_human_did(store, session, github_handle):
     key_name = f"github/{github_handle}/did"
-    return require_shadi_secret_value(store, session, key_name, "human DID")
+    return get_optional_shadi_secret_value(store, session, key_name)
 
 
 def get_llm_settings(config, store=None, session=None, provider_override=None):
@@ -183,20 +182,20 @@ def get_patched_version(alert):
     return ""
 
 
-def build_git_auth_header(token):
-    encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("utf-8")
-    return f"AUTHORIZATION: basic {encoded}"
-
-
-def run_git(args, cwd, token):
-    command = ["git"]
+def run_git(args, cwd, token=None):
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     if token:
-        command.extend(["-c", f"http.extraheader={build_git_auth_header(token)}"])
-    command.extend(args)
+        # Use gh as the git credential helper so all HTTPS GitHub operations
+        # are authenticated via gh CLI rather than raw token headers.
+        env["GH_TOKEN"] = token
+        gh_bin = shutil.which("gh") or "gh"
+        count = int(env.get("GIT_CONFIG_COUNT", "0"))
+        env["GIT_CONFIG_COUNT"] = str(count + 1)
+        env[f"GIT_CONFIG_KEY_{count}"] = "credential.https://github.com.helper"
+        env[f"GIT_CONFIG_VALUE_{count}"] = f"!{gh_bin} auth git-credential"
     return subprocess.run(
-        command,
+        ["git"] + args,
         cwd=cwd,
         check=True,
         capture_output=True,
@@ -207,7 +206,6 @@ def run_git(args, cwd, token):
 
 def clone_or_update_repo(workspace_path, repo, token):
     repo_dir = workspace_path / repo.replace("/", "__")
-    repo_url = f"https://github.com/{repo}.git"
     if repo_dir.exists():
         status = run_git(["status", "--porcelain"], repo_dir, token)
         if status.stdout.strip():
@@ -218,7 +216,7 @@ def clone_or_update_repo(workspace_path, repo, token):
         run_git(["checkout", base_branch], repo_dir, token)
         run_git(["reset", "--hard", f"origin/{base_branch}"], repo_dir, token)
         return repo_dir, "updated"
-    run_git(["clone", repo_url, str(repo_dir)], workspace_path, token)
+    run_gh(["repo", "clone", repo, str(repo_dir.resolve())], workspace_path, token)
     return repo_dir, "cloned"
 
 
@@ -272,6 +270,161 @@ def update_package_json(path, package_name, version):
     if updated:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return updated
+
+
+def update_requirements_txt(path, package_name, version):
+    """Pin *package_name* to *version* in a ``requirements.txt`` file.
+
+    Replaces any existing version specifier (==, >=, ~=, >, extras [...]  etc.)
+    with an exact pin ``package==version``.  Lines that are comments or do not
+    mention to the package are left untouched.  Returns True if a change was made.
+    """
+    if not path.exists():
+        return False
+    lines = path.read_text(encoding="utf-8").splitlines()
+    new_lines = []
+    updated = False
+    pkg_escaped = re.escape(package_name)
+    # Matches: optionally extras like pkg[extra1,extra2], then any version spec
+    pattern = re.compile(
+        rf"^(\s*{pkg_escaped}(?:\[[^\]]*\])?)\s*[!<>=~^][^\s;#]*(.*)$",
+        re.IGNORECASE,
+    )
+    bare_pattern = re.compile(
+        rf"^(\s*{pkg_escaped}(?:\[[^\]]*\])?)\s*([;#].*)?$",
+        re.IGNORECASE,
+    )
+    for line in lines:
+        m = pattern.match(line)
+        if m:
+            new_lines.append(f"{m.group(1).rstrip()}=={version}{m.group(2) or ''}")
+            updated = True
+            continue
+        m2 = bare_pattern.match(line)
+        if m2 and m2.group(1).strip():
+            tail = m2.group(2) or ""
+            new_lines.append(f"{m2.group(1).rstrip()}>={version}{tail}")
+            updated = True
+            continue
+        new_lines.append(line)
+    if updated:
+        path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    return updated
+
+
+def update_pyproject_toml(path, package_name, version):
+    """Raise the lower bound of *package_name* in a ``pyproject.toml`` file.
+
+    Handles the common formats used by PEP 517/518 and Poetry:
+    * ``package_name = "^1.2"``  (Poetry caret)  → ``package_name = ">={version}"``
+    * ``package_name = ">=1.2"`` → ``package_name = ">={version}"``
+    * ``package_name = "==1.2"`` → ``package_name = "=={version}"``
+    * ``"package_name>=1.2"``    inside a TOML array  → ``"package_name>={version}"``
+
+    Returns True if a change was made.
+    """
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+    pkg_escaped = re.escape(package_name)
+    updated = False
+
+    # Pattern A: `pkg = "specifier"` (Poetry / uv style key-value)
+    # Group 1: key+quote, Group 2: operator chars (^, >=, ==, etc.), Group 3: version
+    def _replace_a(m):
+        nonlocal updated
+        updated = True
+        op = m.group(2)
+        spec_char = "==" if op.startswith("==") else ">="
+        return f'{m.group(1)}{spec_char}{version}"'
+
+    text, n = re.subn(
+        rf'(\b{pkg_escaped}(?:\[[^\]]*\])?\s*=\s*")([~^>=<!]*)([^"]*)',
+        _replace_a,
+        text,
+        flags=re.IGNORECASE,
+    )
+    updated = updated or n > 0
+
+    # Pattern B: `"pkg>=specifier"` inside a TOML array / PEP 508 style
+    # Group 1: package name (with optional extras), Group 2: operator chars
+    def _replace_b(m):
+        nonlocal updated
+        updated = True
+        spec_char = "==" if m.group(2).startswith("==") else ">="
+        return f'"{m.group(1)}{spec_char}{version}'
+
+    text, n = re.subn(
+        rf'"({pkg_escaped}(?:\[[^\]]*\])?)\s*([!<>=~^]+)[^"]*',
+        _replace_b,
+        text,
+        flags=re.IGNORECASE,
+    )
+    updated = updated or n > 0
+
+    if updated:
+        path.write_text(text, encoding="utf-8")
+    return updated
+
+
+def detect_dockerfile_ecosystem(path):
+    """Return 'alpine', 'debian', or 'unknown' by inspecting the first FROM line."""
+    if not path.exists():
+        return "unknown"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*FROM\s+(\S+)", line, re.IGNORECASE)
+        if m:
+            base = m.group(1).lower()
+            if "alpine" in base:
+                return "alpine"
+            if any(x in base for x in ("debian", "ubuntu", "slim", "bookworm", "bullseye", "buster", "focal", "jammy")):
+                return "debian"
+    return "unknown"
+
+
+def patch_dockerfile_for_package_cve(path, package, fixed_version):
+    """Insert an OS-level package pin/upgrade into a Dockerfile to fix a CVE.
+
+    For Alpine images inserts: RUN apk add --no-cache <pkg>=<ver>
+    For Debian images inserts: RUN apt-get update && apt-get install -y --no-install-recommends <pkg>
+    The line is placed immediately after the last FROM … AS … stage header.
+    Returns True if the file was modified.
+    """
+    if not path.exists():
+        return False
+
+    ecosystem = detect_dockerfile_ecosystem(path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    # Idempotency: skip if an upgrade line for this package already exists.
+    pkg_lower = package.lower()
+    for line in lines:
+        if pkg_lower in line.lower() and re.search(r"apk\s+add|apk\s+upgrade|apt-get\s+install", line):
+            return False
+
+    if ecosystem == "alpine":
+        if fixed_version:
+            upgrade_cmd = f"RUN apk add --no-cache --upgrade '{package}={fixed_version}'"
+        else:
+            upgrade_cmd = f"RUN apk upgrade --no-cache {package}"
+    elif ecosystem == "debian":
+        upgrade_cmd = (
+            f"RUN apt-get update && apt-get install -y --no-install-recommends {package} "
+            f"&& rm -rf /var/lib/apt/lists/*"
+        )
+    else:
+        # Unknown base — leave a comment so the developer knows what to fix.
+        upgrade_cmd = f"# TODO(secops-cve): upgrade {package} to {fixed_version!r} to fix CVE"
+
+    # Insert after each FROM…AS line (multi-stage builds need the fix in every stage).
+    new_lines = []
+    for i, line in enumerate(lines):
+        new_lines.append(line)
+        if re.match(r"^\s*FROM\s+", line, re.IGNORECASE):
+            new_lines.append(upgrade_cmd)
+
+    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    return True
 
 
 def update_dockerfile_base_image(path, image, version):
@@ -368,44 +521,99 @@ def apply_dependency_patch(repo_path, alert):
         return {"status": "updated", "dependency": name, "ecosystem": ecosystem, "version": patched_version}
 
     if ecosystem in ("pip", "pip-compile", "python"):
-        if not manifest_path.endswith("uv.lock"):
-            return {
-                "status": "unsupported_manifest",
-                "dependency": name,
-                "ecosystem": ecosystem,
-                "manifest": manifest_path,
-            }
-        lock_path = repo_path / manifest_path
-        if not lock_path.exists():
-            return {
-                "status": "missing_lockfile",
-                "dependency": name,
-                "ecosystem": ecosystem,
-                "manifest": manifest_path,
-            }
-        if not shutil.which("uv"):
-            return {
-                "status": "missing_uv",
-                "dependency": name,
-                "ecosystem": ecosystem,
-            }
-        try:
-            subprocess.run(
-                ["uv", "lock", "--upgrade-package", f"{name}=={patched_version}"],
-                cwd=lock_path.parent,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            run_git(["add", str(lock_path)], repo_path, token=None)
-        except subprocess.CalledProcessError as exc:
-            return {
-                "status": "update_failed",
-                "dependency": name,
-                "ecosystem": ecosystem,
-                "error": exc.stderr.strip(),
-            }
-        return {"status": "updated", "dependency": name, "ecosystem": ecosystem, "version": patched_version}
+        manifest = repo_path / (manifest_path or "requirements.txt")
+
+        # -- uv.lock: regenerate the lock file using `uv lock --upgrade-package`.
+        if manifest_path.endswith("uv.lock"):
+            if not manifest.exists():
+                return {
+                    "status": "missing_lockfile",
+                    "dependency": name,
+                    "ecosystem": ecosystem,
+                    "manifest": manifest_path,
+                }
+            if not shutil.which("uv"):
+                return {"status": "missing_uv", "dependency": name, "ecosystem": ecosystem}
+            try:
+                subprocess.run(
+                    ["uv", "lock", "--upgrade-package", f"{name}=={patched_version}"],
+                    cwd=manifest.parent,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                run_git(["add", str(manifest)], repo_path, token=None)
+            except subprocess.CalledProcessError as exc:
+                return {
+                    "status": "update_failed",
+                    "dependency": name,
+                    "ecosystem": ecosystem,
+                    "error": exc.stderr.strip(),
+                }
+            return {"status": "updated", "dependency": name, "ecosystem": ecosystem, "version": patched_version}
+
+        # -- requirements.txt: edit the pin in place.
+        if manifest_path.endswith("requirements.txt") or manifest_path.endswith(".txt"):
+            if not update_requirements_txt(manifest, name, patched_version):
+                return {"status": "not_updated", "dependency": name, "ecosystem": ecosystem, "manifest": manifest_path}
+            run_git(["add", str(manifest.relative_to(repo_path))], repo_path, token=None)
+            # Also regenerate uv.lock if it exists anywhere in the same tree.
+            uv_locks = list(manifest.parent.glob("uv.lock")) + list(manifest.parent.parent.glob("uv.lock"))
+            for uv_lock in uv_locks:
+                if uv_lock.exists() and shutil.which("uv"):
+                    try:
+                        subprocess.run(
+                            ["uv", "lock", "--upgrade-package", f"{name}=={patched_version}"],
+                            cwd=uv_lock.parent,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                        )
+                        run_git(["add", str(uv_lock.relative_to(repo_path))], repo_path, token=None)
+                    except OSError:
+                        pass
+            return {"status": "updated", "dependency": name, "ecosystem": ecosystem, "version": patched_version}
+
+        # -- pyproject.toml: update the version constraint.
+        if manifest_path.endswith("pyproject.toml"):
+            if not update_pyproject_toml(manifest, name, patched_version):
+                return {"status": "not_updated", "dependency": name, "ecosystem": ecosystem, "manifest": manifest_path}
+            run_git(["add", str(manifest.relative_to(repo_path))], repo_path, token=None)
+            # Regenerate lock file (uv.lock / poetry.lock) if tooling is available.
+            uv_lock = manifest.parent / "uv.lock"
+            poetry_lock = manifest.parent / "poetry.lock"
+            if uv_lock.exists() and shutil.which("uv"):
+                try:
+                    subprocess.run(
+                        ["uv", "lock", "--upgrade-package", f"{name}=={patched_version}"],
+                        cwd=manifest.parent,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    run_git(["add", str(uv_lock.relative_to(repo_path))], repo_path, token=None)
+                except OSError:
+                    pass
+            elif poetry_lock.exists() and shutil.which("poetry"):
+                try:
+                    subprocess.run(
+                        ["poetry", "update", name],
+                        cwd=manifest.parent,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    run_git(["add", str(poetry_lock.relative_to(repo_path))], repo_path, token=None)
+                except OSError:
+                    pass
+            return {"status": "updated", "dependency": name, "ecosystem": ecosystem, "version": patched_version}
+
+        return {
+            "status": "unsupported_manifest",
+            "dependency": name,
+            "ecosystem": ecosystem,
+            "manifest": manifest_path,
+        }
 
     if ecosystem in ("docker", "dockerfile"):
         manifest = repo_path / (manifest_path or "Dockerfile")
@@ -423,19 +631,297 @@ def apply_dependency_patch(repo_path, alert):
     return {"status": "unsupported", "dependency": name, "ecosystem": ecosystem}
 
 
+def _extract_dockerfile_hints_from_workflows(repo_path: Path) -> list:
+    """Scan ``.github/workflows/`` for docker build steps.
+
+    Returns a list of ``(hints, dockerfile_path)`` pairs where *hints* is a
+    list of lowercase service/image-name keywords and *dockerfile_path* is the
+    resolved absolute ``Path`` to the Dockerfile inside *repo_path*.
+
+    Understands:
+    * ``docker/build-push-action`` ``file:`` and ``context:`` YAML fields.
+    * ``docker build -f|--file <path>`` inside ``run:`` steps.
+    * Image name from ``tags:`` and ``image:`` fields for richer hint matching.
+    * Step ``name:`` fields that contain hyphenated service identifiers.
+
+    Pure regex/filesystem — no YAML parser required.
+    """
+    workflow_dir = repo_path / ".github" / "workflows"
+    if not workflow_dir.exists():
+        return []
+
+    results: list = []          # list[tuple[list[str], Path]]
+    seen_paths: set = set()
+
+    wf_files = sorted(workflow_dir.glob("*.yml")) + sorted(workflow_dir.glob("*.yaml"))
+
+    def _safe_resolve(path_str: str) -> "Path | None":
+        """Resolve *path_str* relative to *repo_path*, rejecting escapes."""
+        try:
+            candidate = (repo_path / path_str.lstrip("./")).resolve()
+            candidate.relative_to(repo_path.resolve())   # raises ValueError on escape
+            return candidate
+        except (ValueError, OSError):
+            return None
+
+    def _register(hints: list, df_path: Path) -> None:
+        if df_path in seen_paths:
+            for existing_hints, existing_path in results:
+                if existing_path == df_path:
+                    for h in hints:
+                        if h not in existing_hints:
+                            existing_hints.append(h)
+                    break
+        else:
+            seen_paths.add(df_path)
+            results.append((list(hints), df_path))
+
+    def _hints_for_path(df_path: Path, extra: list) -> list:
+        h = [df_path.parent.name.lower()]
+        for e in extra:
+            if e and e not in h:
+                h.append(e)
+        return h
+
+    def _flush(blk: dict) -> None:
+        target: "Path | None" = None
+        # Prefer explicit file: path.
+        if blk.get("file") and "${{" not in blk["file"]:
+            c = _safe_resolve(blk["file"])
+            if c and c.exists():
+                target = c
+        # Fall back to context dir + implicit Dockerfile.
+        if target is None and blk.get("context") and "${{" not in blk["context"]:
+            c = _safe_resolve(blk["context"] + "/Dockerfile")
+            if c and c.exists():
+                target = c
+        if target is None:
+            return
+
+        extra: list = []
+        for key in ("tags", "image"):
+            val = blk.get(key, "")
+            if val and "${{" not in val:
+                # "ghcr.io/org/scheduler-agent:latest" → "scheduler-agent"
+                image_name = val.strip().splitlines()[0].split(":")[0].split("/")[-1].strip()
+                if image_name:
+                    extra.append(image_name.lower())
+        if blk.get("context"):
+            ctx_name = Path(blk["context"].lstrip("./")).name.lower()
+            if ctx_name:
+                extra.append(ctx_name)
+        if blk.get("name"):
+            for tok in re.split(r"\s+", blk["name"].strip().lower()):
+                tok = tok.strip("\"',-.()")
+                if ("-" in tok or "_" in tok) and len(tok) > 2:
+                    extra.append(tok)
+
+        _register(_hints_for_path(target, extra), target)
+
+    for wf_file in wf_files:
+        try:
+            text = wf_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        # Walk line-by-line accumulating per-step key/value pairs.
+        current: dict = {}
+        for line in text.splitlines():
+            if re.match(r"^\s{2,}-\s", line):   # step/list-item boundary
+                _flush(current)
+                current = {}
+            m = re.match(r"^\s*(file|context|tags|image|name):\s*['\"]?(.*?)['\"]?\s*$", line.strip())
+            if m:
+                current[m.group(1)] = m.group(2).strip().strip("'\"")
+        _flush(current)
+
+        # Also handle: docker build -f ./path/Dockerfile  in run: blocks.
+        for m in re.finditer(
+            r"docker\s+build\b[^\n]*?(?:-f|--file)\s+['\"]?\.?/?([^\s'\"#\n${}]+)",
+            text, re.IGNORECASE,
+        ):
+            path_str = m.group(1).strip()
+            if "${{" in path_str:
+                continue
+            c = _safe_resolve(path_str)
+            if c and c.exists():
+                _register([c.parent.name.lower()], c)
+
+    return results
+
+
+def _find_dockerfile_for_alert(repo_path, alert, fields):
+    """Search the local repository clone for the Dockerfile that corresponds to
+    a code-scanning (Trivy) alert.
+
+    Strategy (in priority order):
+    1. ``location.path`` in the alert points directly at a Dockerfile — use it.
+    2a. Derive a service/image name from every available hint (``location.path``,
+       ``source_sarif_file`` in the Trivy message, ``rule.description``) and
+       search all Dockerfiles in the repo for a directory-name match.
+    2b. Match hints against the ``(service, Dockerfile)`` mapping extracted from
+       ``.github/workflows/`` — handles repos where Dockerfiles are not in the
+       expected service directory.
+    3. If only one Dockerfile exists in the repo, assume it is the target.
+    4. Give up — return None so the caller can log ``no_dockerfile_found``.
+
+    The repo is already cloned locally (by ``clone_or_update_fork``), so the
+    search uses pure filesystem operations — no network calls.
+    """
+    instance = alert.get("most_recent_instance") or {}
+    location = instance.get("location") or {}
+    alert_path = location.get("path", "")
+    rule = alert.get("rule") or {}
+
+    # 1. Direct Dockerfile path from the alert.
+    if alert_path and re.search(r"dockerfile", alert_path, re.IGNORECASE):
+        candidate = repo_path / alert_path
+        if candidate.exists():
+            return candidate
+
+    # Enumerate every Dockerfile in the repository once.
+    all_dockerfiles = list(repo_path.glob("**/Dockerfile"))
+    # Filter out anything under hidden / vendor / node_modules directories.
+    all_dockerfiles = [
+        p for p in all_dockerfiles
+        if not any(part.startswith(".") or part in ("node_modules", "vendor")
+                   for part in p.relative_to(repo_path).parts)
+    ]
+
+    if not all_dockerfiles:
+        return None
+
+    # Build a list of candidate service/image name hints.
+    hints = []
+    # From the SARIF artifact path (e.g. "trivy-report-frontend/trivy-frontend.sarif")
+    sarif_raw = fields.get("source_sarif_file", "") or alert_path or ""
+    sarif_stem = Path(sarif_raw).stem  # "trivy-frontend"
+    hints.append(re.sub(r"^trivy[-_]?(report[-_])?", "", sarif_stem, flags=re.IGNORECASE))
+    # Parent directory of the SARIF path (e.g. "trivy-report-frontend" → "frontend")
+    sarif_parent = Path(sarif_raw).parent.name
+    hints.append(re.sub(r"^trivy[-_]?(report[-_])?", "", sarif_parent, flags=re.IGNORECASE))
+    # Rule description sometimes contains the image name.
+    hints.append(rule.get("description", "") or "")
+    # Container image from alert_path if it looks like an image ref (no extension).
+    if alert_path and "." not in Path(alert_path).name:
+        hints.append(Path(alert_path).name)
+
+    # 2a. Try each hint against Dockerfile parent directory names.
+    for hint in hints:
+        hint = hint.strip().lower()
+        if not hint:
+            continue
+        # Exact parent directory name match.
+        exact = [p for p in all_dockerfiles if p.parent.name.lower() == hint]
+        if exact:
+            return exact[0]
+        # Partial match: hint is contained in the parent directory name.
+        partial = [p for p in all_dockerfiles if hint in p.parent.name.lower()]
+        if len(partial) == 1:
+            return partial[0]
+        if len(partial) > 1:
+            # Pick the shallowest path (fewest path components).
+            return sorted(partial, key=lambda p: len(p.parts))[0]
+
+    # 2b. Match hints against the workflow-derived (service, Dockerfile) map.
+    #     Handles repos where Dockerfiles sit in non-obvious locations but the
+    #     GitHub Actions workflow maps a service name to the correct path.
+    workflow_map = _extract_dockerfile_hints_from_workflows(repo_path)
+    for wf_hints, wf_df in workflow_map:
+        for hint in hints:
+            hint_lower = hint.strip().lower()
+            if not hint_lower:
+                continue
+            for wf_hint in wf_hints:
+                if hint_lower == wf_hint or hint_lower in wf_hint or wf_hint in hint_lower:
+                    if wf_df.exists():
+                        return wf_df
+
+    # 3. If only one Dockerfile in the whole repo, it must be the one.
+    if len(all_dockerfiles) == 1:
+        return all_dockerfiles[0]
+
+    return None
+
+
+def apply_container_cve_patch(repo_path, alert):
+    """Apply a Dockerfile fix for a SARIF / code-scanning CVE alert.
+
+    The repository must already be cloned locally (done by ``clone_or_update_fork``
+    in ``remediate_repos``).  This function:
+      1. Parses the Trivy message to get the vulnerable package + fixed version.
+      2. Searches the local clone for the matching Dockerfile using
+         ``_find_dockerfile_for_alert`` (filesystem glob + name heuristics).
+      3. Patches the Dockerfile via ``patch_dockerfile_for_package_cve`` and
+         stages the change with ``git add``.
+
+    Returns a result dict with keys: status, cve_id, package, fixed_version, path.
+    """
+    rule = alert.get("rule") or {}
+    instance = alert.get("most_recent_instance") or {}
+    location = instance.get("location") or {}
+    message_text = (instance.get("message") or {}).get("text", "")
+
+    cve_id = rule.get("id", "")
+    severity = rule.get("severity", "")
+    alert_path = location.get("path", "")
+
+    fields = parse_trivy_message(message_text)
+    package = fields.get("package", "")
+    fixed_version = fields.get("fixed_version", "")
+
+    if not package:
+        return {"status": "no_package", "cve_id": cve_id, "path": alert_path}
+
+    target = _find_dockerfile_for_alert(repo_path, alert, fields)
+
+    if target is None:
+        return {
+            "status": "no_dockerfile_found",
+            "cve_id": cve_id,
+            "package": package,
+            "path": alert_path,
+        }
+
+    patched = patch_dockerfile_for_package_cve(target, package, fixed_version)
+    if not patched:
+        return {
+            "status": "already_patched",
+            "cve_id": cve_id,
+            "package": package,
+            "fixed_version": fixed_version,
+            "path": str(target.relative_to(repo_path)),
+        }
+
+    rel = str(target.relative_to(repo_path))
+    run_git(["add", rel], repo_path, token=None)
+    return {
+        "status": "updated",
+        "cve_id": cve_id,
+        "severity": severity,
+        "package": package,
+        "fixed_version": fixed_version,
+        "path": rel,
+    }
+
+
 def run_gh(args, cwd, token):
     if not shutil.which("gh"):
         raise RuntimeError("gh CLI is required for PR creation")
     env = os.environ.copy()
     env["GH_TOKEN"] = token
-    return subprocess.run(
+    result = subprocess.run(
         ["gh"] + args,
         cwd=cwd,
-        check=True,
         capture_output=True,
         text=True,
         env=env,
     )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, result.args, result.stdout, result.stderr
+        )
+    return result
 
 
 def ensure_upstream_remote(repo_path, upstream_repo, token):
@@ -451,17 +937,37 @@ def ensure_upstream_remote(repo_path, upstream_repo, token):
 def ensure_fork(upstream_repo, fork_owner, token, cwd):
     _, repo_name = upstream_repo.split("/", 1)
     fork_repo = f"{fork_owner}/{repo_name}"
+
+    # Check if a fork already exists with the expected name.
     try:
         run_gh(["api", f"repos/{fork_repo}"], cwd, token)
         return fork_repo
     except subprocess.CalledProcessError:
         pass
 
+    # Also check if a fork exists under a different name (e.g. repo was renamed).
     try:
-        run_gh(["api", f"repos/{upstream_repo}/forks", "-f", f"owner={fork_owner}"], cwd, token)
+        forks_result = run_gh(["api", f"repos/{upstream_repo}/forks", "--jq",
+                               f'[.[] | select(.owner.login == "{fork_owner}")] | first | .full_name'], cwd, token)
+        existing = forks_result.stdout.strip().strip('"')
+        if existing and existing != "null":
+            return existing
+    except subprocess.CalledProcessError:
+        pass
+
+    # Create the fork via the API.
+    try:
+        fork_result = run_gh(["api", f"repos/{upstream_repo}/forks",
+                               "-f", f"owner={fork_owner}", "--method", "POST"], cwd, token)
+        created_name = json.loads(fork_result.stdout).get("full_name")
+        if created_name:
+            fork_repo = created_name
     except subprocess.CalledProcessError as exc:
-        if "already exists" not in exc.stderr.lower():
-            raise
+        stderr = (exc.stderr or "").lower()
+        if "already exists" not in stderr and "name already exists" not in stderr:
+            raise RuntimeError(
+                f"Failed to create fork of {upstream_repo}: {exc.stderr.strip() if exc.stderr else exc}"
+            ) from exc
 
     for _ in range(10):
         try:
@@ -476,15 +982,16 @@ def ensure_fork(upstream_repo, fork_owner, token, cwd):
 def clone_or_update_fork(workspace_path, upstream_repo, fork_owner, token):
     fork_repo = ensure_fork(upstream_repo, fork_owner, token, workspace_path)
     repo_dir = workspace_path / fork_repo.replace("/", "__")
-    repo_url = f"https://github.com/{fork_repo}.git"
 
     if repo_dir.exists():
         status = run_git(["status", "--porcelain"], repo_dir, token)
         if status.stdout.strip():
-            return repo_dir, "dirty", fork_repo, ""
+            # Dirty working tree — clean it so the sync can proceed.
+            run_git(["checkout", "--", "."], repo_dir, token)
+            run_git(["clean", "-fd"], repo_dir, token)
         run_git(["fetch", "origin"], repo_dir, token)
     else:
-        run_git(["clone", repo_url, str(repo_dir)], workspace_path, token)
+        run_gh(["repo", "clone", fork_repo, str(repo_dir.resolve())], workspace_path, token)
 
     ensure_upstream_remote(repo_dir, upstream_repo, token)
     run_git(["fetch", "upstream"], repo_dir, token)
@@ -553,41 +1060,88 @@ def load_pending_prs(workspace_dir):
     return path, data
 
 
-def remediate_repos(config, github_token, report, workspace_dir, create_prs=True):
+def remediate_repos(config, github_token, report, workspace_dir, create_prs=True, fork_owner=None):
     workspace_path = Path(workspace_dir)
     remediation = {}
     pending = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "repos": {},
     }
-    fork_owner = os.getenv("SHADI_HUMAN_GITHUB", "").strip()
     if not fork_owner:
-        raise RuntimeError("SHADI_HUMAN_GITHUB must be set to create forks and PRs")
+        fork_owner = os.getenv("SHADI_HUMAN_GITHUB", "").strip()
+    if not fork_owner:
+        raise RuntimeError(
+            "SHADI_HUMAN_GITHUB must be set to create forks and PRs. "
+            "Set it as an environment variable, pass 'human_github' in the command, "
+            "or add 'human_github = \"<handle>\"' under [secops] in your config file."
+        )
+
+    secops_cfg = config.get("secops", {})
+    git_name  = (
+        secops_cfg.get("git_name")
+        or os.getenv("SHADI_GIT_NAME", "")
+        or os.getenv("GIT_AUTHOR_NAME", "")
+    ).strip()
+    git_email = (
+        secops_cfg.get("git_email")
+        or os.getenv("SHADI_GIT_EMAIL", "")
+        or os.getenv("GIT_AUTHOR_EMAIL", "")
+    ).strip()
+
+    def _global_git(key):
+        """Return the value of a global git config key, or empty string."""
+        try:
+            r = subprocess.run(
+                ["git", "config", "--global", key],
+                capture_output=True, text=True,
+            )
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except OSError:
+            return ""
+
+    # SSH signing key: prefer explicit config/env, fall back to global git config.
+    git_signing_key = (
+        secops_cfg.get("git_signing_key")
+        or os.getenv("SHADI_GIT_SIGNING_KEY", "")
+        or _global_git("user.signingkey")
+    ).strip()
+    gpg_format   = _global_git("gpg.format")     # e.g. "ssh"
+    gpg_ssh_prog = _global_git("gpg.ssh.program") # e.g. "/Applications/1Password.app/.../op-ssh-sign"
+    global_gpgsign = _global_git("commit.gpgsign").lower() in ("true", "1", "yes")
 
     for repo, repo_data in report.get("repos", {}).items():
         alerts = repo_data.get("data", {}).get("dependabot", [])
         actionable_alerts = [alert for alert in alerts if is_actionable_alert(alert)]
-        if not actionable_alerts:
-            remediation[repo] = {"status": "no_actionable_dependabot_alerts"}
+        cs_alerts = repo_data.get("data", {}).get("code_scanning", [])
+        actionable_cs = [a for a in cs_alerts if is_actionable_code_scanning_alert(a)]
+
+        if not actionable_alerts and not actionable_cs:
+            remediation[repo] = {"status": "no_actionable_alerts"}
             continue
 
         repo_path, clone_status, fork_repo, base_branch = clone_or_update_fork(
             workspace_path, repo, fork_owner, github_token
         )
-        if clone_status == "dirty":
-            remediation[repo] = {"status": "skipped_dirty_repo"}
-            continue
-
         if not base_branch:
             remediation[repo] = {"status": "fork_sync_failed"}
             continue
-        branch_name = f"secops/remediate-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+        branch_name = f"fix/secops-remediate-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
         try:
             run_git(["checkout", "-b", branch_name], repo_path, github_token)
         except subprocess.CalledProcessError:
             run_git(["checkout", branch_name], repo_path, github_token)
-        run_git(["config", "user.email", "lumuscar@cisco.com"], repo_path, github_token)
-        run_git(["config", "user.name", "Luca Muscariello"], repo_path, github_token)
+        if git_email:
+            run_git(["config", "user.email", git_email], repo_path, github_token)
+        if git_name:
+            run_git(["config", "user.name", git_name], repo_path, github_token)
+        if git_signing_key:
+            # Replicate the global 1Password SSH signing config in the repo.
+            fmt  = gpg_format or "ssh"
+            prog = gpg_ssh_prog or shutil.which("op-ssh-sign") or "/Applications/1Password.app/Contents/MacOS/op-ssh-sign"
+            run_git(["config", "gpg.format",       fmt],              repo_path, github_token)
+            run_git(["config", "gpg.ssh.program",  prog],             repo_path, github_token)
+            run_git(["config", "user.signingkey",  git_signing_key],  repo_path, github_token)
+            run_git(["config", "commit.gpgsign",   "true"],           repo_path, github_token)
 
         updates = []
         for alert in actionable_alerts:
@@ -595,11 +1149,22 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
             update["severity"] = get_alert_severity(alert)
             updates.append(update)
 
+        # Apply Dockerfile patches for SARIF / code-scanning CVEs.
+        container_updates = []
+        for cs_alert in actionable_cs:
+            try:
+                cu = apply_container_cve_patch(repo_path, cs_alert)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                cve_id = (cs_alert.get("rule") or {}).get("id", "?")
+                cu = {"status": "patch_error", "cve_id": cve_id, "error": str(exc)}
+            container_updates.append(cu)
+
+        all_updates = updates + container_updates
         status = run_git(["status", "--porcelain"], repo_path, github_token)
         if not status.stdout.strip():
             remediation[repo] = {
                 "status": "no_changes",
-                "updates": updates,
+                "updates": all_updates,
             }
             run_git(["checkout", base_branch], repo_path, github_token)
             continue
@@ -608,24 +1173,41 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
         if not is_conventional_commit(commit_message):
             raise RuntimeError(f"commit message is not conventional: '{commit_message}'")
         run_git(["add", "-A"], repo_path, github_token)
-        run_git(["commit", "-m", commit_message, "--signoff"], repo_path, github_token)
+        commit_args = ["commit", "-m", commit_message, "-s"]
+        if git_signing_key and (global_gpgsign or bool(secops_cfg.get("git_signing_key") or os.getenv("SHADI_GIT_SIGNING_KEY", ""))):
+            commit_args.append("-S")
+        run_git(commit_args, repo_path, github_token)
         run_git(["push", "origin", branch_name], repo_path, github_token)
 
         pr_body_lines = [
-            "Automated remediation for critical Dependabot alerts.",
+            "Automated remediation for critical Dependabot and container-scan vulnerabilities.",
             "",
-            "Updates:",
         ]
-        for update in updates:
-            dep = update.get("dependency") or "unknown"
-            version = update.get("version")
-            status_line = update.get("status")
-            if version:
-                pr_body_lines.append(f"- {dep}: {version} ({status_line})")
-            else:
-                pr_body_lines.append(f"- {dep}: {status_line}")
+        if updates:
+            pr_body_lines += ["**Dependency updates:**"]
+            for update in updates:
+                dep = update.get("dependency") or "unknown"
+                version = update.get("version")
+                status_line = update.get("status")
+                if version:
+                    pr_body_lines.append(f"- {dep}: {version} ({status_line})")
+                else:
+                    pr_body_lines.append(f"- {dep}: {status_line}")
+        if container_updates:
+            pr_body_lines += ["", "**Dockerfile / container CVE patches:**"]
+            for cu in container_updates:
+                cve = cu.get("cve_id") or "?"
+                pkg = cu.get("package") or "?"
+                ver = cu.get("fixed_version") or ""
+                path = cu.get("path") or "?"
+                st = cu.get("status")
+                line = f"- [{cve}] {pkg}"
+                if ver:
+                    line += f" → {ver}"
+                line += f" in `{path}` ({st})"
+                pr_body_lines.append(line)
 
-        issue_number, issue_url = create_remediation_issue(repo, updates, github_token, repo_path)
+        issue_number, issue_url = create_remediation_issue(repo, all_updates, github_token, repo_path)
         if issue_number:
             pr_body_lines.append("")
             pr_body_lines.append(f"Fixes #{issue_number}")
@@ -636,14 +1218,14 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
                 "head": f"{fork_owner}:{branch_name}",
                 "base": base_branch,
                 "body": pr_body,
-                "updates": updates,
+                "updates": all_updates,
                 "issue_number": issue_number,
                 "issue_url": issue_url,
                 "fork_owner": fork_owner,
             }
             remediation[repo] = {
                 "status": "pending_pr_approval",
-                "updates": updates,
+                "updates": all_updates,
                 "branch": branch_name,
                 "fork": fork_repo,
                 "issue_url": issue_url,
@@ -652,25 +1234,21 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
             try:
                 pr_response = run_gh(
                     [
-                        "api",
-                        f"repos/{repo}/pulls",
-                        "-f",
-                        f"title={commit_message}",
-                        "-f",
-                        f"head={fork_owner}:{branch_name}",
-                        "-f",
-                        f"base={base_branch}",
-                        "-f",
-                        f"body={pr_body}",
+                        "pr", "create",
+                        "--repo", repo,
+                        "--head", f"{fork_owner}:{branch_name}",
+                        "--base", base_branch,
+                        "--title", commit_message,
+                        "--body", pr_body,
                     ],
                     repo_path,
                     github_token,
                 )
-                pr = json.loads(pr_response.stdout)
+                pr_url = pr_response.stdout.strip()
                 remediation[repo] = {
                     "status": "pr_created",
-                    "updates": updates,
-                    "pr_url": pr.get("html_url"),
+                    "updates": all_updates,
+                    "pr_url": pr_url,
                     "branch": branch_name,
                     "fork": fork_repo,
                     "issue_url": issue_url,
@@ -678,7 +1256,7 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
             except (RuntimeError, subprocess.CalledProcessError, ValueError) as exc:
                 remediation[repo] = {
                     "status": "pr_failed",
-                    "updates": updates,
+                    "updates": all_updates,
                     "error": str(exc),
                     "branch": branch_name,
                     "fork": fork_repo,
@@ -764,7 +1342,51 @@ def fetch_security_issues(api_base, token, repo, label):
     return github_get_json(api_base, token, path, query)
 
 
-def collect_security_report(config, github_token, allowlisted_repos, labels):
+def fetch_code_scanning_alerts_gh(token, repo, cwd):
+    """Use gh CLI to fetch open code scanning (SARIF / Trivy) alerts for a repo.
+    Returns a list of alert dicts with structured location and message data.
+    Returns an empty list if code scanning is not enabled for the repo.
+    """
+    try:
+        result = run_gh(
+            ["api", "--paginate", f"repos/{repo}/code-scanning/alerts",
+             "--jq", '.[] | select(.state == "open")'],
+            cwd,
+            token,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").lower()
+        if "404" in stderr or "not found" in stderr or "advanced security" in stderr:
+            return []
+        raise
+    alerts = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                alerts.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return alerts
+
+
+def parse_trivy_message(text):
+    """Parse a Trivy SARIF message body into a dict with lower_snake_case keys."""
+    fields = {}
+    for line in (text or "").splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            fields[key.strip().lower().replace(" ", "_")] = val.strip()
+    return fields
+
+
+def is_actionable_code_scanning_alert(alert):
+    severity = (alert.get("rule") or {}).get("severity", "").lower()
+    # SARIF: 'error' → critical, 'warning' → high
+    return severity in ("error", "critical", "high", "warning")
+
+
+def collect_security_report(config, github_token, allowlisted_repos, labels, workspace_dir=None):
     api_base = config.get("github", {}).get("api_base", "https://api.github.com")
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -782,8 +1404,10 @@ def collect_security_report(config, github_token, allowlisted_repos, labels):
     with tracer.start_as_current_span("secops.github_fetch") as span:
         span.set_attribute("github.repo_count", len(allowlisted_repos))
         span.add_event("github_fetch.started", {"repos": ",".join(allowlisted_repos)})
+        gh_cwd = Path(workspace_dir) if workspace_dir else Path(".")
+        total_code_scanning = 0
         for repo in allowlisted_repos:
-            repo_entry = {"dependabot": [], "issues": {}}
+            repo_entry = {"dependabot": [], "issues": {}, "code_scanning": []}
             try:
                 alerts = fetch_dependabot_alerts(api_base, github_token, repo)
                 repo_entry["dependabot"] = alerts
@@ -799,13 +1423,23 @@ def collect_security_report(config, github_token, allowlisted_repos, labels):
                 except (HTTPError, URLError, ValueError) as exc:
                     repo_entry["issues"][label] = {"error": str(exc), "items": []}
 
+            # Fetch SARIF / code-scanning alerts via gh CLI (Trivy, CodeQL, etc.)
+            try:
+                cs_alerts = fetch_code_scanning_alerts_gh(github_token, repo, gh_cwd)
+                repo_entry["code_scanning"] = cs_alerts
+                actionable_cs = sum(1 for a in cs_alerts if is_actionable_code_scanning_alert(a))
+                total_code_scanning += actionable_cs
+            except (RuntimeError, subprocess.CalledProcessError) as exc:
+                repo_entry["code_scanning_error"] = str(exc)
+
             repo_alerts = len(repo_entry.get("dependabot", []))
             repo_issues = sum(
                 len(v) if isinstance(v, list) else 0 for v in repo_entry["issues"].values()
             )
+            repo_cs = len(repo_entry.get("code_scanning", []))
             span.add_event(
                 "github_fetch.repo_done",
-                {"repo": repo, "alerts": repo_alerts, "issues": repo_issues},
+                {"repo": repo, "alerts": repo_alerts, "issues": repo_issues, "code_scanning": repo_cs},
             )
             report["repos"][repo] = {
                 "dependabot_count": repo_alerts,
@@ -813,14 +1447,16 @@ def collect_security_report(config, github_token, allowlisted_repos, labels):
                     label: len(items) if isinstance(items, list) else 0
                     for label, items in repo_entry["issues"].items()
                 },
+                "code_scanning_count": repo_cs,
                 "data": repo_entry,
             }
 
         span.add_event(
             "github_fetch.done",
-            {"total_alerts": total_alerts, "total_issues": total_issues},
+            {"total_alerts": total_alerts, "total_issues": total_issues,
+             "total_code_scanning": total_code_scanning},
         )
-    return report, total_alerts, total_issues
+    return report, total_alerts, total_issues, total_code_scanning
 
 
 def generate_llm_markdown(report, total_alerts, total_issues, llm_settings):
@@ -840,11 +1476,61 @@ def generate_llm_markdown(report, total_alerts, total_issues, llm_settings):
         "Use concise language and include repository names.\n\n"
         "Input JSON follows.\n"
     )
+    def _slim_repo(repo_data):
+        """Return a compact summary of a repo's findings for the LLM prompt."""
+        slim = {
+            "dependabot_count": repo_data.get("dependabot_count", 0),
+            "code_scanning_count": repo_data.get("code_scanning_count", 0),
+            "issue_counts": repo_data.get("issue_counts", {}),
+            "dependabot": [],
+            "code_scanning": [],
+            "issues": {},
+        }
+        raw_data = repo_data.get("data", {})
+        for alert in raw_data.get("dependabot", []):
+            adv = alert.get("security_advisory") or {}
+            vuln = alert.get("security_vulnerability") or {}
+            pkg = vuln.get("package") or {}
+            fp = vuln.get("first_patched_version") or {}
+            slim["dependabot"].append({
+                "number": alert.get("number"),
+                "severity": (adv.get("severity") or vuln.get("severity") or "").lower(),
+                "cve_id": adv.get("cve_id") or "",
+                "summary": adv.get("summary") or "",
+                "package": pkg.get("name") or "",
+                "ecosystem": pkg.get("ecosystem") or "",
+                "vulnerable_version_range": vuln.get("vulnerable_version_range") or "",
+                "patched_version": fp.get("identifier") or "",
+                "url": alert.get("html_url") or "",
+            })
+        for cs_alert in raw_data.get("code_scanning", []):
+            if is_actionable_code_scanning_alert(cs_alert):
+                instance = cs_alert.get("most_recent_instance") or {}
+                fields = parse_trivy_message((instance.get("message") or {}).get("text", ""))
+                slim["code_scanning"].append({
+                    "cve_id": (cs_alert.get("rule") or {}).get("id", ""),
+                    "severity": (cs_alert.get("rule") or {}).get("severity", ""),
+                    "path": (instance.get("location") or {}).get("path", ""),
+                    "package": fields.get("package", ""),
+                    "fixed_version": fields.get("fixed_version", ""),
+                })
+        for label, items in (raw_data.get("issues") or {}).items():
+            if isinstance(items, list):
+                slim["issues"][label] = [
+                    {"number": i.get("number"), "title": i.get("title"), "url": i.get("html_url")}
+                    for i in items
+                ]
+            else:
+                slim["issues"][label] = items
+        return slim
+
     payload = {
         "generated_at": report.get("generated_at"),
         "total_dependabot_alerts": total_alerts,
         "total_labeled_issues": total_issues,
-        "repos": report.get("repos", {}),
+        "repos": {
+            repo: _slim_repo(data) for repo, data in report.get("repos", {}).items()
+        },
     }
     prompt = f"{prompt}{json.dumps(payload, indent=2)}"
 
@@ -865,7 +1551,7 @@ def generate_llm_markdown(report, total_alerts, total_issues, llm_settings):
             api_key=api_key,
             base_url=base_url,
         )
-    timeout_seconds = float(os.getenv("SHADI_LLM_TIMEOUT", "60"))
+    timeout_seconds = float(os.getenv("SHADI_LLM_TIMEOUT", "180"))
     with tracer.start_as_current_span("secops.llm_generate") as span:
         span.set_attribute("llm.provider", provider)
         span.set_attribute("llm.model", model_name)
@@ -880,7 +1566,9 @@ def generate_llm_markdown(report, total_alerts, total_issues, llm_settings):
             span.record_exception(exc)
             span.add_event("llm.request_failed", {"error": str(exc)})
             raise RuntimeError(
-                f"LLM report generation failed for provider '{provider}' and model '{model_name}'. "
+                f"LLM report generation failed for provider '{provider}' and model '{model_name}' "
+                f"(endpoint: {base_url!r}). "
+                f"Root cause: {type(exc).__name__}: {exc}. "
                 "Verify the secops/llm secrets for provider, endpoint, model, and API key."
             ) from exc
         span.add_event("llm.response_received")
@@ -962,6 +1650,328 @@ def record_secops_memory(config, summary):
     return {"status": "saved"}
 
 
+# ── Individual ADK-exposed tools ─────────────────────────────────────────────
+# The LLM chains these based on SKILL.md guidance.  State between steps is
+# persisted as secops_raw_alerts.json in the workspace directory.
+
+_RAW_ALERTS_FILE = "secops_raw_alerts.json"
+_NVD_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+
+def _resolve_human_github(secops_config, override=None):
+    if override and override.strip():
+        return override.strip()
+    return (
+        secops_config.get("human_github", "").strip()
+        or os.getenv("SHADI_HUMAN_GITHUB", "").strip()
+        or None
+    )
+
+
+def fetch_security_alerts(
+    labels: str = "security,cve,vulnerability",
+    repos: str | None = None,
+) -> dict:
+    """Fetch open Dependabot alerts, security-labeled issues, and SARIF code-scanning
+    alerts (via gh CLI) for all allowlisted repos.  Saves raw data to the workspace for
+    use by generate_security_report and remediate_vulnerabilities.  Call first.
+
+    Args:
+        labels: Comma-separated issue labels to search for.
+        repos:  Optional comma-separated list of repos (owner/name) to scan.
+                Must be a subset of the configured allowlist.  When omitted all
+                allowlisted repos are scanned.
+    """
+    config_path, config = load_secops_config()
+    secops_config = config.get("secops", {})
+    store, session = create_secops_session()
+    github_token, workspace, _, _ = get_secops_credentials(config, store, session)
+    allowlist = secops_config.get("allowlist", [])
+    if repos:
+        requested = [r.strip() for r in repos.split(",") if r.strip()]
+        allowlist_set = set(allowlist)
+        allowlist = [r for r in requested if r in allowlist_set]
+        if not allowlist:
+            return {"status": "error", "error": f"None of the requested repos are in the allowlist: {requested}"}
+    label_list = [lbl.strip() for lbl in labels.split(",") if lbl.strip()]
+    with tracer.start_as_current_span("secops.fetch_security_alerts") as span:
+        span.set_attribute("fetch.labels", labels)
+        span.set_attribute("fetch.repo_count", len(allowlist))
+        report, total_alerts, total_issues, total_code_scanning = collect_security_report(
+            config, github_token, allowlist, label_list, workspace_dir=workspace
+        )
+        raw_path = Path(workspace) / _RAW_ALERTS_FILE
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        span.set_attribute("fetch.total_alerts", total_alerts)
+        span.set_attribute("fetch.total_issues", total_issues)
+        span.set_attribute("fetch.total_code_scanning", total_code_scanning)
+    return {
+        "status": "ok",
+        "dependabot_alerts": total_alerts,
+        "labeled_issues": total_issues,
+        "code_scanning_alerts": total_code_scanning,
+        "repos": allowlist,
+        "raw_data_path": str(raw_path),
+    }
+
+
+def generate_security_report(
+    report_name: str = "secops_security_report.md",
+    provider: str | None = None,
+    human_github_handle: str | None = None,
+) -> dict:
+    """Generate a Markdown security report using the LLM from alert data saved by
+    fetch_security_alerts.  Saves the report and records a memory entry."""
+    config_path, config = load_secops_config()
+    secops_config = config.get("secops", {})
+    store, session = create_secops_session()
+    _, workspace, _, _ = get_secops_credentials(config, store, session)
+    llm_settings = get_llm_settings(config, store, session, provider_override=provider)
+    raw_path = Path(workspace) / _RAW_ALERTS_FILE
+    if not raw_path.exists():
+        return {"status": "error", "error": "No alert data found. Call fetch_security_alerts first."}
+    report = json.loads(raw_path.read_text(encoding="utf-8"))
+    total_alerts = sum(r.get("dependabot_count", 0) for r in report.get("repos", {}).values())
+    total_issues = sum(
+        sum(c for c in r.get("issue_counts", {}).values())
+        for r in report.get("repos", {}).values()
+    )
+    human_github = _resolve_human_github(secops_config, human_github_handle)
+    if human_github:
+        human_did = get_human_did(store, session, human_github)
+        if human_did:
+            report["human"] = {"github_handle": human_github, "did": human_did}
+    report_path = write_report(report, workspace, report_name, total_alerts, total_issues, llm_settings)
+    memory_status = record_secops_memory(config, {
+        "generated_at": report.get("generated_at"),
+        "report_day": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "dependabot_alerts": total_alerts,
+        "labeled_issues": total_issues,
+        "repos": list(report.get("repos", {}).keys()),
+        "report_path": str(report_path),
+        "model": llm_settings["model"],
+        "provider": llm_settings["provider"],
+    })
+    return {
+        "status": "ok",
+        "report_path": str(report_path),
+        "dependabot_alerts": total_alerts,
+        "labeled_issues": total_issues,
+        "memory": memory_status,
+    }
+
+
+def remediate_vulnerabilities(
+    human_github_handle: str | None = None,
+    create_prs: bool = False,
+    repos: str | None = None,
+) -> dict:
+    """Patch critical vulnerabilities from alert data saved by fetch_security_alerts.
+    Forks repos, commits patches, and optionally opens PRs via gh CLI.
+
+    Args:
+        human_github_handle: GitHub handle of the human who will own the fork.
+        create_prs:          Open a PR after each repo patch.
+        repos:               Optional comma-separated list of repos (owner/name) to
+                             remediate.  When omitted all repos in the saved alert data
+                             are remediated.
+    """
+    config_path, config = load_secops_config()
+    secops_config = config.get("secops", {})
+    store, session = create_secops_session()
+    github_token, workspace, _, _ = get_secops_credentials(config, store, session)
+    raw_path = Path(workspace) / _RAW_ALERTS_FILE
+    if not raw_path.exists():
+        return {"status": "error", "error": "No alert data found. Call fetch_security_alerts first."}
+    report = json.loads(raw_path.read_text(encoding="utf-8"))
+    if repos:
+        requested = {r.strip() for r in repos.split(",") if r.strip()}
+        report = dict(report)
+        report["repos"] = {k: v for k, v in report.get("repos", {}).items() if k in requested}
+        if not report["repos"]:
+            return {"status": "error", "error": f"None of the requested repos found in alert data: {sorted(requested)}"}
+    human_github = _resolve_human_github(secops_config, human_github_handle)
+    allow_prs = create_prs or bool(secops_config.get("auto_pr", False))
+    remediation = remediate_repos(
+        config, github_token, report, workspace,
+        create_prs=allow_prs, fork_owner=human_github,
+    )
+    return {"status": "ok", "remediation": remediation}
+
+
+def approve_queued_prs() -> dict:
+    """Open PRs for all changes queued in secops_pending_prs.json after human review."""
+    config_path, config = load_secops_config()
+    store, session = create_secops_session()
+    github_token, workspace, _, _ = get_secops_credentials(config, store, session)
+    return approve_pending_prs(config, github_token, workspace)
+
+
+def get_latest_report(report_name: str = "secops_security_report.md") -> dict:
+    """Return the content of the latest security report from the workspace."""
+    config_path, config = load_secops_config()
+    store, session = create_secops_session()
+    _, workspace, _, _ = get_secops_credentials(config, store, session)
+    report_path = Path(workspace) / report_name
+    if not report_path.exists():
+        return {"status": "missing", "path": str(report_path)}
+    return {"status": "ok", "path": str(report_path), "report": report_path.read_text(encoding="utf-8")}
+
+
+def get_allowlist() -> dict:
+    """Return the list of allowlisted repositories from the agent config."""
+    _, config = load_secops_config()
+    return {"status": "ok", "allowlist": config.get("secops", {}).get("allowlist", [])}
+
+
+def get_agent_status() -> dict:
+    """Return current workspace path, allowlist, and SLIM config info."""
+    config_path, config = load_secops_config()
+    secops_config = config.get("secops", {})
+    tmp_dir = resolve_tmp_dir(("SHADI_OPERATOR_AGENT_ID", "SHADI_SECOPS_AGENT_ID"))
+    workspace = secops_config.get("workspace_dir", str(Path(tmp_dir) / "shadi-secops"))
+    return {
+        "status": "ok",
+        "config": str(config_path),
+        "workspace": workspace,
+        "allowlist": secops_config.get("allowlist", []),
+        "slim_endpoint": secops_config.get("slim_endpoint", "http://localhost:47357"),
+        "slim_identity": secops_config.get("slim_identity", "agntcy/secops/agent"),
+    }
+
+
+def lookup_cve(cve_id: str = "", package_name: str = "", max_results: int = 5) -> dict:
+    """Query the NIST NVD database for CVE details and remediation guidance.
+
+    Use this when you have a CVE ID from a Dependabot alert or want to look up
+    vulnerabilities affecting a specific package.  Returns CVSS score, severity,
+    description, CWE weaknesses, and reference URLs (vendor advisories, patches).
+
+    Prefer cve_id when an alert already contains one.  Fall back to package_name
+    for keyword searches (e.g. "requests 2.28" or "openssl 3.0").
+
+    Args:
+        cve_id:       Specific CVE identifier, e.g. "CVE-2023-44487".
+        package_name: Package or keyword to search when cve_id is empty.
+        max_results:  Max CVEs to return for keyword searches (1–20, default 5).
+
+    Returns:
+        {
+          "status": "ok" | "not_found" | "error" | "rate_limited",
+          "cves": [
+            {
+              "id": str,
+              "published": str,
+              "last_modified": str,
+              "description": str,
+              "cvss_v3": {"score": float, "severity": str, "vector": str} | None,
+              "cvss_v2": {"score": float, "severity": str} | None,
+              "cwe": [str],
+              "references": [str],
+            }
+          ],
+          "total_results": int,
+        }
+    """
+    if not cve_id and not package_name:
+        return {"status": "error", "error": "Provide cve_id or package_name"}
+
+    params: dict[str, str] = {}
+    if cve_id:
+        params["cveId"] = cve_id.strip().upper()
+    else:
+        params["keywordSearch"] = package_name.strip()
+        params["resultsPerPage"] = str(min(max(1, max_results), 20))
+
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    url = f"{_NVD_BASE}?{query}"
+
+    req = Request(url)
+    req.add_header("User-Agent", "shadi-secops-agent/1.0")
+    nvd_api_key = os.environ.get("NVD_API_KEY", "")
+    if nvd_api_key:
+        req.add_header("apiKey", nvd_api_key)
+
+    try:
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code in (403, 429):
+            return {
+                "status": "rate_limited",
+                "error": (
+                    f"NVD rate limit hit (HTTP {exc.code}). "
+                    "Set NVD_API_KEY env var to raise quota from 5 to 50 req/30s."
+                ),
+            }
+        if exc.code == 404:
+            return {"status": "not_found", "error": f"CVE not found: {cve_id}"}
+        return {"status": "error", "error": f"NVD API HTTP {exc.code}: {exc.reason}"}
+    except URLError as exc:
+        return {"status": "error", "error": f"Network error reaching NVD: {exc.reason}"}
+
+    vulnerabilities = data.get("vulnerabilities", [])
+    if not vulnerabilities:
+        return {"status": "not_found", "cves": [], "total_results": 0}
+
+    results = []
+    for item in vulnerabilities:
+        cve = item.get("cve", {})
+
+        descriptions = cve.get("descriptions", [])
+        desc = next((d["value"] for d in descriptions if d.get("lang") == "en"), "")
+
+        # CVSS v3.1 preferred, fall back to v3.0
+        cvss_v3 = None
+        for key in ("cvssMetricV31", "cvssMetricV30"):
+            metrics = cve.get("metrics", {}).get(key, [])
+            if metrics:
+                d = metrics[0].get("cvssData", {})
+                cvss_v3 = {
+                    "score": d.get("baseScore"),
+                    "severity": d.get("baseSeverity"),
+                    "vector": d.get("vectorString"),
+                }
+                break
+
+        cvss_v2 = None
+        v2_metrics = cve.get("metrics", {}).get("cvssMetricV2", [])
+        if v2_metrics:
+            d = v2_metrics[0].get("cvssData", {})
+            cvss_v2 = {
+                "score": d.get("baseScore"),
+                "severity": v2_metrics[0].get("baseSeverity"),
+            }
+
+        cwe_list: list[str] = []
+        for weakness in cve.get("weaknesses", []):
+            for d in weakness.get("description", []):
+                val = d.get("value", "")
+                if val.startswith("CWE-"):
+                    cwe_list.append(val)
+
+        refs = [r["url"] for r in cve.get("references", []) if r.get("url")]
+
+        results.append({
+            "id": cve.get("id", ""),
+            "published": cve.get("published", ""),
+            "last_modified": cve.get("lastModified", ""),
+            "description": desc,
+            "cvss_v3": cvss_v3,
+            "cvss_v2": cvss_v2,
+            "cwe": cwe_list,
+            "references": refs,
+        })
+
+    return {
+        "status": "ok",
+        "cves": results,
+        "total_results": data.get("totalResults", len(results)),
+    }
+
+
+# kept for backward-compat; a2a_server and secops.py now call the individual tools
 def skill_collect_security_issues(
     labels="security,cve,vulnerability",
     report_name="secops_security_report.md",
@@ -970,68 +1980,17 @@ def skill_collect_security_issues(
     create_prs=False,
     human_github_handle=None,
 ):
-    with tracer.start_as_current_span("secops.skill") as span:
-        span.set_attribute("skill.labels", labels)
-        span.set_attribute("skill.report_name", report_name)
-        span.set_attribute("skill.remediate", remediate)
-        span.set_attribute("skill.create_prs", create_prs)
-
-        config_path, config = load_secops_config()
-        secops_config = config.get("secops", {})
-        allowlisted_repos = secops_config.get("allowlist", [])
-        store, session = create_secops_session()
-        github_token, workspace, _, _ = get_secops_credentials(config, store, session)
-        llm_settings = get_llm_settings(config, store, session, provider_override=provider)
-
-        human_did = ""
-        if human_github_handle:
-            human_did = get_human_did(store, session, human_github_handle)
-
-        label_list = [item.strip() for item in labels.split(",") if item.strip()]
-        report, total_alerts, total_issues = collect_security_report(
-            config, github_token, allowlisted_repos, label_list
+    fetch_result = fetch_security_alerts(labels=labels)
+    if fetch_result.get("status") != "ok":
+        return fetch_result
+    report_result = generate_security_report(
+        report_name=report_name, provider=provider, human_github_handle=human_github_handle
+    )
+    if remediate:
+        rem_result = remediate_vulnerabilities(
+            human_github_handle=human_github_handle, create_prs=create_prs
         )
-        if human_did:
-            report["human"] = {
-                "github_handle": human_github_handle,
-                "did": human_did,
-            }
-        remediation = None
-        if remediate or secops_config.get("auto_remediate"):
-            allow_prs = create_prs or secops_config.get("auto_pr", False)
-            remediation = remediate_repos(config, github_token, report, workspace, create_prs=allow_prs)
-            report["remediation"] = remediation
-
-        report_path = write_report(report, workspace, report_name, total_alerts, total_issues, llm_settings)
-        span.set_attribute("skill.total_alerts", total_alerts)
-        span.set_attribute("skill.total_issues", total_issues)
-        span.set_attribute("skill.repos", ",".join(allowlisted_repos))
-
-        summary = {
-            "generated_at": report["generated_at"],
-            "report_day": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "dependabot_alerts": total_alerts,
-            "labeled_issues": total_issues,
-            "repos": allowlisted_repos,
-            "report_path": str(report_path),
-            "model": llm_settings["model"],
-            "provider": llm_settings["provider"],
-            "remediation": remediation,
-            "human_github_handle": human_github_handle,
-            "human_did": human_did,
-        }
-        memory_status = record_secops_memory(config, summary)
-        span.add_event("memory.recorded", {"status": memory_status.get("status", "unknown")})
-
-        return {
-            "status": "success",
-            "config": str(config_path),
-            "report_path": str(report_path),
-            "dependabot_alerts": total_alerts,
-            "labeled_issues": total_issues,
-            "repos": allowlisted_repos,
-            "memory": memory_status,
-            "remediation": remediation,
-            "human_github_handle": human_github_handle,
-            "human_did": human_did,
-        }
+        report_result["remediation"] = rem_result.get("remediation")
+    report_result["status"] = "success"
+    report_result["repos"] = fetch_result.get("repos", [])
+    return report_result

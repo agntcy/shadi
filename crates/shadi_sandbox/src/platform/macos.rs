@@ -98,6 +98,8 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     // matches on the literal path seen by the caller, so cover both spellings.
     rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
     rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
+    // Allow /dev/null and other character devices needed by subprocesses (e.g. git, gh).
+    rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
     if let Ok(tmpdir) = std::env::var("TMPDIR") {
         let canonical = tmpdir.trim_end_matches('/').to_string();
         rules.push(format!(

@@ -3,16 +3,20 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 
 from skills import (
-    approve_pending_prs,
     create_secops_session,
-    get_secops_credentials,
     load_secops_config,
     require_shadi_secret_value,
-    resolve_tmp_dir,
-    skill_collect_security_issues,
+    fetch_security_alerts,
+    generate_security_report,
+    remediate_vulnerabilities,
+    approve_queued_prs,
+    get_latest_report,
+    get_allowlist,
+    get_agent_status,
 )
 from telemetry import tracer
 
@@ -92,89 +96,67 @@ async def run_scan(command):
     if isinstance(labels, list):
         labels = ",".join(labels)
     report_name = command.get("report_name", "secops_security_report.md")
-    with tracer.start_as_current_span("secops.scan") as span:
-        span.set_attribute("scan.labels", labels)
-        span.set_attribute("scan.report_name", report_name)
-        if provider:
-            span.set_attribute("scan.provider", provider)
-        return await asyncio.to_thread(
-            skill_collect_security_issues,
-            labels=labels,
-            report_name=report_name,
-            provider=provider,
-            remediate=False,
-            create_prs=False,
-        )
+    provider = command.get("provider")
+    repos = command.get("repos")
+    if isinstance(repos, list):
+        repos = ",".join(repos)
+    human_github = command.get("human_github") or os.getenv("SHADI_HUMAN_GITHUB", "").strip() or None
+    result = await asyncio.to_thread(fetch_security_alerts, labels=labels, repos=repos)
+    if result.get("status") != "ok":
+        return result
+    return await asyncio.to_thread(
+        generate_security_report,
+        report_name=report_name,
+        provider=provider,
+        human_github_handle=human_github,
+    )
 
 
 async def run_remediate(command):
-    provider = command.get("provider")
     labels = command.get("labels", "security,cve,vulnerability")
     if isinstance(labels, list):
         labels = ",".join(labels)
     report_name = command.get("report_name", "secops_security_report.md")
+    provider = command.get("provider")
     create_prs = bool(command.get("create_prs", False))
+    repos = command.get("repos")
+    if isinstance(repos, list):
+        repos = ",".join(repos)
     human_github = command.get("human_github") or os.getenv("SHADI_HUMAN_GITHUB", "").strip() or None
-    with tracer.start_as_current_span("secops.remediate") as span:
-        span.set_attribute("remediate.labels", labels)
-        span.set_attribute("remediate.report_name", report_name)
-        span.set_attribute("remediate.create_prs", create_prs)
-        if provider:
-            span.set_attribute("remediate.provider", provider)
-        if human_github:
-            span.set_attribute("remediate.human_github", human_github)
-        return await asyncio.to_thread(
-            skill_collect_security_issues,
-            labels=labels,
-            report_name=report_name,
-            provider=provider,
-            remediate=True,
-            create_prs=create_prs,
-            human_github_handle=human_github,
-        )
+    result = await asyncio.to_thread(fetch_security_alerts, labels=labels, repos=repos)
+    if result.get("status") != "ok":
+        return result
+    report_result = await asyncio.to_thread(
+        generate_security_report,
+        report_name=report_name,
+        provider=provider,
+        human_github_handle=human_github,
+    )
+    rem_result = await asyncio.to_thread(
+        remediate_vulnerabilities,
+        human_github_handle=human_github,
+        create_prs=create_prs,
+        repos=repos,
+    )
+    report_result["remediation"] = rem_result.get("remediation")
+    return report_result
 
 
 async def run_approve_prs():
-    config_path, config = load_secops_config()
-    store, session = create_secops_session()
-    github_token, workspace, _, _ = get_secops_credentials(config, store, session)
-    return await asyncio.to_thread(approve_pending_prs, config, github_token, workspace)
-
-
-def resolve_workspace_dir(secops_config):
-    tmp_dir = resolve_tmp_dir(("SHADI_OPERATOR_AGENT_ID", "SHADI_SECOPS_AGENT_ID"))
-    return secops_config.get("workspace_dir", str(Path(tmp_dir) / "shadi-secops"))
+    return await asyncio.to_thread(approve_queued_prs)
 
 
 async def run_get_report(command):
-    config_path, config = load_secops_config()
-    workspace = resolve_workspace_dir(config.get("secops", {}))
     report_name = command.get("report_name", "secops_security_report.md")
-    report_path = Path(workspace) / report_name
-    if not report_path.exists():
-        return {"status": "missing_report", "path": str(report_path)}
-    text = report_path.read_text(encoding="utf-8")
-    return {"status": "ok", "path": str(report_path), "report": text}
+    return await asyncio.to_thread(get_latest_report, report_name)
 
 
 async def run_status():
-    config_path, config = load_secops_config()
-    secops_config = config.get("secops", {})
-    return {
-        "status": "ok",
-        "config": str(config_path),
-        "slim_endpoint": secops_config.get("slim_endpoint", "http://localhost:47357"),
-        "slim_identity": secops_config.get("slim_identity", "agntcy/secops/agent"),
-        "slim_tls_insecure": bool(secops_config.get("slim_tls_insecure", True)),
-        "workspace_dir": resolve_workspace_dir(secops_config),
-        "allowlist": secops_config.get("allowlist", []),
-    }
+    return await asyncio.to_thread(get_agent_status)
 
 
 async def run_allowlist():
-    config_path, config = load_secops_config()
-    allowlist = config.get("secops", {}).get("allowlist", [])
-    return {"status": "ok", "allowlist": allowlist}
+    return await asyncio.to_thread(get_allowlist)
 
 
 def build_agent_card(types):
@@ -304,8 +286,12 @@ def create_executor(types):
                     await emit_status(event_queue, context, types["TaskState"].completed, types, final=True)
                 except Exception as exc:
                     span.record_exception(exc)
-                    span.add_event("command.failed", {"command": command_name, "error": str(exc)})
-                    await emit_text(event_queue, context, f"error: {exc}", types)
+                    if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                        err_msg = f"{exc}\nstderr: {exc.stderr.strip()}"
+                    else:
+                        err_msg = str(exc)
+                    span.add_event("command.failed", {"command": command_name, "error": err_msg})
+                    await emit_text(event_queue, context, f"error: {err_msg}", types)
                     await emit_status(event_queue, context, types["TaskState"].failed, types, final=True)
 
         async def cancel(self, context, event_queue):

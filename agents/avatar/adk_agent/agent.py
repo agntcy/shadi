@@ -266,7 +266,11 @@ base_instruction = (
     "You are Avatar, a human interface agent. Convert the user request into a JSON command "
     "for the SecOps agent and send it using the send_secops_command tool. The SecOps agent "
     "accepts commands: scan, remediate, approve_prs, report, and help. Optional JSON fields: "
-    "provider, labels, report_name. Always send valid JSON. Reply with the SecOps response."
+    "provider, labels, report_name, create_prs, human_github. "
+    "Use the 'repos' field (comma-separated owner/name string) to scope scan or remediate to "
+    "specific repositories — for example if the user says 'remediate agentic-apps' set "
+    "'repos': 'agntcy/agentic-apps'. When no specific repo is mentioned, omit repos. "
+    "Always send valid JSON. Reply with the SecOps response."
 )
 context = load_agent_context()
 if context:

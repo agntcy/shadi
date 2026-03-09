@@ -1,7 +1,7 @@
 import argparse
 import os
 
-from skills import skill_collect_security_issues
+from skills import fetch_security_alerts, generate_security_report, remediate_vulnerabilities, approve_queued_prs
 
 
 def parse_args():
@@ -27,6 +27,11 @@ def parse_args():
         help="Attempt to patch critical vulnerabilities and open PRs",
     )
     parser.add_argument(
+        "--repos",
+        default=None,
+        help="Comma-separated list of repos (owner/name) to scan/remediate (subset of allowlist)",
+    )
+    parser.add_argument(
         "--approve-prs",
         action="store_true",
         help="Create PRs from pending remediation approvals",
@@ -37,35 +42,32 @@ def parse_args():
 def run_secops_agent():
     print("== SHADI SecOps Autonomous Agent ==")
     args = parse_args()
-    human_github = os.getenv("SHADI_HUMAN_GITHUB", "").strip()
-    if args.approve_prs:
-        from skills import approve_pending_prs, create_secops_session, get_secops_credentials, load_secops_config
+    human_github = os.getenv("SHADI_HUMAN_GITHUB", "").strip() or None
 
-        config_path, config = load_secops_config()
-        store, session = create_secops_session()
-        github_token, workspace, _, _ = get_secops_credentials(config, store, session)
-        result = approve_pending_prs(config, github_token, workspace)
+    if args.approve_prs:
+        result = approve_queued_prs()
         print("Status: approved")
         print("Result:", result)
         return
 
-    result = skill_collect_security_issues(
-        labels=args.labels,
+    fetch_result = fetch_security_alerts(labels=args.labels, repos=args.repos)
+    print("Dependabot alerts:", fetch_result.get("dependabot_alerts"))
+    print("Labeled issues:", fetch_result.get("labeled_issues"))
+    print("Repos:", ", ".join(fetch_result.get("repos", [])))
+
+    report_result = generate_security_report(
         report_name=args.report_name,
         provider=args.provider,
-        remediate=args.remediate,
-        create_prs=False,
-        human_github_handle=human_github or None,
+        human_github_handle=human_github,
     )
-    print("Status:", result.get("status"))
-    print("Report:", result.get("report_path"))
-    print("Dependabot alerts:", result.get("dependabot_alerts"))
-    print("Labeled issues:", result.get("labeled_issues"))
-    print("Repos:", ", ".join(result.get("repos", [])))
-    if result.get("memory") is not None:
-        print("Memory:", result.get("memory"))
-    if result.get("human_did"):
-        print("Human DID:", result.get("human_did"))
+    print("Status:", report_result.get("status"))
+    print("Report:", report_result.get("report_path"))
+    if report_result.get("memory"):
+        print("Memory:", report_result.get("memory"))
+
+    if args.remediate:
+        rem_result = remediate_vulnerabilities(human_github_handle=human_github, repos=args.repos)
+        print("Remediation:", rem_result.get("remediation"))
 
 
 if __name__ == "__main__":
