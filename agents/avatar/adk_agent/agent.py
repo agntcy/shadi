@@ -71,6 +71,10 @@ def create_avatar_session():
 
 
 def require_shadi_secret_value(store, session, key_name, label):
+    env_var = "SHADI_SECRET_" + key_name.upper().replace("/", "_").replace("-", "_").replace(".", "_")
+    env_val = os.getenv(env_var, "").strip()
+    if env_val:
+        return env_val
     try:
         value = store.get(session, key_name)
     except Exception as exc:
@@ -190,20 +194,45 @@ async def send_message(types, client, text):
         message_id="avatar-message",
         parts=[types["Part"](root=types["TextPart"](text=text))],
     )
+    TERMINAL_STATES = {"completed", "failed", "canceled"}
     output = ""
     async for response in client.send_message(request=request):
+        print(f"[send_message] response type={type(response).__name__}", flush=True)
         if isinstance(response, types["Message"]):
             for part in response.parts:
                 if isinstance(part.root, types["TextPart"]):
                     output += part.root.text
         else:
             task, _ = response
-            if task.status.state == "completed" and task.artifacts:
+            state = task.status.state.value if task.status and hasattr(task.status.state, "value") else str(task.status.state) if task.status else ""
+            print(f"[send_message] task.state={state} artifacts={len(task.artifacts) if task.artifacts else 0}", flush=True)
+            if state in TERMINAL_STATES and task.artifacts:
                 for artifact in task.artifacts:
                     for part in artifact.parts:
                         if isinstance(part.root, types["TextPart"]):
                             output += part.root.text
     return output
+
+
+def format_secops_error(exc):
+    messages = []
+    current = exc
+    visited = set()
+    while current and id(current) not in visited:
+        visited.add(id(current))
+        message = str(current).strip()
+        if message:
+            messages.append(message)
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+    combined = " | ".join(messages)
+    if "session handshake failed" in combined:
+        return (
+            "SecOps connection failed during SLIM session handshake. "
+            "Check that the SecOps A2A server is running and that Avatar and SecOps use the same "
+            "SLIM endpoint, identity, shared secret, and TLS settings."
+        )
+    return str(exc)
 
 
 def normalize_secops_payload(payload):
@@ -223,12 +252,19 @@ def normalize_secops_payload(payload):
 
 
 async def send_secops_command(payload):
-    types = require_slima2a_packages()
-    config = resolve_slim_config()
     normalized = normalize_secops_payload(payload)
-
-    client, _httpx_client = await get_cached_client(types, config)
-    return await send_message(types, client, normalized)
+    print(f"[send_secops_command] payload={normalized}", flush=True)
+    try:
+        types = require_slima2a_packages()
+        config = resolve_slim_config()
+        client, _httpx_client = await get_cached_client(types, config)
+        result = await send_message(types, client, normalized)
+        print(f"[send_secops_command] result={result!r}", flush=True)
+        return result
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return f"ERROR calling SecOps: {format_secops_error(exc)}"
 
 
 config_path, config = load_secops_config()
@@ -251,7 +287,11 @@ base_instruction = (
     "You are Avatar, a human interface agent. Convert the user request into a JSON command "
     "for the SecOps agent and send it using the send_secops_command tool. The SecOps agent "
     "accepts commands: scan, remediate, approve_prs, report, and help. Optional JSON fields: "
-    "provider, labels, report_name. Always send valid JSON. Reply with the SecOps response."
+    "provider, labels, report_name, create_prs, human_github. "
+    "Use the 'repos' field (comma-separated owner/name string) to scope scan or remediate to "
+    "specific repositories — for example if the user says 'remediate agentic-apps' set "
+    "'repos': 'agntcy/agentic-apps'. When no specific repo is mentioned, omit repos. "
+    "Always send valid JSON. Reply with the SecOps response."
 )
 context = load_agent_context()
 if context:

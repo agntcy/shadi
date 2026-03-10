@@ -28,6 +28,9 @@ These scripts default to local paths and can be overridden per terminal.
 - SHADI_TMP_DIR: Base directory for per-agent data (default: ./\.tmp).
 - SHADI_AGENT_ID: Agent-specific suffix used for isolation.
 - SHADI_OPERATOR_PRESENTATION: Required to access secrets in SHADI.
+- SHADI_SECRET_BACKEND: Secret store backend (`onepassword` or `keychain`, default: `keychain`).
+- SHADI_OP_VAULT: 1Password vault name (default: `shadi`). Only used when backend is `onepassword`.
+- SHADI_OP_ACCOUNT: 1Password account for multi-account setups. Only used when backend is `onepassword`.
 
 ### SecOps A2A server
 - SHADI_SECOPS_CONFIG: Path to secops TOML (default: ${SHADI_TMP_DIR}/secops-a.toml).
@@ -72,3 +75,17 @@ export SHADI_AGENT_ID="avatar-1"
 export SHADI_OPERATOR_PRESENTATION="local-operator"
 ./scripts/launch_avatar.sh
 ```
+
+## Using 1Password as the secret backend
+
+To store and retrieve all secrets via a 1Password vault instead of the OS
+keychain, export `SHADI_SECRET_BACKEND` before running the scripts:
+
+```bash
+export SHADI_SECRET_BACKEND=onepassword
+export SHADI_OP_VAULT=shadi          # optional, default: shadi
+```
+
+The `op` CLI (1Password CLI v2) must be installed and authenticated. For CI,
+set `OP_SERVICE_ACCOUNT_TOKEN`. Then run the scripts as usual — the import
+script and all launchers will route secrets through 1Password automatically.

@@ -48,8 +48,11 @@ dependencies = [
 name = "agent_secrets"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "security-framework",
  "security-framework-sys",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 

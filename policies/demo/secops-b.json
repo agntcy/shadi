@@ -3,7 +3,9 @@
   "read": ["/"],
   "net_block": false,
   "net_allow": [
+    "litellm.prod.outshift.ai",
     "api.github.com",
+    "github.com",
     "localhost",
     "127.0.0.1",
     "::1"

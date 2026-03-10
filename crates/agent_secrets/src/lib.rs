@@ -16,6 +16,9 @@ pub use memory::SecretBytes;
 pub use policy::SecretPolicy;
 pub use session::SessionContext;
 
+#[cfg(feature = "onepassword")]
+pub use platform::onepassword::OnePasswordStore;
+
 #[derive(Debug)]
 pub enum SecretError {
     NotSupported,

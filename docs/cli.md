@@ -31,6 +31,19 @@ cargo run -p shadictl -- [FLAGS] -- [COMMAND]
 - `--list-prefix PREFIX`: Optional prefix filter for `--list-keychain`.
 - `--print-policy`: Print the resolved policy and exit.
 
+### Secret backend selection
+
+By default `shadictl` uses the OS keychain. To use 1Password instead, set:
+
+| Env var | Description | Default |
+|---------|-------------|---------|
+| `SHADI_SECRET_BACKEND` | Backend selection (`onepassword` or `keychain`) | `keychain` |
+| `SHADI_OP_VAULT` | 1Password vault name | `shadi` |
+| `SHADI_OP_ACCOUNT` | 1Password account (for multi-account setups) | auto |
+
+The 1Password backend requires the `op` CLI to be installed and authenticated.
+For CI, export `OP_SERVICE_ACCOUNT_TOKEN`.
+
 ### Sandbox execution
 
 Run a command inside the sandbox after flags:

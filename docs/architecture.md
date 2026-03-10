@@ -22,6 +22,9 @@ actions and prevent unauthorized data access or exfiltration.
 ### 1) Secrets layer
 - **OS keystores**: Keychain (macOS/iOS), DPAPI/CNG (Windows), Keystore (Android),
   Secret Service (Linux).
+- **1Password backend** (optional): Cross-platform secret storage via the `op` CLI.
+  Enabled with the `onepassword` Cargo feature and `SHADI_SECRET_BACKEND=onepassword`.
+  Supports team/shared vaults and headless CI via `OP_SERVICE_ACCOUNT_TOKEN`.
 - **Access control**: Secrets are accessed only after DID/VC verification.
 - **Memory safety**: Secrets are wrapped in `SecretBytes` and zeroized on drop.
 - **OpenPGP parsing**: `shadictl` uses `sequoia-openpgp` to ingest keys without calling OS `gpg`.
@@ -32,6 +35,7 @@ actions and prevent unauthorized data access or exfiltration.
 - `crates/agent_secrets/src/memory.rs`: `SecretBytes` zeroization wrapper.
 - `crates/agent_secrets/src/platform`: platform keychain backends.
 - `crates/agent_secrets/src/platform/macos.rs`: Keychain storage + key registry for listing.
+- `crates/agent_secrets/src/platform/onepassword.rs`: 1Password backend via `op` CLI.
 - `crates/shadictl/src/main.rs`: OpenPGP ingestion, DID derivation, and secret store helpers.
 
 ### 1b) Identity derivation and provenance

@@ -81,3 +81,19 @@ Notes:
   shared secret in SHADI.
 - Adjust `secops.toml` or the per-agent configs if you want different identities
   or endpoints.
+
+## Using 1Password instead of the OS keychain
+
+All demo steps work with 1Password as the secret backend. Export the following
+before running the walkthrough:
+
+```bash
+export SHADI_SECRET_BACKEND=onepassword
+export SHADI_OP_VAULT=shadi          # optional, default: shadi
+```
+
+The `op` CLI (1Password CLI v2) must be installed and authenticated (or set
+`OP_SERVICE_ACCOUNT_TOKEN` for headless/CI use). Then run every step above
+exactly as written — `just import-secops-secrets`, the A2A launchers, and the
+Avatar agent will all store and retrieve secrets from the 1Password vault
+instead of the OS keychain.

@@ -9,7 +9,18 @@ from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 SECOPS_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(SECOPS_DIR))
 
-from skills import get_llm_settings, load_secops_config, skill_collect_security_issues
+from skills import (
+    get_llm_settings,
+    load_secops_config,
+    fetch_security_alerts,
+    generate_security_report,
+    remediate_vulnerabilities,
+    approve_queued_prs,
+    get_latest_report,
+    get_allowlist,
+    get_agent_status,
+    lookup_cve,
+)
 
 
 def load_agent_context() -> str:
@@ -67,6 +78,17 @@ root_agent = Agent(
     name="secops_agent",
     description="Collects security issues and Dependabot alerts for allowlisted repos.",
     instruction=instruction,
-    tools=[PreloadMemoryTool(), load_memory, skill_collect_security_issues],
+    tools=[
+        PreloadMemoryTool(),
+        load_memory,
+        fetch_security_alerts,
+        generate_security_report,
+        remediate_vulnerabilities,
+        approve_queued_prs,
+        get_latest_report,
+        get_allowlist,
+        get_agent_status,
+        lookup_cve,
+    ],
     after_agent_callback=auto_save_session_to_memory,
 )
