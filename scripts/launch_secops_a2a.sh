@@ -57,8 +57,25 @@ if [[ "${SHADI_SECRET_BACKEND:-}" == "onepassword" ]]; then
 	_OP_VAULT="${SHADI_OP_VAULT:-shadi}"
 
 	_read_op_secret() {
-		op item get "$1" --vault "${_OP_VAULT}" --account "${_OP_ACCOUNT}" --format json 2>/dev/null \
-			| python3 -c "import json,sys,base64; d=json.load(sys.stdin); f=next((f for f in d.get('fields',[]) if f['id']=='notesPlain'),None); print(base64.b64decode(f['value']).decode(),end='') if f else None"
+		local item_name="$1"
+		local item_json
+		if ! item_json="$(op item get "$item_name" --vault "${_OP_VAULT}" --account "${_OP_ACCOUNT}" --format json 2>/dev/null)" || [[ -z "$item_json" ]]; then
+			echo "ERROR: failed to read 1Password item '$item_name' from vault '${_OP_VAULT}' account '${_OP_ACCOUNT}'" >&2
+			return 1
+		fi
+		ITEM_JSON="$item_json" python3 - <<'PY'
+import base64
+import json
+import os
+import sys
+
+data = json.loads(os.environ["ITEM_JSON"])
+field = next((f for f in data.get("fields", []) if f.get("id") == "notesPlain"), None)
+if not field or not field.get("value"):
+    print("ERROR: missing notesPlain field in 1Password item", file=sys.stderr)
+    raise SystemExit(1)
+print(base64.b64decode(field["value"]).decode(), end="")
+PY
 	}
 
 	export SHADI_SECRET_SECOPS_SLIM_SHARED_SECRET="$(_read_op_secret "secops/slim_shared_secret")"

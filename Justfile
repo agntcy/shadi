@@ -94,6 +94,9 @@ secops-run:
 secops-approve-prs:
   uv run --no-project --python .venv/bin/python agents/secops/secops.py --approve-prs
 
+secops-test-python:
+  uv run --with pytest pytest agents/secops/tests/test_skills.py
+
 secops-a2a:
   uv run --no-project --python .venv/bin/python agents/secops/a2a_server.py
 

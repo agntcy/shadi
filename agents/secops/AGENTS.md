@@ -52,8 +52,9 @@ For **each** allowlisted repository (or the subset specified by `repos`) the age
 2. Sync the fork's default branch with `git fetch upstream && git reset --hard upstream/HEAD`.
 3. Clone the fork locally under the workspace directory.
 4. Search the local clone's filesystem for Dockerfiles matching the affected image or service name.
-5. Insert OS-level package upgrades into every matching Dockerfile after each `FROM` line.
-6. Commit all changes on a dated branch `secops/remediate-YYYYMMDD` and push to the fork.
+5. For container CVEs, prefer rebuilding the image and, when the scan indicates the issue comes from the base image lineage, refresh the `FROM` image/tag instead of adding ad-hoc package upgrade lines.
+6. If a container finding only needs rebuild guidance, record that guidance in the remediation output or issue rather than mutating the `Dockerfile`.
+7. Commit safe source changes on a dated branch `secops/remediate-YYYYMMDD` and push to the fork.
 
 Fork names follow `{fork_owner}/{repo-name}`. Branch names follow `secops/remediate-YYYYMMDD`.
 

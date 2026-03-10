@@ -204,6 +204,29 @@ def run_git(args, cwd, token=None):
     )
 
 
+def _resolve_repo_root(repo_path):
+    return Path(repo_path).resolve()
+
+
+def _path_within_repo(repo_path, path_value):
+    repo_root = _resolve_repo_root(repo_path)
+    candidate = Path(path_value)
+    candidates = [candidate]
+    if not candidate.is_absolute():
+        candidates = [candidate.resolve(), (repo_root / candidate).resolve()]
+    for resolved in candidates:
+        try:
+            resolved.relative_to(repo_root)
+            return resolved
+        except ValueError:
+            continue
+    raise ValueError(f"{path_value!s} is outside repository {repo_root}")
+
+
+def _repo_relative_path(repo_path, path_value):
+    return str(_path_within_repo(repo_path, path_value).relative_to(_resolve_repo_root(repo_path)))
+
+
 def clone_or_update_repo(workspace_path, repo, token):
     repo_dir = workspace_path / repo.replace("/", "__")
     if repo_dir.exists():
@@ -382,49 +405,15 @@ def detect_dockerfile_ecosystem(path):
     return "unknown"
 
 
-def patch_dockerfile_for_package_cve(path, package, fixed_version):
-    """Insert an OS-level package pin/upgrade into a Dockerfile to fix a CVE.
-
-    For Alpine images inserts: RUN apk add --no-cache <pkg>=<ver>
-    For Debian images inserts: RUN apt-get update && apt-get install -y --no-install-recommends <pkg>
-    The line is placed immediately after the last FROM … AS … stage header.
-    Returns True if the file was modified.
-    """
+def extract_dockerfile_base_image(path):
+    """Return the first base image reference from a Dockerfile, if present."""
     if not path.exists():
-        return False
-
-    ecosystem = detect_dockerfile_ecosystem(path)
-    lines = path.read_text(encoding="utf-8").splitlines()
-
-    # Idempotency: skip if an upgrade line for this package already exists.
-    pkg_lower = package.lower()
-    for line in lines:
-        if pkg_lower in line.lower() and re.search(r"apk\s+add|apk\s+upgrade|apt-get\s+install", line):
-            return False
-
-    if ecosystem == "alpine":
-        if fixed_version:
-            upgrade_cmd = f"RUN apk add --no-cache --upgrade '{package}={fixed_version}'"
-        else:
-            upgrade_cmd = f"RUN apk upgrade --no-cache {package}"
-    elif ecosystem == "debian":
-        upgrade_cmd = (
-            f"RUN apt-get update && apt-get install -y --no-install-recommends {package} "
-            f"&& rm -rf /var/lib/apt/lists/*"
-        )
-    else:
-        # Unknown base — leave a comment so the developer knows what to fix.
-        upgrade_cmd = f"# TODO(secops-cve): upgrade {package} to {fixed_version!r} to fix CVE"
-
-    # Insert after each FROM…AS line (multi-stage builds need the fix in every stage).
-    new_lines = []
-    for i, line in enumerate(lines):
-        new_lines.append(line)
-        if re.match(r"^\s*FROM\s+", line, re.IGNORECASE):
-            new_lines.append(upgrade_cmd)
-
-    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    return True
+        return ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^\s*FROM\s+([^\s]+)", line, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def update_dockerfile_base_image(path, image, version):
@@ -471,7 +460,7 @@ def apply_dependency_patch(repo_path, alert):
         if not updated:
             return {"status": "not_updated", "dependency": name, "ecosystem": ecosystem}
         try:
-            run_git(["add", str(manifest)], repo_path, token=None)
+            run_git(["add", _repo_relative_path(repo_path, manifest)], repo_path, token=None)
             cargo_args = [
                 "cargo",
                 "update",
@@ -480,7 +469,7 @@ def apply_dependency_patch(repo_path, alert):
                 "--precise",
                 patched_version,
                 "--manifest-path",
-                str(manifest),
+                str(_path_within_repo(repo_path, manifest)),
             ]
             subprocess.run(cargo_args, cwd=repo_path, check=True, capture_output=True, text=True)
             run_git(["add", "Cargo.lock"], repo_path, token=None)
@@ -499,7 +488,7 @@ def apply_dependency_patch(repo_path, alert):
         if not updated:
             return {"status": "not_updated", "dependency": name, "ecosystem": ecosystem}
         try:
-            run_git(["add", str(manifest)], repo_path, token=None)
+            run_git(["add", _repo_relative_path(repo_path, manifest)], repo_path, token=None)
             npm_cwd = manifest.parent
             subprocess.run(
                 ["npm", "install", "--package-lock-only"],
@@ -510,7 +499,7 @@ def apply_dependency_patch(repo_path, alert):
             )
             lockfile = npm_cwd / "package-lock.json"
             if lockfile.exists():
-                run_git(["add", str(lockfile)], repo_path, token=None)
+                run_git(["add", _repo_relative_path(repo_path, lockfile)], repo_path, token=None)
         except subprocess.CalledProcessError as exc:
             return {
                 "status": "update_failed",
@@ -542,7 +531,7 @@ def apply_dependency_patch(repo_path, alert):
                     capture_output=True,
                     text=True,
                 )
-                run_git(["add", str(manifest)], repo_path, token=None)
+                run_git(["add", _repo_relative_path(repo_path, manifest)], repo_path, token=None)
             except subprocess.CalledProcessError as exc:
                 return {
                     "status": "update_failed",
@@ -625,7 +614,7 @@ def apply_dependency_patch(repo_path, alert):
                 "ecosystem": ecosystem,
                 "manifest": manifest_path,
             }
-        run_git(["add", str(manifest)], repo_path, token=None)
+        run_git(["add", _repo_relative_path(repo_path, manifest)], repo_path, token=None)
         return {"status": "updated", "dependency": name, "ecosystem": ecosystem, "version": patched_version}
 
     return {"status": "unsupported", "dependency": name, "ecosystem": ecosystem}
@@ -639,7 +628,7 @@ def _extract_dockerfile_hints_from_workflows(repo_path: Path) -> list:
     resolved absolute ``Path`` to the Dockerfile inside *repo_path*.
 
     Understands:
-    * ``docker/build-push-action`` ``file:`` and ``context:`` YAML fields.
+    * ``docker/build-push-action`` ``file:``, ``dockerfile:``, and ``context:`` YAML fields.
     * ``docker build -f|--file <path>`` inside ``run:`` steps.
     * Image name from ``tags:`` and ``image:`` fields for richer hint matching.
     * Step ``name:`` fields that contain hyphenated service identifiers.
@@ -650,6 +639,8 @@ def _extract_dockerfile_hints_from_workflows(repo_path: Path) -> list:
     if not workflow_dir.exists():
         return []
 
+    repo_root = _resolve_repo_root(repo_path)
+
     results: list = []          # list[tuple[list[str], Path]]
     seen_paths: set = set()
 
@@ -658,8 +649,8 @@ def _extract_dockerfile_hints_from_workflows(repo_path: Path) -> list:
     def _safe_resolve(path_str: str) -> "Path | None":
         """Resolve *path_str* relative to *repo_path*, rejecting escapes."""
         try:
-            candidate = (repo_path / path_str.lstrip("./")).resolve()
-            candidate.relative_to(repo_path.resolve())   # raises ValueError on escape
+            candidate = (repo_root / path_str.lstrip("./")).resolve()
+            candidate.relative_to(repo_root)   # raises ValueError on escape
             return candidate
         except (ValueError, OSError):
             return None
@@ -685,9 +676,15 @@ def _extract_dockerfile_hints_from_workflows(repo_path: Path) -> list:
 
     def _flush(blk: dict) -> None:
         target: "Path | None" = None
-        # Prefer explicit file: path.
-        if blk.get("file") and "${{" not in blk["file"]:
-            c = _safe_resolve(blk["file"])
+        # Prefer explicit Dockerfile path. In docker/build-push-action, the
+        # dockerfile path is commonly relative to the build context.
+        dockerfile_path = blk.get("file") or blk.get("dockerfile") or ""
+        context_path = blk.get("context") or ""
+        if dockerfile_path and "${{" not in dockerfile_path:
+            candidate_path = dockerfile_path
+            if blk.get("dockerfile") and context_path and "${{" not in context_path:
+                candidate_path = str(Path(context_path) / dockerfile_path)
+            c = _safe_resolve(candidate_path)
             if c and c.exists():
                 target = c
         # Fall back to context dir + implicit Dockerfile.
@@ -730,7 +727,7 @@ def _extract_dockerfile_hints_from_workflows(repo_path: Path) -> list:
             if re.match(r"^\s{2,}-\s", line):   # step/list-item boundary
                 _flush(current)
                 current = {}
-            m = re.match(r"^\s*(file|context|tags|image|name):\s*['\"]?(.*?)['\"]?\s*$", line.strip())
+            m = re.match(r"^\s*(file|dockerfile|context|tags|image|name):\s*['\"]?(.*?)['\"]?\s*$", line.strip())
             if m:
                 current[m.group(1)] = m.group(2).strip().strip("'\"")
         _flush(current)
@@ -750,43 +747,110 @@ def _extract_dockerfile_hints_from_workflows(repo_path: Path) -> list:
     return results
 
 
+def _list_repo_dockerfiles(repo_path: Path) -> list[Path]:
+    """Return all Dockerfiles in *repo_path* using portable Python traversal."""
+    dockerfiles: list[Path] = []
+    for root, dirs, files in os.walk(_resolve_repo_root(repo_path)):
+        dirs[:] = [
+            name
+            for name in dirs
+            if not name.startswith(".") and name not in ("node_modules", "vendor", "__pycache__")
+        ]
+        if "Dockerfile" in files:
+            dockerfiles.append(Path(root) / "Dockerfile")
+    return dockerfiles
+
+
+def _tokenize_match_text(value: str) -> set[str]:
+    """Split a path-like or image-like value into lowercase match tokens."""
+    return {
+        token
+        for token in re.split(r"[^a-z0-9]+", value.lower())
+        if token
+    }
+
+
+def _select_best_dockerfile_candidate(repo_path: Path, candidates, hints):
+    """Return the best matching Dockerfile path for the given alert hints."""
+    stop_tokens = {
+        "artifacts",
+        "container",
+        "containers",
+        "dockerfile",
+        "ghcr",
+        "io",
+        "latest",
+        "report",
+        "trivy",
+    }
+    scored = []
+    for candidate_hints, dockerfile in candidates:
+        rel_path = _repo_relative_path(repo_path, dockerfile)
+        path_tokens = _tokenize_match_text(rel_path)
+        candidate_hint_tokens = set()
+        for candidate_hint in candidate_hints:
+            candidate_hint_tokens.update(_tokenize_match_text(candidate_hint))
+        candidate_hint_tokens -= stop_tokens
+
+        best_overlap = 0
+        exact_parent = 0
+        for hint in hints:
+            hint_tokens = _tokenize_match_text(hint) - stop_tokens
+            if not hint_tokens:
+                continue
+            overlap = len(hint_tokens & (path_tokens | candidate_hint_tokens))
+            if overlap > best_overlap:
+                best_overlap = overlap
+            if dockerfile.parent.name.lower() in hint_tokens or dockerfile.parent.name.lower() in candidate_hint_tokens:
+                exact_parent = 1
+        if best_overlap > 0:
+            scored.append((best_overlap, exact_parent, dockerfile))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda item: (item[0], item[1], -len(item[2].parts)), reverse=True)
+    best_overlap, best_exact_parent, best_path = scored[0]
+    if len(scored) == 1:
+        return best_path
+    second_overlap, second_exact_parent, _ = scored[1]
+    if (best_overlap, best_exact_parent) > (second_overlap, second_exact_parent):
+        return best_path
+    return None
+
+
 def _find_dockerfile_for_alert(repo_path, alert, fields):
     """Search the local repository clone for the Dockerfile that corresponds to
     a code-scanning (Trivy) alert.
 
     Strategy (in priority order):
     1. ``location.path`` in the alert points directly at a Dockerfile — use it.
-    2a. Derive a service/image name from every available hint (``location.path``,
-       ``source_sarif_file`` in the Trivy message, ``rule.description``) and
-       search all Dockerfiles in the repo for a directory-name match.
-    2b. Match hints against the ``(service, Dockerfile)`` mapping extracted from
-       ``.github/workflows/`` — handles repos where Dockerfiles are not in the
-       expected service directory.
-    3. If only one Dockerfile exists in the repo, assume it is the target.
-    4. Give up — return None so the caller can log ``no_dockerfile_found``.
+    2. Use Dockerfile locations declared in ``.github/workflows/`` as the
+       authoritative set of container build definitions, and match alert hints
+       against those paths first.
+    3. If workflow metadata is absent or inconclusive, fall back to a generic
+       Dockerfile scan of the local clone.
+    4. If only one Dockerfile exists in the repo, assume it is the target.
+    5. Give up — return None so the caller can log ``no_dockerfile_found``.
 
     The repo is already cloned locally (by ``clone_or_update_fork``), so the
     search uses pure filesystem operations — no network calls.
     """
+    repo_root = _resolve_repo_root(repo_path)
     instance = alert.get("most_recent_instance") or {}
     location = instance.get("location") or {}
     alert_path = location.get("path", "")
-    rule = alert.get("rule") or {}
+    category = instance.get("category", "") or ""
+    environment_raw = instance.get("environment", "") or ""
 
     # 1. Direct Dockerfile path from the alert.
     if alert_path and re.search(r"dockerfile", alert_path, re.IGNORECASE):
-        candidate = repo_path / alert_path
+        candidate = repo_root / alert_path
         if candidate.exists():
             return candidate
 
-    # Enumerate every Dockerfile in the repository once.
-    all_dockerfiles = list(repo_path.glob("**/Dockerfile"))
-    # Filter out anything under hidden / vendor / node_modules directories.
-    all_dockerfiles = [
-        p for p in all_dockerfiles
-        if not any(part.startswith(".") or part in ("node_modules", "vendor")
-                   for part in p.relative_to(repo_path).parts)
-    ]
+    # Enumerate every Dockerfile in the repository once using Python traversal.
+    all_dockerfiles = _list_repo_dockerfiles(repo_path)
 
     if not all_dockerfiles:
         return None
@@ -800,44 +864,43 @@ def _find_dockerfile_for_alert(repo_path, alert, fields):
     # Parent directory of the SARIF path (e.g. "trivy-report-frontend" → "frontend")
     sarif_parent = Path(sarif_raw).parent.name
     hints.append(re.sub(r"^trivy[-_]?(report[-_])?", "", sarif_parent, flags=re.IGNORECASE))
-    # Rule description sometimes contains the image name.
-    hints.append(rule.get("description", "") or "")
-    # Container image from alert_path if it looks like an image ref (no extension).
-    if alert_path and "." not in Path(alert_path).name:
-        hints.append(Path(alert_path).name)
-
-    # 2a. Try each hint against Dockerfile parent directory names.
-    for hint in hints:
-        hint = hint.strip().lower()
-        if not hint:
-            continue
-        # Exact parent directory name match.
-        exact = [p for p in all_dockerfiles if p.parent.name.lower() == hint]
-        if exact:
-            return exact[0]
-        # Partial match: hint is contained in the parent directory name.
-        partial = [p for p in all_dockerfiles if hint in p.parent.name.lower()]
-        if len(partial) == 1:
-            return partial[0]
-        if len(partial) > 1:
-            # Pick the shallowest path (fewest path components).
-            return sorted(partial, key=lambda p: len(p.parts))[0]
-
-    # 2b. Match hints against the workflow-derived (service, Dockerfile) map.
-    #     Handles repos where Dockerfiles sit in non-obvious locations but the
-    #     GitHub Actions workflow maps a service name to the correct path.
-    workflow_map = _extract_dockerfile_hints_from_workflows(repo_path)
-    for wf_hints, wf_df in workflow_map:
-        for hint in hints:
-            hint_lower = hint.strip().lower()
-            if not hint_lower:
+    # Category often includes the scanned image name, e.g. trivy-scheduler-agent.
+    hints.append(re.sub(r"^trivy[-_]?(report[-_])?", "", category, flags=re.IGNORECASE))
+    if alert_path:
+        alert_path_obj = Path(alert_path)
+        hints.append(alert_path_obj.name)
+        if alert_path_obj.parent.name:
+            hints.append(alert_path_obj.parent.name)
+    if environment_raw:
+        try:
+            environment = json.loads(environment_raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            environment = {}
+        for key in ("image", "repo"):
+            value = environment.get(key)
+            if not value:
                 continue
-            for wf_hint in wf_hints:
-                if hint_lower == wf_hint or hint_lower in wf_hint or wf_hint in hint_lower:
-                    if wf_df.exists():
-                        return wf_df
+            value_str = str(value)
+            hints.append(value_str.split("/")[-1].split(":")[0])
+            parts = [part for part in value_str.split("/") if part]
+            if len(parts) >= 2:
+                hints.append(parts[-2])
 
-    # 3. If only one Dockerfile in the whole repo, it must be the one.
+    # 2. Match hints against the workflow-derived (service, Dockerfile) map.
+    #    These paths are the authoritative container build definitions.
+    workflow_map = _extract_dockerfile_hints_from_workflows(repo_path)
+    workflow_target = _select_best_dockerfile_candidate(repo_path, workflow_map, hints)
+    if workflow_target is not None:
+        return workflow_target
+
+    # 3. Fall back to the repo-wide Dockerfile scan if workflow metadata is
+    #    absent or insufficient.
+    repo_candidates = [([dockerfile.parent.name.lower()], dockerfile) for dockerfile in all_dockerfiles]
+    repo_target = _select_best_dockerfile_candidate(repo_path, repo_candidates, hints)
+    if repo_target is not None:
+        return repo_target
+
+    # 4. If only one Dockerfile in the whole repo, it must be the one.
     if len(all_dockerfiles) == 1:
         return all_dockerfiles[0]
 
@@ -845,15 +908,16 @@ def _find_dockerfile_for_alert(repo_path, alert, fields):
 
 
 def apply_container_cve_patch(repo_path, alert):
-    """Apply a Dockerfile fix for a SARIF / code-scanning CVE alert.
+    """Plan container CVE remediation for a SARIF / code-scanning alert.
 
     The repository must already be cloned locally (done by ``clone_or_update_fork``
     in ``remediate_repos``).  This function:
       1. Parses the Trivy message to get the vulnerable package + fixed version.
       2. Searches the local clone for the matching Dockerfile using
          ``_find_dockerfile_for_alert`` (filesystem glob + name heuristics).
-      3. Patches the Dockerfile via ``patch_dockerfile_for_package_cve`` and
-         stages the change with ``git add``.
+      3. Recommends a clean remediation path: rebuild the image and, when the
+         scan points at an outdated base image, prefer updating the ``FROM``
+         line instead of inserting ad-hoc package-install commands.
 
     Returns a result dict with keys: status, cve_id, package, fixed_version, path.
     """
@@ -883,25 +947,28 @@ def apply_container_cve_patch(repo_path, alert):
             "path": alert_path,
         }
 
-    patched = patch_dockerfile_for_package_cve(target, package, fixed_version)
-    if not patched:
+    rel = _repo_relative_path(repo_path, target)
+    base_image = extract_dockerfile_base_image(target)
+    if not base_image:
         return {
-            "status": "already_patched",
+            "status": "base_image_review_required",
             "cve_id": cve_id,
+            "severity": severity,
             "package": package,
             "fixed_version": fixed_version,
-            "path": str(target.relative_to(repo_path)),
+            "path": rel,
+            "recommendation": "Review the Dockerfile and rebuild the image. Do not add ad-hoc package-install lines for this CVE.",
         }
 
-    rel = str(target.relative_to(repo_path))
-    run_git(["add", rel], repo_path, token=None)
     return {
-        "status": "updated",
+        "status": "base_image_refresh_recommended",
         "cve_id": cve_id,
         "severity": severity,
         "package": package,
         "fixed_version": fixed_version,
         "path": rel,
+        "base_image": base_image,
+        "recommendation": "Rebuild the image. If the container scan attributes the CVE to the base image lineage, update the FROM image/tag rather than adding package-level Dockerfile edits.",
     }
 
 
@@ -1007,18 +1074,37 @@ def clone_or_update_fork(workspace_path, upstream_repo, fork_owner, token):
 def create_remediation_issue(repo, updates, token, cwd):
     issue_title = "SecOps: remediate critical vulnerabilities"
     issue_body_lines = [
-        "Automated remediation for critical Dependabot alerts.",
+        "Automated remediation guidance for critical dependency and container-image alerts.",
         "",
         "Updates:",
     ]
     for update in updates:
-        dep = update.get("dependency") or "unknown"
-        version = update.get("version")
+        dep = update.get("dependency")
+        if dep:
+            version = update.get("version")
+            status_line = update.get("status")
+            if version:
+                issue_body_lines.append(f"- {dep}: {version} ({status_line})")
+            else:
+                issue_body_lines.append(f"- {dep}: {status_line}")
+            continue
+
+        cve_id = update.get("cve_id") or "?"
+        package = update.get("package") or "container finding"
+        base_image = update.get("base_image")
+        path = update.get("path")
         status_line = update.get("status")
-        if version:
-            issue_body_lines.append(f"- {dep}: {version} ({status_line})")
-        else:
-            issue_body_lines.append(f"- {dep}: {status_line}")
+        fixed_version = update.get("fixed_version")
+
+        line = f"- [{cve_id}] {package}"
+        if fixed_version:
+            line += f" fixed in {fixed_version}"
+        if base_image:
+            line += f" on base image {base_image}"
+        if path:
+            line += f" in {path}"
+        line += f" ({status_line})"
+        issue_body_lines.append(line)
     issue_body_lines.append("")
     issue_body_lines.append("Generated by SHADI SecOps.")
 
@@ -1149,19 +1235,34 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
             update["severity"] = get_alert_severity(alert)
             updates.append(update)
 
-        # Apply Dockerfile patches for SARIF / code-scanning CVEs.
+        # Container scan alerts are turned into rebuild/base-image guidance.
         container_updates = []
         for cs_alert in actionable_cs:
             try:
                 cu = apply_container_cve_patch(repo_path, cs_alert)
             except (subprocess.CalledProcessError, OSError) as exc:
                 cve_id = (cs_alert.get("rule") or {}).get("id", "?")
-                cu = {"status": "patch_error", "cve_id": cve_id, "error": str(exc)}
+                cu = {"status": "analysis_error", "cve_id": cve_id, "error": str(exc)}
             container_updates.append(cu)
 
         all_updates = updates + container_updates
         status = run_git(["status", "--porcelain"], repo_path, github_token)
         if not status.stdout.strip():
+            container_follow_up = [
+                cu
+                for cu in container_updates
+                if cu.get("status") in ("base_image_refresh_recommended", "base_image_review_required")
+            ]
+            if container_follow_up:
+                issue_number, issue_url = create_remediation_issue(repo, all_updates, github_token, repo_path)
+                remediation[repo] = {
+                    "status": "container_rebuild_recommended",
+                    "updates": all_updates,
+                    "issue_number": issue_number,
+                    "issue_url": issue_url,
+                }
+                run_git(["checkout", base_branch], repo_path, github_token)
+                continue
             remediation[repo] = {
                 "status": "no_changes",
                 "updates": all_updates,
@@ -1180,7 +1281,7 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
         run_git(["push", "origin", branch_name], repo_path, github_token)
 
         pr_body_lines = [
-            "Automated remediation for critical Dependabot and container-scan vulnerabilities.",
+            "Automated remediation for critical dependency vulnerabilities and container-image findings.",
             "",
         ]
         if updates:
@@ -1194,16 +1295,19 @@ def remediate_repos(config, github_token, report, workspace_dir, create_prs=True
                 else:
                     pr_body_lines.append(f"- {dep}: {status_line}")
         if container_updates:
-            pr_body_lines += ["", "**Dockerfile / container CVE patches:**"]
+            pr_body_lines += ["", "**Container image remediation guidance:**"]
             for cu in container_updates:
                 cve = cu.get("cve_id") or "?"
                 pkg = cu.get("package") or "?"
                 ver = cu.get("fixed_version") or ""
                 path = cu.get("path") or "?"
+                base_image = cu.get("base_image") or ""
                 st = cu.get("status")
                 line = f"- [{cve}] {pkg}"
                 if ver:
-                    line += f" → {ver}"
+                    line += f" fixed in {ver}"
+                if base_image:
+                    line += f" on {base_image}"
                 line += f" in `{path}` ({st})"
                 pr_body_lines.append(line)
 

@@ -63,11 +63,12 @@ or lock files where a safe patched version is available.
 4. Enumerate all `Dockerfile`s in the local clone (skips `.git`, `node_modules`, `vendor`).
 5. Match each Trivy alert to the correct Dockerfile using the service/image name extracted
    from the SARIF artifact path, alert location, or rule description.
-6. Insert an OS-level upgrade after every `FROM` line:
-   - Alpine: `RUN apk add --no-cache --upgrade 'pkg=ver'`
-   - Debian/Ubuntu: `RUN apt-get update && apt-get install -y --no-install-recommends pkg`
-7. Multi-stage builds are fully supported. Patches are idempotent.
-8. Commit on `secops/remediate-YYYYMMDD` branch, push to fork, optionally open PR.
+6. Prefer a clean image refresh path:
+  - rebuilding the image is usually enough for CVEs to disappear on the next scan,
+  - if the scan indicates the vulnerable package comes from the base image lineage, update the `FROM` image/tag and rebuild,
+  - do not add ad-hoc OS package installation or upgrade lines to the `Dockerfile` just to silence the scan.
+7. If a container finding requires follow-up but does not produce a safe code change, the agent opens or recommends a remediation issue instead of polluting the `Dockerfile`.
+8. Commit on `secops/remediate-YYYYMMDD` branch only when there is an actual safe source change, push to fork, optionally open PR.
 
 Must be called after `fetch_security_alerts`.
 
@@ -132,7 +133,7 @@ Returns:
 | "scan", "check alerts", "run report" | `fetch_security_alerts` → `generate_security_report` |
 | "remediate", "patch vulnerabilities" | `fetch_security_alerts` → `generate_security_report` → `remediate_vulnerabilities` |
 | "remediate and open PRs" | same as above with `create_prs=True` |
-| "fix container CVEs", "patch Dockerfiles" | `fetch_security_alerts` → `remediate_vulnerabilities` (handles Dockerfile patching automatically) |
+| "fix container CVEs", "patch Dockerfiles" | `fetch_security_alerts` → `remediate_vulnerabilities` (produces rebuild/base-image guidance and only updates `FROM` lines when the scan clearly supports it) |
 | "remediate only agentic-apps" (specific repo) | `fetch_security_alerts(repos="agntcy/agentic-apps")` → `remediate_vulnerabilities(repos="agntcy/agentic-apps")` |
 | "approve PRs" | `approve_queued_prs` |
 | "show report", "latest findings" | `get_latest_report` (no re-scan needed) |
@@ -152,15 +153,15 @@ Returns:
 | `fork_sync_failed` | Could not resolve upstream base branch |
 | `pr_failed` | `gh pr create` failed; `error` has details |
 
-### Container CVE patch status codes (per alert)
+### Container CVE remediation status codes (per alert)
 
 | Code | Meaning |
 |------|---------|
-| `updated` | Dockerfile patched and `git add`ed |
-| `already_patched` | An equivalent upgrade line already exists — skipped |
+| `base_image_refresh_recommended` | Rebuild the image and prefer a base-image tag refresh over package-layer Dockerfile edits |
+| `base_image_review_required` | Dockerfile found, but the base image could not be resolved cleanly; review the scan and image lineage manually |
 | `no_package` | Trivy message did not include a parseable package name |
 | `no_dockerfile_found` | Could not locate a Dockerfile for this image in the repo (checked: direct path, `**/service-name/Dockerfile`, fuzzy parent-dir match, SARIF artifact parent) |
-| `patch_error` | `git add` or filesystem error staging the patch; `error` field has details — other alerts continue |
+| `analysis_error` | Filesystem or analysis error while deriving remediation guidance; `error` field has details — other alerts continue |
 
 ## Parameter guidance
 
@@ -178,7 +179,7 @@ Returns:
   - Dependabot alerts (GitHub Dependabot API, `state=open`).
   - GitHub Code Scanning alerts (SARIF/Trivy, `state=open`) — container image CVEs.
 - Actionable severity: `critical`, `high`, `error`, and `warning` for Code Scanning.
-- Actions: report, triage, plan; optional PR creation for safe upgrades and Dockerfile patches.
+- Actions: report, triage, plan; optional PR creation for safe dependency upgrades and base-image updates.
 - Human-in-the-loop: required before merge; never auto-merge.
 
 ## Inputs
@@ -286,7 +287,7 @@ endpoint = "http://localhost:47357"
          - Abort with `skipped_dirty_repo` if the working tree is dirty.
          - If not yet cloned: `gh repo clone {fork_owner}/{repo} <workspace_dir>`
       3. **Create fix branch** — `git checkout -b fix/secops-remediate-YYYYMMDD`
-      4. **Apply patches** — `Cargo.toml` bumps + `cargo update`, `package.json` bumps + `npm install`, `uv.lock` bumps via `uv lock --upgrade-package`, `FROM` line updates in Dockerfiles.
+      4. **Apply patches** — `Cargo.toml` bumps + `cargo update`, `package.json` bumps + `npm install`, `uv.lock` bumps via `uv lock --upgrade-package`, `FROM` line updates in Dockerfiles when the remediation is a base-image refresh.
       5. **Commit** — `git add -A` then `git commit -s -S -m "chore(secops): remediate critical vulnerabilities"` using Conventional Commits format. `-s` adds a `Signed-off-by` trailer; `-S` GPG-signs the commit.
       6. **Push** — `git push origin fix/secops-remediate-YYYYMMDD` (push to fork).
       7. **Open remediation issue** on the upstream repo via `gh api repos/{upstream}/issues`.

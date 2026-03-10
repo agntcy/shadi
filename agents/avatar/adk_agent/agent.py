@@ -214,6 +214,27 @@ async def send_message(types, client, text):
     return output
 
 
+def format_secops_error(exc):
+    messages = []
+    current = exc
+    visited = set()
+    while current and id(current) not in visited:
+        visited.add(id(current))
+        message = str(current).strip()
+        if message:
+            messages.append(message)
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+    combined = " | ".join(messages)
+    if "session handshake failed" in combined:
+        return (
+            "SecOps connection failed during SLIM session handshake. "
+            "Check that the SecOps A2A server is running and that Avatar and SecOps use the same "
+            "SLIM endpoint, identity, shared secret, and TLS settings."
+        )
+    return str(exc)
+
+
 def normalize_secops_payload(payload):
     if isinstance(payload, dict):
         return json.dumps(payload)
@@ -243,7 +264,7 @@ async def send_secops_command(payload):
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        return f"ERROR calling SecOps: {exc}"
+        return f"ERROR calling SecOps: {format_secops_error(exc)}"
 
 
 config_path, config = load_secops_config()

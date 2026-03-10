@@ -221,48 +221,28 @@ class TestDetectDockerfileEcosystem:
 
 
 # ===========================================================================
-# patch_dockerfile_for_package_cve
+# extract_dockerfile_base_image
 # ===========================================================================
 
 
-class TestPatchDockerfileForPackageCVE:
-    def test_alpine_with_version(self, tmp_path):
+class TestExtractDockerfileBaseImage:
+    def test_returns_first_from_image(self, tmp_path):
         p = write(tmp_path / "Dockerfile", "FROM alpine:3.19\nRUN echo app\n")
-        assert skills.patch_dockerfile_for_package_cve(p, "zlib", "1.2.13-r0") is True
-        content = p.read_text()
-        assert "apk add --no-cache --upgrade 'zlib=1.2.13-r0'" in content
+        assert skills.extract_dockerfile_base_image(p) == "alpine:3.19"
 
-    def test_alpine_without_version(self, tmp_path):
-        p = write(tmp_path / "Dockerfile", "FROM alpine:3.19\n")
-        assert skills.patch_dockerfile_for_package_cve(p, "zlib", "") is True
-        assert "apk upgrade --no-cache zlib" in p.read_text()
-
-    def test_debian(self, tmp_path):
-        p = write(tmp_path / "Dockerfile", "FROM debian:bookworm\n")
-        assert skills.patch_dockerfile_for_package_cve(p, "libssl1.1", "1.1.1n") is True
-        assert "apt-get install -y --no-install-recommends libssl1.1" in p.read_text()
-
-    def test_unknown_ecosystem_leaves_comment(self, tmp_path):
-        p = write(tmp_path / "Dockerfile", "FROM scratch\n")
-        assert skills.patch_dockerfile_for_package_cve(p, "mypkg", "1.0") is True
-        assert "TODO(secops-cve)" in p.read_text()
-
-    def test_idempotent_alpine(self, tmp_path):
-        p = write(tmp_path / "Dockerfile", "FROM alpine:3.19\nRUN apk add --no-cache --upgrade 'zlib=1.2.13-r0'\n")
-        assert skills.patch_dockerfile_for_package_cve(p, "zlib", "1.2.13-r0") is False
-
-    def test_multistage_patches_every_stage(self, tmp_path):
+    def test_preserves_multistage_first_image(self, tmp_path):
         p = write(
             tmp_path / "Dockerfile",
-            "FROM alpine:3.19 AS builder\nRUN make\nFROM alpine:3.19\nRUN ./app\n",
+            "FROM python:3.12 AS builder\nRUN make\nFROM alpine:3.19\nRUN ./app\n",
         )
-        skills.patch_dockerfile_for_package_cve(p, "zlib", "1.2.13-r0")
-        content = p.read_text()
-        # Upgrade line should appear after each FROM
-        assert content.count("apk add --no-cache --upgrade 'zlib=1.2.13-r0'") == 2
+        assert skills.extract_dockerfile_base_image(p) == "python:3.12"
 
     def test_missing_file(self, tmp_path):
-        assert skills.patch_dockerfile_for_package_cve(tmp_path / "Dockerfile", "zlib", "1.0") is False
+        assert skills.extract_dockerfile_base_image(tmp_path / "Dockerfile") == ""
+
+    def test_no_from_returns_empty(self, tmp_path):
+        p = write(tmp_path / "Dockerfile", "# generated elsewhere\n")
+        assert skills.extract_dockerfile_base_image(p) == ""
 
 
 # ===========================================================================
@@ -501,6 +481,24 @@ class TestExtractDockerfileHintsFromWorkflows:
         hints, _ = results[0]
         assert "scheduler-agent" in hints
 
+        def test_dockerfile_field_resolves_relative_to_context(self, tmp_path):
+                wf = textwrap.dedent("""\
+                        jobs:
+                            build:
+                                strategy:
+                                    matrix:
+                                        include:
+                                            - name: worker-agent
+                                                dockerfile: containers/worker/Dockerfile
+                                                context: services/app
+                """)
+                repo = self._make_repo(tmp_path, ["services/app/containers/worker/Dockerfile"], wf)
+                results = skills._extract_dockerfile_hints_from_workflows(repo)
+                assert len(results) == 1
+                hints, df_path = results[0]
+                assert df_path == repo / "services" / "app" / "containers" / "worker" / "Dockerfile"
+                assert "worker-agent" in hints
+
 
 # ===========================================================================
 # _find_dockerfile_for_alert
@@ -558,11 +556,170 @@ class TestFindDockerfileForAlert:
         result = skills._find_dockerfile_for_alert(tmp_path, alert, fields)
         assert result == df
 
+    def test_workflow_path_preferred_over_generic_repo_match(self, tmp_path):
+        workflow_df = write(
+            tmp_path / "services" / "app" / "containers" / "scheduler" / "Dockerfile",
+            "FROM alpine:3\n",
+        )
+        write(
+            tmp_path / "scratch" / "scheduler" / "Dockerfile",
+            "FROM alpine:3\n",
+        )
+        wf_dir = tmp_path / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "build.yml").write_text(
+            textwrap.dedent(
+                """\
+                jobs:
+                  build:
+                    strategy:
+                      matrix:
+                        include:
+                          - name: scheduler-agent
+                            dockerfile: containers/scheduler/Dockerfile
+                            context: services/app
+                """
+            ),
+            encoding="utf-8",
+        )
+        alert = {
+            "rule": {"id": "CVE-TEST", "severity": "warning", "description": ""},
+            "most_recent_instance": {
+                "category": "trivy-scheduler-agent",
+                "environment": json.dumps(
+                    {
+                        "image": "scheduler-agent",
+                        "repo": "registry.example/platform/scheduler-agent",
+                        "version": "latest",
+                    }
+                ),
+                "location": {"path": "platform/images/scheduler-agent"},
+                "message": {"text": "Package: libgnutls30t64\nFixed Version: 3.8.9-3+deb13u2\n"},
+            },
+        }
+        result = skills._find_dockerfile_for_alert(tmp_path, alert, {})
+        assert result == workflow_df
+
+    def test_filesystem_hint_match_without_workflow(self, tmp_path):
+        scheduler_df = write(
+            tmp_path / "tourist_scheduling_system" / "containers" / "scheduler" / "Dockerfile",
+            "FROM debian:bookworm\n",
+        )
+        write(
+            tmp_path / "tourist_scheduling_system" / "containers" / "ui" / "Dockerfile",
+            "FROM debian:bookworm\n",
+        )
+        write(
+            tmp_path / "tourist_scheduling_system" / "containers" / "frontend" / "Dockerfile",
+            "FROM nginx:1.27\n",
+        )
+        alert = {
+            "rule": {"id": "CVE-TEST", "severity": "warning", "description": ""},
+            "most_recent_instance": {
+                "category": "trivy-scheduler-agent",
+                "environment": json.dumps(
+                    {
+                        "image": "scheduler-agent",
+                        "repo": "registry.example/platform/scheduler-agent",
+                        "version": "latest",
+                    }
+                ),
+                "location": {"path": "platform/images/scheduler-agent"},
+                "message": {"text": "Package: libgnutls30t64\nFixed Version: 3.8.9-3+deb13u2\n"},
+            },
+        }
+        result = skills._find_dockerfile_for_alert(tmp_path, alert, {})
+        assert result == scheduler_df
+
     def test_hidden_dockerfiles_excluded(self, tmp_path):
         # A Dockerfile inside .docker should be ignored
         write(tmp_path / ".docker" / "Dockerfile", "FROM alpine:3\n")
         alert = self._alert()
         assert skills._find_dockerfile_for_alert(tmp_path, alert, {}) is None
+
+    def test_workflow_hint_match_from_category_and_environment(self, tmp_path):
+        df = write(
+            tmp_path / "tourist_scheduling_system" / "containers" / "scheduler" / "Dockerfile",
+            "FROM debian:bookworm\n",
+        )
+        wf_dir = tmp_path / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "build.yml").write_text(
+            textwrap.dedent(
+                """\
+                jobs:
+                  build:
+                    strategy:
+                      matrix:
+                        include:
+                          - name: scheduler-agent
+                            dockerfile: containers/scheduler/Dockerfile
+                            context: tourist_scheduling_system
+                """
+            ),
+            encoding="utf-8",
+        )
+        alert = {
+            "rule": {"id": "CVE-TEST", "severity": "warning", "description": ""},
+            "most_recent_instance": {
+                "category": "trivy-scheduler-agent",
+                "environment": json.dumps(
+                    {
+                        "image": "scheduler-agent",
+                        "repo": "registry.example/platform/scheduler-agent",
+                        "version": "latest",
+                    }
+                ),
+                "location": {"path": "platform/images/scheduler-agent"},
+                "message": {"text": "Package: libgnutls30t64\nFixed Version: 3.8.9-3+deb13u2\n"},
+            },
+        }
+        result = skills._find_dockerfile_for_alert(tmp_path, alert, {})
+        assert result == df
+
+    def test_relative_repo_path_with_workflow_context(self, tmp_path, monkeypatch):
+        repo_dir = tmp_path / "agentic-apps"
+        df = write(
+            repo_dir / "tourist_scheduling_system" / "containers" / "scheduler" / "Dockerfile",
+            "FROM debian:bookworm\n",
+        )
+        wf_dir = repo_dir / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "build-tss-images.yml").write_text(
+            textwrap.dedent(
+                """\
+                jobs:
+                  build:
+                    strategy:
+                      matrix:
+                        include:
+                          - name: scheduler-agent
+                            dockerfile: containers/scheduler/Dockerfile
+                            context: tourist_scheduling_system
+                """
+            ),
+            encoding="utf-8",
+        )
+        alert = {
+            "rule": {"id": "CVE-TEST", "severity": "warning", "description": ""},
+            "most_recent_instance": {
+                "category": "trivy-scheduler-agent",
+                "environment": json.dumps(
+                    {
+                        "image": "scheduler-agent",
+                        "repo": "registry.example/platform/scheduler-agent",
+                        "version": "latest",
+                    }
+                ),
+                "location": {"path": "platform/images/scheduler-agent"},
+                "message": {"text": "Package: libgnutls30t64\nFixed Version: 3.8.9-3+deb13u2\n"},
+            },
+        }
+        monkeypatch.chdir(tmp_path)
+
+        result = skills._find_dockerfile_for_alert(Path("agentic-apps"), alert, {})
+
+        assert result == df
 
 
 # ===========================================================================
@@ -586,14 +743,15 @@ class TestApplyContainerCvePatch:
             },
         }
 
-    def test_successful_patch(self, tmp_path):
+    def test_returns_base_image_refresh_guidance(self, tmp_path):
         write(tmp_path / "frontend" / "Dockerfile", "FROM alpine:3.19\n")
         with patch.object(skills, "run_git") as mock_git:
             result = skills.apply_container_cve_patch(tmp_path, self._make_alert())
-        assert result["status"] == "updated"
+        assert result["status"] == "base_image_refresh_recommended"
         assert result["cve_id"] == "CVE-2026-1234"
         assert result["package"] == "zlib"
-        mock_git.assert_called_once()
+        assert result["base_image"] == "alpine:3.19"
+        mock_git.assert_not_called()
 
     def test_no_package_in_message(self, tmp_path):
         write(tmp_path / "frontend" / "Dockerfile", "FROM alpine:3.19\n")
@@ -611,23 +769,16 @@ class TestApplyContainerCvePatch:
         result = skills.apply_container_cve_patch(tmp_path, self._make_alert())
         assert result["status"] == "no_dockerfile_found"
 
-    def test_already_patched(self, tmp_path):
-        write(
-            tmp_path / "frontend" / "Dockerfile",
-            "FROM alpine:3.19\nRUN apk add --no-cache --upgrade 'zlib=1.2.13'\n",
-        )
-        with patch.object(skills, "run_git"):
-            result = skills.apply_container_cve_patch(tmp_path, self._make_alert())
-        assert result["status"] == "already_patched"
+    def test_requires_manual_review_when_base_image_missing(self, tmp_path):
+        write(tmp_path / "frontend" / "Dockerfile", "# populated by build system\n")
+        result = skills.apply_container_cve_patch(tmp_path, self._make_alert())
+        assert result["status"] == "base_image_review_required"
 
-    def test_git_add_uses_relative_path(self, tmp_path):
+    def test_does_not_stage_container_guidance(self, tmp_path):
         write(tmp_path / "frontend" / "Dockerfile", "FROM alpine:3.19\n")
         with patch.object(skills, "run_git") as mock_git:
             skills.apply_container_cve_patch(tmp_path, self._make_alert())
-        args = mock_git.call_args[0][0]  # first positional arg → git args list
-        assert args[0] == "add"
-        added_path = args[1]
-        assert not Path(added_path).is_absolute(), "git add should use a relative path"
+        mock_git.assert_not_called()
 
 
 # ===========================================================================
@@ -695,6 +846,26 @@ class TestApplyDependencyPatch:
         # uv lock --upgrade-package must have been called
         cmd = mock_run.call_args[0][0]
         assert "uv" in cmd and "lock" in cmd
+
+    def test_uv_lock_git_add_uses_repo_relative_path(self, tmp_path, monkeypatch):
+        repo_dir = tmp_path / "agentic-apps"
+        lockfile = repo_dir / "tourist_scheduling_system" / "uv.lock"
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text("", encoding="utf-8")
+        alert = self._alert("pip", "pillow", "tourist_scheduling_system/uv.lock", "10.4.0")
+        monkeypatch.chdir(tmp_path)
+
+        with patch("shutil.which", return_value="/usr/bin/uv"), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch.object(skills, "run_git") as mock_git:
+            result = skills.apply_dependency_patch(Path("agentic-apps"), alert)
+
+        assert result["status"] == "updated"
+        mock_git.assert_called_once_with(
+            ["add", "tourist_scheduling_system/uv.lock"],
+            Path("agentic-apps"),
+            token=None,
+        )
 
     def test_uv_not_installed(self, tmp_path):
         (tmp_path / "uv.lock").write_text("", encoding="utf-8")
