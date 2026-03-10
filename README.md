@@ -12,7 +12,14 @@ SHADI is designed for environments where agents are long-lived, hold real creden
 - SQLCipher-backed encrypted local memory (`shadi_memory`).
 - Python bindings (`shadi_py`) for secrets, memory, and sandboxed execution.
 - SLIM transport integration for secure agent-to-agent messaging.
-- A practical SecOps agent demo and launch scripts.
+- Example agents and demos, including a practical SecOps workflow and launch scripts.
+
+Recent updates in this branch of the project:
+
+- SecOps now treats container CVEs as rebuild or base-image refresh work instead of mutating Dockerfiles with ad-hoc package upgrade lines.
+- Dockerfile resolution for container findings is workflow-first, using `.github/workflows/*` metadata before repo-wide scanning.
+- Demo launchers are hardened for the optional 1Password backend by reading required secrets before entering the sandbox.
+- Avatar surfaces clearer SLIM handshake errors when the SecOps A2A side is unavailable or misconfigured.
 
 ## Repository layout
 
@@ -22,7 +29,7 @@ SHADI is designed for environments where agents are long-lived, hold real creden
 - `crates/shadi_memory`: SQLCipher memory library and CLI (`shadi-memory`).
 - `crates/shadi_py`: Python extension module `shadi`.
 - `crates/agent_transport_slim` + `crates/slim_mas`: secure transport and moderation helpers.
-- `agents/secops`: SecOps agent, A2A server, and skill implementation.
+- `agents/secops`: example SecOps workload, A2A server, and skill implementation.
 - `docs`: architecture, security, CLI, demos, and integration docs.
 - `scripts`: local launch helpers for SLIM + agent demos.
 
@@ -141,7 +148,7 @@ The module exposes bindings for:
 
 ## SecOps demo and launch scripts
 
-The repo includes runnable examples under `agents/secops` and helper scripts in `scripts/`.
+The repo includes runnable demo workloads under `agents/secops` and helper scripts in `scripts/`.
 
 Common local flow:
 
@@ -150,6 +157,18 @@ Common local flow:
 ./scripts/import_secops_secrets.sh
 ./scripts/launch_secops_a2a.sh
 ./scripts/launch_avatar.sh
+```
+
+Focused Python tests for the SecOps skill:
+
+```bash
+just secops-test-python
+```
+
+Security scan for the SecOps skill package:
+
+```bash
+just secops-skill-scan
 ```
 
 See `scripts/README.md` and `docs/demo.md` for full setup details.
@@ -164,6 +183,7 @@ Primary docs live in `docs/`:
 - `docs/cli.md`: complete CLI reference
 - `docs/sandbox.md`: policy model and profile behavior
 - `docs/demo.md`: demo walkthrough
+- `docs/secops_agent.md`: SecOps demo workload and remediation behavior
 
 Build/serve docs locally:
 

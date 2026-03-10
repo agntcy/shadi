@@ -56,9 +56,11 @@ actions and prevent unauthorized data access or exfiltration.
 ### 2) Sandbox layer
 - **macOS**: Seatbelt profile enforcement for filesystem and network policies.
 - **Windows**: AppContainer + ACL allowlists + Job Objects (kill-on-close).
-- **CLI**: `shadi` provides command blocklists and a JSON policy format.
+- **CLI**: `shadi` provides JSON policy loading, profile defaults, optional command blocklists, and brokered secret injection.
 - **Portable launcher model**: `shadi` supports built-in profiles
   (`strict`, `balanced`, `connected`) for portable secure launch defaults.
+- **Launch-time enforcement**: Policy is resolved before the agent process starts, so the sandbox is not a prompt-level suggestion that the agent can rewrite from inside the session.
+- **Operational hardening**: macOS launcher support now resolves relative paths before emitting Seatbelt rules and accounts for required local IPC paths such as 1Password and SLIM runtime state.
 
 #### Key modules
 - `crates/shadi_sandbox/src/policy.rs`: policy model and helpers.
@@ -68,14 +70,14 @@ actions and prevent unauthorized data access or exfiltration.
 ### 3) Memory layer
 - **Local encrypted store**: SQLCipher-backed SQLite for portable, on-device memory.
 - **Key management**: Encryption keys live in SHADI secrets (keychain backed).
-- **Agent usage**: SecOps writes summaries to the encrypted store; ADK memory remains in-process unless configured for persistent backends.
+- **Agent usage**: workloads running on SHADI can persist local state in the encrypted store; the SecOps demo writes summaries there, while ADK memory remains in-process unless configured for persistent backends.
 
 #### Key modules
 - `crates/shadi_memory/src/lib.rs`: SQLCipher store and query helpers.
 - `crates/shadi_memory/src/main.rs`: shadi-memory CLI.
 - `crates/shadictl/src/main.rs`: `shadictl memory` helper.
 - `crates/shadi_py/src/lib.rs`: SQLCipher bindings.
-- `agents/secops/skills.py`: SecOps summary persistence.
+- `agents/secops/skills.py`: example summary persistence used by the SecOps demo.
 
 ### 4) Transport layer
 - **SLIM/A2A**: MLS provides confidentiality and integrity between agents.
@@ -87,6 +89,9 @@ actions and prevent unauthorized data access or exfiltration.
 ### 5) Brokered secret injection (optional)
 - If sandbox rules prevent keystore access, secrets can be brokered outside the
   sandbox and injected as environment variables into the agent process.
+- This is also the fallback path used by the demo launchers when the optional
+  1Password backend is enabled: required items are read in the foreground and
+  exported into the sandboxed process environment.
 
 #### Key modules
 - `crates/shadictl/src/main.rs`: `--inject-keychain` and policy enforcement.
@@ -114,9 +119,10 @@ The CLI combines profile defaults, policy file settings, and explicit flags:
 - CLI flags override or extend resulting policy.
 - The effective policy can be printed with `--print-policy`.
 
-## SecOps agent architecture
-The SecOps agent runs locally under SHADI and uses the Python bindings for secrets
-plus GitHub APIs for security signals.
+## Demo workload: SecOps agent
+The SecOps agent is an example workload that runs on top of SHADI. It uses the
+Python bindings for secrets plus GitHub APIs for security signals, but it is
+not part of the core runtime itself.
 
 #### Key modules
 - `agents/secops/skills.py`: skills to collect alerts and issues.
@@ -128,7 +134,71 @@ plus GitHub APIs for security signals.
 1. Read config from secops.toml.
 2. Fetch GitHub token and workspace path from SHADI.
 3. Collect Dependabot alerts and security-labeled issues.
-4. Write `secops_security_report.json` to the workspace.
+4. Collect code-scanning alerts for container findings via GitHub code scanning.
+5. For dependency alerts, patch supported manifests and stage repo-relative changes.
+6. For container CVEs, locate the authoritative Dockerfile from GitHub workflow metadata when possible and recommend image rebuilds or base-image refreshes instead of ad-hoc package-install edits.
+7. Create remediation issues and optional PRs, then write `secops_security_report.json` to the workspace.
+
+## Updated system view
+
+```mermaid
+flowchart TB
+  subgraph Operator[Operator and Control Plane]
+    Human[Human operator]
+    Config[secops.toml and policy JSON]
+    Launchers[Launch scripts and shadictl]
+  end
+
+  subgraph Trust[Identity and Secret Plane]
+    Verify[PySessionContext and verifier]
+    Secrets[ShadiStore]
+    Keychain[OS keychain or 1Password backend]
+    MemoryKey[SQLCipher memory key]
+  end
+
+  subgraph Runtime[Sandboxed Runtime Plane]
+    Sandbox[shadi_sandbox policy enforcement]
+    Avatar[Avatar ADK agent]
+    SecOps[SecOps agent or A2A server]
+    Memory[SqlCipherMemoryStore]
+  end
+
+  subgraph External[External Services]
+    GitHub[GitHub APIs and gh CLI]
+    Models[LLM provider endpoints]
+    SLIM[SLIM or A2A transport]
+  end
+
+  Human --> Launchers
+  Config --> Launchers
+  Launchers --> Sandbox
+  Human --> Verify
+  Verify --> Secrets
+  Secrets --> Keychain
+  Secrets --> MemoryKey
+  Sandbox --> Avatar
+  Sandbox --> SecOps
+  Avatar --> SLIM
+  SecOps --> SLIM
+  SecOps --> GitHub
+  SecOps --> Models
+  SecOps --> Memory
+  MemoryKey --> Memory
+  Avatar -. verified secret reads .-> Secrets
+  SecOps -. verified secret reads .-> Secrets
+```
+
+The main architecture update is that SHADI now has a clearer split between:
+- control-plane launch logic that resolves policy and optional secret brokerage before process start,
+- runtime enforcement that the agent cannot weaken by rewriting a local denylist path string,
+- and application-layer behavior implemented by example workloads such as SecOps remediation planning and Avatar-to-SecOps orchestration.
+
+## Demo workload behavior: SecOps remediation model
+
+- Dependency remediation still edits supported manifests directly and can open PRs.
+- Container CVEs are handled as rebuild guidance, not by mutating Dockerfiles with ad-hoc OS package commands.
+- Dockerfile discovery prefers `.github/workflows/*` as the authoritative source of build definitions, then falls back to portable filesystem scanning.
+- If only guidance is needed, SecOps opens a remediation issue so the repo owner can refresh the base image or rebuild the container in the right place.
 
 ## Data flow (high level)
 1. Human identity material is ingested (OpenPGP or seed bytes).
@@ -210,8 +280,9 @@ flowchart LR
 - **Stopped**: Message tampering; MLS provides integrity/authentication.
 
 ### Privilege escalation
-- **Stopped**: Running blocked commands via CLI blocklist.
-- **Mitigated**: Kernel-level constraints remain even if the agent tries to evade.
+- **Mitigated**: Prompt-level or path-level agent reasoning by applying sandbox policy before launch.
+- **Mitigated**: Running blocked commands via CLI blocklist when that feature is used.
+- **Mitigated**: Kernel-level constraints remain even if the agent tries to evade application-layer logic.
 
 ## Threat-to-control mapping
 
@@ -221,7 +292,7 @@ flowchart LR
 | Secret theft at rest | OS keystore storage | Blocked |
 | Secret exfiltration in sandbox | OS sandbox + net block | Blocked |
 | Unauthorized file access | Seatbelt/AppContainer allowlists | Blocked |
-| Destructive commands | CLI blocklist | Blocked |
+| Destructive commands | CLI blocklist | Mitigated |
 | Message interception | MLS in SLIM | Blocked |
 | Message tampering | MLS integrity | Blocked |
 | Agent identity substitution | HKDF derivation + verify-agent-identity | Blocked (with verification) |
@@ -231,6 +302,7 @@ flowchart LR
 - Host OS compromise or kernel-level malware can bypass sandbox controls.
 - Metadata leakage (timing, sizes, endpoints) is not fully addressed in v1.
 - ACL changes on Windows could be interrupted before rollback in a crash.
+- Application-level path deny rules are weaker than OS-enforced sandbox restrictions; do not rely on path matching alone for high-assurance policy.
 
 ## Deployment guidance
 - Prefer running agents under the sandbox with a JSON policy file.

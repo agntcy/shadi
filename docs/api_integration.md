@@ -32,7 +32,7 @@ To list secrets stored for an app or agent, use `shadictl`:
 
 ```bash
 cargo run -p shadictl -- --list-keychain --list-prefix agents/
-cargo run -p shadictl -- --list-keychain --list-prefix secops/
+cargo run -p shadictl -- --list-keychain --list-prefix apps/
 ```
 
 Avoid printing secret values. Pass key names to helpers that resolve secrets
@@ -45,14 +45,14 @@ To list or search long-term memory in the encrypted SQLCipher store, use the
 cargo run -p shadictl -- -- memory list \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --limit 50
+  --scope app --limit 50
 ```
 
 ```bash
 cargo run -p shadictl -- -- memory search \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --query dependabot --limit 10
+  --scope app --query policy --limit 10
 ```
 
 ## Integration overview
@@ -103,8 +103,8 @@ fn main() -> Result<(), SecretError> {
     let mut session = SessionContext::new("agent-1", "session-1");
     session.verified = true;
 
-    access.put_for_session(&session, "secops/token", b"secret", SecretPolicy::default())?;
-    let secret = access.get_for_session(&session, "secops/token")?;
+    access.put_for_session(&session, "app/config", b"secret", SecretPolicy::default())?;
+    let secret = access.get_for_session(&session, "app/config")?;
     let value = secret.expose(|bytes| bytes.to_vec());
 
     println!("secret len: {}", value.len());
@@ -157,9 +157,9 @@ store.set_verifier(lambda agent_id, session_id, presentation, claims: True)
 session = PySessionContext("agent-1", "session-1")
 store.verify_session(session, b"didvc-presentation")
 
-store.put(session, "secops/token", b"secret")
-print(store.get(session, "secops/token"))
-store.delete(session, "secops/token")
+store.put(session, "app/config", b"secret")
+print(store.get(session, "app/config"))
+store.delete(session, "app/config")
 ```
 
 ### Example: integrate with an app session
@@ -196,12 +196,12 @@ store.put(session, "app/config", b"value")
 from shadi import SqlCipherMemoryStore
 
 store = SqlCipherMemoryStore(
-  db_path="./.tmp/shadi-secops/secops_memory.db",
-  key_name="secops/memory_key",
+  db_path="./.tmp/shadi-app/app_memory.db",
+  key_name="app/memory_key",
 )
 
-store.put("secops", "security_report", "{\"status\":\"ok\"}")
-latest = store.get_latest("secops", "security_report")
+store.put("app", "latest_state", "{\"status\":\"ok\"}")
+latest = store.get_latest("app", "latest_state")
 print(latest.payload if latest else "no entry")
 ```
 
@@ -286,7 +286,7 @@ access to the agent sessions.
 ## Secret store naming in Rust vs Python
 
 Rust and Python use the same underlying SHADI secret store. The "name" you see
-in examples is just the secret key string (for example, `secops/token` or
+in examples is just the secret key string (for example, `app/config` or
 `agents/agent-a/did`). There is no separate store per language.
 
 If you see different names between Rust and Python examples, it is only a
@@ -313,8 +313,8 @@ For Python agents, you can run under the sandbox using the JSON policy runner:
 
 ```bash
 ./.venv/bin/python tools/run_sandboxed_agent.py \
-  --policy policies/demo/secops-a.json \
-  -- ./.venv/bin/python agents/secops/a2a_server.py
+  --policy ./sandbox.json \
+  -- ./.venv/bin/python ./your_agent.py
 ```
 
 `net_allow` in the policy file is enforced by the Python runner using a
@@ -325,7 +325,7 @@ sandbox and inject it as an environment variable:
 
 ```bash
 cargo run -p shadictl -- \
-  --inject-keychain secops/token=GITHUB_TOKEN \
+  --inject-keychain app/config=APP_CONFIG \
   -- \
   ./your-agent
 ```
