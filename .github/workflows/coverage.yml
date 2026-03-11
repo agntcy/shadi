@@ -9,44 +9,49 @@ on:
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: data-plane
+    env:
+      PYO3_PYTHON: python
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          workspace: ./data-plane
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install just
-        run: |
-          sudo snap install just --classic || true
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install LLVM tools
+        run: rustup component add llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov
-
-      - name: Setup UV
-        id: setup-uv
-        uses: ./.github/actions/setup-python
+        uses: taiki-e/install-action@v2
         with:
-          uv-install: true
+          tool: cargo-llvm-cov
 
-      - name: Generate data plane coverage report (Rust + Python)
-        run: task data-plane:coverage-full
-
-      - name: Generate control-plane coverage reports
-        run: task control-plane:coverage
-        working-directory: control-plane
+      - name: Generate coverage report
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --workspace --features coverage --lcov \
+            --output-path coverage/lcov.info \
+            --ignore-filename-regex "/rustc-[^/]+/"
 
       - name: Upload combined coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
-          files: data-plane/lcov.info,data-plane/python/bindings/coverage.lcov,control-plane/*-coverage.out
-          flags: rust,python,go
-          name: combined-coverage
+          files: coverage/lcov.info
+          flags: rust
+          name: rust-coverage
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
