@@ -5,33 +5,48 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+
 jobs:
   coverage:
-    runs-on: macos-latest
-    env:
-      PYO3_PYTHON: "/opt/homebrew/opt/python@3.12/bin/python3.12"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: data-plane
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install Homebrew dependencies
-        run: brew install python@3.12 just llvm nettle pkg-config
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-rust
         with:
-          cache-on-failure: true
+          workspace: ./data-plane
+
+      - name: Install just
+        run: |
+          sudo snap install just --classic || true
+
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        run: cargo install cargo-llvm-cov
+
+      - name: Setup UV
+        id: setup-uv
+        uses: ./.github/actions/setup-python
         with:
-          tool: cargo-llvm-cov
-      - name: Generate coverage
-        run: just coverage
-      - name: Upload coverage to Codecov
+          uv-install: true
+
+      - name: Generate data plane coverage report (Rust + Python)
+        run: task data-plane:coverage-full
+
+      - name: Generate control-plane coverage reports
+        run: task control-plane:coverage
+        working-directory: control-plane
+
+      - name: Upload combined coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
-          files: coverage/lcov.info
-          flags: rust
-          name: rust-coverage
+          files: data-plane/lcov.info,data-plane/python/bindings/coverage.lcov,control-plane/*-coverage.out
+          flags: rust,python,go
+          name: combined-coverage
           fail_ci_if_error: true
-          token: ${{ secrets.CODECOV_TOKEN }}
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
