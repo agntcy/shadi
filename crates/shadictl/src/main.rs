@@ -2196,6 +2196,13 @@ mod tests {
         dir
     }
 
+    fn seed_git_repo(repo_path: &Path) {
+        let tracked = repo_path.join("tracked.txt");
+        std::fs::write(&tracked, "initial\n").expect("write tracked file");
+        run_git(repo_path, &["add", "tracked.txt"]);
+        run_git(repo_path, &["commit", "-m", "initial"]);
+    }
+
     fn git_snapshot_artifacts(dir: &Path) -> Vec<PathBuf> {
         let mut entries = std::fs::read_dir(dir.join("runs"))
             .expect("read snapshot dir")
@@ -2203,6 +2210,35 @@ mod tests {
             .collect::<Vec<_>>();
         entries.sort();
         entries
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn snapshot_test_command() -> (Vec<String>, PathBuf) {
+        #[cfg(target_os = "macos")]
+        {
+            (
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf 'changed\n' >> tracked.txt && printf 'new\n' > note.txt".to_string(),
+                ],
+                PathBuf::from("/bin"),
+            )
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let system32 = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
+                + "\\System32";
+            (
+                vec![
+                    format!("{}\\cmd.exe", system32),
+                    "/C".to_string(),
+                    "echo changed>>tracked.txt && echo new>note.txt".to_string(),
+                ],
+                PathBuf::from(system32),
+            )
+        }
     }
 
     fn sample_openpgp_cert_armored() -> Vec<u8> {
@@ -2501,25 +2537,101 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn run_sandboxed_command_writes_git_snapshot_artifact() {
+    fn git_snapshot_session_writes_artifact_without_sandbox() {
         let repo = init_git_repo();
         let repo_path = repo.path().canonicalize().expect("canonical repo");
-        let tracked = repo_path.join("tracked.txt");
-        std::fs::write(&tracked, "initial\n").expect("write tracked file");
-        run_git(&repo_path, &["add", "tracked.txt"]);
-        run_git(&repo_path, &["commit", "-m", "initial"]);
+        seed_git_repo(&repo_path);
 
         let snapshot_root = temp_dir();
         let snapshot_dir = snapshot_root.path().join("git-snapshots");
 
         let mut cli = build_cli();
-        cli.command = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "printf 'changed\n' >> tracked.txt && printf 'new\n' > note.txt".to_string(),
-        ];
-        cli.allow.push(PathBuf::from("/bin"));
+        cli.command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_untracked = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let tracked = repo_path.join("tracked.txt");
+        let mut tracked_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&tracked)
+            .expect("open tracked file");
+        use std::io::Write as _;
+        writeln!(tracked_file, "changed").expect("append tracked file");
+        std::fs::write(repo_path.join("note.txt"), "new\n").expect("write untracked file");
+
+        let artifact_path = session.finish(Some(0), None).expect("finish snapshot");
+        assert!(artifact_path.starts_with(snapshot_dir.join("runs")));
+
+        let payload = std::fs::read_to_string(&artifact_path).expect("read artifact");
+        let artifact: Value = serde_json::from_str(&payload).expect("parse artifact json");
+
+        assert_eq!(artifact["schema_version"], 1);
+        assert_eq!(artifact["git"]["detected"], true);
+        assert_eq!(artifact["git"]["include_untracked_inventory"], true);
+        assert_eq!(artifact["layout"]["root_dir"], snapshot_dir.display().to_string());
+        assert_eq!(artifact["layout"]["latest_file"], snapshot_dir.join("latest.json").display().to_string());
+
+        let run_dir = PathBuf::from(artifact["layout"]["run_dir"].as_str().expect("run dir"));
+        assert!(run_dir.starts_with(snapshot_dir.join("runs")));
+        assert!(artifact["git"]["before"]["status_porcelain"]
+            .as_array()
+            .expect("before status array")
+            .is_empty());
+
+        let after_status = artifact["git"]["after"]["status_porcelain"]
+            .as_array()
+            .expect("after status array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(after_status.iter().any(|line| line.contains("tracked.txt")));
+        assert!(after_status.iter().any(|line| line.contains("note.txt")));
+
+        let untracked = artifact["git"]["after"]["untracked_inventory"]
+            .as_array()
+            .expect("untracked inventory")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(untracked.contains(&"note.txt"));
+        assert_eq!(artifact["git"]["comparison"]["overall_changed"], true);
+        assert_eq!(artifact["git"]["comparison"]["status_changed"], true);
+        assert_eq!(artifact["git"]["comparison"]["diff_changed"], true);
+        assert!(artifact["git"]["before"]["hashes"]["state_sha256"]
+            .as_str()
+            .expect("before state hash")
+            .len()
+            == 64);
+        assert!(artifact["git"]["after"]["hashes"]["state_sha256"]
+            .as_str()
+            .expect("after state hash")
+            .len()
+            == 64);
+        assert_eq!(artifact["outcome"]["exit_code"], 0);
+
+        let latest = std::fs::read_to_string(snapshot_dir.join("latest.json")).expect("read latest artifact");
+        let latest_artifact: Value = serde_json::from_str(&latest).expect("parse latest artifact");
+        assert_eq!(latest_artifact["artifact_id"], artifact["artifact_id"]);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn run_sandboxed_command_writes_git_snapshot_artifact() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        let (command, command_prefix) = snapshot_test_command();
+        cli.command = command;
+        cli.allow.push(command_prefix);
         cli.allow.push(repo_path.clone());
         cli.git_snapshot = true;
         cli.git_snapshot_untracked = true;
@@ -2540,10 +2652,8 @@ mod tests {
         assert_eq!(artifact["git"]["include_untracked_inventory"], true);
         assert_eq!(artifact["layout"]["root_dir"], snapshot_dir.display().to_string());
         assert_eq!(artifact["layout"]["latest_file"], snapshot_dir.join("latest.json").display().to_string());
-        assert!(artifact["layout"]["run_dir"]
-            .as_str()
-            .expect("run dir")
-            .contains("/runs/"));
+        let run_dir = PathBuf::from(artifact["layout"]["run_dir"].as_str().expect("run dir"));
+        assert!(run_dir.starts_with(snapshot_dir.join("runs")));
         assert!(artifact["git"]["before"]["status_porcelain"]
             .as_array()
             .expect("before status array")
