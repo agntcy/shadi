@@ -1,7 +1,32 @@
-# Demo walkthrough
+# Demo Walkthrough
 
-This walkthrough shows a real, end-to-end SLIM A2A demo: two SecOps agents and
-one human (Avatar) in the same group channel, backed by a local SLIM node.
+This page documents an example multi-agent scenario built on top of SHADI. It
+is useful for validating the runtime end to end, but it is not the default
+operating model for every SHADI deployment.
+
+The example scenario uses two SecOps agents and one human-facing Avatar agent
+in the same SLIM group channel, backed by a local SLIM node.
+
+!!! note
+
+  Use this walkthrough when you want to exercise SHADI with a realistic
+  multi-agent workflow. For the core runtime model, start with
+  [Getting Started](getting_started.md), [Operations](operations.md), and
+  [Architecture](architecture.md).
+
+## Scenario Overview
+
+In this example, SHADI is responsible for:
+
+- storing shared secrets and identity material
+- applying sandbox policy before each agent starts
+- brokering the local runtime environment for the demo agents
+
+The workload-specific behavior comes from the demo agents themselves:
+
+- Avatar acts as the human-facing entry point
+- the SecOps agents perform scanning and remediation planning
+- SLIM provides the transport between participants
 
 ## 1) Start a local SLIM node
 
@@ -35,6 +60,12 @@ just launch-secops-a2a-example
 To start a second agent, set `SHADI_AGENT_ID=secops-b` and point
 `SHADI_SECOPS_CONFIG` to `./.tmp/secops-b.toml` before running the launcher.
 
+If you want the SecOps side to open PRs, also set:
+
+```bash
+export SHADI_HUMAN_GITHUB="your-github-handle"
+```
+
 ## 4) Connect as a human using the Avatar ADK agent
 
 ```bash
@@ -47,6 +78,14 @@ In the Avatar prompt, ask for actions like:
 scan dependabot for the allowlist
 report
 ```
+
+For remediation flows, ask for something like:
+
+```text
+scan dependabot for the allowlist and remediate actionable findings
+```
+
+Container findings now come back as rebuild or base-image refresh guidance rather than Dockerfile package-layer edits.
 
 ## 5) Key and DID utilities
 
@@ -76,7 +115,7 @@ Notes:
 - Keys and DIDs are stored in the SHADI secret store.
 - OpenPGP parsing uses `sequoia-openpgp`, not the OS `gpg` binary.
 
-## Notes
+## Scenario Notes
 - The SecOps A2A servers and Avatar agent share the same SLIM endpoint and
   shared secret in SHADI.
 - Adjust `secops.toml` or the per-agent configs if you want different identities
@@ -84,8 +123,8 @@ Notes:
 
 ## Using 1Password instead of the OS keychain
 
-All demo steps work with 1Password as the secret backend. Export the following
-before running the walkthrough:
+All steps in this example scenario work with 1Password as the secret backend.
+Export the following before running the walkthrough:
 
 ```bash
 export SHADI_SECRET_BACKEND=onepassword
@@ -94,6 +133,14 @@ export SHADI_OP_VAULT=shadi          # optional, default: shadi
 
 The `op` CLI (1Password CLI v2) must be installed and authenticated (or set
 `OP_SERVICE_ACCOUNT_TOKEN` for headless/CI use). Then run every step above
-exactly as written — `just import-secops-secrets`, the A2A launchers, and the
-Avatar agent will all store and retrieve secrets from the 1Password vault
-instead of the OS keychain.
+exactly as written. The bootstrap and launch helpers will store and retrieve
+secrets from the 1Password vault instead of the OS keychain.
+
+The launchers pre-read the required 1Password items before entering the sandbox.
+This avoids the common failure mode where the `op` background prompt or daemon
+startup is blocked by sandbox policy.
+
+## Troubleshooting
+
+- If `launch_secops_a2a.sh` fails under the 1Password backend, confirm that the `op` CLI is authenticated for the selected account and vault.
+- If Avatar reports a SLIM session handshake failure, verify that the SecOps A2A server is already running and that both terminals use the same shared secret, identity, endpoint, and TLS files.

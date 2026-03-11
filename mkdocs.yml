@@ -4,38 +4,83 @@ site_url: https://example.com/shadi
 repo_url: https://github.com/your-org/shadi
 repo_name: shadi
 
+extra:
+  copyright: >
+    Copyright SHADI Contributors.
+
+extra_css:
+  - stylesheets/custom.css
+
 theme:
   name: material
+  custom_dir: overrides
+  font:
+    text: Roboto
+    code: Roboto Mono
   palette:
-    - scheme: default
+    - media: "(prefers-color-scheme)"
       toggle:
-        icon: material/weather-night
-        name: Switch to dark mode
-    - scheme: slate
-      toggle:
-        icon: material/weather-sunny
+        icon: material/link
         name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/toggle-switch
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/toggle-switch-off
+        name: Switch to system preference
+  logo_light: assets/img/logo-light.svg
+  logo_dark: assets/img/logo-dark.svg
   features:
     - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.footer
     - navigation.top
+    - navigation.tracking
     - content.code.copy
+    - content.tabs.link
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
 
 nav:
-  - Overview: index.md
-  - CLI Reference: cli.md
-  - API & Integration: api_integration.md
-  - Architecture: architecture.md
-  - Demo: demo.md
-  - SecOps Agent: secops_agent.md
-  - Security: security.md
-  - Design: design.md
-  - Sandbox: sandbox.md
+  - Introduction:
+      - Overview: index.md
+      - Architecture: architecture.md
+      - Security Notes: security.md
+      - Design Overview: design.md
+  - Guides:
+      - Getting Started: getting_started.md
+      - Operations: operations.md
+      - Sandbox and Policies: sandbox.md
+      - Demo Walkthrough: demo.md
+      - SecOps Demo: secops_agent.md
+  - Integrations:
+      - API Guide: api_integration.md
+      - SLIM and A2A: slim_a2a.md
+      - Google ADK: adk_integration.md
+      - Mobile: mobile_integration.md
+  - Reference:
+      - CLI Reference: cli.md
 
 exclude_docs: |
   README.md
 
 markdown_extensions:
   - admonition
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid

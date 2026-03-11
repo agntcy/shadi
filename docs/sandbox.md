@@ -115,9 +115,19 @@ cargo run -p shadictl -- \
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
   to execute processes are allowed for read access.
 - Command blocking is enforced before launch in the CLI.
+- On macOS, policy paths are resolved to absolute paths before Seatbelt rules are emitted; relative subpaths are not reliable enforcement inputs.
+- The demo launchers can broker secrets outside the sandbox and inject them into the agent environment before execution.
 - Windows: ACL allowlists are applied to the specified paths for the AppContainer
   SID and automatically reverted when the sandboxed process exits. Network
   access is controlled by AppContainer capabilities.
+
+### Sandbox boundary guidance
+
+Use the sandbox as the security boundary, not application-level path deny rules.
+Path-matching controls are useful for operator ergonomics, but they are weaker
+than OS-enforced policy because the agent can reason about alternate paths and
+wrappers. SHADI resolves and applies the effective sandbox policy before launch,
+which is the property you should rely on for enforcement.
 
 ## Windows integration test
 

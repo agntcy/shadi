@@ -67,7 +67,7 @@ Inject a secret into the command environment (brokered secrets):
 
 ```bash
 cargo run -p shadictl -- \
-  --inject-keychain secops/token=GITHUB_TOKEN \
+  --inject-keychain app/config=APP_CONFIG \
   -- \
   ./your-agent
 ```
@@ -227,14 +227,14 @@ Put a memory entry from inline payload or file:
 cargo run -p shadictl -- -- memory put \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --entry-key report --payload '{"status":"ok"}'
+  --scope app --entry-key state --payload '{"status":"ok"}'
 ```
 
 ```bash
 cargo run -p shadictl -- -- memory put \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --entry-key report --payload-file ./report.json
+  --scope app --entry-key state --payload-file ./state.json
 ```
 
 Get the latest entry:
@@ -243,7 +243,7 @@ Get the latest entry:
 cargo run -p shadictl -- -- memory get \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --entry-key report
+  --scope app --entry-key state
 ```
 
 Search entries:
@@ -252,7 +252,7 @@ Search entries:
 cargo run -p shadictl -- -- memory search \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --query dependabot --limit 10
+  --scope app --query policy --limit 10
 ```
 
 List entries:
@@ -261,7 +261,7 @@ List entries:
 cargo run -p shadictl -- -- memory list \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --limit 50
+  --scope app --limit 50
 ```
 
 Delete an entry:
@@ -270,7 +270,7 @@ Delete an entry:
 cargo run -p shadictl -- -- memory delete \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  --scope secops --entry-key report
+  --scope app --entry-key state
 ```
 
 ## shadi-memory (`shadi-memory`)
@@ -302,14 +302,14 @@ Put a memory entry from inline payload or file:
 cargo run -p shadi_memory -- \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  put --scope secops --entry-key report --payload '{"status":"ok"}'
+  put --scope app --entry-key state --payload '{"status":"ok"}'
 ```
 
 ```bash
 cargo run -p shadi_memory -- \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  put --scope secops --entry-key report --payload-file ./report.json
+  put --scope app --entry-key state --payload-file ./state.json
 ```
 
 Get the latest entry:
@@ -318,7 +318,7 @@ Get the latest entry:
 cargo run -p shadi_memory -- \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  get --scope secops --entry-key report
+  get --scope app --entry-key state
 ```
 
 Search entries:
@@ -327,7 +327,7 @@ Search entries:
 cargo run -p shadi_memory -- \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  search --scope secops --query dependabot --limit 10
+  search --scope app --query policy --limit 10
 ```
 
 List entries:
@@ -336,7 +336,7 @@ List entries:
 cargo run -p shadi_memory -- \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  list --scope secops --limit 50
+  list --scope app --limit 50
 ```
 
 Delete an entry:
@@ -345,7 +345,7 @@ Delete an entry:
 cargo run -p shadi_memory -- \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
-  delete --scope secops --entry-key report
+  delete --scope app --entry-key state
 ```
 
 ## slim-mas (`slim-mas`)

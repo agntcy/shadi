@@ -97,6 +97,11 @@ secops-approve-prs:
 secops-test-python:
   uv run --with pytest pytest agents/secops/tests/test_skills.py
 
+secops-skill-scan:
+  rm -rf .tmp/skill-scanner/secops
+  uv run --no-project --python .venv/bin/python tools/prepare_skill_scan.py --source agents/secops --dest .tmp/skill-scanner/secops
+  uvx --from cisco-ai-skill-scanner skill-scanner scan .tmp/skill-scanner/secops --format summary --format markdown --detailed --output-markdown .tmp/skill-scanner/secops-scan.md
+
 secops-a2a:
   uv run --no-project --python .venv/bin/python agents/secops/a2a_server.py
 
