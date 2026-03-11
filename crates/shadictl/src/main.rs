@@ -1,7 +1,7 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -642,25 +642,31 @@ impl GitSnapshotSession {
         self.artifact.outcome.exit_code = exit_code;
         self.artifact.outcome.error = error;
 
-        if let Some(repo_root) = self.artifact.git.repo_root.clone() {
-            if self.artifact.git.capture_error.is_none() {
-                match collect_git_repo_state(Path::new(&repo_root), self.artifact.git.include_untracked_inventory) {
+        for repository in &mut self.artifact.git.repositories {
+            if repository.capture_error.is_none() {
+                match collect_git_repo_state(
+                    Path::new(&repository.repo_root),
+                    self.artifact.git.include_untracked_inventory,
+                ) {
                     Ok(after) => {
                         let summary = summarize_status_lines(&after.status_porcelain);
-                        self.artifact.git.diff_summary = Some(summary);
-                        self.artifact.git.after = Some(after);
+                        repository.diff_summary = Some(summary);
+                        repository.after = Some(after);
                     }
                     Err(err) => {
-                        self.artifact.git.capture_error = Some(err);
+                        repository.capture_error = Some(err);
                     }
                 }
             }
+
+            repository.comparison = build_git_state_comparison(
+                repository.before.as_ref(),
+                repository.after.as_ref(),
+            );
         }
 
-        self.artifact.git.comparison = build_git_state_comparison(
-            self.artifact.git.before.as_ref(),
-            self.artifact.git.after.as_ref(),
-        );
+        self.artifact.git.sync_primary_repository_fields();
+        self.artifact.git.refresh_change_summary();
 
         std::fs::create_dir_all(&self.output_dir)
             .map_err(|err| format!("failed to create {}: {}", self.output_dir.display(), err))?;
@@ -738,6 +744,8 @@ struct GitSnapshotOutcome {
 #[derive(Debug, Serialize)]
 struct GitSnapshotRecord {
     detected: bool,
+    changed_repositories: usize,
+    any_repo_changed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     repo_root: Option<String>,
     include_untracked_inventory: bool,
@@ -751,9 +759,63 @@ struct GitSnapshotRecord {
     comparison: Option<GitStateComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capture_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    repositories: Vec<GitTrackedRepository>,
 }
 
-#[derive(Debug, Serialize)]
+impl GitSnapshotRecord {
+    fn sync_primary_repository_fields(&mut self) {
+        if let Some(primary) = self.repositories.first() {
+            self.repo_root = Some(primary.repo_root.clone());
+            self.before = primary.before.clone();
+            self.after = primary.after.clone();
+            self.diff_summary = primary.diff_summary.clone();
+            self.comparison = primary.comparison.clone();
+            self.capture_error = primary.capture_error.clone();
+        } else {
+            self.repo_root = None;
+            self.before = None;
+            self.after = None;
+            self.diff_summary = None;
+            self.comparison = None;
+            self.capture_error = None;
+        }
+    }
+
+    fn refresh_change_summary(&mut self) {
+        self.changed_repositories = self
+            .repositories
+            .iter()
+            .filter(|repository| {
+                repository
+                    .comparison
+                    .as_ref()
+                    .map(|comparison| comparison.overall_changed)
+                    .unwrap_or(false)
+            })
+            .count();
+        self.any_repo_changed = self.changed_repositories > 0;
+        self.detected = !self.repositories.is_empty();
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GitTrackedRepository {
+    repo_root: String,
+    relative_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before: Option<GitRepoState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<GitRepoState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff_summary: Option<GitDiffSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison: Option<GitStateComparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct GitRepoState {
     #[serde(skip_serializing_if = "Option::is_none")]
     head: Option<String>,
@@ -764,7 +826,7 @@ struct GitRepoState {
     hashes: GitRepoStateHashes,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct GitRepoStateHashes {
     #[serde(skip_serializing_if = "Option::is_none")]
     head_sha256: Option<String>,
@@ -775,7 +837,7 @@ struct GitRepoStateHashes {
     state_sha256: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct GitStateComparison {
     #[serde(skip_serializing_if = "Option::is_none")]
     before_state_sha256: Option<String>,
@@ -789,7 +851,7 @@ struct GitStateComparison {
     overall_changed: bool,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct GitDiffSummary {
     added: usize,
     modified: usize,
@@ -844,31 +906,11 @@ fn snapshot_policy_value(
 }
 
 fn capture_git_snapshot(cwd: &Path, include_untracked: bool) -> GitSnapshotRecord {
-    match detect_git_repo_root(cwd) {
-        Ok(Some(repo_root)) => match collect_git_repo_state(&repo_root, include_untracked) {
-            Ok(before) => GitSnapshotRecord {
-                detected: true,
-                repo_root: Some(repo_root.display().to_string()),
-                include_untracked_inventory: include_untracked,
-                before: Some(before),
-                after: None,
-                diff_summary: None,
-                comparison: None,
-                capture_error: None,
-            },
-            Err(err) => GitSnapshotRecord {
-                detected: true,
-                repo_root: Some(repo_root.display().to_string()),
-                include_untracked_inventory: include_untracked,
-                before: None,
-                after: None,
-                diff_summary: None,
-                comparison: None,
-                capture_error: Some(err),
-            },
-        },
-        Ok(None) => GitSnapshotRecord {
+    match discover_git_repo_roots(cwd) {
+        Ok(repo_roots) if repo_roots.is_empty() => GitSnapshotRecord {
             detected: false,
+            changed_repositories: 0,
+            any_repo_changed: false,
             repo_root: None,
             include_untracked_inventory: include_untracked,
             before: None,
@@ -876,9 +918,35 @@ fn capture_git_snapshot(cwd: &Path, include_untracked: bool) -> GitSnapshotRecor
             diff_summary: None,
             comparison: None,
             capture_error: None,
+            repositories: Vec::new(),
         },
+        Ok(repo_roots) => {
+            let repositories = repo_roots
+                .into_iter()
+                .map(|repo_root| capture_git_repository_snapshot(cwd, &repo_root, include_untracked))
+                .collect::<Vec<_>>();
+
+            let mut record = GitSnapshotRecord {
+                detected: true,
+                changed_repositories: 0,
+                any_repo_changed: false,
+                repo_root: None,
+                include_untracked_inventory: include_untracked,
+                before: None,
+                after: None,
+                diff_summary: None,
+                comparison: None,
+                capture_error: None,
+                repositories,
+            };
+            record.sync_primary_repository_fields();
+            record.refresh_change_summary();
+            record
+        }
         Err(err) => GitSnapshotRecord {
             detected: false,
+            changed_repositories: 0,
+            any_repo_changed: false,
             repo_root: None,
             include_untracked_inventory: include_untracked,
             before: None,
@@ -886,8 +954,110 @@ fn capture_git_snapshot(cwd: &Path, include_untracked: bool) -> GitSnapshotRecor
             diff_summary: None,
             comparison: None,
             capture_error: Some(err),
+            repositories: Vec::new(),
         },
     }
+}
+
+fn capture_git_repository_snapshot(cwd: &Path, repo_root: &Path, include_untracked: bool) -> GitTrackedRepository {
+    let repo_root_string = repo_root.display().to_string();
+    match collect_git_repo_state(repo_root, include_untracked) {
+        Ok(before) => GitTrackedRepository {
+            repo_root: repo_root_string,
+            relative_path: repo_relative_path(cwd, repo_root),
+            before: Some(before),
+            after: None,
+            diff_summary: None,
+            comparison: None,
+            capture_error: None,
+        },
+        Err(err) => GitTrackedRepository {
+            repo_root: repo_root_string,
+            relative_path: repo_relative_path(cwd, repo_root),
+            before: None,
+            after: None,
+            diff_summary: None,
+            comparison: None,
+            capture_error: Some(err),
+        },
+    }
+}
+
+fn repo_relative_path(cwd: &Path, repo_root: &Path) -> String {
+    match repo_root.strip_prefix(cwd) {
+        Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+        Ok(relative) => relative.display().to_string(),
+        Err(_) if cwd.starts_with(repo_root) => ".".to_string(),
+        Err(_) => repo_root.display().to_string(),
+    }
+}
+
+fn discover_git_repo_roots(cwd: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut repo_roots = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if let Some(primary_root) = detect_git_repo_root(cwd)? {
+        let normalized = canonicalize_or_clone(&primary_root);
+        seen.insert(normalized.clone());
+        repo_roots.push(normalized);
+    }
+
+    let scope_root = canonicalize_or_clone(cwd);
+    let mut nested_roots = find_nested_git_repo_roots(&scope_root)?;
+    nested_roots.sort();
+
+    for repo_root in nested_roots {
+        if seen.insert(repo_root.clone()) {
+            repo_roots.push(repo_root);
+        }
+    }
+
+    Ok(repo_roots)
+}
+
+fn find_nested_git_repo_roots(scope_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut repo_roots = Vec::new();
+    let mut stack = vec![scope_root.to_path_buf()];
+
+    while let Some(directory) = stack.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|err| format!("failed to scan {}: {}", directory.display(), err))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("failed to scan {}: {}", directory.display(), err))?;
+            let path = entry.path();
+            let file_name = entry.file_name();
+            let file_type = entry
+                .file_type()
+                .map_err(|err| format!("failed to inspect {}: {}", path.display(), err))?;
+
+            if file_name == std::ffi::OsStr::new(".git") {
+                if let Some(repo_dir) = path.parent() {
+                    if let Some(repo_root) = detect_git_repo_root(repo_dir)? {
+                        let normalized = canonicalize_or_clone(&repo_root);
+                        if normalized.starts_with(scope_root) || scope_root.starts_with(&normalized) {
+                            repo_roots.push(normalized);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if file_type.is_symlink() {
+                continue;
+            }
+
+            if file_type.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+
+    Ok(repo_roots)
+}
+
+fn canonicalize_or_clone(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn detect_git_repo_root(cwd: &Path) -> Result<Option<PathBuf>, String> {
@@ -2203,6 +2373,15 @@ mod tests {
         run_git(repo_path, &["commit", "-m", "initial"]);
     }
 
+    fn init_nested_git_repo(parent: &Path, name: &str) -> PathBuf {
+        let repo_path = parent.join(name);
+        std::fs::create_dir_all(&repo_path).expect("create nested repo dir");
+        run_git(&repo_path, &["init"]);
+        run_git(&repo_path, &["config", "user.name", "SHADI Tests"]);
+        run_git(&repo_path, &["config", "user.email", "shadi-tests@example.com"]);
+        repo_path
+    }
+
     fn git_snapshot_artifacts(dir: &Path) -> Vec<PathBuf> {
         let mut entries = std::fs::read_dir(dir.join("runs"))
             .expect("read snapshot dir")
@@ -2537,6 +2716,57 @@ mod tests {
     }
 
     #[test]
+    fn git_snapshot_layout_default_starts_empty() {
+        let layout = GitSnapshotLayout::default();
+
+        assert!(layout.root_dir.is_empty());
+        assert!(layout.run_dir.is_empty());
+        assert!(layout.snapshot_file.is_empty());
+        assert!(layout.latest_file.is_empty());
+    }
+
+    #[test]
+    fn finalize_git_snapshot_accepts_none() {
+        finalize_git_snapshot(None, Some(0), None);
+    }
+
+    #[test]
+    fn finalize_git_snapshot_handles_write_failure() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let mut cli = build_cli();
+        cli.command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let blocking_file = temp_dir();
+        let blocking_path = blocking_file.path().join("snapshot-blocker");
+        std::fs::write(&blocking_path, "occupied\n").expect("write blocking file");
+        session.output_dir = blocking_path;
+
+        finalize_git_snapshot(Some(&mut session), Some(0), None);
+    }
+
+    #[test]
+    fn run_sandboxed_command_returns_error_when_process_cannot_start() {
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+
+        let mut cli = build_cli();
+        cli.command = vec![cwd.join("missing-command").display().to_string()];
+        cli.allow.push(cwd.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &cwd);
+
+        assert_eq!(exit, ExitCode::from(1));
+    }
+
+    #[test]
     fn git_snapshot_session_writes_artifact_without_sandbox() {
         let repo = init_git_repo();
         let repo_path = repo.path().canonicalize().expect("canonical repo");
@@ -2620,6 +2850,67 @@ mod tests {
         let latest = std::fs::read_to_string(snapshot_dir.join("latest.json")).expect("read latest artifact");
         let latest_artifact: Value = serde_json::from_str(&latest).expect("parse latest artifact");
         assert_eq!(latest_artifact["artifact_id"], artifact["artifact_id"]);
+    }
+
+    #[test]
+    fn git_snapshot_session_tracks_nested_repository_changes() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let nested_repo = init_nested_git_repo(&repo_path, "nested");
+        std::fs::write(nested_repo.join("nested.txt"), "initial\n").expect("write nested file");
+        run_git(&nested_repo, &["add", "nested.txt"]);
+        run_git(&nested_repo, &["commit", "-m", "initial"]);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        cli.command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let nested_file = nested_repo.join("nested.txt");
+        let mut nested_handle = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&nested_file)
+            .expect("open nested file");
+        use std::io::Write as _;
+        writeln!(nested_handle, "changed").expect("append nested file");
+        run_git(&nested_repo, &["add", "nested.txt"]);
+        run_git(&nested_repo, &["commit", "-m", "update"]);
+
+        let artifact_path = session.finish(Some(0), None).expect("finish snapshot");
+        let payload = std::fs::read_to_string(&artifact_path).expect("read artifact");
+        let artifact: Value = serde_json::from_str(&payload).expect("parse artifact json");
+
+        assert_eq!(artifact["git"]["detected"], true);
+        assert_eq!(artifact["git"]["any_repo_changed"], true);
+        assert_eq!(artifact["git"]["changed_repositories"], 1);
+        assert_eq!(artifact["git"]["comparison"]["overall_changed"], false);
+
+        let repositories = artifact["git"]["repositories"]
+            .as_array()
+            .expect("repository array");
+        assert_eq!(repositories.len(), 2);
+
+        let nested = repositories
+            .iter()
+            .find(|repository| repository["relative_path"] == "nested")
+            .expect("nested repository entry");
+        assert_eq!(nested["comparison"]["overall_changed"], true);
+        assert_eq!(nested["comparison"]["head_changed"], true);
+        assert_eq!(nested["diff_summary"]["changed"], false);
+
+        let primary = repositories
+            .iter()
+            .find(|repository| repository["relative_path"] == ".")
+            .expect("primary repository entry");
+        assert_eq!(primary["comparison"]["overall_changed"], false);
     }
 
     #[test]

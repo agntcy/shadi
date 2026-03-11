@@ -109,6 +109,7 @@ cargo run -p shadictl -- \
 What gets captured:
 
 - repository detection based on the current working directory
+- discovery of nested Git repositories under the sandbox working directory
 - pre-run and post-run `HEAD`
 - `git status --porcelain=v1 --untracked-files=all`
 - `git diff --binary`
@@ -124,6 +125,17 @@ Artifact layout:
 
 This feature is opt-in by design. SHADI does not capture snapshots unless you
 pass `--git-snapshot`, and the first implementation remains Git-read-only.
+
+Nested Git repos are handled explicitly. The artifact keeps the original
+top-level `git.*` fields for the primary repo rooted at the sandbox working
+directory, and adds `git.repositories` for per-repo records when additional Git
+repos exist below that directory. This prevents false negatives in workflows
+where an agent changes another repo under the same workspace.
+
+Example: a SecOps agent may clone, pull, or commit inside a remediation target
+repo under its working folder. In that case the outer repo can remain clean,
+but the nested repo entry will still show the change through its own
+`comparison` block and will increment `git.changed_repositories`.
 
 ### Key utilities
 `shadictl` also manages OpenPGP keys and agent DIDs without invoking OS `gpg`:

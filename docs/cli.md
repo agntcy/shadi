@@ -92,6 +92,13 @@ timestamps, `HEAD`, `git status --porcelain`, `git diff --binary`, and optional
 untracked inventory. By default artifacts are written to
 `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
 
+If the working tree contains nested Git repositories, the snapshot artifact now
+records them separately under `git.repositories`. The top-level `git.before`,
+`git.after`, and `git.comparison` fields remain pinned to the primary repo at
+the sandbox working directory for backward compatibility, while
+`git.changed_repositories` and `git.any_repo_changed` summarize whether any
+tracked repo changed during the sandboxed run.
+
 The layout is stable for downstream tooling:
 
 - `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/runs/<artifact_id>/snapshot.json`: canonical per-run artifact.
@@ -103,6 +110,19 @@ inventory, and a combined state hash. The artifact also includes a comparison
 section with `head_changed`, `status_changed`, `diff_changed`,
 `untracked_changed`, and `overall_changed` so other systems can tell whether
 the sandboxed command changed the working tree without reprocessing Git output.
+
+For nested repos, each entry under `git.repositories` includes:
+
+- `repo_root`: absolute path to the tracked repo root.
+- `relative_path`: path relative to the sandbox working directory (`.` for the primary repo).
+- `before` and `after` Git state for that specific repo.
+- `diff_summary` and `comparison` for that repo.
+
+This matters for agent workflows that operate on multiple repositories from one
+workspace, such as a SecOps agent cloning or updating remediation targets under
+its current working folder. A nested repo commit can leave the outer repo
+unchanged while still appearing as `head_changed: true` and
+`overall_changed: true` on that nested repo entry.
 
 ### Key, DID, and identity provenance
 

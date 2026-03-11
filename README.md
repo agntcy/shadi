@@ -125,6 +125,13 @@ Each artifact includes resolved policy, timestamps, before/after Git state,
 SHA-256 hashes for captured Git payloads, and comparison fields such as
 `status_changed` and `overall_changed`.
 
+If the workspace contains nested Git repos, the artifact also includes a
+`git.repositories` array with per-repo before/after state and comparison
+metadata. This is important for agent workflows like SecOps remediation where
+the agent may clone or update another repo under the current working folder:
+the outer repo can stay unchanged while the nested repo entry still reports the
+change.
+
 ### 4) Derive agent identities from a human source
 
 ```bash
