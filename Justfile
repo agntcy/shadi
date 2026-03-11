@@ -1,8 +1,8 @@
 set shell := ["zsh", "-uc"]
 set windows-shell := ["pwsh", "-NoLogo", "-Command"]
 
-python_prefix := if os() == "windows" { "" } else { `brew --prefix python@3.12` }
-python312 := if os() == "windows" { if env_var_or_default("PYO3_PYTHON", "") != "" { env_var("PYO3_PYTHON") } else { `uv python find 3.12` } } else { python_prefix + "/bin/python3.12" }
+python_prefix := if os() == "windows" { "" } else { `command -v brew >/dev/null 2>&1 && brew --prefix python@3.12 || true` }
+python312 := if os() == "windows" { if env_var_or_default("PYO3_PYTHON", "") != "" { env_var("PYO3_PYTHON") } else { `uv python find 3.12` } } else { if python_prefix != "" { python_prefix + "/bin/python3.12" } else { "python3.12" } }
 PROVIDER := "google"
 TIMEOUT := "60"
 REMEDIATE := "false"
