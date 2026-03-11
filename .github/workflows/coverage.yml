@@ -1,4 +1,4 @@
-name: Coverage
+name: Publish Project Coverage to Codecov
 
 on:
   push:
@@ -31,4 +31,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: coverage/lcov.info
+          flags: rust
+          name: rust-coverage
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
