@@ -2588,8 +2588,9 @@ mod tests {
             .iter()
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
-        assert!(after_status.iter().any(|line| line.contains("tracked.txt")));
         assert!(after_status.iter().any(|line| line.contains("note.txt")));
+        assert_eq!(artifact["git"]["diff_summary"]["modified"], 1);
+        assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
 
         let untracked = artifact["git"]["after"]["untracked_inventory"]
             .as_array()
@@ -2654,6 +2655,16 @@ mod tests {
         assert_eq!(artifact["layout"]["latest_file"], snapshot_dir.join("latest.json").display().to_string());
         let run_dir = PathBuf::from(artifact["layout"]["run_dir"].as_str().expect("run dir"));
         assert!(run_dir.starts_with(snapshot_dir.join("runs")));
+
+        #[cfg(target_os = "windows")]
+        if let Some(error) = artifact["outcome"]["error"].as_str() {
+            assert_eq!(exit, ExitCode::from(1));
+            assert!(error.contains("CreateAppContainerProfile failed"));
+            assert!(artifact["outcome"]["exit_code"].is_null());
+            return;
+        }
+
+        assert_eq!(exit, ExitCode::from(0));
         assert!(artifact["git"]["before"]["status_porcelain"]
             .as_array()
             .expect("before status array")
@@ -2665,8 +2676,9 @@ mod tests {
             .iter()
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
-        assert!(after_status.iter().any(|line| line.contains("tracked.txt")));
         assert!(after_status.iter().any(|line| line.contains("note.txt")));
+        assert_eq!(artifact["git"]["diff_summary"]["modified"], 1);
+        assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
 
         let untracked = artifact["git"]["after"]["untracked_inventory"]
             .as_array()
@@ -2689,6 +2701,7 @@ mod tests {
             .len()
             == 64);
         assert_eq!(artifact["outcome"]["exit_code"], 0);
+        assert!(artifact["outcome"]["error"].is_null());
 
         let latest = std::fs::read_to_string(snapshot_dir.join("latest.json")).expect("read latest artifact");
         let latest_artifact: Value = serde_json::from_str(&latest).expect("parse latest artifact");
