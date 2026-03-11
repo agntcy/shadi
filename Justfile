@@ -1,4 +1,4 @@
-set shell := ["zsh", "-uc"]
+set shell := ["bash", "-uc"]
 set windows-shell := ["pwsh", "-NoLogo", "-Command"]
 
 python_prefix := if os() == "windows" { "" } else { `command -v brew >/dev/null 2>&1 && brew --prefix python@3.12 || true` }
