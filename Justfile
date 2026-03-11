@@ -1,8 +1,9 @@
-set shell := ["zsh", "-uc"]
+set shell := ["bash", "-uc"]
 set windows-shell := ["pwsh", "-NoLogo", "-Command"]
 
-python_prefix := if os() == "windows" { "" } else { `brew --prefix python@3.12` }
-python312 := if os() == "windows" { if env_var_or_default("PYO3_PYTHON", "") != "" { env_var("PYO3_PYTHON") } else { `uv python find 3.12` } } else { python_prefix + "/bin/python3.12" }
+python_prefix := if os() == "windows" { "" } else { `command -v brew >/dev/null 2>&1 && brew --prefix python@3.12 || true` }
+python312 := if os() == "windows" { if env_var_or_default("PYO3_PYTHON", "") != "" { env_var("PYO3_PYTHON") } else { `uv python find 3.12` } } else { if python_prefix != "" { python_prefix + "/bin/python3.12" } else { "python3.12" } }
+python_rustflags := if os() == "macos" { "-C link-arg=-L" + python_prefix + "/Frameworks/Python.framework/Versions/3.12/lib/python3.12/config-3.12-darwin -C link-arg=-lpython3.12 -C link-arg=-framework -C link-arg=CoreFoundation" } else { "" }
 PROVIDER := "google"
 TIMEOUT := "60"
 REMEDIATE := "false"
@@ -32,14 +33,21 @@ coverage:
   LLVM_SYSROOT="$(rustc --print sysroot)" \
   LLVM_HOST="$(rustc -Vv | awk '/host/ {print $2}')" \
   LLVM_BREW="$(brew --prefix llvm 2>/dev/null || true)" \
+  LLVM_BREW_VERSIONED="$(brew --prefix llvm@21 2>/dev/null || true)" \
   LLVM_COV="$(command -v llvm-cov || true)" \
-  LLVM_PROFDATA="$(command -v llvm-profdata || true)" \
-  LLVM_COV="${LLVM_COV:-$LLVM_BREW/bin/llvm-cov}" \
-  LLVM_PROFDATA="${LLVM_PROFDATA:-$LLVM_BREW/bin/llvm-profdata}" \
-  LLVM_COV="${LLVM_COV:-$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-cov}" \
-  LLVM_PROFDATA="${LLVM_PROFDATA:-$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-profdata}" \
+  LLVM_PROFDATA="$(command -v llvm-profdata || true)"; \
+  if [ -z "$LLVM_COV" ]; then \
+    if [ -x "$LLVM_BREW/bin/llvm-cov" ]; then LLVM_COV="$LLVM_BREW/bin/llvm-cov"; \
+    elif [ -x "$LLVM_BREW_VERSIONED/bin/llvm-cov" ]; then LLVM_COV="$LLVM_BREW_VERSIONED/bin/llvm-cov"; \
+    else LLVM_COV="$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-cov"; fi; \
+  fi; \
+  if [ -z "$LLVM_PROFDATA" ]; then \
+    if [ -x "$LLVM_BREW/bin/llvm-profdata" ]; then LLVM_PROFDATA="$LLVM_BREW/bin/llvm-profdata"; \
+    elif [ -x "$LLVM_BREW_VERSIONED/bin/llvm-profdata" ]; then LLVM_PROFDATA="$LLVM_BREW_VERSIONED/bin/llvm-profdata"; \
+    else LLVM_PROFDATA="$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-profdata"; fi; \
+  fi; \
   SHADI_KEYCHAIN_TESTS=1 \
-  PYO3_PYTHON="{{python312}}" RUSTFLAGS="-C link-arg=-L{{python_prefix}}/Frameworks/Python.framework/Versions/3.12/lib/python3.12/config-3.12-darwin -C link-arg=-lpython3.12 -C link-arg=-framework -C link-arg=CoreFoundation" \
+  PYO3_PYTHON="{{python312}}" RUSTFLAGS="{{python_rustflags}}" \
   LLVM_COV="$LLVM_COV" LLVM_PROFDATA="$LLVM_PROFDATA" \
   cargo llvm-cov --workspace --features coverage --lcov --output-path coverage/lcov.info --ignore-filename-regex "/rustc-[^/]+/"
 
@@ -48,14 +56,21 @@ coverage-html:
   LLVM_SYSROOT="$(rustc --print sysroot)" \
   LLVM_HOST="$(rustc -Vv | awk '/host/ {print $2}')" \
   LLVM_BREW="$(brew --prefix llvm 2>/dev/null || true)" \
+  LLVM_BREW_VERSIONED="$(brew --prefix llvm@21 2>/dev/null || true)" \
   LLVM_COV="$(command -v llvm-cov || true)" \
-  LLVM_PROFDATA="$(command -v llvm-profdata || true)" \
-  LLVM_COV="${LLVM_COV:-$LLVM_BREW/bin/llvm-cov}" \
-  LLVM_PROFDATA="${LLVM_PROFDATA:-$LLVM_BREW/bin/llvm-profdata}" \
-  LLVM_COV="${LLVM_COV:-$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-cov}" \
-  LLVM_PROFDATA="${LLVM_PROFDATA:-$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-profdata}" \
+  LLVM_PROFDATA="$(command -v llvm-profdata || true)"; \
+  if [ -z "$LLVM_COV" ]; then \
+    if [ -x "$LLVM_BREW/bin/llvm-cov" ]; then LLVM_COV="$LLVM_BREW/bin/llvm-cov"; \
+    elif [ -x "$LLVM_BREW_VERSIONED/bin/llvm-cov" ]; then LLVM_COV="$LLVM_BREW_VERSIONED/bin/llvm-cov"; \
+    else LLVM_COV="$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-cov"; fi; \
+  fi; \
+  if [ -z "$LLVM_PROFDATA" ]; then \
+    if [ -x "$LLVM_BREW/bin/llvm-profdata" ]; then LLVM_PROFDATA="$LLVM_BREW/bin/llvm-profdata"; \
+    elif [ -x "$LLVM_BREW_VERSIONED/bin/llvm-profdata" ]; then LLVM_PROFDATA="$LLVM_BREW_VERSIONED/bin/llvm-profdata"; \
+    else LLVM_PROFDATA="$LLVM_SYSROOT/lib/rustlib/$LLVM_HOST/bin/llvm-profdata"; fi; \
+  fi; \
   SHADI_KEYCHAIN_TESTS=1 \
-  PYO3_PYTHON="{{python312}}" RUSTFLAGS="-C link-arg=-L{{python_prefix}}/Frameworks/Python.framework/Versions/3.12/lib/python3.12/config-3.12-darwin -C link-arg=-lpython3.12 -C link-arg=-framework -C link-arg=CoreFoundation" \
+  PYO3_PYTHON="{{python312}}" RUSTFLAGS="{{python_rustflags}}" \
   LLVM_COV="$LLVM_COV" LLVM_PROFDATA="$LLVM_PROFDATA" \
   cargo llvm-cov --workspace --features coverage --html --output-dir coverage/html --ignore-filename-regex "/rustc-[^/]+/"
 

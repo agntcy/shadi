@@ -67,7 +67,7 @@ For the current demo workflows, this is the practical order:
 2. Load secrets and identity material required by the chosen agent.
 3. Start transport dependencies from [Demo Walkthrough](demo.md).
 4. Launch the sandboxed agent process.
-5. Inspect outputs such as policy, report files, memory state, and queued PR artifacts.
+5. Inspect outputs such as policy, Git snapshot artifacts, report files, memory state, and queued PR artifacts.
 
 !!! info
 
@@ -79,6 +79,7 @@ For the current demo workflows, this is the practical order:
 Start from the symptom, then jump to the right page:
 
 - Sandbox launch or path access issue: [Sandbox and Policies](sandbox.md)
+- Git-backed sandbox snapshot or working-tree audit issue: [Sandbox and Policies](sandbox.md) and [CLI Reference](cli.md)
 - Avatar or SLIM handshake issue: [Demo Walkthrough](demo.md)
 - Demo workload or remediation behavior issue: [SecOps Demo](secops_agent.md)
 - Identity, DID, or secret access issue: [API Guide](api_integration.md) and [CLI Reference](cli.md)
@@ -88,6 +89,7 @@ Start from the symptom, then jump to the right page:
 Keep these pages close when running the system:
 
 - [CLI Reference](cli.md) for `shadictl` flags and memory commands
+- [Sandbox and Policies](sandbox.md) for snapshot capture, launcher profiles, and enforcement boundaries
 - [Security Notes](security.md) for threat-model boundaries and backend caveats
 - [Architecture](architecture.md) for the control-plane versus runtime split
 

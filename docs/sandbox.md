@@ -82,8 +82,60 @@ Profile defaults are applied first, then policy file values, then CLI flags.
 - `--net-block`: Block network access.
 - `--allow-command CMD`: Override default command blocklist.
 - `--inject-keychain KEY=ENV`: Read a keychain secret and inject it as an env var before sandboxing.
+- `--git-snapshot`: Capture before/after Git state for the current working tree.
+- `--git-snapshot-dir DIR`: Override the default snapshot root at `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
+- `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the artifact.
 
 `net_allow` is honored by the Python sandbox runner. It injects a `sitecustomize.py` hook that blocks connections outside the allowlist (best-effort; not OS-enforced).
+
+## Git-backed snapshots
+
+`shadictl` can optionally capture a read-only Git snapshot around the sandboxed
+run. This is useful when you want an audit artifact for file changes without
+auto-committing anything or asking downstream tooling to reconstruct Git state
+from scratch.
+
+Enable it explicitly:
+
+```bash
+cargo run -p shadictl -- \
+  --allow . \
+  --git-snapshot \
+  --git-snapshot-untracked \
+  -- \
+  ./your-agent
+```
+
+What gets captured:
+
+- repository detection based on the current working directory
+- discovery of nested Git repositories under the sandbox working directory
+- pre-run and post-run `HEAD`
+- `git status --porcelain=v1 --untracked-files=all`
+- `git diff --binary`
+- optional untracked inventory via `git ls-files --others --exclude-standard`
+- a derived comparison block so operators can tell whether `HEAD`, status,
+  diff, or untracked state changed
+- SHA-256 hashes for the captured Git payloads and a combined state hash
+
+Artifact layout:
+
+- `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/runs/<artifact_id>/snapshot.json`
+- `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/latest.json`
+
+This feature is opt-in by design. SHADI does not capture snapshots unless you
+pass `--git-snapshot`, and the first implementation remains Git-read-only.
+
+Nested Git repos are handled explicitly. The artifact keeps the original
+top-level `git.*` fields for the primary repo rooted at the sandbox working
+directory, and adds `git.repositories` for per-repo records when additional Git
+repos exist below that directory. This prevents false negatives in workflows
+where an agent changes another repo under the same workspace.
+
+Example: a SecOps agent may clone, pull, or commit inside a remediation target
+repo under its working folder. In that case the outer repo can remain clean,
+but the nested repo entry will still show the change through its own
+`comparison` block and will increment `git.changed_repositories`.
 
 ### Key utilities
 `shadictl` also manages OpenPGP keys and agent DIDs without invoking OS `gpg`:
@@ -115,6 +167,7 @@ cargo run -p shadictl -- \
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
   to execute processes are allowed for read access.
 - Command blocking is enforced before launch in the CLI.
+- Git snapshots are metadata capture only. They do not commit, stage, or rewrite Git history.
 - On macOS, policy paths are resolved to absolute paths before Seatbelt rules are emitted; relative subpaths are not reliable enforcement inputs.
 - The demo launchers can broker secrets outside the sandbox and inject them into the agent environment before execution.
 - Windows: ACL allowlists are applied to the specified paths for the AppContainer

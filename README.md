@@ -1,5 +1,9 @@
 # SHADI
 
+[![Docs](https://github.com/agntcy/shadi/actions/workflows/docs-pages.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/docs-pages.yml)
+[![Coverage](https://github.com/agntcy/shadi/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/coverage.yml)
+[![CI](https://github.com/agntcy/shadi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/ci.yml)
+
 Secure Host for Agentic AI Dynamic Instantiation (SHADI) is a secure host runtime for autonomous, multi-agent systems.
 
 SHADI is designed for environments where agents are long-lived, hold real credentials, and run close to sensitive data. It combines identity verification, keychain-backed secrets, OS sandboxing, and encrypted local memory to reduce blast radius and make agent behavior auditable.
@@ -9,6 +13,7 @@ SHADI is designed for environments where agents are long-lived, hold real creden
 - Verified secret access gates (`agent_secrets`) with OS keychain backends.
 - Deterministic human -> agent identity derivation (`did:key`) and provenance verification.
 - Kernel-enforced sandbox execution policies (`shadi_sandbox`) with portable profile defaults.
+- Opt-in Git-backed sandbox snapshots for before/after working-tree capture and audit trails.
 - SQLCipher-backed encrypted local memory (`shadi_memory`).
 - Python bindings (`shadi_py`) for secrets, memory, and sandboxed execution.
 - SLIM transport integration for secure agent-to-agent messaging.
@@ -100,7 +105,38 @@ cargo run -p shadictl -- \
 	/usr/bin/env echo "hello from sandbox"
 ```
 
-### 3) Derive agent identities from a human source
+### 3) Capture a Git-backed sandbox snapshot
+
+Use this when you want a stable artifact describing what a sandboxed command
+changed inside a Git working tree:
+
+```bash
+cargo run -p shadictl -- \
+	--allow . \
+	--git-snapshot \
+	--git-snapshot-untracked \
+	-- \
+	./your-agent
+```
+
+Artifacts are opt-in and written by default to
+`${SHADI_TMP_DIR:-./.tmp}/git-snapshots`, with a stable layout:
+
+- `runs/<artifact_id>/snapshot.json`: canonical per-run artifact
+- `latest.json`: copy of the most recent snapshot
+
+Each artifact includes resolved policy, timestamps, before/after Git state,
+SHA-256 hashes for captured Git payloads, and comparison fields such as
+`status_changed` and `overall_changed`.
+
+If the workspace contains nested Git repos, the artifact also includes a
+`git.repositories` array with per-repo before/after state and comparison
+metadata. This is important for agent workflows like SecOps remediation where
+the agent may clone or update another repo under the current working folder:
+the outer repo can stay unchanged while the nested repo entry still reports the
+change.
+
+### 4) Derive agent identities from a human source
 
 ```bash
 cargo run -p shadictl -- \
@@ -113,7 +149,7 @@ cargo run -p shadictl -- \
 	--out-dir ./agent-dids
 ```
 
-### 4) Verify agent provenance
+### 5) Verify agent provenance
 
 ```bash
 cargo run -p shadictl -- \
@@ -124,7 +160,7 @@ cargo run -p shadictl -- \
 	--prefix agents
 ```
 
-### 5) Use encrypted memory through `shadictl`
+### 6) Use encrypted memory through `shadictl`
 
 ```bash
 cargo run -p shadictl -- -- memory init \

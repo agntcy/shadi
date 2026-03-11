@@ -1,32 +1,58 @@
-name: Coverage
+name: Publish Project Coverage to Codecov
 
 on:
+  push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
   coverage:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     env:
-      PYO3_PYTHON: "/opt/homebrew/opt/python@3.12/bin/python3.12"
+      PYO3_PYTHON: python
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Install Homebrew dependencies
-        run: brew install python@3.12 just llvm nettle pkg-config
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev
+
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install LLVM tools
+        run: rustup component add llvm-tools-preview
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      - name: Generate coverage
+
+      - name: Generate coverage report
         run: just coverage
-      - name: Upload coverage to Codecov
+
+      - name: Upload combined coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           files: coverage/lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: rust
+          name: rust-coverage
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
