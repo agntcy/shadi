@@ -1,5 +1,9 @@
 # SHADI
 
+[![Docs](https://github.com/agntcy/shadi/actions/workflows/docs-pages.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/docs-pages.yml)
+[![Coverage](https://github.com/agntcy/shadi/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/coverage.yml)
+[![CI](https://github.com/agntcy/shadi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/ci.yml)
+
 Secure Host for Agentic AI Dynamic Instantiation (SHADI) is a secure host runtime for autonomous, multi-agent systems.
 
 SHADI is designed for environments where agents are long-lived, hold real credentials, and run close to sensitive data. It combines identity verification, keychain-backed secrets, OS sandboxing, and encrypted local memory to reduce blast radius and make agent behavior auditable.

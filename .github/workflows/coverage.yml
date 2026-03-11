@@ -31,6 +31,11 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Install LLVM tools
         run: rustup component add llvm-tools-preview
 
@@ -40,11 +45,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Generate coverage report
-        run: |
-          mkdir -p coverage
-          cargo llvm-cov --workspace --features coverage --lcov \
-            --output-path coverage/lcov.info \
-            --ignore-filename-regex "/rustc-[^/]+/"
+        run: just coverage
 
       - name: Upload combined coverage to Codecov
         uses: codecov/codecov-action@v4

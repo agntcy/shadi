@@ -1,9 +1,22 @@
-name: Docs
+name: CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
+    tags:
+      - "v*.*.*"
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "overrides/**"
+      - "assets/**"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "overrides/**"
+      - "assets/**"
   workflow_dispatch:
 
 permissions:
@@ -12,12 +25,30 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.vars.outputs.release_tag }}
+    steps:
+      - name: Resolve required vars
+        id: vars
+        run: |
+          echo "release_tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+  docs:
+    name: Docs
+    needs:
+      - prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,17 +61,24 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           uv pip install --system mkdocs mkdocs-material pymdown-extensions
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - name: Build docs
-        run: mkdocs build --strict
+        run: just docs-build
       - name: Configure Pages
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/configure-pages@v5
       - name: Upload Pages artifact
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
-    needs: build
+    needs: docs
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -49,3 +87,14 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  success:
+    name: Success
+    if: ${{ !cancelled() && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'failure') }}
+    needs:
+      - prepare
+      - docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo Success
+        run: echo "::notice Success!"
