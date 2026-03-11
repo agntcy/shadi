@@ -30,6 +30,9 @@ cargo run -p shadictl -- [FLAGS] -- [COMMAND]
 - `--list-keychain`: List secrets in the SHADI store.
 - `--list-prefix PREFIX`: Optional prefix filter for `--list-keychain`.
 - `--print-policy`: Print the resolved policy and exit.
+- `--git-snapshot`: Capture Git state before and after the sandboxed run.
+- `--git-snapshot-dir DIR`: Write snapshot artifacts under DIR instead of `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
+- `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the snapshot artifact.
 
 ### Secret backend selection
 
@@ -71,6 +74,35 @@ cargo run -p shadictl -- \
   -- \
   ./your-agent
 ```
+
+Capture a read-only Git snapshot around a sandboxed run:
+
+```bash
+cargo run -p shadictl -- \
+  --allow . \
+  --git-snapshot \
+  --git-snapshot-untracked \
+  -- \
+  ./your-agent
+```
+
+When enabled, `shadictl` checks whether the working directory is inside a Git
+repository and writes a JSON artifact with command metadata, resolved policy,
+timestamps, `HEAD`, `git status --porcelain`, `git diff --binary`, and optional
+untracked inventory. By default artifacts are written to
+`${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
+
+The layout is stable for downstream tooling:
+
+- `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/runs/<artifact_id>/snapshot.json`: canonical per-run artifact.
+- `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/latest.json`: copy of the most recent snapshot.
+
+Each repo state in the artifact now includes SHA-256 hashes for `HEAD`, the
+porcelain status payload, the raw binary diff payload, optional untracked
+inventory, and a combined state hash. The artifact also includes a comparison
+section with `head_changed`, `status_changed`, `diff_changed`,
+`untracked_changed`, and `overall_changed` so other systems can tell whether
+the sandboxed command changed the working tree without reprocessing Git output.
 
 ### Key, DID, and identity provenance
 
