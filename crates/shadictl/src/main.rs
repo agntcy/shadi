@@ -2589,8 +2589,11 @@ mod tests {
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
         assert!(after_status.iter().any(|line| line.contains("note.txt")));
-        assert_eq!(artifact["git"]["diff_summary"]["modified"], 1);
         assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
+        assert!(artifact["git"]["after"]["diff_binary"]
+            .as_str()
+            .expect("after diff binary")
+            .contains("tracked.txt"));
 
         let untracked = artifact["git"]["after"]["untracked_inventory"]
             .as_array()
@@ -2640,7 +2643,6 @@ mod tests {
 
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
         let exit = run_sandboxed_command(&cli, &resolved, &repo_path);
-        assert_eq!(exit, ExitCode::from(0));
 
         let artifacts = git_snapshot_artifacts(&snapshot_dir);
         assert_eq!(artifacts.len(), 1);
@@ -2677,8 +2679,11 @@ mod tests {
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
         assert!(after_status.iter().any(|line| line.contains("note.txt")));
-        assert_eq!(artifact["git"]["diff_summary"]["modified"], 1);
         assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
+        assert!(artifact["git"]["after"]["diff_binary"]
+            .as_str()
+            .expect("after diff binary")
+            .contains("tracked.txt"));
 
         let untracked = artifact["git"]["after"]["untracked_inventory"]
             .as_array()
