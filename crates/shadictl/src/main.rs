@@ -2881,6 +2881,7 @@ mod tests {
             .expect("open nested file");
         use std::io::Write as _;
         writeln!(nested_handle, "changed").expect("append nested file");
+            drop(nested_handle);
         run_git(&nested_repo, &["add", "nested.txt"]);
         run_git(&nested_repo, &["commit", "-m", "update"]);
 
