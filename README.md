@@ -1,6 +1,7 @@
 # SHADI
 
 [![Docs](https://github.com/agntcy/shadi/actions/workflows/docs-pages.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/docs-pages.yml)
+[![Docs Site](https://img.shields.io/badge/docs-agntcy.github.io%2Fshadi-blue)](https://agntcy.github.io/shadi)
 [![Coverage](https://github.com/agntcy/shadi/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/coverage.yml)
 [![CI](https://github.com/agntcy/shadi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/ci.yml)
 
