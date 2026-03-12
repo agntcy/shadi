@@ -4,6 +4,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::io::BufRead;
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -25,6 +26,7 @@ use shadi_sandbox::{spawn_sandboxed, SandboxPolicy};
 use agent_secrets::{SecretPolicy, SecretStore};
 use shadi_memory::{MemoryEntry, SqlCipherStore};
 use sequoia_openpgp as openpgp;
+use tracing::{field, info_span};
 
 #[derive(Parser, Debug)]
 #[command(name = "shadi")]
@@ -97,6 +99,34 @@ struct MemoryCli {
 
     #[command(subcommand)]
     command: MemoryCommand,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "trace", about = "Inspect local SHADI trace logs")]
+struct TraceCli {
+    #[arg(long, value_name = "PATH")]
+    file: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: TraceCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum TraceCommand {
+    List {
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long)]
+        exit_code: Option<i32>,
+    },
+    Summary {
+        #[arg(long, default_value = "200")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -404,6 +434,7 @@ fn test_store_get(key: &str) -> Option<Vec<u8>> {
 
 
 fn main() -> ExitCode {
+    shadi_telemetry::init("shadi-core");
     let cli = Cli::parse();
     run_cli(cli)
 }
@@ -411,6 +442,9 @@ fn main() -> ExitCode {
 fn run_cli(cli: Cli) -> ExitCode {
     if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("memory")) {
         return run_memory_command(&cli.command[1..]);
+    }
+    if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("trace")) {
+        return run_trace_command(&cli.command[1..]);
     }
     if matches!(cli.command.first().map(|cmd| cmd.as_str()), Some("did-from-gpg")) {
         return run_did_from_gpg_command(&cli.command);
@@ -529,8 +563,189 @@ fn run_cli(cli: Cli) -> ExitCode {
     run_sandboxed_command(&cli, &resolved, &cwd)
 }
 
+fn run_trace_command(args: &[String]) -> ExitCode {
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push("shadictl-trace".to_string());
+    argv.extend_from_slice(args);
+    let cli = match TraceCli::try_parse_from(argv) {
+        Ok(cli) => cli,
+        Err(err) => {
+            eprintln!("{}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    let path = resolve_trace_file(cli.file);
+    match &cli.command {
+        TraceCommand::List {
+            limit,
+            name,
+            command,
+            exit_code,
+        } => match trace_list(&path, *limit, name.as_deref(), command.as_deref(), *exit_code) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
+        TraceCommand::Summary { limit } => match trace_summary(&path, *limit) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
+    }
+}
+
+fn resolve_trace_file(cli_path: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = cli_path {
+        return path;
+    }
+    if let Ok(path) = std::env::var("SHADI_OTEL_FILE") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    PathBuf::from(".shadi/traces.jsonl")
+}
+
+fn trace_list(
+    path: &Path,
+    limit: usize,
+    name: Option<&str>,
+    command: Option<&str>,
+    exit_code: Option<i32>,
+) -> Result<(), String> {
+    let lines = read_trace_lines(path, limit)?;
+    for line in lines {
+        if let Some(value) = parse_trace_line(&line) {
+            if !trace_matches(&value, name, command, exit_code) {
+                continue;
+            }
+        }
+        println!("{}", line);
+    }
+    Ok(())
+}
+
+fn trace_summary(path: &Path, limit: usize) -> Result<(), String> {
+    let lines = read_trace_lines(path, limit)?;
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for line in lines {
+        if let Some(value) = parse_trace_line(&line) {
+            if let Some(name) = trace_span_name(&value) {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+    }
+
+    for (name, count) in counts {
+        println!("{}\t{}", count, name);
+    }
+    Ok(())
+}
+
+fn read_trace_lines(path: &Path, limit: usize) -> Result<Vec<String>, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|err| format!("failed to open trace file {}: {}", path.display(), err))?;
+    let reader = std::io::BufReader::new(file);
+    let mut lines: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    for line in reader.lines() {
+        let line = line.map_err(|err| format!("failed to read trace file: {}", err))?;
+        if limit == 0 {
+            continue;
+        }
+        lines.push_back(line);
+        if lines.len() > limit {
+            lines.pop_front();
+        }
+    }
+    Ok(lines.into_iter().collect())
+}
+
+fn parse_trace_line(line: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(line).ok()
+}
+
+fn trace_span_name(value: &serde_json::Value) -> Option<String> {
+    if let Some(name) = value
+        .get("span")
+        .and_then(|span| span.get("name"))
+        .and_then(|name| name.as_str())
+    {
+        return Some(name.to_string());
+    }
+
+    if let Some(spans) = value.get("spans").and_then(|spans| spans.as_array()) {
+        if let Some(name) = spans
+            .iter()
+            .filter_map(|span| span.get("name"))
+            .filter_map(|name| name.as_str())
+            .next()
+        {
+            return Some(name.to_string());
+        }
+    }
+
+    None
+}
+
+fn trace_matches(
+    value: &serde_json::Value,
+    name: Option<&str>,
+    command: Option<&str>,
+    exit_code: Option<i32>,
+) -> bool {
+    if let Some(expected) = name {
+        if trace_span_name(value)
+            .as_deref()
+            .map(|value| !value.contains(expected))
+            .unwrap_or(true)
+        {
+            return false;
+        }
+    }
+
+    if let Some(expected) = command {
+        let found = value
+            .get("fields")
+            .and_then(|fields| fields.get("command"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.contains(expected))
+            .unwrap_or(false);
+        if !found {
+            return false;
+        }
+    }
+
+    if let Some(expected) = exit_code {
+        let found = value
+            .get("fields")
+            .and_then(|fields| fields.get("exit.code"))
+            .and_then(|value| value.as_i64())
+            .map(|value| value == expected as i64)
+            .unwrap_or(false);
+        if !found {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &Path) -> ExitCode {
     let cmd_name = cli.command.first().map(|cmd| cmd.as_str()).unwrap_or("");
+    let policy_source = cli
+        .policy_file
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let mut allowed_paths = BTreeSet::new();
+    allowed_paths.extend(resolved.policy.allow_read().iter().cloned());
+    allowed_paths.extend(resolved.policy.allow_write().iter().cloned());
+    let network_mode = if resolved.policy.net_blocked() { "blocked" } else { "allowed" };
 
     let mut command = Command::new(cmd_name);
     if cli.command.len() > 1 {
@@ -544,21 +759,56 @@ fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &Path) -> Ex
     }
 
     let mut snapshot = GitSnapshotSession::start(cli, resolved, cwd);
+    let snapshot_enabled = snapshot.is_some();
+
+    let span = info_span!(
+        "shadi.sandbox.run",
+        command = %cmd_name,
+        cwd = %cwd.display(),
+        policy.source = %policy_source,
+        policy.allowed_paths = allowed_paths.len() as i64,
+        network.mode = %network_mode,
+        snapshot.enabled = snapshot_enabled,
+        exit.code = field::Empty,
+        snapshot.path = field::Empty,
+    );
+    let _guard = span.enter();
 
     match spawn_sandboxed(&mut command, &resolved.policy) {
         Ok(mut child) => match child.wait() {
             Ok(status) => {
-                finalize_git_snapshot(snapshot.as_mut(), status.code(), None);
+                let exit_code = status.code().unwrap_or(1);
+                span.record("exit.code", &exit_code);
+                let snapshot_path = finalize_git_snapshot(snapshot.as_mut(), status.code(), None);
+                if let Some(path) = snapshot_path {
+                    span.record("snapshot.path", &path.display().to_string());
+                }
                 ExitCode::from(status.code().unwrap_or(1) as u8)
             }
             Err(err) => {
-                finalize_git_snapshot(snapshot.as_mut(), None, Some(format!("failed to wait for child: {}", err)));
+                span.record("exit.code", &-1);
+                let snapshot_path = finalize_git_snapshot(
+                    snapshot.as_mut(),
+                    None,
+                    Some(format!("failed to wait for child: {}", err)),
+                );
+                if let Some(path) = snapshot_path {
+                    span.record("snapshot.path", &path.display().to_string());
+                }
                 eprintln!("failed to wait for child: {}", err);
                 ExitCode::from(1)
             }
         },
         Err(err) => {
-            finalize_git_snapshot(snapshot.as_mut(), None, Some(format!("failed to start sandboxed command: {}", err)));
+            span.record("exit.code", &-1);
+            let snapshot_path = finalize_git_snapshot(
+                snapshot.as_mut(),
+                None,
+                Some(format!("failed to start sandboxed command: {}", err)),
+            );
+            if let Some(path) = snapshot_path {
+                span.record("snapshot.path", &path.display().to_string());
+            }
             eprintln!("failed to start sandboxed command: {}", err);
             ExitCode::from(1)
         }
@@ -569,11 +819,17 @@ fn finalize_git_snapshot(
     snapshot: Option<&mut GitSnapshotSession>,
     exit_code: Option<i32>,
     error: Option<String>,
-) {
+) -> Option<PathBuf> {
     if let Some(snapshot) = snapshot {
-        if let Err(err) = snapshot.finish(exit_code, error) {
-            eprintln!("warning: failed to write git snapshot artifact: {}", err);
+        match snapshot.finish(exit_code, error) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                eprintln!("warning: failed to write git snapshot artifact: {}", err);
+                None
+            }
         }
+    } else {
+        None
     }
 }
 
@@ -1303,14 +1559,30 @@ fn run_memory_command(args: &[String]) -> ExitCode {
 }
 
 fn handle_memory_command(cli: &MemoryCli, store: &SqlCipherStore) -> Result<String, String> {
+    let span = info_span!(
+        "shadi.memory.command",
+        memory.command = field::Empty,
+        memory.scope = field::Empty,
+        memory.entry_key = field::Empty,
+        memory.limit = field::Empty,
+        memory.query = field::Empty,
+    );
+    let _guard = span.enter();
+
     match &cli.command {
-        MemoryCommand::Init => Ok("ok".to_string()),
+        MemoryCommand::Init => {
+            span.record("memory.command", &"init");
+            Ok("ok".to_string())
+        }
         MemoryCommand::Put {
             scope,
             entry_key,
             payload,
             payload_file,
         } => {
+            span.record("memory.command", &"put");
+            span.record("memory.scope", &field::display(scope));
+            span.record("memory.entry_key", &field::display(entry_key));
             let payload = read_memory_payload(payload.clone(), payload_file.clone())?;
             let id = store
                 .put(scope, entry_key, &payload)
@@ -1318,6 +1590,9 @@ fn handle_memory_command(cli: &MemoryCli, store: &SqlCipherStore) -> Result<Stri
             Ok(serde_json::json!({"status": "saved", "id": id}).to_string())
         }
         MemoryCommand::Get { scope, entry_key } => {
+            span.record("memory.command", &"get");
+            span.record("memory.scope", &field::display(scope));
+            span.record("memory.entry_key", &field::display(entry_key));
             let entry = store
                 .get_latest(scope, entry_key)
                 .map_err(|err| err.to_string())?;
@@ -1331,18 +1606,32 @@ fn handle_memory_command(cli: &MemoryCli, store: &SqlCipherStore) -> Result<Stri
             query,
             limit,
         } => {
+            span.record("memory.command", &"search");
+            if let Some(scope) = scope.as_ref() {
+                span.record("memory.scope", &field::display(scope));
+            }
+            span.record("memory.query", &field::display(query));
+            span.record("memory.limit", &(*limit as i64));
             let entries = store
                 .search(scope.as_deref(), query, *limit)
                 .map_err(|err| err.to_string())?;
             format_memory_entries(entries)
         }
         MemoryCommand::List { scope, limit } => {
+            span.record("memory.command", &"list");
+            if let Some(scope) = scope.as_ref() {
+                span.record("memory.scope", &field::display(scope));
+            }
+            span.record("memory.limit", &(*limit as i64));
             let entries = store
                 .list(scope.as_deref(), *limit)
                 .map_err(|err| err.to_string())?;
             format_memory_entries(entries)
         }
         MemoryCommand::Delete { scope, entry_key } => {
+            span.record("memory.command", &"delete");
+            span.record("memory.scope", &field::display(scope));
+            span.record("memory.entry_key", &field::display(entry_key));
             let affected = store
                 .delete(scope, entry_key)
                 .map_err(|err| err.to_string())?;
@@ -2086,6 +2375,19 @@ fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy,
         allow.insert(cmd.to_string());
     }
 
+    let profile_name = match cli.profile.unwrap_or(LauncherProfile::Balanced) {
+        LauncherProfile::Strict => "strict",
+        LauncherProfile::Balanced => "balanced",
+        LauncherProfile::Connected => "connected",
+    };
+    let span = info_span!(
+        "shadi.policy.resolve",
+        policy.allowed_paths = field::Empty,
+        network.mode = field::Empty,
+        policy.profile = %profile_name,
+    );
+    let _guard = span.enter();
+
     let profile = profile_defaults(cli.profile);
     let profile_net_block = profile.net_block.unwrap_or(false);
     let mut policy = SandboxPolicy::new().block_network(cli.net_block || file_policy.net_block.unwrap_or(profile_net_block));
@@ -2101,6 +2403,13 @@ fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy,
     policy = apply_paths(policy, &cli.read, PathMode::Read)?;
     policy = apply_paths(policy, &cli.write, PathMode::Write)?;
     policy = apply_paths(policy, &cli.allow, PathMode::Allow)?;
+
+    let mut allowed_paths = BTreeSet::new();
+    allowed_paths.extend(policy.allow_read().iter().cloned());
+    allowed_paths.extend(policy.allow_write().iter().cloned());
+    span.record("policy.allowed_paths", &(allowed_paths.len() as i64));
+    let network_mode = if policy.net_blocked() { "blocked" } else { "allowed" };
+    span.record("network.mode", &field::display(network_mode));
 
     Ok(ResolvedPolicy {
         policy,
@@ -2223,6 +2532,8 @@ fn canonicalize_string_path(path: &str) -> std::io::Result<PathBuf> {
 }
 
 fn load_policy_file(path: &Path) -> std::io::Result<PolicyFile> {
+    let span = info_span!("shadi.policy.load", policy.source = %path.display());
+    let _guard = span.enter();
     let data = std::fs::read_to_string(path)?;
     serde_json::from_str(&data).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
@@ -2232,6 +2543,8 @@ fn inject_keychain_secrets(command: &mut Command, mappings: &[String]) -> Result
         return Ok(());
     }
 
+    let span = info_span!("shadi.secrets.inject", secret.count = mappings.len() as i64);
+    let _guard = span.enter();
     let store = default_secret_store();
     inject_keychain_with_store(store.as_ref(), command, mappings)
 }

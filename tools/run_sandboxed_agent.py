@@ -5,16 +5,30 @@ import sys
 from pathlib import Path
 
 from shadi import SandboxPolicyHandle, run_sandboxed
+from telemetry import tracer
 
 
 def load_policy(policy_path: str) -> tuple[SandboxPolicyHandle, dict]:
     policy_file = Path(policy_path)
     if not policy_file.exists():
         raise FileNotFoundError(f"Policy file not found: {policy_file}")
-    try:
-        policy_data = json.loads(policy_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Policy file is not valid JSON: {exc}") from exc
+    with tracer.start_as_current_span("shadi.policy.load") as span:
+        span.set_attribute("policy.source", str(policy_file))
+        try:
+            policy_data = json.loads(policy_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Policy file is not valid JSON: {exc}") from exc
+
+        allowed_paths = set()
+        for path in policy_data.get("read", []) or []:
+            allowed_paths.add(str(path))
+        for path in policy_data.get("write", []) or []:
+            allowed_paths.add(str(path))
+        for path in policy_data.get("allow", []) or []:
+            allowed_paths.add(str(path))
+        span.set_attribute("policy.allowed_paths.count", len(allowed_paths))
+        network_mode = "blocked" if policy_data.get("net_block") else "allowed"
+        span.set_attribute("network.mode", network_mode)
 
     policy = SandboxPolicyHandle()
     for path in policy_data.get("read", []) or []:
@@ -72,8 +86,25 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    allowed_paths = set()
+    for path in policy_data.get("read", []) or []:
+        allowed_paths.add(str(path))
+    for path in policy_data.get("write", []) or []:
+        allowed_paths.add(str(path))
+    for path in policy_data.get("allow", []) or []:
+        allowed_paths.add(str(path))
+    network_mode = "blocked" if policy_data.get("net_block") else "allowed"
+
     env = build_env(policy_data)
-    return run_sandboxed(command, policy, cwd=args.cwd, env=env)
+    with tracer.start_as_current_span("shadi.sandbox.run") as span:
+        span.set_attribute("command", " ".join(command))
+        span.set_attribute("cwd", args.cwd or str(Path.cwd()))
+        span.set_attribute("policy.source", args.policy)
+        span.set_attribute("policy.allowed_paths.count", len(allowed_paths))
+        span.set_attribute("network.mode", network_mode)
+        exit_code = run_sandboxed(command, policy, cwd=args.cwd, env=env)
+        span.set_attribute("exit.code", exit_code)
+        return exit_code
 
 
 if __name__ == "__main__":

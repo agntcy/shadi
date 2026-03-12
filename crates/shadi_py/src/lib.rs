@@ -14,6 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 use shadi_memory::{MemoryEntry as ShadiMemoryEntry, SqlCipherStore};
 use shadi_sandbox::{spawn_sandboxed, SandboxError, SandboxPolicy};
+use tracing::{field, info_span};
 
 struct SessionFlagVerifier;
 
@@ -127,6 +128,8 @@ impl ShadiStore {
     }
 
     fn put(&self, session: &PySessionContext, key: &str, secret: &[u8]) -> PyResult<()> {
+        let span = info_span!("shadi.secret.put", secret.key = %key);
+        let _guard = span.enter();
         let ctx = session.to_context();
         let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
@@ -141,6 +144,8 @@ impl ShadiStore {
         session: &PySessionContext,
         key: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        let span = info_span!("shadi.secret.get", secret.key = %key);
+        let _guard = span.enter();
         let ctx = session.to_context();
         let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
@@ -150,6 +155,8 @@ impl ShadiStore {
     }
 
     fn delete(&self, session: &PySessionContext, key: &str) -> PyResult<()> {
+        let span = info_span!("shadi.secret.delete", secret.key = %key);
+        let _guard = span.enter();
         let ctx = session.to_context();
         let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
@@ -159,6 +166,8 @@ impl ShadiStore {
     }
 
     fn list_keys(&self, session: &PySessionContext) -> PyResult<Vec<String>> {
+        let span = info_span!("shadi.secret.list_keys");
+        let _guard = span.enter();
         let ctx = session.to_context();
         AgentSecretAccess::require_verified(&ctx).map_err(map_secret_error)?;
         let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
@@ -178,12 +187,16 @@ impl SqlCipherMemoryStore {
     }
 
     fn put(&self, scope: &str, entry_key: &str, payload: &str) -> PyResult<i64> {
+        let span = info_span!("shadi.memory.put", memory.scope = %scope, memory.entry_key = %entry_key);
+        let _guard = span.enter();
         self.store
             .put(scope, entry_key, payload)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))
     }
 
     fn get_latest(&self, scope: &str, entry_key: &str) -> PyResult<Option<MemoryEntry>> {
+        let span = info_span!("shadi.memory.get_latest", memory.scope = %scope, memory.entry_key = %entry_key);
+        let _guard = span.enter();
         let entry = self
             .store
             .get_latest(scope, entry_key)
@@ -193,6 +206,13 @@ impl SqlCipherMemoryStore {
 
     #[pyo3(signature = (query, scope=None, limit=10))]
     fn search(&self, query: &str, scope: Option<String>, limit: usize) -> PyResult<Vec<MemoryEntry>> {
+        let span = info_span!(
+            "shadi.memory.search",
+            memory.query = %query,
+            memory.scope = %scope.as_deref().unwrap_or(""),
+            memory.limit = limit as i64,
+        );
+        let _guard = span.enter();
         let entries = self
             .store
             .search(scope.as_deref(), query, limit)
@@ -205,6 +225,12 @@ impl SqlCipherMemoryStore {
 
     #[pyo3(signature = (scope=None, limit=50))]
     fn list(&self, scope: Option<String>, limit: usize) -> PyResult<Vec<MemoryEntry>> {
+        let span = info_span!(
+            "shadi.memory.list",
+            memory.scope = %scope.as_deref().unwrap_or(""),
+            memory.limit = limit as i64,
+        );
+        let _guard = span.enter();
         let entries = self
             .store
             .list(scope.as_deref(), limit)
@@ -216,6 +242,8 @@ impl SqlCipherMemoryStore {
     }
 
     fn delete(&self, scope: &str, entry_key: &str) -> PyResult<usize> {
+        let span = info_span!("shadi.memory.delete", memory.scope = %scope, memory.entry_key = %entry_key);
+        let _guard = span.enter();
         self.store
             .delete(scope, entry_key)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))
@@ -286,6 +314,7 @@ impl PySessionContext {
 
 #[pymodule]
 fn shadi(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    shadi_telemetry::init("shadi-runtime");
     m.add_class::<ShadiStore>()?;
     m.add_class::<PySessionContext>()?;
     m.add_class::<SqlCipherMemoryStore>()?;
@@ -325,6 +354,8 @@ fn inject_keychain_with_store(
     command: &mut Command,
     mappings: &[String],
 ) -> Result<(), String> {
+    let span = info_span!("shadi.secrets.inject", secret.count = mappings.len() as i64);
+    let _guard = span.enter();
     for mapping in mappings {
         let (key, env) = parse_key_env(mapping)?;
         let secret = store
@@ -361,6 +392,15 @@ fn run_sandboxed(
         return Err(PyRuntimeError::new_err("command must not be empty"));
     }
 
+    let cwd_value = cwd.as_deref().unwrap_or("");
+    let span = info_span!(
+        "shadi.sandbox.run",
+        command = %command[0],
+        cwd = %cwd_value,
+        exit.code = field::Empty,
+    );
+    let _guard = span.enter();
+
     let mut cmd = Command::new(&command[0]);
     if command.len() > 1 {
         cmd.args(&command[1..]);
@@ -381,6 +421,7 @@ fn run_sandboxed(
     let status = child
         .wait()
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    span.record("exit.code", &status.code().unwrap_or(-1));
     Ok(status.code().unwrap_or(1))
 }
 

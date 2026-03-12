@@ -7,8 +7,32 @@ mod platform;
 pub use policy::SandboxPolicy;
 use std::process::{Command, ExitStatus};
 use std::io;
+use tracing::{field, info_span};
 
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
+    let program = command.get_program().to_string_lossy().to_string();
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cwd = command
+        .get_current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "".to_string());
+    let allowed_paths = policy.allow_read().len() + policy.allow_write().len();
+    let network_mode = if policy.net_blocked() { "blocked" } else { "allowed" };
+
+    let span = info_span!(
+        "shadi.sandbox.spawn",
+        command = %program,
+        args = %args,
+        cwd = %cwd,
+        policy.allowed_paths = allowed_paths as i64,
+        network.mode = %network_mode,
+    );
+    let _guard = span.enter();
+
     platform::spawn_sandboxed(command, policy)
 }
 
@@ -37,14 +61,26 @@ impl SandboxedChild {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        match &mut self.inner {
+        let span = info_span!("shadi.sandbox.wait", pid = self.id(), exit.code = field::Empty);
+        let _guard = span.enter();
+
+        let status = match &mut self.inner {
             SandboxedChildInner::Std(child) => child.wait(),
             #[cfg(target_os = "windows")]
             SandboxedChildInner::Windows(child) => child.wait(),
+        };
+
+        if let Ok(ref status) = status {
+            span.record("exit.code", &status.code().unwrap_or(-1));
         }
+
+        status
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
+        let span = info_span!("shadi.sandbox.kill", pid = self.id());
+        let _guard = span.enter();
+
         match &mut self.inner {
             SandboxedChildInner::Std(child) => child.kill(),
             #[cfg(target_os = "windows")]

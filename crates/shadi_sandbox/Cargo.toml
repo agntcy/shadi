@@ -9,6 +9,7 @@ coverage = []
 
 [dependencies]
 thiserror = "1.0"
+tracing = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

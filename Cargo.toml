@@ -6,6 +6,7 @@ members = [
   "crates/shadi_memory",
   "crates/shadi_py",
   "crates/shadi_sandbox",
+  "crates/shadi_telemetry",
   "crates/shadictl"
 ]
 resolver = "2"
