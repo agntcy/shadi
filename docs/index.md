@@ -1,74 +1,78 @@
 # SHADI
 
-SHADI is a secure host runtime for agents that run close to real credentials,
-local data, and developer tooling. It combines verified identity, gated secret
-access, OS-enforced sandboxing, encrypted local memory, and secure transport so
-agent execution is constrained by launch-time policy instead of prompt-time
-intent alone.
+## Runtime Safety Infrastructure for Agentic Systems
+
+Secure Host for Agentic AI Dynamic Instantiation (SHADI) is a hardened runtime
+for agents operating near real credentials, local data, and developer tooling.
+It enforces launch-time policy through verified identity, gated secret access,
+OS-level sandboxing, encrypted local memory, and secure transport.
+
+[Get Started](getting_started.md) | [Read the Docs](architecture.md)
+
+## Why SHADI
+
+SHADI is built for environments where trust boundaries matter:
+
+- Secrets are only released to verified sessions.
+- Sandbox policy is enforced by the OS, not prompt intent.
+- Memory stays encrypted at rest.
+- Transport between agents is authenticated and protected.
+
+## Five Layers of Runtime Safety
+
+Each layer builds on the previous one to reduce blast radius and make behavior auditable.
+
+1. **Verified Identity**: deterministic human-to-agent derivation with provenance checks.
+2. **Secrets Gate**: keychain-backed secrets with optional 1Password integration.
+3. **Kernel Sandbox**: OS-enforced policies with portable profiles and JSON policy support.
+4. **Encrypted Memory**: SQLCipher-backed local state for agent memory.
+5. **Secure Transport**: MLS-backed messaging via SLIM and A2A.
+
+## Core Capabilities
+
+- Git-backed sandbox snapshots for before/after capture and audit trails.
+- Python bindings for secrets, memory, and sandboxed execution.
+- CLI workflows for policy, identity, key management, and sandbox execution.
+- Example agents and demos, including a SecOps workflow against real GitHub signals.
 
 ## Start Here
 
-Use the docs by task, not by file name:
+- New to SHADI? Start with [Getting Started](getting_started.md).
+- Running or debugging live agent workflows? Use [Operations](operations.md).
+- Need the system model? Read [Architecture](architecture.md) and [Security Notes](security.md).
+- Integrating into an agent or app? Start with the [API Guide](api_integration.md).
+- Looking for flags and commands? See the [CLI Reference](cli.md).
 
-- If you are new to SHADI, start with [Getting Started](getting_started.md).
-- If you are running or debugging real agent workflows, start with [Operations](operations.md).
-- If you need the system model, start with [Architecture](architecture.md) and [Security Notes](security.md).
-- If you are integrating an agent or app, start with [API Guide](api_integration.md), then the relevant integration page.
-- If you need commands and flags, use [CLI Reference](cli.md).
+## By Role
 
-## What SHADI Gives You
+**Operator**
+- [Getting Started](getting_started.md)
+- [Operations](operations.md)
+- [Security Notes](security.md)
 
-- Verified secret access backed by platform keystores and optional 1Password integration.
-- Deterministic human-to-agent identity derivation with provenance checks.
-- Kernel-enforced sandbox execution with portable profiles and JSON policy support.
-- Encrypted on-device memory through SQLCipher.
-- Python bindings for secrets, memory, and sandboxed execution.
-- Secure agent-to-agent messaging through SLIM and A2A.
-- Example agents and demos, including a SecOps workflow that exercises the runtime against real GitHub signals.
+**Agent or Platform Engineer**
+- [Architecture](architecture.md)
+- [API Guide](api_integration.md)
+- [SLIM and A2A](slim_a2a.md) or [Google ADK](adk_integration.md)
 
-## Read By Role
-
-### Operator
-
-You are trying to run agents safely on a workstation or end device.
-
-- Read [Getting Started](getting_started.md) for the shortest path from clone to first sandboxed command.
-- Read [Operations](operations.md) for runtime checks, demo flows, and troubleshooting.
-- Read [Security Notes](security.md) for the threat model and deployment caveats.
-
-### Agent or Platform Engineer
-
-You are integrating SHADI into an agent runtime, toolchain, or application.
-
-- Read [Architecture](architecture.md) for the runtime split between launch, trust, sandbox, memory, and transport.
-- Read [API Guide](api_integration.md) for Rust and Python integration patterns.
-- Read [SLIM and A2A](slim_a2a.md) or [Google ADK](adk_integration.md) for runtime-specific paths.
-
-### Security Engineering
-
-You are evaluating controls, provenance, and remediation behavior.
-
-- Read [Security Notes](security.md) for the control model.
-- Read [SecOps Demo](secops_agent.md) for the security-demo workload, remediation boundaries, and operator workflows.
-- Read [Design Overview](design.md) for implementation direction and current constraints.
+**Security Engineering**
+- [Security Notes](security.md)
+- [SecOps Demo](secops_agent.md)
+- [Design Overview](design.md)
 
 ## Documentation Map
 
-The site is organized into four sections:
+- Introduction: framing, architecture, security, and design intent.
+- Guides: onboarding and operational flows for setup, sandboxing, and demos.
+- Integrations: API usage plus transport and framework integration notes.
+- Reference: commands and flags for `shadictl`.
 
-- `Introduction`: project framing, architecture, security, and design intent.
-- `Guides`: onboarding and operational flows for setup, sandboxing, and demo workloads.
-- `Integrations`: API usage plus transport and agent-framework integration notes.
-- `Reference`: command and flag documentation for `shadictl`.
+## Runtime Model (At a Glance)
 
-## Core Runtime Model
+1. Identity verification determines whether a session is trusted.
+2. Secrets are released only to verified sessions.
+3. Sandbox policy is resolved before process start and enforced by the OS.
+4. Local memory stays encrypted at rest.
+5. Inter-agent transport is protected by MLS-backed messaging.
 
-SHADI is built around a small set of enforcement layers:
-
-- Identity verification determines whether an agent session is trusted.
-- Secret access is gated on that verified session.
-- Sandbox policy is resolved before process start and enforced by the OS.
-- Local memory stays encrypted at rest.
-- Inter-agent transport is protected by MLS-backed messaging.
-
-For a system-level view of how those layers fit together, continue to [Architecture](architecture.md).
+For a deeper walkthrough, continue to [Architecture](architecture.md).
