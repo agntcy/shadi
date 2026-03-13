@@ -1082,6 +1082,21 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_get_secret_invalid_utf8_returns_error() {
+        let key = unique_key("secret/invalid-utf8");
+        test_store_put(&key, &[0xFF, 0xFE, 0xFD]);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "get-secret".to_string(),
+            "--key".to_string(),
+            key,
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
     fn run_cli_did_from_gpg_writes_document() {
         let dir = temp_dir();
         let input = dir.path().join("key.asc");
@@ -1101,6 +1116,25 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert_eq!(code, ExitCode::from(0));
         let content = std::fs::read_to_string(&output).expect("read did doc");
         assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_did_from_gpg_invalid_certificate_returns_error() {
+        let dir = temp_dir();
+        let input = dir.path().join("invalid.asc");
+        let output = dir.path().join("did.json");
+        std::fs::write(&input, b"not-an-openpgp-cert").expect("write");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-gpg".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
     }
 
     #[test]
@@ -1132,6 +1166,43 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert!(test_store_get("agents/agent-a/diddoc").is_some());
         let content = std::fs::read_to_string(&output).expect("read did doc");
         assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_did_without_out_file_still_stores_identity() {
+        let root_key = unique_key("root-secret-no-out");
+        test_store_put(&root_key, b"root-secret-no-out");
+        let agent_name = unique_key("agent-no-out");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-did".to_string(),
+            "--secret".to_string(),
+            root_key,
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+        assert!(test_store_get(&format!("agents/{}/private", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/public", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/did", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/diddoc", agent_name)).is_some());
+    }
+
+    #[test]
+    fn run_cli_derive_agent_did_missing_secret_returns_error() {
+        let code = run_derive_agent_did_command(DeriveAgentDidArgs {
+            secret: None,
+            input: None,
+            agent_name: "agent-missing-secret".to_string(),
+            prefix: "agents".to_string(),
+            out_file: None,
+        });
+
+        assert_eq!(code, ExitCode::from(2));
     }
 
     #[test]
@@ -1278,6 +1349,59 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_derive_agent_identity_missing_seed_returns_error() {
+        let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
+            source: HumanIdentitySource::Seed,
+            human_secret: None,
+            input: None,
+            agent_names: vec!["agent-missing-seed".to_string()],
+            prefix: "agents".to_string(),
+            human_did_key: None,
+            out_dir: None,
+        });
+
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_derive_and_verify_agent_identity_with_gpg_source() {
+        let dir = temp_dir();
+        let input = dir.path().join("human.sec");
+        std::fs::write(&input, sample_openpgp_secret_armored()).expect("write");
+
+        let agent_name = unique_key("agent-gpg-verify");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "gpg".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "gpg".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+    }
+
+    #[test]
     fn run_cli_verify_agent_identity_succeeds() {
         let seed_key = unique_key("verify-human-seed");
         test_store_put(&seed_key, b"verify-seed-material");
@@ -1350,6 +1474,46 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_verify_agent_identity_fails_on_did_mismatch() {
+        let seed_key = unique_key("verify-did-seed");
+        test_store_put(&seed_key, b"seed-did");
+
+        let agent_name = unique_key("agent-did-mismatch");
+        let did_key = format!("agents/{}/did", agent_name);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        test_store_put(&did_key, b"did:key:zWrongDid");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
     fn run_cli_verify_agent_identity_checks_human_binding() {
         let seed_key = unique_key("verify-binding-seed");
         test_store_put(&seed_key, b"binding-seed");
@@ -1392,6 +1556,94 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_verify_agent_identity_requires_binding_without_expected_key() {
+        let seed_key = unique_key("verify-binding-required-only-seed");
+        test_store_put(&seed_key, b"binding-required-only-seed");
+        let human_did_key = unique_key("verify-binding-required-only-human-did");
+        test_store_put(&human_did_key, b"did:key:zRequiredOnly");
+
+        let agent_name = unique_key("agent-binding-required-only");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_fails_on_human_binding_mismatch() {
+        let seed_key = unique_key("verify-binding-seed-mismatch");
+        test_store_put(&seed_key, b"binding-seed-mismatch");
+        let human_did_key_a = unique_key("verify-human-did-a");
+        test_store_put(&human_did_key_a, b"did:key:zHumanA");
+        let human_did_key_b = unique_key("verify-human-did-b");
+        test_store_put(&human_did_key_b, b"did:key:zHumanB");
+
+        let agent_name = unique_key("agent-binding-mismatch");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--human-did-key".to_string(),
+            human_did_key_a,
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--human-did-key".to_string(),
+            human_did_key_b,
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
     fn run_cli_did_from_github_stores_outputs() {
         let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
         let payload = serde_json::json!([
@@ -1420,6 +1672,97 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert!(content.contains("\"did:key:"));
 
         set_test_github_payload(None);
+    }
+
+    #[test]
+    fn run_cli_did_from_github_without_out_file_stores_outputs() {
+        let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
+        let payload = serde_json::json!([
+            {"id": 2, "public_key": armored}
+        ])
+        .to_string();
+        set_test_github_payload(Some(payload));
+
+        let user = unique_key("gh-user");
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-github".to_string(),
+            "--user".to_string(),
+            user.clone(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+        assert!(test_store_get(&format!("github/{}/did", user)).is_some());
+        assert!(test_store_get(&format!("github/{}/diddoc", user)).is_some());
+
+        set_test_github_payload(None);
+    }
+
+    #[test]
+    fn run_cli_did_from_github_invalid_public_key_returns_error() {
+        let payload = serde_json::json!([
+            {"id": 3, "public_key": "%%%invalid-base64%%%"}
+        ])
+        .to_string();
+        set_test_github_payload(Some(payload));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-github".to_string(),
+            "--user".to_string(),
+            "invalid-public-key".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+        set_test_github_payload(None);
+    }
+
+    #[test]
+    fn run_cli_did_from_github_without_payload_returns_error() {
+        set_test_github_payload(None);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-github".to_string(),
+            "--user".to_string(),
+            "missing-payload".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_did_from_gpg_missing_input_returns_error() {
+        let dir = temp_dir();
+        let input = dir.path().join("missing.asc");
+        let output = dir.path().join("did.json");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-gpg".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn read_seed_input_reads_from_input_file() {
+        let dir = temp_dir();
+        let input = dir.path().join("seed.bin");
+        std::fs::write(&input, b"seed-bytes").expect("write");
+
+        let value = read_seed_input("--human-secret", None, Some(&input)).expect("seed from file");
+        assert_eq!(value, b"seed-bytes".to_vec());
+    }
+
+    #[test]
+    fn read_seed_input_requires_secret_or_input() {
+        let err = read_seed_input("--human-secret", None, None).expect_err("missing seed source");
+        assert!(err.contains("missing --human-secret or --in"));
     }
 
     #[test]
@@ -1567,8 +1910,6 @@ members = [{ did = "did:key:zA", role = "human" }]
         let _guard = trace_env_lock().lock().expect("trace env lock");
         let dir = temp_dir();
         let cli_path = dir.path().join("trace.jsonl");
-        std::env::set_var("SHADI_OTEL_FILE", "/tmp/ignored.jsonl");
-
         let resolved = resolve_trace_file(Some(cli_path.clone()));
         assert_eq!(resolved, cli_path);
 
