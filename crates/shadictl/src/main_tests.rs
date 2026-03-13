@@ -16,6 +16,12 @@
         tempfile::tempdir().expect("tempdir")
     }
 
+    fn write_mas_config(dir: &Path, contents: &str) -> PathBuf {
+        let path = dir.join("mas.toml");
+        std::fs::write(&path, contents).expect("write mas config");
+        path
+    }
+
     fn build_cli() -> Cli {
         Cli {
             profile: None,
@@ -1548,4 +1554,440 @@
 
         trace_list(&path, 10, Some("sandbox"), Some("echo"), Some(0)).expect("list");
         trace_list(&path, 10, Some("policy"), None, Some(1)).expect("list");
+    }
+
+    #[test]
+    fn slim_mas_validate_requires_default_group() {
+        let dir = temp_dir();
+        let config_path = write_mas_config(
+            dir.path(),
+            r#"
+[groups.team-a]
+members = [{ did = "did:key:zA", role = "human" }]
+"#,
+        );
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::Validate,
+        };
+
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn slim_mas_list_members_errors_for_missing_group() {
+        let dir = temp_dir();
+        let config_path = write_mas_config(
+            dir.path(),
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{ did = "did:key:zA", role = "human" }]
+"#,
+        );
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::ListMembers {
+                group: Some("team-b".to_string()),
+            },
+        };
+
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn slim_mas_admit_allows_member_from_shadi_key() {
+        let dir = temp_dir();
+        let key = unique_key("secops/member_did");
+        let config = format!(
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{{ did = "shadi://{}", role = "human" }}]
+"#,
+            key
+        );
+        let config_path = write_mas_config(
+            dir.path(),
+            &config,
+        );
+
+        test_store_put(&key, b"did:key:zMember");
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::Admit {
+                group: None,
+                did: format!("shadi://{}", key),
+                role: Some("human".to_string()),
+            },
+        };
+
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn slim_mas_admit_denies_wrong_role() {
+        let dir = temp_dir();
+        let config_path = write_mas_config(
+            dir.path(),
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{ did = "did:key:zMember", role = "human" }]
+"#,
+        );
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::Admit {
+                group: None,
+                did: "did:key:zMember".to_string(),
+                role: Some("agent".to_string()),
+            },
+        };
+
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(3));
+    }
+
+    #[test]
+    fn run_memory_command_init_succeeds_with_explicit_key() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory.db");
+
+        let cli = MemoryCli {
+            db,
+            key: Some("test-memory-key".to_string()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Init,
+        };
+
+        assert_eq!(run_memory_command(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_memory_command_put_get_list_search_delete_succeeds() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory.db");
+        let key = "test-memory-key".to_string();
+
+        let put = MemoryCli {
+            db: db.clone(),
+            key: Some(key.clone()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Put {
+                scope: "secops".to_string(),
+                entry_key: "report".to_string(),
+                payload: Some("{\"status\":\"ok\"}".to_string()),
+                payload_file: None,
+            },
+        };
+        assert_eq!(run_memory_command(put), ExitCode::SUCCESS);
+
+        let get = MemoryCli {
+            db: db.clone(),
+            key: Some(key.clone()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Get {
+                scope: "secops".to_string(),
+                entry_key: "report".to_string(),
+            },
+        };
+        assert_eq!(run_memory_command(get), ExitCode::SUCCESS);
+
+        let list = MemoryCli {
+            db: db.clone(),
+            key: Some(key.clone()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::List {
+                scope: Some("secops".to_string()),
+                limit: 10,
+            },
+        };
+        assert_eq!(run_memory_command(list), ExitCode::SUCCESS);
+
+        let search = MemoryCli {
+            db: db.clone(),
+            key: Some(key.clone()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Search {
+                scope: Some("secops".to_string()),
+                query: "ok".to_string(),
+                limit: 10,
+            },
+        };
+        assert_eq!(run_memory_command(search), ExitCode::SUCCESS);
+
+        let delete = MemoryCli {
+            db,
+            key: Some(key),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Delete {
+                scope: "secops".to_string(),
+                entry_key: "report".to_string(),
+            },
+        };
+        assert_eq!(run_memory_command(delete), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_memory_command_rejects_empty_memory_key() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory.db");
+
+        let cli = MemoryCli {
+            db,
+            key: Some(String::new()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Init,
+        };
+
+        assert_eq!(run_memory_command(cli), ExitCode::from(1));
+    }
+
+    #[test]
+    fn read_memory_payload_rejects_conflicting_inputs() {
+        let err = read_memory_payload(Some("inline".to_string()), Some(PathBuf::from("payload.txt")))
+            .unwrap_err();
+        assert!(err.contains("use either payload or payload-file"));
+    }
+
+    #[test]
+    fn slim_mas_list_groups_and_members_succeed() {
+        let dir = temp_dir();
+        let config_path = write_mas_config(
+            dir.path(),
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [
+  { did = "did:key:zA", role = "human" },
+  { did = "did:key:zB" }
+]
+"#,
+        );
+
+        let list_groups = SlimMasCli {
+            config: config_path.clone(),
+            command: SlimMasCommand::ListGroups,
+        };
+        assert_eq!(run_slim_mas_command(list_groups), ExitCode::from(0));
+
+        let list_members = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::ListMembers { group: None },
+        };
+        assert_eq!(run_slim_mas_command(list_members), ExitCode::from(0));
+    }
+
+    #[test]
+    fn slim_mas_validate_succeeds_with_default_group() {
+        let dir = temp_dir();
+        let config_path = write_mas_config(
+            dir.path(),
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{ did = "did:key:zA" }]
+"#,
+        );
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::Validate,
+        };
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn slim_mas_admit_errors_when_group_missing() {
+        let dir = temp_dir();
+        let config_path = write_mas_config(
+            dir.path(),
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{ did = "did:key:zMember", role = "human" }]
+"#,
+        );
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::Admit {
+                group: Some("team-b".to_string()),
+                did: "did:key:zMember".to_string(),
+                role: Some("human".to_string()),
+            },
+        };
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn slim_mas_admit_errors_when_did_reference_cannot_be_resolved() {
+        let dir = temp_dir();
+        let missing_key = unique_key("missing/member");
+        let config_path = write_mas_config(
+            dir.path(),
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{ did = "did:key:zMember", role = "human" }]
+"#,
+        );
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::Admit {
+                group: None,
+                did: format!("shadi://{}", missing_key),
+                role: Some("human".to_string()),
+            },
+        };
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn slim_mas_list_members_errors_when_group_did_reference_is_missing() {
+        let dir = temp_dir();
+        let missing_key = unique_key("missing/member");
+        let config = format!(
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{{ did = "shadi://{}", role = "human" }}]
+"#,
+            missing_key
+        );
+        let config_path = write_mas_config(
+            dir.path(),
+            &config,
+        );
+
+        let cli = SlimMasCli {
+            config: config_path,
+            command: SlimMasCommand::ListMembers { group: None },
+        };
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn slim_mas_returns_error_for_missing_config_file() {
+        let dir = temp_dir();
+        let cli = SlimMasCli {
+            config: dir.path().join("missing.toml"),
+            command: SlimMasCommand::ListGroups,
+        };
+        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_memory_command_resolves_key_from_store() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-from-store.db");
+        let key_name = unique_key("memory/key");
+
+        test_store_put(&key_name, b"store-memory-key");
+
+        let cli = MemoryCli {
+            db,
+            key: None,
+            key_name,
+            command: MemoryCommand::Init,
+        };
+
+        assert_eq!(run_memory_command(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_memory_command_errors_when_key_name_missing() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-missing-key.db");
+        let key_name = unique_key("memory/missing");
+
+        let cli = MemoryCli {
+            db,
+            key: None,
+            key_name,
+            command: MemoryCommand::Init,
+        };
+
+        assert_eq!(run_memory_command(cli), ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_memory_command_errors_when_store_key_is_not_utf8() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-invalid-utf8.db");
+        let key_name = unique_key("memory/not-utf8");
+
+        test_store_put(&key_name, &[0xff, 0xfe]);
+
+        let cli = MemoryCli {
+            db,
+            key: None,
+            key_name,
+            command: MemoryCommand::Init,
+        };
+
+        assert_eq!(run_memory_command(cli), ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_memory_command_put_supports_payload_file() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-payload-file.db");
+        let payload_file = dir.path().join("payload.txt");
+        std::fs::write(&payload_file, "payload-from-file").expect("write payload file");
+
+        let put = MemoryCli {
+            db,
+            key: Some("test-memory-key".to_string()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Put {
+                scope: "secops".to_string(),
+                entry_key: "from-file".to_string(),
+                payload: None,
+                payload_file: Some(payload_file),
+            },
+        };
+
+        assert_eq!(run_memory_command(put), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_memory_command_put_rejects_missing_payload_inputs() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-missing-payload.db");
+
+        let put = MemoryCli {
+            db,
+            key: Some("test-memory-key".to_string()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Put {
+                scope: "secops".to_string(),
+                entry_key: "missing-payload".to_string(),
+                payload: None,
+                payload_file: None,
+            },
+        };
+
+        assert_eq!(run_memory_command(put), ExitCode::from(1));
     }
