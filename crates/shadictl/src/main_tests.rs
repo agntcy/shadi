@@ -7,9 +7,14 @@
     use agent_secrets::policy::SecretPolicy;
 
     static TRACE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static GITHUB_PAYLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn trace_env_lock() -> &'static Mutex<()> {
         TRACE_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn github_payload_lock() -> &'static Mutex<()> {
+        GITHUB_PAYLOAD_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn temp_dir() -> TempDir {
@@ -1645,6 +1650,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_did_from_github_stores_outputs() {
+        let _guard = github_payload_lock().lock().expect("github payload lock");
         let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
         let payload = serde_json::json!([
             {"id": 1, "public_key": armored}
@@ -1676,6 +1682,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_did_from_github_without_out_file_stores_outputs() {
+        let _guard = github_payload_lock().lock().expect("github payload lock");
         let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
         let payload = serde_json::json!([
             {"id": 2, "public_key": armored}
@@ -1700,6 +1707,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_did_from_github_invalid_public_key_returns_error() {
+        let _guard = github_payload_lock().lock().expect("github payload lock");
         let payload = serde_json::json!([
             {"id": 3, "public_key": "%%%invalid-base64%%%"}
         ])
@@ -1719,6 +1727,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_did_from_github_without_payload_returns_error() {
+        let _guard = github_payload_lock().lock().expect("github payload lock");
         set_test_github_payload(None);
 
         let mut cli = build_cli();
