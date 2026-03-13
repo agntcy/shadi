@@ -887,6 +887,129 @@
     }
 
     #[test]
+    fn test_secret_store_delete_removes_key() {
+        let key = unique_key("delete/me");
+        test_store_put(&key, b"value");
+
+        let store = default_secret_store();
+        store.delete(&key).expect("delete key");
+
+        assert!(test_store_get(&key).is_none());
+    }
+
+    #[test]
+    fn run_named_command_dispatches_trace_variant() {
+        let dir = temp_dir();
+        let trace_file = dir.path().join("trace.jsonl");
+        std::fs::write(&trace_file, "\n").expect("write trace file");
+
+        let code = run_named_command(Commands::Trace(TraceCli {
+            file: Some(trace_file),
+            command: TraceCommand::Summary { limit: 10 },
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_named_command_dispatches_memory_variant() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-dispatch.db");
+
+        let code = run_named_command(Commands::Memory(MemoryCli {
+            db,
+            key: Some("dispatch-key".to_string()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Init,
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_named_command_dispatches_slim_mas_variant() {
+        let dir = temp_dir();
+        let config = write_mas_config(
+            dir.path(),
+            r#"
+[mas]
+default_group = "team-a"
+
+[groups.team-a]
+members = [{ did = "did:key:zA", role = "human" }]
+"#,
+        );
+
+        let code = run_named_command(Commands::SlimMas(SlimMasCli {
+            config,
+            command: SlimMasCommand::Validate,
+        }));
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_subcommand_branch_executes_direct_dispatch() {
+        let dir = temp_dir();
+        let trace_file = dir.path().join("trace.jsonl");
+        std::fs::write(&trace_file, "\n").expect("write trace file");
+
+        let mut cli = build_cli();
+        cli.subcommand = Some(Commands::Trace(TraceCli {
+            file: Some(trace_file),
+            command: TraceCommand::Summary { limit: 10 },
+        }));
+        cli.run_command.clear();
+
+        assert_eq!(run_cli(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_cli_print_policy_with_missing_policy_file_returns_error() {
+        let dir = temp_dir();
+        let mut cli = build_cli();
+        cli.print_policy = true;
+        cli.run_command.clear();
+        cli.policy_file = Some(dir.path().join("missing-policy.json"));
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_print_policy_with_invalid_cli_paths_returns_error() {
+        let mut cli = build_cli();
+        cli.print_policy = true;
+        cli.run_command.clear();
+        cli.read.push(PathBuf::from("/this/path/does/not/exist/for-shadi"));
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_with_run_command_and_print_policy_returns_policy_dump() {
+        let mut cli = build_cli();
+        cli.print_policy = true;
+        cli.allow_command.push("echo".to_string());
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_with_run_command_and_missing_policy_file_returns_error() {
+        let dir = temp_dir();
+        let mut cli = build_cli();
+        cli.policy_file = Some(dir.path().join("missing-policy.json"));
+        cli.run_command = vec!["echo".to_string(), "hello".to_string()];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_with_run_command_and_invalid_cli_paths_returns_error() {
+        let mut cli = build_cli();
+        cli.run_command = vec!["echo".to_string(), "hello".to_string()];
+        cli.read.push(PathBuf::from("/this/path/does/not/exist/for-shadi"));
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
     fn run_cli_put_key_command_stores_payload() {
         let dir = temp_dir();
         let path = dir.path().join("key.asc");
