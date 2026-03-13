@@ -1,0 +1,1551 @@
+    use super::*;
+    use tempfile::TempDir;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use agent_secrets::{SecretError, SecretResult};
+    use agent_secrets::memory::SecretBytes;
+    use agent_secrets::policy::SecretPolicy;
+
+    static TRACE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn trace_env_lock() -> &'static Mutex<()> {
+        TRACE_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_dir() -> TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    fn build_cli() -> Cli {
+        Cli {
+            profile: None,
+            policy_file: None,
+            allow: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            inject_keychain: Vec::new(),
+            list_keychain: false,
+            list_prefix: None,
+            print_policy: false,
+            git_snapshot: false,
+            git_snapshot_dir: None,
+            git_snapshot_untracked: false,
+            subcommand: None,
+            run_command: vec!["echo".to_string(), "ok".to_string()],
+        }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .expect("run git");
+        if !output.status.success() {
+            panic!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn init_git_repo() -> TempDir {
+        let dir = temp_dir();
+        run_git(dir.path(), &["init"]);
+        run_git(dir.path(), &["config", "user.name", "SHADI Tests"]);
+        run_git(dir.path(), &["config", "user.email", "shadi-tests@example.com"]);
+        dir
+    }
+
+    fn seed_git_repo(repo_path: &Path) {
+        let tracked = repo_path.join("tracked.txt");
+        std::fs::write(&tracked, "initial\n").expect("write tracked file");
+        run_git(repo_path, &["add", "tracked.txt"]);
+        run_git(repo_path, &["commit", "-m", "initial"]);
+    }
+
+    fn init_nested_git_repo(parent: &Path, name: &str) -> PathBuf {
+        let repo_path = parent.join(name);
+        std::fs::create_dir_all(&repo_path).expect("create nested repo dir");
+        run_git(&repo_path, &["init"]);
+        run_git(&repo_path, &["config", "user.name", "SHADI Tests"]);
+        run_git(&repo_path, &["config", "user.email", "shadi-tests@example.com"]);
+        repo_path
+    }
+
+    fn git_snapshot_artifacts(dir: &Path) -> Vec<PathBuf> {
+        let mut entries = std::fs::read_dir(dir.join("runs"))
+            .expect("read snapshot dir")
+            .map(|entry| entry.expect("dir entry").path().join("snapshot.json"))
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn snapshot_test_command() -> (Vec<String>, PathBuf) {
+        #[cfg(target_os = "macos")]
+        {
+            (
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf 'changed\n' >> tracked.txt && printf 'new\n' > note.txt".to_string(),
+                ],
+                PathBuf::from("/bin"),
+            )
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let system32 = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
+                + "\\System32";
+            (
+                vec![
+                    format!("{}\\cmd.exe", system32),
+                    "/C".to_string(),
+                    "echo changed>>tracked.txt && echo new>note.txt".to_string(),
+                ],
+                PathBuf::from(system32),
+            )
+        }
+    }
+
+    fn sample_openpgp_cert_armored() -> Vec<u8> {
+        use openpgp::cert::prelude::*;
+        use openpgp::serialize::Serialize;
+
+        let (cert, _) = CertBuilder::general_purpose(Some("alice@example.org"))
+            .generate()
+            .expect("generate cert");
+        let mut exported = Vec::new();
+        cert.armored().export(&mut exported).expect("export cert");
+        exported
+    }
+
+    fn sample_openpgp_secret_armored() -> Vec<u8> {
+        use openpgp::cert::prelude::*;
+        use openpgp::serialize::Serialize;
+
+        let (cert, _) = CertBuilder::general_purpose(Some("alice@example.org"))
+            .generate()
+            .expect("generate cert");
+        let mut exported = Vec::new();
+        cert.as_tsk()
+            .armored()
+            .export(&mut exported)
+            .expect("export secret key");
+        exported
+    }
+
+    fn unique_key(prefix: &str) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        format!("{}-{}-{}", prefix, std::process::id(), nanos)
+    }
+
+    fn policy_from_paths(read: &[PathBuf], write: &[PathBuf], allow: &[PathBuf]) -> PolicyFile {
+        PolicyFile {
+            read: read.iter().map(|p| p.display().to_string()).collect(),
+            write: write.iter().map(|p| p.display().to_string()).collect(),
+            allow: allow.iter().map(|p| p.display().to_string()).collect(),
+            net_block: Some(false),
+            allow_command: Vec::new(),
+            block_command: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_policy_merges_paths_and_commands() {
+        let read_dir = temp_dir();
+        let write_dir = temp_dir();
+        let allow_dir = temp_dir();
+        let read_path = read_dir.path().canonicalize().expect("canonicalize");
+        let write_path = write_dir.path().canonicalize().expect("canonicalize");
+        let allow_path = allow_dir.path().canonicalize().expect("canonicalize");
+
+        let mut cli = build_cli();
+        cli.read.push(read_path.clone());
+        cli.allow_command.push("rm".to_string());
+
+        let policy_file = policy_from_paths(&[], &[write_path.clone()], &[allow_path.clone()]);
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+
+        assert!(resolved.policy.allow_read().iter().any(|p| p == &read_path));
+        assert!(resolved.policy.allow_write().iter().any(|p| p == &write_path));
+        assert!(resolved.policy.allow_read().iter().any(|p| p == &allow_path));
+        assert!(resolved.policy.allow_write().iter().any(|p| p == &allow_path));
+        assert!(resolved.allow.contains("rm"));
+    }
+
+    #[test]
+    fn resolve_policy_rejects_missing_paths() {
+        let cli = build_cli();
+        let policy_file = PolicyFile {
+            read: vec!["/path/does/not/exist".to_string()],
+            write: Vec::new(),
+            allow: Vec::new(),
+            net_block: Some(false),
+            allow_command: Vec::new(),
+            block_command: Vec::new(),
+        };
+
+        let err = resolve_policy(&cli, &policy_file).unwrap_err();
+        assert!(err.contains("invalid read path"));
+    }
+
+    #[test]
+    fn resolve_policy_sets_net_block() {
+        let mut cli = build_cli();
+        cli.net_block = true;
+        let policy_file = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert!(resolved.policy.net_blocked());
+    }
+
+    #[test]
+    fn resolve_policy_honors_file_net_block() {
+        let cli = build_cli();
+        let policy_file = PolicyFile {
+            net_block: Some(true),
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert!(resolved.policy.net_blocked());
+    }
+
+    #[test]
+    fn resolve_policy_uses_balanced_profile_by_default() {
+        let cli = build_cli();
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        let default_read = canonicalize_string_path("/").expect("canonical root path");
+        assert!(resolved.policy.net_blocked());
+        assert!(resolved
+            .policy
+            .allow_read()
+            .iter()
+            .any(|path| path == &default_read));
+    }
+
+    #[test]
+    fn resolve_policy_uses_connected_profile() {
+        let mut cli = build_cli();
+        cli.profile = Some(LauncherProfile::Connected);
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        assert!(!resolved.policy.net_blocked());
+    }
+
+    #[test]
+    fn resolve_policy_uses_strict_profile() {
+        let mut cli = build_cli();
+        cli.profile = Some(LauncherProfile::Strict);
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        let default_read = canonicalize_string_path("/").expect("canonical root path");
+        assert!(resolved.policy.net_blocked());
+        assert!(!resolved
+            .policy
+            .allow_read()
+            .iter()
+            .any(|path| path == &default_read));
+    }
+
+    #[test]
+    fn resolve_policy_merges_command_lists() {
+        let mut cli = build_cli();
+        cli.allow_command.push("rm".to_string());
+        let policy_file = PolicyFile {
+            allow_command: vec!["echo".to_string()],
+            block_command: vec!["rm".to_string()],
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert!(resolved.blocked.contains("rm"));
+        assert!(resolved.allow.contains("rm"));
+        assert!(resolved.allow.contains("echo"));
+    }
+
+    #[test]
+    fn is_command_blocked_allows_unknown_when_not_blocked() {
+        let blocked = default_blocked_commands()
+            .into_iter()
+            .map(|cmd| cmd.to_string())
+            .collect::<HashSet<_>>();
+        let allow = HashSet::new();
+        assert!(!is_command_blocked("echo", &blocked, &allow));
+    }
+
+    #[test]
+    fn command_blocking_respects_allowlist() {
+        let blocked = default_blocked_commands()
+            .into_iter()
+            .map(|cmd| cmd.to_string())
+            .collect::<HashSet<_>>();
+        let mut allow = HashSet::new();
+        allow.insert("rm".to_string());
+
+        assert!(!is_command_blocked("rm", &blocked, &allow));
+        assert!(is_command_blocked("mv", &blocked, &HashSet::new()));
+    }
+
+    #[test]
+    fn format_policy_sorts_commands() {
+        let policy = SandboxPolicy::new();
+        let blocked = ["rm".to_string(), "cp".to_string()].into_iter().collect();
+        let allow = ["zsh".to_string(), "bash".to_string()].into_iter().collect();
+
+        let output = format_policy(&policy, &blocked, &allow).expect("format");
+        assert!(output.contains("\"block_command\""));
+        assert!(output.contains("\"allow_command\""));
+    }
+
+    #[test]
+    fn format_policy_groups_allow_paths() {
+        let dir = temp_dir();
+        let path = dir.path().canonicalize().expect("canonicalize");
+        let policy = SandboxPolicy::new()
+            .allow_read_path(&path)
+            .allow_write_path(&path);
+        let output = format_policy(&policy, &HashSet::new(), &HashSet::new()).expect("format");
+        let path_str = path.display().to_string().replace('\\', "\\\\");
+        assert!(output.contains(&path_str));
+    }
+
+    #[test]
+    fn format_policy_separates_read_and_write() {
+        let read_dir = temp_dir();
+        let write_dir = temp_dir();
+        let read_path = read_dir.path().canonicalize().expect("canonicalize");
+        let write_path = write_dir.path().canonicalize().expect("canonicalize");
+        let policy = SandboxPolicy::new()
+            .allow_read_path(&read_path)
+            .allow_write_path(&write_path);
+        let output = format_policy(&policy, &HashSet::new(), &HashSet::new()).expect("format");
+        let read_str = read_path.display().to_string().replace('\\', "\\\\");
+        let write_str = write_path.display().to_string().replace('\\', "\\\\");
+        assert!(output.contains(&read_str));
+        assert!(output.contains(&write_str));
+    }
+
+    #[test]
+    fn load_policy_file_parses_json() {
+        let dir = temp_dir();
+        let path = dir.path().join("policy.json");
+        let tmp_dir = std::env::var("SHADI_TMP_DIR").unwrap_or_else(|_| "./.tmp".to_string());
+        std::fs::write(
+            &path,
+            format!(r#"{{"allow": ["{}"], "net_block": true}}"#, tmp_dir),
+        )
+        .expect("write");
+
+        let policy = load_policy_file(&path).expect("load");
+        assert_eq!(policy.allow, vec![tmp_dir]);
+        assert_eq!(policy.net_block, Some(true));
+    }
+
+    #[test]
+    fn load_policy_file_rejects_invalid_json() {
+        let dir = temp_dir();
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, "not-json").expect("write");
+        let err = load_policy_file(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn run_cli_missing_command_returns_error() {
+        let mut cli = build_cli();
+        cli.run_command.clear();
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_print_policy_returns_ok() {
+        let mut cli = build_cli();
+        cli.run_command.clear();
+        cli.print_policy = true;
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_blocks_disallowed_command() {
+        let mut cli = build_cli();
+        cli.run_command = vec!["rm".to_string()];
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn run_cli_executes_allowed_command() {
+        let mut cli = build_cli();
+        cli.run_command = vec!["/usr/bin/true".to_string()];
+        cli.allow.push(PathBuf::from("/usr/bin"));
+        let code = run_cli(cli);
+        assert_ne!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn summarize_status_lines_counts_git_changes() {
+        let summary = summarize_status_lines(&[
+            " M tracked.txt".to_string(),
+            "A  staged.txt".to_string(),
+            "R  old.txt -> new.txt".to_string(),
+            "?? scratch.txt".to_string(),
+        ]);
+
+        assert_eq!(summary.modified, 1);
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.renamed, 1);
+        assert_eq!(summary.untracked, 1);
+        assert!(summary.changed);
+    }
+
+    #[test]
+    fn git_snapshot_layout_default_starts_empty() {
+        let layout = GitSnapshotLayout::default();
+
+        assert!(layout.root_dir.is_empty());
+        assert!(layout.run_dir.is_empty());
+        assert!(layout.snapshot_file.is_empty());
+        assert!(layout.latest_file.is_empty());
+    }
+
+    #[test]
+    fn finalize_git_snapshot_accepts_none() {
+        finalize_git_snapshot(None, Some(0), None);
+    }
+
+    #[test]
+    fn finalize_git_snapshot_handles_write_failure() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let blocking_file = temp_dir();
+        let blocking_path = blocking_file.path().join("snapshot-blocker");
+        std::fs::write(&blocking_path, "occupied\n").expect("write blocking file");
+        session.output_dir = blocking_path;
+
+        finalize_git_snapshot(Some(&mut session), Some(0), None);
+    }
+
+    #[test]
+    fn run_sandboxed_command_returns_error_when_process_cannot_start() {
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![cwd.join("missing-command").display().to_string()];
+        cli.allow.push(cwd.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &cwd);
+
+        assert_eq!(exit, ExitCode::from(1));
+    }
+
+    #[test]
+    fn git_snapshot_session_writes_artifact_without_sandbox() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_untracked = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let tracked = repo_path.join("tracked.txt");
+        let mut tracked_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&tracked)
+            .expect("open tracked file");
+        use std::io::Write as _;
+        writeln!(tracked_file, "changed").expect("append tracked file");
+        std::fs::write(repo_path.join("note.txt"), "new\n").expect("write untracked file");
+
+        let artifact_path = session.finish(Some(0), None).expect("finish snapshot");
+        assert!(artifact_path.starts_with(snapshot_dir.join("runs")));
+
+        let payload = std::fs::read_to_string(&artifact_path).expect("read artifact");
+        let artifact: Value = serde_json::from_str(&payload).expect("parse artifact json");
+
+        assert_eq!(artifact["schema_version"], 1);
+        assert_eq!(artifact["git"]["detected"], true);
+        assert_eq!(artifact["git"]["include_untracked_inventory"], true);
+        assert_eq!(artifact["layout"]["root_dir"], snapshot_dir.display().to_string());
+        assert_eq!(artifact["layout"]["latest_file"], snapshot_dir.join("latest.json").display().to_string());
+
+        let run_dir = PathBuf::from(artifact["layout"]["run_dir"].as_str().expect("run dir"));
+        assert!(run_dir.starts_with(snapshot_dir.join("runs")));
+        assert!(artifact["git"]["before"]["status_porcelain"]
+            .as_array()
+            .expect("before status array")
+            .is_empty());
+
+        let after_status = artifact["git"]["after"]["status_porcelain"]
+            .as_array()
+            .expect("after status array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(after_status.iter().any(|line| line.contains("note.txt")));
+        assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
+        assert!(artifact["git"]["after"]["diff_binary"]
+            .as_str()
+            .expect("after diff binary")
+            .contains("tracked.txt"));
+
+        let untracked = artifact["git"]["after"]["untracked_inventory"]
+            .as_array()
+            .expect("untracked inventory")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(untracked.contains(&"note.txt"));
+        assert_eq!(artifact["git"]["comparison"]["overall_changed"], true);
+        assert_eq!(artifact["git"]["comparison"]["status_changed"], true);
+        assert_eq!(artifact["git"]["comparison"]["diff_changed"], true);
+        assert!(artifact["git"]["before"]["hashes"]["state_sha256"]
+            .as_str()
+            .expect("before state hash")
+            .len()
+            == 64);
+        assert!(artifact["git"]["after"]["hashes"]["state_sha256"]
+            .as_str()
+            .expect("after state hash")
+            .len()
+            == 64);
+        assert_eq!(artifact["outcome"]["exit_code"], 0);
+
+        let latest = std::fs::read_to_string(snapshot_dir.join("latest.json")).expect("read latest artifact");
+        let latest_artifact: Value = serde_json::from_str(&latest).expect("parse latest artifact");
+        assert_eq!(latest_artifact["artifact_id"], artifact["artifact_id"]);
+    }
+
+    #[test]
+    fn git_snapshot_session_tracks_nested_repository_changes() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let nested_repo = init_nested_git_repo(&repo_path, "nested");
+        std::fs::write(nested_repo.join("nested.txt"), "initial\n").expect("write nested file");
+        run_git(&nested_repo, &["add", "nested.txt"]);
+        run_git(&nested_repo, &["commit", "-m", "initial"]);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let nested_file = nested_repo.join("nested.txt");
+        let mut nested_handle = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&nested_file)
+            .expect("open nested file");
+        use std::io::Write as _;
+        writeln!(nested_handle, "changed").expect("append nested file");
+            drop(nested_handle);
+        run_git(&nested_repo, &["add", "nested.txt"]);
+        run_git(&nested_repo, &["commit", "-m", "update"]);
+
+        let artifact_path = session.finish(Some(0), None).expect("finish snapshot");
+        let payload = std::fs::read_to_string(&artifact_path).expect("read artifact");
+        let artifact: Value = serde_json::from_str(&payload).expect("parse artifact json");
+
+        assert_eq!(artifact["git"]["detected"], true);
+        assert_eq!(artifact["git"]["any_repo_changed"], true);
+        assert_eq!(artifact["git"]["changed_repositories"], 1);
+        assert_eq!(artifact["git"]["comparison"]["overall_changed"], false);
+
+        let repositories = artifact["git"]["repositories"]
+            .as_array()
+            .expect("repository array");
+        assert_eq!(repositories.len(), 2);
+
+        let nested = repositories
+            .iter()
+            .find(|repository| repository["relative_path"] == "nested")
+            .expect("nested repository entry");
+        assert_eq!(nested["comparison"]["overall_changed"], true);
+        assert_eq!(nested["comparison"]["head_changed"], true);
+        assert_eq!(nested["diff_summary"]["changed"], false);
+
+        let primary = repositories
+            .iter()
+            .find(|repository| repository["relative_path"] == ".")
+            .expect("primary repository entry");
+        assert_eq!(primary["comparison"]["overall_changed"], false);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn run_sandboxed_command_writes_git_snapshot_artifact() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        let (command, command_prefix) = snapshot_test_command();
+        cli.run_command = command;
+        cli.allow.push(command_prefix);
+        cli.allow.push(repo_path.clone());
+        cli.git_snapshot = true;
+        cli.git_snapshot_untracked = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &repo_path);
+
+        let artifacts = git_snapshot_artifacts(&snapshot_dir);
+        assert_eq!(artifacts.len(), 1);
+
+        let payload = std::fs::read_to_string(&artifacts[0]).expect("read artifact");
+        let artifact: Value = serde_json::from_str(&payload).expect("parse artifact json");
+
+        assert_eq!(artifact["schema_version"], 1);
+        assert_eq!(artifact["git"]["detected"], true);
+        assert_eq!(artifact["git"]["include_untracked_inventory"], true);
+        assert_eq!(artifact["layout"]["root_dir"], snapshot_dir.display().to_string());
+        assert_eq!(artifact["layout"]["latest_file"], snapshot_dir.join("latest.json").display().to_string());
+        let run_dir = PathBuf::from(artifact["layout"]["run_dir"].as_str().expect("run dir"));
+        assert!(run_dir.starts_with(snapshot_dir.join("runs")));
+
+        #[cfg(target_os = "windows")]
+        if let Some(error) = artifact["outcome"]["error"].as_str() {
+            assert_eq!(exit, ExitCode::from(1));
+            assert!(error.contains("CreateAppContainerProfile failed"));
+            assert!(artifact["outcome"]["exit_code"].is_null());
+            return;
+        }
+
+        assert_eq!(exit, ExitCode::from(0));
+        assert!(artifact["git"]["before"]["status_porcelain"]
+            .as_array()
+            .expect("before status array")
+            .is_empty());
+
+        let after_status = artifact["git"]["after"]["status_porcelain"]
+            .as_array()
+            .expect("after status array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(after_status.iter().any(|line| line.contains("note.txt")));
+        assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
+        assert!(artifact["git"]["after"]["diff_binary"]
+            .as_str()
+            .expect("after diff binary")
+            .contains("tracked.txt"));
+
+        let untracked = artifact["git"]["after"]["untracked_inventory"]
+            .as_array()
+            .expect("untracked inventory")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(untracked.contains(&"note.txt"));
+        assert_eq!(artifact["git"]["comparison"]["overall_changed"], true);
+        assert_eq!(artifact["git"]["comparison"]["status_changed"], true);
+        assert_eq!(artifact["git"]["comparison"]["diff_changed"], true);
+        assert!(artifact["git"]["before"]["hashes"]["state_sha256"]
+            .as_str()
+            .expect("before state hash")
+            .len()
+            == 64);
+        assert!(artifact["git"]["after"]["hashes"]["state_sha256"]
+            .as_str()
+            .expect("after state hash")
+            .len()
+            == 64);
+        assert_eq!(artifact["outcome"]["exit_code"], 0);
+        assert!(artifact["outcome"]["error"].is_null());
+
+        let latest = std::fs::read_to_string(snapshot_dir.join("latest.json")).expect("read latest artifact");
+        let latest_artifact: Value = serde_json::from_str(&latest).expect("parse latest artifact");
+        assert_eq!(latest_artifact["artifact_id"], artifact["artifact_id"]);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn run_cli_executes_allowed_command() {
+        let mut cli = build_cli();
+        let system32 = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
+            + "\\System32";
+        cli.run_command = vec![format!("{}\\where.exe", system32), "cmd".to_string()];
+        cli.allow.push(PathBuf::from(&system32));
+        let code = run_cli(cli);
+        assert_ne!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn canonicalize_helpers_resolve_paths() {
+        let dir = temp_dir();
+        let path = canonicalize_path(&dir.path().to_path_buf()).expect("path");
+        let text = canonicalize_string_path(dir.path().to_str().expect("str")).expect("str path");
+        assert_eq!(path, text);
+    }
+
+    #[test]
+    fn read_openpgp_input_reads_file() {
+        let dir = temp_dir();
+        let path = dir.path().join("key.asc");
+        std::fs::write(&path, b"test-key").expect("write");
+
+        let payload = read_openpgp_input("--key", None, Some(&path)).expect("read");
+        assert_eq!(payload, b"test-key".to_vec());
+    }
+
+    #[test]
+    fn read_openpgp_input_reports_missing() {
+        let err = read_openpgp_input("--key", None, None).unwrap_err();
+        assert!(err.contains("missing --key"));
+    }
+
+    #[test]
+    fn read_openpgp_input_errors_on_missing_file() {
+        let dir = temp_dir();
+        let path = dir.path().join("missing.asc");
+        let err = read_openpgp_input("--key", None, Some(&path)).unwrap_err();
+        assert!(err.contains("failed to read"));
+    }
+
+    #[test]
+    fn inject_keychain_noop_when_empty() {
+        let mut command = Command::new("/usr/bin/true");
+        inject_keychain_secrets(&mut command, &[]).expect("inject");
+    }
+
+    struct MemoryStore {
+        entries: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl MemoryStore {
+        fn new() -> Self {
+            Self {
+                entries: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl SecretStore for MemoryStore {
+        fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+            let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            guard.insert(key.to_string(), secret.to_vec());
+            Ok(())
+        }
+
+        fn get(&self, key: &str) -> SecretResult<SecretBytes> {
+            let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            let value = guard.get(key).ok_or(SecretError::InvalidInput)?.clone();
+            Ok(SecretBytes::new(value))
+        }
+
+        fn delete(&self, key: &str) -> SecretResult<()> {
+            let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            guard.remove(key);
+            Ok(())
+        }
+
+        fn list_keys(&self) -> SecretResult<Vec<String>> {
+            let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            Ok(guard.keys().cloned().collect())
+        }
+    }
+
+    #[test]
+    fn list_keychain_with_store_filters_prefix() {
+        let store = MemoryStore::new();
+        store.put("secops/a", b"1", SecretPolicy::default()).unwrap();
+        store.put("other/b", b"2", SecretPolicy::default()).unwrap();
+
+        let keys = list_keychain_with_store(&store, Some("secops/")).unwrap();
+        assert_eq!(keys, vec!["secops/a".to_string()]);
+    }
+
+    #[test]
+    fn list_keychain_with_store_sorts_keys() {
+        let store = MemoryStore::new();
+        store.put("b", b"1", SecretPolicy::default()).unwrap();
+        store.put("a", b"2", SecretPolicy::default()).unwrap();
+
+        let keys = list_keychain_with_store(&store, None).unwrap();
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn inject_keychain_with_store_sets_env() {
+        let store = MemoryStore::new();
+        store.put("secops/token", b"value", SecretPolicy::default()).unwrap();
+
+        let mut command = Command::new("/usr/bin/true");
+        inject_keychain_with_store(&store, &mut command, &["secops/token=TOKEN".to_string()]).unwrap();
+
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("TOKEN")
+                && *value == Some(std::ffi::OsStr::new("value"))
+        }));
+    }
+
+    #[test]
+    fn inject_keychain_with_store_reports_missing_key() {
+        let store = MemoryStore::new();
+        let mut command = Command::new("/usr/bin/true");
+        let err = inject_keychain_with_store(&store, &mut command, &["missing=TOKEN".to_string()]).unwrap_err();
+        assert!(err.contains("keychain lookup failed"));
+    }
+
+    #[test]
+    fn inject_keychain_with_store_rejects_invalid_mapping() {
+        let store = MemoryStore::new();
+        let mut command = Command::new("/usr/bin/true");
+        let err = inject_keychain_with_store(&store, &mut command, &["invalid".to_string()]).unwrap_err();
+        assert!(err.contains("inject-keychain must be"));
+    }
+
+    #[test]
+    fn list_keychain_returns_ok_when_enabled() {
+        let key_a = unique_key("secops/key-a");
+        let key_b = unique_key("secops/key-b");
+        test_store_put(&key_a, b"a");
+        test_store_put(&key_b, b"b");
+
+        list_keychain(Some("secops/")).expect("list");
+    }
+
+    #[test]
+    fn inject_keychain_secrets_uses_default_store() {
+        let key = unique_key("shadi-test-secret");
+        test_store_put(&key, b"value");
+
+        let mut command = Command::new("/usr/bin/true");
+        inject_keychain_secrets(&mut command, &[format!("{}=TOKEN", key)]).expect("inject");
+
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(env_key, value)| {
+            *env_key == std::ffi::OsStr::new("TOKEN")
+                && *value == Some(std::ffi::OsStr::new("value"))
+        }));
+
+    }
+
+    #[test]
+    fn run_cli_list_keychain_routes_to_store() {
+        let key_a = unique_key("secops/key-a");
+        let key_b = unique_key("other/key-b");
+        test_store_put(&key_a, b"a");
+        test_store_put(&key_b, b"b");
+
+        let mut cli = build_cli();
+        cli.run_command.clear();
+        cli.list_keychain = true;
+        cli.list_prefix = Some("secops/".to_string());
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_put_key_command_stores_payload() {
+        let dir = temp_dir();
+        let path = dir.path().join("key.asc");
+        std::fs::write(&path, b"payload").expect("write");
+
+        let key = unique_key("openpgp/test");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "put-key".to_string(),
+            "--key".to_string(),
+            key.clone(),
+            "--in".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert_eq!(test_store_get(&key), Some(b"payload".to_vec()));
+    }
+
+    #[test]
+    fn run_cli_put_key_missing_file_returns_error() {
+        let dir = temp_dir();
+        let path = dir.path().join("missing.asc");
+        let key = unique_key("openpgp/missing");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "put-key".to_string(),
+            "--key".to_string(),
+            key,
+            "--in".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_get_secret_command_reads_store() {
+        let key = unique_key("secret/key");
+        test_store_put(&key, b"value");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "get-secret".to_string(),
+            "--key".to_string(),
+            key,
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_get_secret_missing_key_returns_error() {
+        let key = unique_key("missing/key");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "get-secret".to_string(),
+            "--key".to_string(),
+            key,
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_did_from_gpg_writes_document() {
+        let dir = temp_dir();
+        let input = dir.path().join("key.asc");
+        let output = dir.path().join("did.json");
+        std::fs::write(&input, sample_openpgp_cert_armored()).expect("write");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-gpg".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_did_stores_outputs() {
+        let root_key = unique_key("root-secret");
+        test_store_put(&root_key, b"root-secret");
+
+        let dir = temp_dir();
+        let output = dir.path().join("agent.json");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-did".to_string(),
+            "--secret".to_string(),
+            root_key.clone(),
+            "--name".to_string(),
+            "agent-a".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get("agents/agent-a/private").is_some());
+        assert!(test_store_get("agents/agent-a/public").is_some());
+        assert!(test_store_get("agents/agent-a/did").is_some());
+        assert!(test_store_get("agents/agent-a/diddoc").is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_did_from_openpgp_file() {
+        let dir = temp_dir();
+        let input = dir.path().join("human.sec");
+        std::fs::write(&input, sample_openpgp_secret_armored()).expect("write");
+
+        let agent_name = unique_key("agent-gpg");
+        let output = dir.path().join("agent.json");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-did".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get(&format!("agents/{}/private", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/public", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/did", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/diddoc", agent_name)).is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_put_key_then_derive_agent_did_from_keychain() {
+        let dir = temp_dir();
+        let input = dir.path().join("human.sec");
+        std::fs::write(&input, sample_openpgp_secret_armored()).expect("write");
+
+        let key_name = unique_key("human-gpg");
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "put-key".to_string(),
+            "--key".to_string(),
+            key_name.clone(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get(&key_name).is_some());
+
+        let agent_name = unique_key("agent-from-keychain");
+        let output = dir.path().join("agent.json");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-did".to_string(),
+            "--secret".to_string(),
+            key_name,
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get(&format!("agents/{}/private", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/public", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/did", agent_name)).is_some());
+        assert!(test_store_get(&format!("agents/{}/diddoc", agent_name)).is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_from_seed_for_multiple_agents() {
+        let seed_key = unique_key("human-seed");
+        test_store_put(&seed_key, b"human-seed-material");
+
+        let dir = temp_dir();
+        let out_dir = dir.path().join("idents");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            "agent-a".to_string(),
+            "--name".to_string(),
+            "agent-b".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+            "--out-dir".to_string(),
+            out_dir.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get("agents/agent-a/private").is_some());
+        assert!(test_store_get("agents/agent-a/did").is_some());
+        assert!(test_store_get("agents/agent-b/private").is_some());
+        assert!(test_store_get("agents/agent-b/did").is_some());
+        let a_doc = std::fs::read_to_string(out_dir.join("agent-a.did.json")).expect("read did doc");
+        let b_doc = std::fs::read_to_string(out_dir.join("agent-b.did.json")).expect("read did doc");
+        assert!(a_doc.contains("\"did:key:"));
+        assert!(b_doc.contains("\"did:key:"));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_stores_human_did_binding() {
+        let root_key = unique_key("human-gpg");
+        test_store_put(&root_key, b"root-secret");
+        let human_did_key = unique_key("human-did");
+        test_store_put(&human_did_key, b"did:key:zHuman");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            root_key,
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--name".to_string(),
+            "agent-bound".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        let stored = test_store_get("agents/agent-bound/human_did").expect("human did binding");
+        assert_eq!(stored, b"did:key:zHuman".to_vec());
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_succeeds() {
+        let seed_key = unique_key("verify-human-seed");
+        test_store_put(&seed_key, b"verify-seed-material");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            "agent-verify".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            "agent-verify".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_fails_on_mismatch() {
+        let seed_key = unique_key("verify-human-seed-a");
+        test_store_put(&seed_key, b"seed-a");
+        let other_seed_key = unique_key("verify-human-seed-b");
+        test_store_put(&other_seed_key, b"seed-b");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            "agent-mismatch".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            other_seed_key,
+            "--name".to_string(),
+            "agent-mismatch".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_checks_human_binding() {
+        let seed_key = unique_key("verify-binding-seed");
+        test_store_put(&seed_key, b"binding-seed");
+        let human_did_key = unique_key("verify-human-did");
+        test_store_put(&human_did_key, b"did:key:zHumanBinding");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--human-did-key".to_string(),
+            human_did_key.clone(),
+            "--name".to_string(),
+            "agent-binding".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            "agent-binding".to_string(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_did_from_github_stores_outputs() {
+        let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
+        let payload = serde_json::json!([
+            {"id": 1, "public_key": armored}
+        ])
+        .to_string();
+        set_test_github_payload(Some(payload));
+
+        let dir = temp_dir();
+        let output = dir.path().join("github.json");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-github".to_string(),
+            "--user".to_string(),
+            "alice".to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get("github/alice/did").is_some());
+        assert!(test_store_get("github/alice/diddoc").is_some());
+        let content = std::fs::read_to_string(&output).expect("read did doc");
+        assert!(content.contains("\"did:key:"));
+
+        set_test_github_payload(None);
+    }
+
+    #[test]
+    fn blocklist_blocks_default_command() {
+        let blocked = default_blocked_commands();
+        assert!(blocked.contains("rm"));
+    }
+
+    #[test]
+    fn allowlist_overrides_blocklist() {
+        let blocked = default_blocked_commands();
+        let allow = ["rm"].into_iter().collect::<HashSet<_>>();
+        assert!(blocked.contains("rm"));
+        assert!(allow.contains("rm"));
+    }
+
+    #[test]
+    fn parse_key_env_rejects_missing_parts() {
+        assert!(parse_key_env("onlykey").is_err());
+        assert!(parse_key_env("=ENV").is_err());
+        assert!(parse_key_env("KEY=").is_err());
+    }
+
+    #[test]
+    fn parse_key_env_accepts_valid_format() {
+        let (key, env) = parse_key_env("secret=ENV").unwrap();
+        assert_eq!(key, "secret");
+        assert_eq!(env, "ENV");
+    }
+
+    #[test]
+    fn extract_ed25519_public_key_from_cert() {
+        let public_key = extract_ed25519_public_key(&sample_openpgp_cert_armored()).expect("extract key");
+        assert!(public_key.len() == 32 || public_key.len() == 33);
+        if public_key.len() == 33 {
+            assert_eq!(public_key[0], 0x40);
+        }
+    }
+
+    #[test]
+    fn build_did_document_from_ed25519_key() {
+        let pubkey = vec![0x01; 32];
+        let mut pkey = vec![0x40];
+        pkey.extend_from_slice(&pubkey);
+
+        let (did, vm_id, doc) = build_did_document(&pkey).unwrap();
+
+        let mut multicodec = vec![0xED, 0x01];
+        multicodec.extend_from_slice(&pubkey);
+        let fingerprint = format!("z{}", bs58::encode(multicodec).into_string());
+
+        assert_eq!(did, format!("did:key:{}", fingerprint));
+        assert_eq!(vm_id, format!("{}#{}", did, fingerprint));
+        assert_eq!(doc["id"], did);
+        assert_eq!(doc["verificationMethod"][0]["id"], vm_id);
+        assert_eq!(doc["verificationMethod"][0]["publicKeyMultibase"], fingerprint);
+    }
+
+    #[test]
+    fn build_did_document_rejects_wrong_length() {
+        let err = build_did_document(&vec![0x01; 31]).unwrap_err();
+        assert!(err.contains("unexpected Ed25519"));
+    }
+
+    #[test]
+    fn extract_github_public_key_returns_first() {
+        let payload = r#"[
+            {"id": 1, "public_key": "KEY1"},
+            {"id": 2, "public_key": "KEY2"}
+        ]"#;
+
+        let key = extract_github_public_key(payload).unwrap();
+        assert_eq!(key, "KEY1");
+    }
+
+    #[test]
+    fn extract_github_public_key_errors_on_empty_list() {
+        let err = extract_github_public_key("[]").unwrap_err();
+        assert!(err.contains("no GPG keys"));
+    }
+
+    #[test]
+    fn extract_github_public_key_errors_on_missing_field() {
+        let payload = r#"[{"id": 1}]"#;
+        let err = extract_github_public_key(payload).unwrap_err();
+        assert!(err.contains("public_key"));
+    }
+
+    #[test]
+    fn extract_github_public_key_errors_on_unexpected_format() {
+        let err = extract_github_public_key("{}").unwrap_err();
+        assert!(err.contains("unexpected GitHub response"));
+    }
+
+    #[test]
+    fn decode_github_public_key_accepts_armored() {
+        let armored = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nabc\n-----END PGP PUBLIC KEY BLOCK-----\n";
+        let decoded = decode_github_public_key(armored.to_string()).unwrap();
+        assert_eq!(decoded, armored.as_bytes());
+    }
+
+    #[test]
+    fn decode_github_public_key_decodes_base64() {
+        let decoded = decode_github_public_key("AQID".to_string()).unwrap();
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn decode_github_public_key_rejects_empty() {
+        let err = decode_github_public_key("\n  \n".to_string()).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn secret_bytes_to_utf8_rejects_invalid_utf8() {
+        let err = secret_bytes_to_utf8(&[0xff, 0xff]).unwrap_err();
+        assert!(err.contains("utf-8"));
+    }
+
+    #[test]
+    fn derive_agent_keypair_is_deterministic() {
+        let seed = b"root-secret";
+        let (priv1, pub1) = derive_agent_keypair(seed, "agent-a").expect("derive");
+        let (priv2, pub2) = derive_agent_keypair(seed, "agent-a").expect("derive");
+        assert_eq!(priv1, priv2);
+        assert_eq!(pub1, pub2);
+    }
+
+    #[test]
+    fn derive_agent_keypair_changes_with_name() {
+        let seed = b"root-secret";
+        let (_, pub1) = derive_agent_keypair(seed, "agent-a").expect("derive");
+        let (_, pub2) = derive_agent_keypair(seed, "agent-b").expect("derive");
+        assert_ne!(pub1, pub2);
+    }
+
+    #[test]
+    fn derive_agent_keypair_rejects_empty_name() {
+        let err = derive_agent_keypair(b"root-secret", " ").unwrap_err();
+        assert!(err.contains("agent name"));
+    }
+
+    #[test]
+    fn resolve_trace_file_prefers_cli_path() {
+        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let dir = temp_dir();
+        let cli_path = dir.path().join("trace.jsonl");
+        std::env::set_var("SHADI_OTEL_FILE", "/tmp/ignored.jsonl");
+
+        let resolved = resolve_trace_file(Some(cli_path.clone()));
+        assert_eq!(resolved, cli_path);
+
+        std::env::remove_var("SHADI_OTEL_FILE");
+    }
+
+    #[test]
+    fn resolve_trace_file_uses_env_var() {
+        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let dir = temp_dir();
+        let env_path = dir.path().join("env-trace.jsonl");
+        std::env::set_var("SHADI_OTEL_FILE", env_path.to_string_lossy().to_string());
+
+        let resolved = resolve_trace_file(None);
+        assert_eq!(resolved, env_path);
+
+        std::env::remove_var("SHADI_OTEL_FILE");
+    }
+
+    #[test]
+    fn trace_span_name_reads_span_name() {
+        let value = json!({"span": {"name": "shadi.sandbox.run"}});
+        assert_eq!(trace_span_name(&value), Some("shadi.sandbox.run".to_string()));
+    }
+
+    #[test]
+    fn trace_matches_filters_command_and_exit() {
+        let value = json!({
+            "span": {"name": "shadi.sandbox.run"},
+            "fields": {"command": "echo hi", "exit.code": 0}
+        });
+
+        assert!(trace_matches(&value, Some("sandbox"), Some("echo"), Some(0)));
+        assert!(!trace_matches(&value, Some("sandbox"), Some("missing"), Some(0)));
+        assert!(!trace_matches(&value, Some("sandbox"), Some("echo"), Some(1)));
+    }
+
+    #[test]
+    fn read_trace_lines_keeps_tail() {
+        let dir = temp_dir();
+        let path = dir.path().join("traces.jsonl");
+        std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write traces");
+
+        let lines = read_trace_lines(&path, 2).expect("read lines");
+        assert_eq!(lines, vec!["three".to_string(), "four".to_string()]);
+    }
+
+    #[test]
+    fn trace_list_errors_on_missing_file() {
+        let err = trace_list(Path::new("/tmp/does-not-exist.jsonl"), 5, None, None, None)
+            .unwrap_err();
+        assert!(err.contains("failed to open trace file"));
+    }
+
+    #[test]
+    fn trace_summary_counts_span_names() {
+        let dir = temp_dir();
+        let path = dir.path().join("traces.jsonl");
+        let lines = vec![
+            json!({"span": {"name": "shadi.sandbox.run"}}).to_string(),
+            json!({"span": {"name": "shadi.sandbox.run"}}).to_string(),
+            json!({"span": {"name": "shadi.policy.resolve"}}).to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).expect("write traces");
+
+        trace_summary(&path, 10).expect("summary");
+    }
+
+    #[test]
+    fn trace_matches_filters_on_missing_fields() {
+        let value = json!({"span": {"name": "shadi.sandbox.run"}});
+        assert!(!trace_matches(&value, Some("sandbox"), Some("echo"), None));
+        assert!(!trace_matches(&value, Some("sandbox"), None, Some(1)));
+    }
+
+    #[test]
+    fn trace_span_name_reads_spans_array() {
+        let value = json!({"spans": [{"name": "shadi.trace"}]});
+        assert_eq!(trace_span_name(&value), Some("shadi.trace".to_string()));
+    }
+
+    #[test]
+    fn resolve_trace_file_defaults_when_unset() {
+        let _guard = trace_env_lock().lock().expect("trace env lock");
+        std::env::remove_var("SHADI_OTEL_FILE");
+        let resolved = resolve_trace_file(None);
+        assert_eq!(resolved, PathBuf::from(".shadi/traces.jsonl"));
+    }
+
+    #[test]
+    fn parse_trace_line_rejects_invalid_json() {
+        assert!(parse_trace_line("not-json").is_none());
+    }
+
+    #[test]
+    fn trace_list_respects_filters() {
+        let dir = temp_dir();
+        let path = dir.path().join("traces.jsonl");
+        let lines = vec![
+            json!({"span": {"name": "shadi.sandbox.run"}, "fields": {"command": "echo hi", "exit.code": 0}})
+                .to_string(),
+            json!({"span": {"name": "shadi.policy.resolve"}, "fields": {"command": "cat", "exit.code": 1}})
+                .to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).expect("write traces");
+
+        trace_list(&path, 10, Some("sandbox"), Some("echo"), Some(0)).expect("list");
+        trace_list(&path, 10, Some("policy"), None, Some(1)).expect("list");
+    }

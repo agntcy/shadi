@@ -32,9 +32,9 @@ Recent updates in this branch of the project:
 - `crates/shadictl`: main CLI (`shadi`) for policy, sandbox execution, key management, and identity derivation/verification.
 - `crates/shadi_sandbox`: sandbox policy model and platform enforcement.
 - `crates/agent_secrets`: keychain-backed secret storage + verification-gated access.
-- `crates/shadi_memory`: SQLCipher memory library and CLI (`shadi-memory`).
+- `crates/shadi_memory`: SQLCipher memory library (accessed via `shadictl memory`).
 - `crates/shadi_py`: Python extension module `shadi`.
-- `crates/agent_transport_slim` + `crates/slim_mas`: secure transport and moderation helpers.
+- `crates/agent_transport_slim` + `crates/slim_mas`: secure transport and moderation helpers (with `shadictl slim-mas`).
 - `agents/secops`: example SecOps workload, A2A server, and skill implementation.
 - `docs`: architecture, security, CLI, demos, and integration docs.
 - `scripts`: local launch helpers for SLIM + agent demos.
@@ -164,7 +164,7 @@ cargo run -p shadictl -- \
 ### 6) Use encrypted memory through `shadictl`
 
 ```bash
-cargo run -p shadictl -- -- memory init \
+cargo run -p shadictl -- memory init \
 	--db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
 	--key-name shadi/memory/sqlcipher_key
 ```

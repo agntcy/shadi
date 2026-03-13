@@ -42,14 +42,14 @@ To list or search long-term memory in the encrypted SQLCipher store, use the
 `shadictl memory` helper so keys stay in SHADI:
 
 ```bash
-cargo run -p shadictl -- -- memory list \
+cargo run -p shadictl -- memory list \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --limit 50
 ```
 
 ```bash
-cargo run -p shadictl -- -- memory search \
+cargo run -p shadictl -- memory search \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --query policy --limit 10

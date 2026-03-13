@@ -20,7 +20,7 @@ members = [
 
 ## CLI
 ```bash
-cargo run -p slim_mas -- list-groups
-cargo run -p slim_mas -- list-members --group secops-team
-cargo run -p slim_mas -- admit --group secops-team --did did:key:... --role human
+cargo run -p shadictl -- slim-mas list-groups
+cargo run -p shadictl -- slim-mas list-members --group secops-team
+cargo run -p shadictl -- slim-mas admit --group secops-team --did did:key:... --role human
 ```

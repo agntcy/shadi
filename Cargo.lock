@@ -2888,7 +2888,6 @@ name = "shadi_memory"
 version = "0.1.0"
 dependencies = [
  "agent_secrets",
- "clap",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2951,6 +2950,7 @@ dependencies = [
  "shadi_memory",
  "shadi_sandbox",
  "shadi_telemetry",
+ "slim_mas",
  "tempfile",
  "tracing",
 ]
@@ -3003,7 +3003,6 @@ name = "slim_mas"
 version = "0.1.0"
 dependencies = [
  "agent_secrets",
- "clap",
  "serde",
  "tempfile",
  "toml",
