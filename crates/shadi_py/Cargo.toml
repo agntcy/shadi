@@ -13,6 +13,8 @@ doctest = false
 agent_secrets = { path = "../agent_secrets", features = ["onepassword"] }
 shadi_memory = { path = "../shadi_memory" }
 shadi_sandbox = { path = "../shadi_sandbox" }
+shadi_telemetry = { path = "../shadi_telemetry" }
+tracing = "0.1"
 
 [dependencies.pyo3]
 version = "0.21"

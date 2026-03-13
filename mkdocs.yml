@@ -61,6 +61,7 @@ nav:
   - Guides:
       - Getting Started: getting_started.md
       - Operations: operations.md
+      - Telemetry: telemetry.md
       - Sandbox and Policies: sandbox.md
       - Demo Walkthrough: demo.md
       - SecOps Demo: secops_agent.md

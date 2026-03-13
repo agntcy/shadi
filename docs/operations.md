@@ -92,6 +92,7 @@ Keep these pages close when running the system:
 - [Sandbox and Policies](sandbox.md) for snapshot capture, launcher profiles, and enforcement boundaries
 - [Security Notes](security.md) for threat-model boundaries and backend caveats
 - [Architecture](architecture.md) for the control-plane versus runtime split
+- [Telemetry](telemetry.md) for OpenTelemetry configuration and local collectors
 
 ## Scope of This Page
 

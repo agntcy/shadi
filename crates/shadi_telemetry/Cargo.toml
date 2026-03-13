@@ -1,0 +1,13 @@
+[package]
+name = "shadi_telemetry"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opentelemetry = "0.24"
+opentelemetry_sdk = "0.24"
+opentelemetry-otlp = { version = "0.17", features = ["http-proto", "reqwest-client"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.25"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+tracing-appender = "0.2"

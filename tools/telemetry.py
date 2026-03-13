@@ -1,11 +1,11 @@
 # Copyright AGNTCY Contributors (https://github.com/agntcy)
 # SPDX-License-Identifier: Apache-2.0
 """
-OpenTelemetry setup for the shadi-secops agent.
+OpenTelemetry setup for SHADI core tooling.
 
 Configure export with standard OTel env vars:
   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318  (OTLP/HTTP)
-  OTEL_SERVICE_NAME=shadi-secops                     (default)
+  OTEL_SERVICE_NAME=shadi-runtime                   (default)
 
 Set SHADI_OTEL_CONSOLE=1 to print spans to stdout when no OTLP endpoint is set.
 
@@ -13,7 +13,7 @@ Without any configuration, all telemetry is a no-op.
 """
 import os
 
-SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME") or "shadi-secops"
+SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME") or "shadi-runtime"
 
 try:
     from opentelemetry import trace
@@ -47,7 +47,7 @@ try:
         _provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 
     trace.set_tracer_provider(_provider)
-    tracer = trace.get_tracer("shadi.secops")
+    tracer = trace.get_tracer("shadi.runtime")
 
 except ImportError:
     # Graceful no-op when opentelemetry packages are not installed.
