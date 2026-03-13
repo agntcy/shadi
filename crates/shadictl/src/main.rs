@@ -4050,4 +4050,56 @@ mod tests {
         let err = derive_agent_keypair(b"root-secret", " ").unwrap_err();
         assert!(err.contains("agent name"));
     }
+
+    #[test]
+    fn resolve_trace_file_prefers_cli_path() {
+        let dir = temp_dir();
+        let cli_path = dir.path().join("trace.jsonl");
+        std::env::set_var("SHADI_OTEL_FILE", "/tmp/ignored.jsonl");
+
+        let resolved = resolve_trace_file(Some(cli_path.clone()));
+        assert_eq!(resolved, cli_path);
+
+        std::env::remove_var("SHADI_OTEL_FILE");
+    }
+
+    #[test]
+    fn resolve_trace_file_uses_env_var() {
+        let dir = temp_dir();
+        let env_path = dir.path().join("env-trace.jsonl");
+        std::env::set_var("SHADI_OTEL_FILE", env_path.to_string_lossy().to_string());
+
+        let resolved = resolve_trace_file(None);
+        assert_eq!(resolved, env_path);
+
+        std::env::remove_var("SHADI_OTEL_FILE");
+    }
+
+    #[test]
+    fn trace_span_name_reads_span_name() {
+        let value = json!({"span": {"name": "shadi.sandbox.run"}});
+        assert_eq!(trace_span_name(&value), Some("shadi.sandbox.run".to_string()));
+    }
+
+    #[test]
+    fn trace_matches_filters_command_and_exit() {
+        let value = json!({
+            "span": {"name": "shadi.sandbox.run"},
+            "fields": {"command": "echo hi", "exit.code": 0}
+        });
+
+        assert!(trace_matches(&value, Some("sandbox"), Some("echo"), Some(0)));
+        assert!(!trace_matches(&value, Some("sandbox"), Some("missing"), Some(0)));
+        assert!(!trace_matches(&value, Some("sandbox"), Some("echo"), Some(1)));
+    }
+
+    #[test]
+    fn read_trace_lines_keeps_tail() {
+        let dir = temp_dir();
+        let path = dir.path().join("traces.jsonl");
+        std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write traces");
+
+        let lines = read_trace_lines(&path, 2).expect("read lines");
+        assert_eq!(lines, vec!["three".to_string(), "four".to_string()]);
+    }
 }
