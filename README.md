@@ -103,6 +103,24 @@ cargo run -p shadictl -- policy explain --format json
 cargo run -p shadictl -- policy diff --against profile:strict --format json
 ```
 
+With explicit policy file and CLI overrides:
+
+```bash
+cargo run -p shadictl -- \
+	config show \
+	--profile connected \
+	--policy ./sandbox.json \
+	--allow . \
+	--allow-command curl \
+	--format json
+```
+
+Quickly inspect policy source attribution:
+
+```bash
+cargo run -q -p shadictl -- policy explain --policy ./sandbox.json --format json | jq '.sources'
+```
+
 ### 2) Run a command in the sandbox
 
 ```bash
