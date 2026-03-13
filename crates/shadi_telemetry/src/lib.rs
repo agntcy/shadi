@@ -150,9 +150,13 @@ fn telemetry_enabled(otlp_endpoint: &str, console_enabled: bool, file_path: Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_bool_env_accepts_truthy_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("SHADI_OTEL_CONSOLE", "1");
         assert!(parse_bool_env("SHADI_OTEL_CONSOLE"));
         std::env::set_var("SHADI_OTEL_CONSOLE", "true");
@@ -161,6 +165,7 @@ mod tests {
         assert!(parse_bool_env("SHADI_OTEL_CONSOLE"));
         std::env::set_var("SHADI_OTEL_CONSOLE", "no");
         assert!(!parse_bool_env("SHADI_OTEL_CONSOLE"));
+        std::env::remove_var("SHADI_OTEL_CONSOLE");
     }
 
     #[test]
@@ -180,6 +185,7 @@ mod tests {
 
     #[test]
     fn load_config_reads_env_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318");
         std::env::set_var("SHADI_OTEL_CONSOLE", "true");
         std::env::set_var("SHADI_OTEL_FILE", "./traces.jsonl");
@@ -199,6 +205,7 @@ mod tests {
 
     #[test]
     fn resolve_service_name_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("OTEL_SERVICE_NAME");
         let name = resolve_service_name("default-service");
         assert_eq!(name, "default-service");
