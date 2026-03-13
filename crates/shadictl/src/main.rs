@@ -4102,4 +4102,38 @@ mod tests {
         let lines = read_trace_lines(&path, 2).expect("read lines");
         assert_eq!(lines, vec!["three".to_string(), "four".to_string()]);
     }
+
+    #[test]
+    fn trace_list_errors_on_missing_file() {
+        let err = trace_list(Path::new("/tmp/does-not-exist.jsonl"), 5, None, None, None)
+            .unwrap_err();
+        assert!(err.contains("failed to open trace file"));
+    }
+
+    #[test]
+    fn trace_summary_counts_span_names() {
+        let dir = temp_dir();
+        let path = dir.path().join("traces.jsonl");
+        let lines = vec![
+            json!({"span": {"name": "shadi.sandbox.run"}}).to_string(),
+            json!({"span": {"name": "shadi.sandbox.run"}}).to_string(),
+            json!({"span": {"name": "shadi.policy.resolve"}}).to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).expect("write traces");
+
+        trace_summary(&path, 10).expect("summary");
+    }
+
+    #[test]
+    fn trace_matches_filters_on_missing_fields() {
+        let value = json!({"span": {"name": "shadi.sandbox.run"}});
+        assert!(!trace_matches(&value, Some("sandbox"), Some("echo"), None));
+        assert!(!trace_matches(&value, Some("sandbox"), None, Some(1)));
+    }
+
+    #[test]
+    fn trace_span_name_reads_spans_array() {
+        let value = json!({"spans": [{"name": "shadi.trace"}]});
+        assert_eq!(trace_span_name(&value), Some("shadi.trace".to_string()));
+    }
 }
