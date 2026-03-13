@@ -9,7 +9,14 @@ mod windows_integration {
 
     #[test]
     fn appcontainer_smoke_test() {
-        if std::env::var("SHADI_WINDOWS_INTEGRATION").is_err() {
+        let enabled = std::env::var("SHADI_WINDOWS_INTEGRATION")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+
+        if !enabled {
             return;
         }
 

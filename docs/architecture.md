@@ -74,7 +74,6 @@ actions and prevent unauthorized data access or exfiltration.
 
 #### Key modules
 - `crates/shadi_memory/src/lib.rs`: SQLCipher store and query helpers.
-- `crates/shadi_memory/src/main.rs`: shadi-memory CLI.
 - `crates/shadictl/src/main.rs`: `shadictl memory` helper.
 - `crates/shadi_py/src/lib.rs`: SQLCipher bindings.
 - `agents/secops/skills.py`: example summary persistence used by the SecOps demo.

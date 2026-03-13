@@ -2,12 +2,10 @@
 
 This page documents the command-line tools shipped with SHADI:
 
-- `shadictl` (binary name `shadi`): sandbox runner and key management.
-- `shadi-memory` (binary name `shadi-memory`): SQLCipher-backed encrypted store.
-- `slim-mas` (binary name `slim-mas`): SLIM multi-agent moderator helper.
+- `shadictl` (binary name `shadi`): sandbox runner, key management, memory, and MAS helpers.
 
 Most agents use the Python bindings (`shadi` module) for secrets, SQLCipher
-memory, and sandbox execution. The CLIs remain useful for ops and debugging.
+memory, and sandbox execution. The CLI remains useful for ops and debugging.
 
 ## shadictl (`shadi`)
 
@@ -268,7 +266,7 @@ the SHADI secret store (no key material is printed).
 Initialize a store:
 
 ```bash
-cargo run -p shadictl -- -- memory init \
+cargo run -p shadictl -- memory init \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key
 ```
@@ -276,14 +274,14 @@ cargo run -p shadictl -- -- memory init \
 Put a memory entry from inline payload or file:
 
 ```bash
-cargo run -p shadictl -- -- memory put \
+cargo run -p shadictl -- memory put \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state --payload '{"status":"ok"}'
 ```
 
 ```bash
-cargo run -p shadictl -- -- memory put \
+cargo run -p shadictl -- memory put \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state --payload-file ./state.json
@@ -292,7 +290,7 @@ cargo run -p shadictl -- -- memory put \
 Get the latest entry:
 
 ```bash
-cargo run -p shadictl -- -- memory get \
+cargo run -p shadictl -- memory get \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state
@@ -301,7 +299,7 @@ cargo run -p shadictl -- -- memory get \
 Search entries:
 
 ```bash
-cargo run -p shadictl -- -- memory search \
+cargo run -p shadictl -- memory search \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --query policy --limit 10
@@ -310,7 +308,7 @@ cargo run -p shadictl -- -- memory search \
 List entries:
 
 ```bash
-cargo run -p shadictl -- -- memory list \
+cargo run -p shadictl -- memory list \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --limit 50
@@ -319,90 +317,15 @@ cargo run -p shadictl -- -- memory list \
 Delete an entry:
 
 ```bash
-cargo run -p shadictl -- -- memory delete \
+cargo run -p shadictl -- memory delete \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state
 ```
 
-## shadi-memory (`shadi-memory`)
+## shadictl slim-mas (`shadictl slim-mas`)
 
-`shadi-memory` manages SQLCipher-backed encrypted memory entries.
-Prefer `shadictl memory` when you want keys resolved from SHADI without
-exporting them, or the Python bindings (`SqlCipherMemoryStore`) in apps.
-
-### Global flags
-
-- `--db PATH`: Path to the SQLCipher database file.
-- `--key VALUE`: Raw SQLCipher key value (optional).
-- `--key-name NAME`: Secret store key name for the SQLCipher key (default `shadi/memory/sqlcipher_key`).
-
-### Commands
-
-Initialize a store:
-
-```bash
-cargo run -p shadi_memory -- \
-  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
-  --key-name shadi/memory/sqlcipher_key \
-  init
-```
-
-Put a memory entry from inline payload or file:
-
-```bash
-cargo run -p shadi_memory -- \
-  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
-  --key-name shadi/memory/sqlcipher_key \
-  put --scope app --entry-key state --payload '{"status":"ok"}'
-```
-
-```bash
-cargo run -p shadi_memory -- \
-  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
-  --key-name shadi/memory/sqlcipher_key \
-  put --scope app --entry-key state --payload-file ./state.json
-```
-
-Get the latest entry:
-
-```bash
-cargo run -p shadi_memory -- \
-  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
-  --key-name shadi/memory/sqlcipher_key \
-  get --scope app --entry-key state
-```
-
-Search entries:
-
-```bash
-cargo run -p shadi_memory -- \
-  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
-  --key-name shadi/memory/sqlcipher_key \
-  search --scope app --query policy --limit 10
-```
-
-List entries:
-
-```bash
-cargo run -p shadi_memory -- \
-  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
-  --key-name shadi/memory/sqlcipher_key \
-  list --scope app --limit 50
-```
-
-Delete an entry:
-
-```bash
-cargo run -p shadi_memory -- \
-  --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
-  --key-name shadi/memory/sqlcipher_key \
-  delete --scope app --entry-key state
-```
-
-## slim-mas (`slim-mas`)
-
-`slim-mas` evaluates SLIM multi-agent membership rules from a TOML config.
+`shadictl slim-mas` evaluates SLIM multi-agent membership rules from a TOML config.
 
 ### Global flags
 
@@ -413,26 +336,25 @@ cargo run -p shadi_memory -- \
 List available groups:
 
 ```bash
-cargo run -p slim_mas -- list-groups
+cargo run -p shadictl -- slim-mas list-groups
 ```
 
 List members for a group:
 
 ```bash
-cargo run -p slim_mas -- list-members --group team-a
+cargo run -p shadictl -- slim-mas list-members --group team-a
 ```
 
 Validate config (ensures a default group exists):
 
 ```bash
-cargo run -p slim_mas -- validate
+cargo run -p shadictl -- slim-mas validate
 ```
 
 Admit or deny a member:
 
 ```bash
-cargo run -p slim_mas -- \
-  admit --group team-a --did did:key:human --role human
+cargo run -p shadictl -- slim-mas admit --group team-a --did did:key:human --role human
 ```
 
 Exit codes:

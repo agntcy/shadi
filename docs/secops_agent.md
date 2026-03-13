@@ -204,7 +204,7 @@ encrypted store. Use the helper below to inspect or seed entries without
 exporting keys.
 
 ```bash
-cargo run -p shadictl -- -- memory init --db "$SHADI_SECOPS_MEMORY_DB"
+cargo run -p shadictl -- memory init --db "$SHADI_SECOPS_MEMORY_DB"
 ```
 
 Set the database path and write summaries from the SecOps skill:
@@ -220,7 +220,7 @@ path like `secops_memory.db` will point to a different database.
 Store a summary via the CLI:
 
 ```bash
-cargo run -p shadictl -- -- memory put --db "$SHADI_SECOPS_MEMORY_DB" \
+cargo run -p shadictl -- memory put --db "$SHADI_SECOPS_MEMORY_DB" \
 	--key-name secops/memory_key \
 	--scope secops --entry-key security_report --payload '{"status":"ok"}'
 ```
@@ -228,7 +228,7 @@ cargo run -p shadictl -- -- memory put --db "$SHADI_SECOPS_MEMORY_DB" \
 Search memory:
 
 ```bash
-cargo run -p shadictl -- -- memory search --db "$SHADI_SECOPS_MEMORY_DB" \
+cargo run -p shadictl -- memory search --db "$SHADI_SECOPS_MEMORY_DB" \
 	--key-name secops/memory_key \
 	--scope secops --query "dependabot"
 ```
@@ -236,7 +236,7 @@ cargo run -p shadictl -- -- memory search --db "$SHADI_SECOPS_MEMORY_DB" \
 List memory:
 
 ```bash
-cargo run -p shadictl -- -- memory list --db "$SHADI_SECOPS_MEMORY_DB" \
+cargo run -p shadictl -- memory list --db "$SHADI_SECOPS_MEMORY_DB" \
 	--key-name secops/memory_key \
 	--scope secops
 ```

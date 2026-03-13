@@ -151,6 +151,7 @@ fn telemetry_enabled(otlp_endpoint: &str, console_enabled: bool, file_path: Opti
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -180,6 +181,13 @@ mod tests {
     fn resolve_trace_path_builds_dir_and_name() {
         let (dir, file) = resolve_trace_path("/tmp/trace.jsonl").expect("path");
         assert_eq!(dir, PathBuf::from("/tmp"));
+        assert_eq!(file, "trace.jsonl");
+    }
+
+    #[test]
+    fn resolve_trace_path_defaults_parent_for_bare_filename() {
+        let (dir, file) = resolve_trace_path("trace.jsonl").expect("path");
+        assert_eq!(dir, PathBuf::new());
         assert_eq!(file, "trace.jsonl");
     }
 
@@ -217,5 +225,27 @@ mod tests {
         assert!(telemetry_enabled("http://localhost:4318", false, None));
         assert!(telemetry_enabled("", true, None));
         assert!(telemetry_enabled("", false, Some("/tmp/trace.jsonl")));
+    }
+
+    #[test]
+    fn init_configures_console_and_file_layers() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let file_path = std::env::temp_dir().join(format!("shadi-traces-{nanos}.jsonl"));
+
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::set_var("SHADI_OTEL_CONSOLE", "true");
+        std::env::set_var("SHADI_OTEL_FILE", file_path.to_string_lossy().to_string());
+        std::env::set_var("OTEL_SERVICE_NAME", "shadi-telemetry-test");
+
+        init("default-service");
+
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::remove_var("SHADI_OTEL_CONSOLE");
+        std::env::remove_var("SHADI_OTEL_FILE");
+        std::env::remove_var("OTEL_SERVICE_NAME");
     }
 }
