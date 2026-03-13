@@ -4136,4 +4136,32 @@ mod tests {
         let value = json!({"spans": [{"name": "shadi.trace"}]});
         assert_eq!(trace_span_name(&value), Some("shadi.trace".to_string()));
     }
+
+    #[test]
+    fn resolve_trace_file_defaults_when_unset() {
+        std::env::remove_var("SHADI_OTEL_FILE");
+        let resolved = resolve_trace_file(None);
+        assert_eq!(resolved, PathBuf::from(".shadi/traces.jsonl"));
+    }
+
+    #[test]
+    fn parse_trace_line_rejects_invalid_json() {
+        assert!(parse_trace_line("not-json").is_none());
+    }
+
+    #[test]
+    fn trace_list_respects_filters() {
+        let dir = temp_dir();
+        let path = dir.path().join("traces.jsonl");
+        let lines = vec![
+            json!({"span": {"name": "shadi.sandbox.run"}, "fields": {"command": "echo hi", "exit.code": 0}})
+                .to_string(),
+            json!({"span": {"name": "shadi.policy.resolve"}, "fields": {"command": "cat", "exit.code": 1}})
+                .to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).expect("write traces");
+
+        trace_list(&path, 10, Some("sandbox"), Some("echo"), Some(0)).expect("list");
+        trace_list(&path, 10, Some("policy"), None, Some(1)).expect("list");
+    }
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 
 use opentelemetry::KeyValue;
@@ -17,32 +17,27 @@ static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceL
 
 pub fn init(service_name: &str) {
     INIT.call_once(|| {
-        let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_default();
-        let console_enabled = parse_bool_env("SHADI_OTEL_CONSOLE");
-        let file_path = env::var("SHADI_OTEL_FILE")
-            .ok()
-            .and_then(|value| normalize_file_path(&value));
+        let config = load_config(service_name);
 
-        if !telemetry_enabled(&otlp_endpoint, console_enabled, file_path.as_deref()) {
+        if !telemetry_enabled(
+            &config.otlp_endpoint,
+            config.console_enabled,
+            config.file_path.as_deref(),
+        ) {
             return;
         }
 
-        let service_name = env::var("OTEL_SERVICE_NAME")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| service_name.to_string());
-
         let resource = Resource::new(vec![
-            KeyValue::new("service.name", service_name),
+            KeyValue::new("service.name", config.service_name),
             KeyValue::new("service.namespace", "shadi"),
             KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
             KeyValue::new("telemetry.sdk.language", "rust"),
         ]);
 
-        let otel_layer = if !otlp_endpoint.is_empty() {
+        let otel_layer = if !config.otlp_endpoint.is_empty() {
             let exporter = opentelemetry_otlp::new_exporter()
                 .http()
-                .with_endpoint(otlp_endpoint);
+            .with_endpoint(config.otlp_endpoint);
             let provider = opentelemetry_otlp::new_pipeline()
                 .tracing()
                 .with_exporter(exporter)
@@ -61,15 +56,9 @@ pub fn init(service_name: &str) {
             None
         };
 
-        let file_layer = file_path.as_ref().and_then(|path| {
-            let trace_path = Path::new(path);
-            let dir = trace_path.parent().unwrap_or_else(|| Path::new("."));
-            let file_name = trace_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("traces.jsonl");
-
-            if std::fs::create_dir_all(dir).is_err() {
+        let file_layer = config.file_path.as_ref().and_then(|path| {
+            let (dir, file_name) = resolve_trace_path(path)?;
+            if std::fs::create_dir_all(&dir).is_err() {
                 return None;
             }
 
@@ -87,7 +76,7 @@ pub fn init(service_name: &str) {
             )
         });
 
-        let fmt_layer = console_enabled.then(|| tracing_subscriber::fmt::layer());
+        let fmt_layer = config.console_enabled.then(|| tracing_subscriber::fmt::layer());
 
         let subscriber = tracing_subscriber::registry()
             .with(otel_layer)
@@ -110,6 +99,48 @@ fn normalize_file_path(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn resolve_trace_path(path: &str) -> Option<(PathBuf, String)> {
+    let trace_path = Path::new(path);
+    let dir = trace_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let file_name = trace_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("traces.jsonl")
+        .to_string();
+    Some((dir, file_name))
+}
+
+#[derive(Debug, Clone)]
+struct TelemetryConfig {
+    otlp_endpoint: String,
+    console_enabled: bool,
+    file_path: Option<String>,
+    service_name: String,
+}
+
+fn load_config(default_service_name: &str) -> TelemetryConfig {
+    let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_default();
+    let console_enabled = parse_bool_env("SHADI_OTEL_CONSOLE");
+    let file_path = env::var("SHADI_OTEL_FILE")
+        .ok()
+        .and_then(|value| normalize_file_path(&value));
+    let service_name = resolve_service_name(default_service_name);
+
+    TelemetryConfig {
+        otlp_endpoint,
+        console_enabled,
+        file_path,
+        service_name,
+    }
+}
+
+fn resolve_service_name(default_service_name: &str) -> String {
+    env::var("OTEL_SERVICE_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_service_name.to_string())
 }
 
 fn telemetry_enabled(otlp_endpoint: &str, console_enabled: bool, file_path: Option<&str>) -> bool {
@@ -138,6 +169,39 @@ mod tests {
         assert_eq!(normalize_file_path("   "), None);
         assert_eq!(normalize_file_path("/tmp/trace.jsonl"), Some("/tmp/trace.jsonl".to_string()));
         assert_eq!(normalize_file_path("  ./traces.jsonl "), Some("./traces.jsonl".to_string()));
+    }
+
+    #[test]
+    fn resolve_trace_path_builds_dir_and_name() {
+        let (dir, file) = resolve_trace_path("/tmp/trace.jsonl").expect("path");
+        assert_eq!(dir, PathBuf::from("/tmp"));
+        assert_eq!(file, "trace.jsonl");
+    }
+
+    #[test]
+    fn load_config_reads_env_vars() {
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318");
+        std::env::set_var("SHADI_OTEL_CONSOLE", "true");
+        std::env::set_var("SHADI_OTEL_FILE", "./traces.jsonl");
+        std::env::set_var("OTEL_SERVICE_NAME", "shadi-test");
+
+        let config = load_config("default");
+        assert_eq!(config.otlp_endpoint, "http://localhost:4318");
+        assert!(config.console_enabled);
+        assert_eq!(config.file_path, Some("./traces.jsonl".to_string()));
+        assert_eq!(config.service_name, "shadi-test");
+
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::remove_var("SHADI_OTEL_CONSOLE");
+        std::env::remove_var("SHADI_OTEL_FILE");
+        std::env::remove_var("OTEL_SERVICE_NAME");
+    }
+
+    #[test]
+    fn resolve_service_name_defaults() {
+        std::env::remove_var("OTEL_SERVICE_NAME");
+        let name = resolve_service_name("default-service");
+        assert_eq!(name, "default-service");
     }
 
     #[test]
