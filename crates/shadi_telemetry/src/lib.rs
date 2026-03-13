@@ -18,17 +18,12 @@ static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceL
 pub fn init(service_name: &str) {
     INIT.call_once(|| {
         let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_default();
-        let console = env::var("SHADI_OTEL_CONSOLE")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        let console_enabled = matches!(console.as_str(), "1" | "true" | "yes");
-
+        let console_enabled = parse_bool_env("SHADI_OTEL_CONSOLE");
         let file_path = env::var("SHADI_OTEL_FILE")
             .ok()
-            .filter(|value| !value.trim().is_empty());
+            .and_then(|value| normalize_file_path(&value));
 
-        if otlp_endpoint.is_empty() && !console_enabled && file_path.is_none() {
+        if !telemetry_enabled(&otlp_endpoint, console_enabled, file_path.as_deref()) {
             return;
         }
 
@@ -101,4 +96,55 @@ pub fn init(service_name: &str) {
 
         let _ = tracing::subscriber::set_global_default(subscriber);
     });
+}
+
+fn parse_bool_env(key: &str) -> bool {
+    let value = env::var(key).unwrap_or_default().trim().to_ascii_lowercase();
+    matches!(value.as_str(), "1" | "true" | "yes")
+}
+
+fn normalize_file_path(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn telemetry_enabled(otlp_endpoint: &str, console_enabled: bool, file_path: Option<&str>) -> bool {
+    !otlp_endpoint.is_empty() || console_enabled || file_path.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bool_env_accepts_truthy_values() {
+        std::env::set_var("SHADI_OTEL_CONSOLE", "1");
+        assert!(parse_bool_env("SHADI_OTEL_CONSOLE"));
+        std::env::set_var("SHADI_OTEL_CONSOLE", "true");
+        assert!(parse_bool_env("SHADI_OTEL_CONSOLE"));
+        std::env::set_var("SHADI_OTEL_CONSOLE", "yes");
+        assert!(parse_bool_env("SHADI_OTEL_CONSOLE"));
+        std::env::set_var("SHADI_OTEL_CONSOLE", "no");
+        assert!(!parse_bool_env("SHADI_OTEL_CONSOLE"));
+    }
+
+    #[test]
+    fn normalize_file_path_trims_and_rejects_empty() {
+        assert_eq!(normalize_file_path(""), None);
+        assert_eq!(normalize_file_path("   "), None);
+        assert_eq!(normalize_file_path("/tmp/trace.jsonl"), Some("/tmp/trace.jsonl".to_string()));
+        assert_eq!(normalize_file_path("  ./traces.jsonl "), Some("./traces.jsonl".to_string()));
+    }
+
+    #[test]
+    fn telemetry_enabled_requires_any_sink() {
+        assert!(!telemetry_enabled("", false, None));
+        assert!(telemetry_enabled("http://localhost:4318", false, None));
+        assert!(telemetry_enabled("", true, None));
+        assert!(telemetry_enabled("", false, Some("/tmp/trace.jsonl")));
+    }
 }
