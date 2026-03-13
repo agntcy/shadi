@@ -95,6 +95,14 @@ Available built-in profiles:
 - `balanced`: practical local default with network blocked
 - `connected`: balanced + network enabled
 
+Inspect effective configuration and policy provenance:
+
+```bash
+cargo run -p shadictl -- config show --format json
+cargo run -p shadictl -- policy explain --format json
+cargo run -p shadictl -- policy diff --against profile:strict --format json
+```
+
 ### 2) Run a command in the sandbox
 
 ```bash

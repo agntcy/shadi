@@ -32,12 +32,14 @@ use tracing::{field, info_span};
 mod memory_command;
 mod identity_command;
 mod cli_types;
+mod introspection_command;
 mod policy_helpers;
 mod sandbox_snapshot;
 mod slim_mas_command;
 mod trace_command;
 
 use cli_types::*;
+use introspection_command::*;
 use identity_command::*;
 use memory_command::*;
 use policy_helpers::*;
@@ -124,6 +126,8 @@ fn main() -> ExitCode {
 
 fn run_named_command(command: Commands) -> ExitCode {
     match command {
+        Commands::Config(command) => run_config_command(command),
+        Commands::Policy(command) => run_policy_command(command),
         Commands::Memory(command) => run_memory_command(command),
         Commands::Trace(command) => run_trace_command(command),
         Commands::SlimMas(command) => run_slim_mas_command(command),

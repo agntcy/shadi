@@ -45,6 +45,36 @@ By default `shadictl` uses the OS keychain. To use 1Password instead, set:
 The 1Password backend requires the `op` CLI to be installed and authenticated.
 For CI, export `OP_SERVICE_ACCOUNT_TOKEN`.
 
+### Config and policy introspection
+
+Inspect effective runtime config (profile, policy source, backend metadata, and
+effective policy):
+
+```bash
+cargo run -p shadictl -- config show --format json
+```
+
+Explain resolved policy with source inputs (profile defaults, policy file, and
+CLI overrides):
+
+```bash
+cargo run -p shadictl -- policy explain --format json
+```
+
+Diff effective policy against a baseline profile:
+
+```bash
+cargo run -p shadictl -- policy diff --against profile:strict --format json
+```
+
+Diff effective policy against another policy file:
+
+```bash
+cargo run -p shadictl -- policy diff --against file:./sandbox.json --format json
+```
+
+Supported formats for these commands: `json` (default) and `text`.
+
 ### Sandbox execution
 
 Run a command inside the sandbox after flags:

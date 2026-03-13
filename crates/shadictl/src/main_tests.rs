@@ -951,6 +951,58 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_named_command_dispatches_config_variant() {
+        let code = run_named_command(Commands::Config(ConfigCli {
+            command: ConfigCommand::Show(ConfigShowArgs {
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_named_command_dispatches_policy_explain_variant() {
+        let code = run_named_command(Commands::Policy(PolicyCli {
+            command: PolicyCommand::Explain(PolicyExplainArgs {
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_named_command_dispatches_policy_diff_variant() {
+        let code = run_named_command(Commands::Policy(PolicyCli {
+            command: PolicyCommand::Diff(PolicyDiffArgs {
+                against: "profile:balanced".to_string(),
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
     fn run_cli_subcommand_branch_executes_direct_dispatch() {
         let dir = temp_dir();
         let trace_file = dir.path().join("trace.jsonl");
