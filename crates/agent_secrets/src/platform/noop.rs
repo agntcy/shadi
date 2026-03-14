@@ -30,3 +30,21 @@ impl SecretStore for NoopSecretStore {
         Err(SecretError::NotSupported)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noop_store_rejects_all_operations() {
+        let store = NoopSecretStore::new();
+
+        assert!(matches!(
+            store.put("key", b"secret", SecretPolicy::default()),
+            Err(SecretError::NotSupported)
+        ));
+        assert!(matches!(store.get("key"), Err(SecretError::NotSupported)));
+        assert!(matches!(store.delete("key"), Err(SecretError::NotSupported)));
+        assert!(matches!(store.list_keys(), Err(SecretError::NotSupported)));
+    }
+}

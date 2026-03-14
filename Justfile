@@ -34,10 +34,18 @@ clean:
   cargo clean
 
 coverage:
-  SHADI_KEYCHAIN_TESTS=1 scripts/run_coverage.sh lcov "{{python312}}" "{{python_rustflags}}"
+  {{ if os() == "windows" {
+    ".\\scripts\\run_coverage.ps1 -Mode lcov -PythonBin \"" + python312 + "\" -RustflagsValue \"" + python_rustflags + "\""
+  } else {
+    "SHADI_KEYCHAIN_TESTS=1 scripts/run_coverage.sh lcov \"" + python312 + "\" \"" + python_rustflags + "\""
+  } }}
 
 coverage-html:
-  SHADI_KEYCHAIN_TESTS=1 scripts/run_coverage.sh html "{{python312}}" "{{python_rustflags}}"
+  {{ if os() == "windows" {
+    ".\\scripts\\run_coverage.ps1 -Mode html -PythonBin \"" + python312 + "\" -RustflagsValue \"" + python_rustflags + "\""
+  } else {
+    "SHADI_KEYCHAIN_TESTS=1 scripts/run_coverage.sh html \"" + python312 + "\" \"" + python_rustflags + "\""
+  } }}
 
 shadi:
   cargo run -p shadi_cli --
