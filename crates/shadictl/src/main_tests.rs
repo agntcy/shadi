@@ -1019,6 +1019,50 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_run_command_dispatches_config_subcommand() {
+        let mut cli = build_cli();
+        cli.subcommand = None;
+        cli.run_command = vec![
+            "config".to_string(),
+            "show".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_cli_run_command_dispatches_policy_explain_subcommand() {
+        let mut cli = build_cli();
+        cli.subcommand = None;
+        cli.run_command = vec![
+            "policy".to_string(),
+            "explain".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_cli_run_command_dispatches_policy_diff_subcommand() {
+        let mut cli = build_cli();
+        cli.subcommand = None;
+        cli.run_command = vec![
+            "policy".to_string(),
+            "diff".to_string(),
+            "--against".to_string(),
+            "profile:balanced".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
     fn run_cli_print_policy_with_missing_policy_file_returns_error() {
         let dir = temp_dir();
         let mut cli = build_cli();

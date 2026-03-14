@@ -364,6 +364,10 @@ mod tests {
             Some(LauncherProfile::Connected)
         ));
         assert!(parse_against_profile("unknown").is_none());
+        assert!(matches!(
+            parse_against_profile("STRICT"),
+            Some(LauncherProfile::Strict)
+        ));
     }
 
     #[test]
@@ -451,5 +455,134 @@ mod tests {
             format: OutputFormat::Json,
         });
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_config_command_dispatches_show() {
+        let code = run_config_command(ConfigCli {
+            command: ConfigCommand::Show(ConfigShowArgs {
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_policy_command_dispatches_variants() {
+        let explain = run_policy_command(PolicyCli {
+            command: PolicyCommand::Explain(PolicyExplainArgs {
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        });
+        assert_eq!(explain, ExitCode::SUCCESS);
+
+        let diff = run_policy_command(PolicyCli {
+            command: PolicyCommand::Diff(PolicyDiffArgs {
+                against: "profile:balanced".to_string(),
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        });
+        assert_eq!(diff, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_config_show_returns_error_for_missing_policy_file() {
+        let dir = tempdir().expect("tempdir");
+        let code = run_config_show(ConfigShowArgs {
+            profile: None,
+            policy_file: Some(dir.path().join("missing.json")),
+            allow: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_policy_explain_returns_error_for_missing_policy_file() {
+        let dir = tempdir().expect("tempdir");
+        let code = run_policy_explain(PolicyExplainArgs {
+            profile: None,
+            policy_file: Some(dir.path().join("missing.json")),
+            allow: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_policy_diff_rejects_invalid_profile_target() {
+        let code = run_policy_diff(PolicyDiffArgs {
+            against: "profile:nope".to_string(),
+            profile: None,
+            policy_file: None,
+            allow: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_policy_diff_rejects_missing_file_target() {
+        let dir = tempdir().expect("tempdir");
+        let code = run_policy_diff(PolicyDiffArgs {
+            against: format!("file:{}", dir.path().join("missing.json").display()),
+            profile: None,
+            policy_file: None,
+            allow: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn secret_backend_from_env_reads_values() {
+        std::env::set_var("SHADI_SECRET_BACKEND", "onepassword");
+        std::env::set_var("SHADI_OP_VAULT", "vault-a");
+        std::env::set_var("SHADI_OP_ACCOUNT", "account-a");
+        let cfg = secret_backend_from_env();
+        std::env::remove_var("SHADI_SECRET_BACKEND");
+        std::env::remove_var("SHADI_OP_VAULT");
+        std::env::remove_var("SHADI_OP_ACCOUNT");
+
+        assert_eq!(cfg.selected, "onepassword");
+        assert_eq!(cfg.op_vault.as_deref(), Some("vault-a"));
+        assert_eq!(cfg.op_account.as_deref(), Some("account-a"));
     }
 }
