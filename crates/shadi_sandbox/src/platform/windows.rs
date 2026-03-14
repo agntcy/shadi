@@ -471,6 +471,7 @@ fn apply_job_object(process: HANDLE) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn windows_spawn_returns_clear_error_when_attribute_init_fails() {
@@ -492,5 +493,56 @@ mod tests {
         rollback_acl_changes(&mut rollbacks);
         rollback_acl_changes(&mut rollbacks);
         assert!(rollbacks.is_empty());
+    }
+
+    #[test]
+    fn quote_arg_leaves_simple_values_unchanged() {
+        assert_eq!(quote_arg("cmd"), "cmd");
+        assert_eq!(quote_arg("--flag"), "--flag");
+    }
+
+    #[test]
+    fn quote_arg_wraps_and_escapes_when_needed() {
+        assert_eq!(quote_arg("hello world"), "\"hello world\"");
+        assert_eq!(quote_arg("has\"quote"), "\"has\\\"quote\"");
+    }
+
+    #[test]
+    fn build_command_line_quotes_program_and_args() {
+        let cmdline = build_command_line(
+            "C:\\Program Files\\app.exe",
+            &[
+                "arg1".to_string(),
+                "arg two".to_string(),
+                "quoted\"value".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            cmdline,
+            "\"C:\\Program Files\\app.exe\" arg1 \"arg two\" \"quoted\\\"value\""
+        );
+    }
+
+    #[test]
+    fn to_wide_appends_null_terminator() {
+        let wide = to_wide("shadi");
+        assert_eq!(wide.last().copied(), Some(0));
+        assert!(wide.len() >= 2);
+    }
+
+    #[test]
+    fn hresult_error_messages_are_stable() {
+        let err = hresult_error_message("CreateAppContainerProfile", -2147467259);
+        assert!(err.contains("CreateAppContainerProfile"));
+        assert!(err.contains("hresult=0x"));
+    }
+
+    #[test]
+    fn grant_path_access_rejects_empty_access_request() {
+        let path = PathBuf::from("C:\\temp");
+        let err = grant_path_access(std::ptr::null_mut(), &path, false, false)
+            .expect_err("empty access mask should fail");
+        assert_eq!(err, "no access requested");
     }
 }
