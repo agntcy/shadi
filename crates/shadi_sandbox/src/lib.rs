@@ -231,7 +231,7 @@ impl WindowsChild {
         }
 
         self.cleaned = true;
-        restore_acl_rollbacks(&mut self.rollbacks);
+        restore_windows_acl_rollbacks(&mut self.rollbacks);
 
         unsafe {
             if !self.thread.is_null() {
@@ -256,7 +256,7 @@ impl Drop for WindowsChild {
 }
 
 #[cfg(target_os = "windows")]
-fn restore_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
+pub(crate) fn restore_windows_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
     use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
     use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
     use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
