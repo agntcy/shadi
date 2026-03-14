@@ -129,7 +129,7 @@ demo-tourist:
   ./.venv-py312/bin/python agents/adk_demo/run_tourist_demo.py
 
 windows-integration:
-  SHADI_WINDOWS_INTEGRATION=1 cargo test -p shadi_sandbox
+  $env:PYO3_PYTHON = "{{python312}}"; $env:SHADI_WINDOWS_INTEGRATION = "1"; cargo test --workspace
 
 docs-build:
   mkdocs build

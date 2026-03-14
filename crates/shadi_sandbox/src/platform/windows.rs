@@ -35,8 +35,9 @@ use windows_sys::Win32::Foundation::LocalFree;
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let program = command.get_program().to_string_lossy().to_string();
     let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+    let profile_name = sandbox_profile_name();
 
-    let appcontainer = AppContainer::new("shadi_sandbox", policy.net_blocked())
+    let appcontainer = AppContainer::new(&profile_name, policy.net_blocked())
         .map_err(SandboxError::ApplyFailed)?;
 
     let mut rollbacks = apply_policy_acl_grants(appcontainer.sid(), policy)
@@ -60,6 +61,10 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     apply_job_object(child.process).map_err(SandboxError::ApplyFailed)?;
 
     Ok(SandboxedChild::from_windows(child))
+}
+
+fn sandbox_profile_name() -> String {
+    std::env::var("SHADI_APPCONTAINER_NAME").unwrap_or_else(|_| "shadi_sandbox".to_string())
 }
 
 fn apply_policy_acl_grants(
@@ -107,6 +112,10 @@ fn hresult_error_message(operation: &'static str, code: i32) -> String {
     format!("{} failed (hresult=0x{:08x})", operation, code as u32)
 }
 
+fn is_already_exists_hresult(code: i32) -> bool {
+    code as u32 == ERROR_ALREADY_EXISTS || code as u32 == (0x8007_0000 | ERROR_ALREADY_EXISTS)
+}
+
 struct AppContainer {
     sid: *mut core::ffi::c_void,
     caps: *mut SID_AND_ATTRIBUTES,
@@ -137,9 +146,9 @@ impl AppContainer {
 }
 
 fn create_or_derive_appcontainer_sid(name: &str) -> Result<*mut core::ffi::c_void, String> {
-        let name_w = to_wide(name);
-        let display_w = to_wide("SHADI Sandbox");
-        let description_w = to_wide("SHADI AppContainer");
+    let name_w = to_wide(name);
+    let display_w = to_wide("SHADI Sandbox");
+    let description_w = to_wide("SHADI AppContainer");
 
     let mut sid: *mut core::ffi::c_void = std::ptr::null_mut();
     let rc = unsafe {
@@ -154,7 +163,7 @@ fn create_or_derive_appcontainer_sid(name: &str) -> Result<*mut core::ffi::c_voi
     };
 
     if rc != 0 {
-        if rc as u32 == ERROR_ALREADY_EXISTS {
+        if is_already_exists_hresult(rc) {
             let derive_rc = unsafe { DeriveAppContainerSidFromAppContainerName(name_w.as_ptr(), &mut sid) };
             if derive_rc != 0 {
                 return Err(hresult_error_message(
@@ -219,6 +228,7 @@ fn spawn_appcontainer_process(
 ) -> Result<PROCESS_INFORMATION, String> {
     let cmdline = build_command_line(program, args);
     let mut cmdline_w = to_wide(&cmdline);
+    let application_name = resolve_application_name(program);
 
     let mut security_caps = SECURITY_CAPABILITIES {
         AppContainerSid: appcontainer.sid(),
@@ -229,7 +239,7 @@ fn spawn_appcontainer_process(
 
     let attribute_list = ProcThreadAttributeList::new(1)?;
     attribute_list.set_security_capabilities(&mut security_caps)?;
-    create_process_with_attributes(&mut cmdline_w, attribute_list.list)
+    create_process_with_attributes(application_name.as_deref(), &mut cmdline_w, attribute_list.list)
 }
 
 struct ProcThreadAttributeList {
@@ -289,6 +299,7 @@ impl Drop for ProcThreadAttributeList {
 }
 
 fn create_process_with_attributes(
+    application_name_w: Option<&[u16]>,
     cmdline_w: &mut [u16],
     list: windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST,
 ) -> Result<PROCESS_INFORMATION, String> {
@@ -299,7 +310,9 @@ fn create_process_with_attributes(
     let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let ok = unsafe {
         CreateProcessW(
-            std::ptr::null(),
+            application_name_w
+                .map(|value| value.as_ptr())
+                .unwrap_or(std::ptr::null()),
             cmdline_w.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -317,6 +330,29 @@ fn create_process_with_attributes(
     }
 
     Ok(info)
+}
+
+fn resolve_application_name(program: &str) -> Option<Vec<u16>> {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('\\') || program.contains('/') {
+        return Some(to_wide(program));
+    }
+
+    if program.eq_ignore_ascii_case("cmd") || program.eq_ignore_ascii_case("cmd.exe") {
+        if let Some(comspec) = std::env::var_os("ComSpec") {
+            let comspec = comspec.to_string_lossy().to_string();
+            if !comspec.is_empty() {
+                return Some(to_wide(&comspec));
+            }
+        }
+
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            let fallback = Path::new(&system_root).join("System32").join("cmd.exe");
+            return Some(to_wide(&fallback.to_string_lossy()));
+        }
+    }
+
+    None
 }
 
 fn build_command_line(program: &str, args: &[String]) -> String {
@@ -536,6 +572,13 @@ mod tests {
         let err = hresult_error_message("CreateAppContainerProfile", -2147467259);
         assert!(err.contains("CreateAppContainerProfile"));
         assert!(err.contains("hresult=0x"));
+    }
+
+    #[test]
+    fn already_exists_hresult_matches_raw_and_wrapped_forms() {
+        assert!(is_already_exists_hresult(ERROR_ALREADY_EXISTS as i32));
+        assert!(is_already_exists_hresult(0x8007_0000u32.wrapping_add(ERROR_ALREADY_EXISTS) as i32));
+        assert!(!is_already_exists_hresult(5));
     }
 
     #[test]

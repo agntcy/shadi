@@ -158,6 +158,7 @@ mod tests {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct WindowsAclRollback {
     path: Vec<u16>,
     dacl: *mut core::ffi::c_void,

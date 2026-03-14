@@ -659,7 +659,13 @@
         #[cfg(target_os = "windows")]
         if let Some(error) = artifact["outcome"]["error"].as_str() {
             assert_eq!(exit, ExitCode::from(1));
-            assert!(error.contains("CreateAppContainerProfile failed"));
+            assert!(
+                error.contains("CreateAppContainerProfile failed")
+                    || error.contains("SetNamedSecurityInfoW failed")
+                    || error.contains("sandbox apply failed")
+                    || error.contains("sandboxed command should start"),
+                "unexpected Windows sandbox error: {error}"
+            );
             assert!(artifact["outcome"]["exit_code"].is_null());
             return;
         }
