@@ -20,6 +20,24 @@ Open three terminals and run:
 ./scripts/launch_avatar.sh
 ```
 
+On Windows PowerShell, use the `.ps1` equivalents:
+
+```powershell
+.\scripts\launch_slim.ps1
+```
+
+```powershell
+.\scripts\import_secops_secrets.ps1
+```
+
+```powershell
+.\scripts\launch_secops_a2a.ps1
+```
+
+```powershell
+.\scripts\launch_avatar.ps1
+```
+
 ## Environment variables
 
 These scripts default to local paths and can be overridden per terminal.
@@ -57,6 +75,14 @@ export SLIM_ENDPOINT="127.0.0.1:47357"
 ./scripts/launch_slim.sh
 ```
 
+Windows PowerShell:
+
+```powershell
+$env:SHADI_TMP_DIR = "./.tmp"
+$env:SLIM_ENDPOINT = "127.0.0.1:47357"
+.\scripts\launch_slim.ps1
+```
+
 Terminal 2 (SecOps A2A):
 
 ```bash
@@ -67,6 +93,16 @@ export SHADI_OPERATOR_PRESENTATION="local-operator"
 ./scripts/launch_secops_a2a.sh
 ```
 
+Windows PowerShell:
+
+```powershell
+$env:SHADI_TMP_DIR = "./.tmp"
+$env:SHADI_AGENT_ID = "secops-a"
+$env:SHADI_OPERATOR_PRESENTATION = "local-operator"
+.\scripts\import_secops_secrets.ps1
+.\scripts\launch_secops_a2a.ps1
+```
+
 Terminal 3 (Avatar):
 
 ```bash
@@ -74,6 +110,15 @@ export SHADI_TMP_DIR="./.tmp"
 export SHADI_AGENT_ID="avatar-1"
 export SHADI_OPERATOR_PRESENTATION="local-operator"
 ./scripts/launch_avatar.sh
+```
+
+Windows PowerShell:
+
+```powershell
+$env:SHADI_TMP_DIR = "./.tmp"
+$env:SHADI_AGENT_ID = "avatar-1"
+$env:SHADI_OPERATOR_PRESENTATION = "local-operator"
+.\scripts\launch_avatar.ps1
 ```
 
 ## Using 1Password as the secret backend
@@ -89,3 +134,7 @@ export SHADI_OP_VAULT=shadi          # optional, default: shadi
 The `op` CLI (1Password CLI v2) must be installed and authenticated. For CI,
 set `OP_SERVICE_ACCOUNT_TOKEN`. Then run the scripts as usual — the import
 script and all launchers will route secrets through 1Password automatically.
+
+The PowerShell launchers support the same environment variables and also pre-read
+1Password secrets before entering the sandbox so Windows Hello / app prompts do
+not deadlock once the sandbox is active.

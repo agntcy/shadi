@@ -299,6 +299,78 @@ class TestUpdatePackageJson:
 
 
 # ===========================================================================
+# workspace path handling
+# ===========================================================================
+
+
+class TestWorkspacePaths:
+    def test_resolve_workspace_path_returns_absolute_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        resolved = skills.resolve_workspace_path("./.tmp/shadi-secops")
+        assert resolved == (tmp_path / ".tmp" / "shadi-secops").resolve()
+
+    def test_write_pending_prs_creates_parent_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        path = skills.write_pending_prs("./.tmp/shadi-secops", {"repos": {}})
+        assert path.exists()
+        assert path.parent == (tmp_path / ".tmp" / "shadi-secops").resolve()
+
+    def test_collect_security_report_creates_workspace_before_gh_calls(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        def fake_dependabot(api_base, token, repo):
+            return []
+
+        def fake_issues(api_base, token, repo, label):
+            return []
+
+        def fake_code_scanning(token, repo, cwd):
+            assert cwd == (tmp_path / ".tmp" / "shadi-secops").resolve()
+            assert cwd.exists()
+            return []
+
+        monkeypatch.setattr(skills, "fetch_dependabot_alerts", fake_dependabot)
+        monkeypatch.setattr(skills, "fetch_security_issues", fake_issues)
+        monkeypatch.setattr(skills, "fetch_code_scanning_alerts_gh", fake_code_scanning)
+
+        report, total_alerts, total_issues, total_code_scanning = skills.collect_security_report(
+            {"github": {}},
+            "token",
+            ["agntcy/shadi"],
+            ["security"],
+            workspace_dir="./.tmp/shadi-secops",
+        )
+
+        assert total_alerts == 0
+        assert total_issues == 0
+        assert total_code_scanning == 0
+        assert "agntcy/shadi" in report["repos"]
+
+
+class TestSubprocessEncoding:
+    def test_run_git_uses_utf8_decoding(self, tmp_path):
+        completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+        with patch.object(skills.subprocess, "run", return_value=completed) as run_mock:
+            skills.run_git(["status"], tmp_path)
+
+        kwargs = run_mock.call_args.kwargs
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        assert kwargs["text"] is True
+
+    def test_run_gh_uses_utf8_decoding(self, tmp_path):
+        completed = subprocess.CompletedProcess(["gh"], 0, stdout="{}", stderr="")
+        with patch.object(skills.shutil, "which", return_value="gh"):
+            with patch.object(skills.subprocess, "run", return_value=completed) as run_mock:
+                skills.run_gh(["api", "repos/agntcy/shadi"], tmp_path, "token")
+
+        kwargs = run_mock.call_args.kwargs
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        assert kwargs["text"] is True
+
+
+# ===========================================================================
 # update_requirements_txt
 # ===========================================================================
 

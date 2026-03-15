@@ -12,6 +12,8 @@ REMEDIATE := env_var_or_default("REMEDIATE", "false")
 AGENTIC_APPS_PATH := env_var_or_default("AGENTIC_APPS_PATH", "")
 TOURIST_CMD := env_var_or_default("TOURIST_CMD", "")
 SHADI_OP_ACCOUNT := env_var_or_default("SHADI_OP_ACCOUNT", "my.1password.com")
+venv_python := if os() == "windows" { ".venv\\Scripts\\python.exe" } else { ".venv/bin/python" }
+demo_python := if os() == "windows" { ".venv-py312\\Scripts\\python.exe" } else { "./.venv-py312/bin/python" }
 
 build:
   PYO3_PYTHON="{{python312}}" RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" cargo build
@@ -57,44 +59,52 @@ demo:
     --net-block \
     --inject-keychain tourist_api_key=SHADI_BROKER_SECRET \
     -- \
-    ./.venv-py312/bin/python agents/secops/secops.py
+    {{demo_python}} agents/secops/secops.py
 
 demo-policy:
   cargo run -p shadi_cli -- \
     --policy policies/demo/secops-a.json \
     --inject-keychain tourist_api_key=SHADI_BROKER_SECRET \
     -- \
-    ./.venv-py312/bin/python agents/secops/secops.py
+    {{demo_python}} agents/secops/secops.py
 
 demo-steps:
-  SHADI_POLICY_PATH=policies/demo/secops-a.json ./.venv-py312/bin/python agents/secops/secops.py
+  {{ if os() == "windows" {
+    "$env:SHADI_POLICY_PATH = \"policies/demo/secops-a.json\"; " + demo_python + " agents/secops/secops.py"
+  } else {
+    "SHADI_POLICY_PATH=policies/demo/secops-a.json " + demo_python + " agents/secops/secops.py"
+  } }}
 
 secops-import:
-  source ~/.env-phoenix && export SHADI_OPERATOR_PRESENTATION="local-operator" && \
-  uv run --no-project --python .venv/bin/python agents/secops/import_secops_secrets.py
+  {{ if os() == "windows" {
+    "$env:SHADI_OPERATOR_PRESENTATION = \"local-operator\"; uv run --no-project --python " + venv_python + " agents/secops/import_secops_secrets.py"
+  } else {
+    "source ~/.env-phoenix && export SHADI_OPERATOR_PRESENTATION=\"local-operator\" && uv run --no-project --python " + venv_python + " agents/secops/import_secops_secrets.py"
+  } }}
 
 secops-run:
-  SHADI_LLM_TIMEOUT={{ TIMEOUT }} \
-  uv run --no-project --python .venv/bin/python agents/secops/secops.py \
-    --provider {{ PROVIDER }} \
-    {{ if REMEDIATE == "true" { "--remediate" } else { "" } }}
+  {{ if os() == "windows" {
+    "$env:SHADI_LLM_TIMEOUT = \"" + TIMEOUT + "\"; uv run --no-project --python " + venv_python + " agents/secops/secops.py --provider " + PROVIDER + if REMEDIATE == "true" { " --remediate" } else { "" }
+  } else {
+    "SHADI_LLM_TIMEOUT=" + TIMEOUT + " uv run --no-project --python " + venv_python + " agents/secops/secops.py --provider " + PROVIDER + if REMEDIATE == "true" { " --remediate" } else { "" }
+  } }}
 
 secops-approve-prs:
-  uv run --no-project --python .venv/bin/python agents/secops/secops.py --approve-prs
+  uv run --no-project --python {{venv_python}} agents/secops/secops.py --approve-prs
 
 secops-test-python:
   uv run --with pytest pytest agents/secops/tests/test_skills.py
 
 secops-skill-scan:
   rm -rf .tmp/skill-scanner/secops
-  uv run --no-project --python .venv/bin/python tools/prepare_skill_scan.py --source agents/secops --dest .tmp/skill-scanner/secops
+  uv run --no-project --python {{venv_python}} tools/prepare_skill_scan.py --source agents/secops --dest .tmp/skill-scanner/secops
   uvx --from cisco-ai-skill-scanner skill-scanner scan .tmp/skill-scanner/secops --format summary --format markdown --detailed --output-markdown .tmp/skill-scanner/secops-scan.md
 
 secops-a2a:
-  uv run --no-project --python .venv/bin/python agents/secops/a2a_server.py
+  uv run --no-project --python {{venv_python}} agents/secops/a2a_server.py
 
 shadi-prompt:
-  uv run --no-project --python .venv/bin/python tools/shadi_prompt.py
+  uv run --no-project --python {{venv_python}} tools/shadi_prompt.py
 
 secops-run-google:
   just secops-run PROVIDER="google"
@@ -146,38 +156,72 @@ docs-serve:
   mkdocs serve
 
 launch-slim:
-  ./scripts/launch_slim.sh
+  {{ if os() == "windows" {
+    ".\\scripts\\launch_slim.ps1"
+  } else {
+    "./scripts/launch_slim.sh"
+  } }}
 
 launch-slim-example:
-  SHADI_TMP_DIR="./.tmp" ./scripts/launch_slim.sh
+  {{ if os() == "windows" {
+    "$env:SHADI_TMP_DIR = \"./.tmp\"; .\\scripts\\launch_slim.ps1"
+  } else {
+    "SHADI_TMP_DIR=\"./.tmp\" ./scripts/launch_slim.sh"
+  } }}
 
 launch-secops-a2a:
-  ./scripts/launch_secops_a2a.sh
+  {{ if os() == "windows" {
+    ".\\scripts\\launch_secops_a2a.ps1"
+  } else {
+    "./scripts/launch_secops_a2a.sh"
+  } }}
 
 launch-secops-a2a-example:
-  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/import_secops_secrets.sh
-  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/launch_secops_a2a.sh
+  {{ if os() == "windows" {
+    "$env:SHADI_TMP_DIR = \"./.tmp\"; $env:SHADI_AGENT_ID = \"secops-a\"; $env:SHADI_OPERATOR_PRESENTATION = \"local-operator\"; .\\scripts\\import_secops_secrets.ps1"
+  } else {
+    "SHADI_TMP_DIR=\"./.tmp\" SHADI_AGENT_ID=\"secops-a\" SHADI_OPERATOR_PRESENTATION=\"local-operator\" ./scripts/import_secops_secrets.sh"
+  } }}
+  {{ if os() == "windows" {
+    "$env:SHADI_TMP_DIR = \"./.tmp\"; $env:SHADI_AGENT_ID = \"secops-a\"; $env:SHADI_OPERATOR_PRESENTATION = \"local-operator\"; .\\scripts\\launch_secops_a2a.ps1"
+  } else {
+    "SHADI_TMP_DIR=\"./.tmp\" SHADI_AGENT_ID=\"secops-a\" SHADI_OPERATOR_PRESENTATION=\"local-operator\" ./scripts/launch_secops_a2a.sh"
+  } }}
 
 launch-secops-a2a-example-op:
-  SHADI_SECRET_BACKEND=onepassword SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/import_secops_secrets.sh
-  SHADI_SECRET_BACKEND=onepassword SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="secops-a" SHADI_OPERATOR_PRESENTATION="local-operator" ./scripts/launch_secops_a2a.sh
+  {{ if os() == "windows" {
+    "$env:SHADI_SECRET_BACKEND = \"onepassword\"; $env:SHADI_TMP_DIR = \"./.tmp\"; $env:SHADI_AGENT_ID = \"secops-a\"; $env:SHADI_OPERATOR_PRESENTATION = \"local-operator\"; .\\scripts\\import_secops_secrets.ps1"
+  } else {
+    "SHADI_SECRET_BACKEND=onepassword SHADI_TMP_DIR=\"./.tmp\" SHADI_AGENT_ID=\"secops-a\" SHADI_OPERATOR_PRESENTATION=\"local-operator\" ./scripts/import_secops_secrets.sh"
+  } }}
+  {{ if os() == "windows" {
+    "$env:SHADI_SECRET_BACKEND = \"onepassword\"; $env:SHADI_TMP_DIR = \"./.tmp\"; $env:SHADI_AGENT_ID = \"secops-a\"; $env:SHADI_OPERATOR_PRESENTATION = \"local-operator\"; .\\scripts\\launch_secops_a2a.ps1"
+  } else {
+    "SHADI_SECRET_BACKEND=onepassword SHADI_TMP_DIR=\"./.tmp\" SHADI_AGENT_ID=\"secops-a\" SHADI_OPERATOR_PRESENTATION=\"local-operator\" ./scripts/launch_secops_a2a.sh"
+  } }}
 
 launch-avatar:
-  ./scripts/launch_avatar.sh
+  {{ if os() == "windows" {
+    ".\\scripts\\launch_avatar.ps1"
+  } else {
+    "./scripts/launch_avatar.sh"
+  } }}
 
 # Launch the interactive Avatar agent (foreground REPL).
 demo-avatar:
-  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="avatar-1" SHADI_OPERATOR_PRESENTATION="local-operator" \
-    ./scripts/launch_avatar.sh
+  {{ if os() == "windows" {
+    "$env:SHADI_TMP_DIR = \"./.tmp\"; $env:SHADI_AGENT_ID = \"avatar-1\"; $env:SHADI_OPERATOR_PRESENTATION = \"local-operator\"; .\\scripts\\launch_avatar.ps1"
+  } else {
+    "SHADI_TMP_DIR=\"./.tmp\" SHADI_AGENT_ID=\"avatar-1\" SHADI_OPERATOR_PRESENTATION=\"local-operator\" ./scripts/launch_avatar.sh"
+  } }}
 
 # Same as demo-avatar but uses 1Password as the secret backend.
 demo-avatar-op:
-  @OP_ACCOUNT="{{SHADI_OP_ACCOUNT}}"; \
-    op vault list --account "$OP_ACCOUNT" >/dev/null 2>&1 || \
-    { echo "ERROR: 1Password not unlocked for $OP_ACCOUNT. Open the 1Password app and authenticate (Touch ID) first."; exit 1; }
-  SHADI_SECRET_BACKEND=onepassword SHADI_OP_ACCOUNT="{{SHADI_OP_ACCOUNT}}" \
-  SHADI_TMP_DIR="./.tmp" SHADI_AGENT_ID="avatar-1" SHADI_OPERATOR_PRESENTATION="local-operator" \
-    ./scripts/launch_avatar.sh
+  {{ if os() == "windows" {
+    "$opAccount = \"{{SHADI_OP_ACCOUNT}}\"; op vault list --account $opAccount | Out-Null; $env:SHADI_SECRET_BACKEND = \"onepassword\"; $env:SHADI_OP_ACCOUNT = $opAccount; $env:SHADI_TMP_DIR = \"./.tmp\"; $env:SHADI_AGENT_ID = \"avatar-1\"; $env:SHADI_OPERATOR_PRESENTATION = \"local-operator\"; .\\scripts\\launch_avatar.ps1"
+  } else {
+    "OP_ACCOUNT=\"{{SHADI_OP_ACCOUNT}}\"; op vault list --account \"$OP_ACCOUNT\" >/dev/null 2>&1 || { echo \"ERROR: 1Password not unlocked for $OP_ACCOUNT. Open the 1Password app and authenticate (Touch ID) first.\"; exit 1; }; SHADI_SECRET_BACKEND=onepassword SHADI_OP_ACCOUNT=\"{{SHADI_OP_ACCOUNT}}\" SHADI_TMP_DIR=\"./.tmp\" SHADI_AGENT_ID=\"avatar-1\" SHADI_OPERATOR_PRESENTATION=\"local-operator\" ./scripts/launch_avatar.sh"
+  } }}
 
 # Tail background demo logs (SLIM + SecOps A2A).
 demo-logs:
