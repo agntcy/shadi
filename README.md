@@ -81,6 +81,21 @@ just test
 just lint
 ```
 
+The root [Justfile](Justfile) is intentionally thin. It imports focused task
+files from [just/core.just](just/core.just), [just/secops.just](just/secops.just),
+[just/demo.just](just/demo.just), [just/platform.just](just/platform.just), and
+[just/vars.just](just/vars.just), while keeping the public commands unchanged.
+Use `just --list` or `just --groups` to browse tasks by area.
+
+Contributor note for task placement:
+
+- Put shared variables and environment-derived values in [just/vars.just](just/vars.just).
+- Put platform-sensitive interpreter and path helpers in [just/platform.just](just/platform.just).
+- Put build, test, lint, docs, and profile-printing tasks in [just/core.just](just/core.just).
+- Put SHADI and SecOps workflows in [just/secops.just](just/secops.just).
+- Put launcher and demo entrypoints in [just/demo.just](just/demo.just).
+- Keep the root [Justfile](Justfile) limited to global settings, imports, and the default help entrypoint.
+
 ## Core CLI workflows
 
 ### 1) Print a baseline secure policy profile

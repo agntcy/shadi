@@ -1,0 +1,5 @@
+python_prefix := if os() == "windows" { "" } else { `command -v brew >/dev/null 2>&1 && brew --prefix python@3.12 || true` }
+python312 := if os() == "windows" { if env_var_or_default("PYO3_PYTHON", "") != "" { env_var("PYO3_PYTHON") } else { `uv python find 3.12` } } else { if python_prefix != "" { python_prefix + "/bin/python3.12" } else { "python3.12" } }
+python_rustflags := if os() == "macos" { "-C link-arg=-L" + python_prefix + "/Frameworks/Python.framework/Versions/3.12/lib/python3.12/config-3.12-darwin -C link-arg=-lpython3.12 -C link-arg=-framework -C link-arg=CoreFoundation" } else { "" }
+venv_python := if os() == "windows" { ".venv\\Scripts\\python.exe" } else { ".venv/bin/python" }
+demo_python := if os() == "windows" { ".venv-py312\\Scripts\\python.exe" } else { "./.venv-py312/bin/python" }
