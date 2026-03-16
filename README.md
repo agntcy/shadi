@@ -81,6 +81,8 @@ just test
 just lint
 ```
 
+Use `just --list` or `just --groups` to browse tasks by area.
+
 ## Core CLI workflows
 
 ### 1) Print a baseline secure policy profile

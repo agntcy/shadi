@@ -113,6 +113,9 @@ pub enum SandboxError {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    use std::os::windows::ffi::OsStrExt;
+
     #[test]
     fn sandbox_error_display_message() {
         let err = SandboxError::InvalidConfig;
@@ -123,6 +126,12 @@ mod tests {
     fn sandbox_error_apply_failed_message() {
         let err = SandboxError::ApplyFailed("boom".to_string());
         assert!(format!("{}", err).contains("sandbox apply failed"));
+    }
+
+    #[test]
+    fn sandbox_error_not_supported_message() {
+        let err = SandboxError::NotSupported;
+        assert!(format!("{}", err).contains("sandbox not supported"));
     }
 
     #[cfg(target_os = "macos")]
@@ -155,9 +164,120 @@ mod tests {
         wrapped.kill().expect("kill");
         let _ = wrapped.wait().expect("wait");
     }
+
+    #[cfg(target_os = "windows")]
+    fn to_wide(value: &std::path::Path) -> Vec<u16> {
+        value.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn open_process_handle(pid: u32, access: u32) -> windows_sys::Win32::Foundation::HANDLE {
+        use windows_sys::Win32::System::Threading::OpenProcess;
+
+        let handle = unsafe { OpenProcess(access, 0, pid) };
+        assert!(!handle.is_null(), "OpenProcess should succeed");
+        handle
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sandboxed_child_wraps_std_process_on_windows() {
+        let child = Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+
+        let mut wrapped = SandboxedChild::from_std(child);
+        assert_eq!(wrapped.id(), pid);
+
+        let status = wrapped.wait().expect("wait");
+        assert!(status.success());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sandboxed_child_kill_stops_std_process_on_windows() {
+        let child = Command::new("cmd")
+            .args(["/C", "ping", "-n", "6", "127.0.0.1", ">", "NUL"])
+            .spawn()
+            .expect("spawn");
+
+        let mut wrapped = SandboxedChild::from_std(child);
+        wrapped.kill().expect("kill");
+        let _ = wrapped.wait().expect("wait");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sandboxed_child_wraps_windows_process_on_windows() {
+        const PROCESS_QUERY_LIMITED_INFORMATION_ACCESS: u32 = 0x1000;
+        const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+        let mut std_child = Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("spawn");
+        let process = open_process_handle(
+            std_child.id(),
+            PROCESS_QUERY_LIMITED_INFORMATION_ACCESS | SYNCHRONIZE_ACCESS,
+        );
+
+        let windows_child = WindowsChild::new(process, std::ptr::null_mut(), std_child.id(), Vec::new());
+        let mut wrapped = SandboxedChild::from_windows(windows_child);
+
+        assert_eq!(wrapped.id(), std_child.id());
+        let status = wrapped.wait().expect("wait");
+        assert!(status.success());
+
+        let _ = std_child.wait().expect("wait std child");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sandboxed_windows_child_kill_stops_process_on_windows() {
+        const PROCESS_QUERY_LIMITED_INFORMATION_ACCESS: u32 = 0x1000;
+        const PROCESS_TERMINATE_ACCESS: u32 = 0x0001;
+        const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+        let mut std_child = Command::new("cmd")
+            .args(["/C", "ping", "-n", "6", "127.0.0.1", ">", "NUL"])
+            .spawn()
+            .expect("spawn");
+        let process = open_process_handle(
+            std_child.id(),
+            PROCESS_QUERY_LIMITED_INFORMATION_ACCESS | PROCESS_TERMINATE_ACCESS | SYNCHRONIZE_ACCESS,
+        );
+
+        let windows_child = WindowsChild::new(process, std::ptr::null_mut(), std_child.id(), Vec::new());
+        let mut wrapped = SandboxedChild::from_windows(windows_child);
+
+        wrapped.kill().expect("kill");
+        let status = std_child.wait().expect("wait std child");
+        assert!(!status.success());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn restore_windows_acl_rollbacks_drains_entries() {
+        let path = std::env::temp_dir().join("shadi-coverage-rollback");
+        std::fs::write(&path, b"rollback").expect("write temp file");
+
+        let mut rollbacks = vec![WindowsAclRollback {
+            path: to_wide(&path),
+            dacl: std::ptr::null_mut(),
+            security_descriptor: std::ptr::null_mut(),
+        }];
+
+        restore_windows_acl_rollbacks(&mut rollbacks);
+        assert!(rollbacks.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct WindowsAclRollback {
     path: Vec<u16>,
     dacl: *mut core::ffi::c_void,
@@ -231,7 +351,7 @@ impl WindowsChild {
         }
 
         self.cleaned = true;
-        restore_acl_rollbacks(&mut self.rollbacks);
+        restore_windows_acl_rollbacks(&mut self.rollbacks);
 
         unsafe {
             if !self.thread.is_null() {
@@ -256,7 +376,7 @@ impl Drop for WindowsChild {
 }
 
 #[cfg(target_os = "windows")]
-fn restore_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
+pub(crate) fn restore_windows_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
     use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
     use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
     use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;

@@ -14,6 +14,13 @@ from shadi import ShadiStore, PySessionContext, SqlCipherMemoryStore
 from telemetry import tracer
 
 
+_SUBPROCESS_TEXT_KWARGS = {
+    "text": True,
+    "encoding": "utf-8",
+    "errors": "replace",
+}
+
+
 def load_secops_config():
     config_path = Path(os.getenv("SHADI_SECOPS_CONFIG", "secops.toml"))
     if not config_path.exists():
@@ -70,6 +77,13 @@ def get_secops_credentials(config, store, session):
         "utf-8"
     )
     return github_token, workspace, token_key, workspace_key
+
+
+def resolve_workspace_path(workspace_dir):
+    workspace_path = Path(workspace_dir).expanduser()
+    if not workspace_path.is_absolute():
+        workspace_path = workspace_path.resolve()
+    return workspace_path
 
 
 def require_shadi_secret_value(store, session, key_name, label):
@@ -199,7 +213,7 @@ def run_git(args, cwd, token=None):
         cwd=cwd,
         check=True,
         capture_output=True,
-        text=True,
+        **_SUBPROCESS_TEXT_KWARGS,
         env=env,
     )
 
@@ -224,7 +238,7 @@ def _path_within_repo(repo_path, path_value):
 
 
 def _repo_relative_path(repo_path, path_value):
-    return str(_path_within_repo(repo_path, path_value).relative_to(_resolve_repo_root(repo_path)))
+    return _path_within_repo(repo_path, path_value).relative_to(_resolve_repo_root(repo_path)).as_posix()
 
 
 def clone_or_update_repo(workspace_path, repo, token):
@@ -981,7 +995,7 @@ def run_gh(args, cwd, token):
         ["gh"] + args,
         cwd=cwd,
         capture_output=True,
-        text=True,
+        **_SUBPROCESS_TEXT_KWARGS,
         env=env,
     )
     if result.returncode != 0:
@@ -1126,11 +1140,12 @@ def create_remediation_issue(repo, updates, token, cwd):
 
 
 def pending_prs_path(workspace_dir):
-    return Path(workspace_dir) / "secops_pending_prs.json"
+    return resolve_workspace_path(workspace_dir) / "secops_pending_prs.json"
 
 
 def write_pending_prs(workspace_dir, pending):
     path = pending_prs_path(workspace_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(pending, indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -1147,7 +1162,8 @@ def load_pending_prs(workspace_dir):
 
 
 def remediate_repos(config, github_token, report, workspace_dir, create_prs=True, fork_owner=None):
-    workspace_path = Path(workspace_dir)
+    workspace_path = resolve_workspace_path(workspace_dir)
+    workspace_path.mkdir(parents=True, exist_ok=True)
     remediation = {}
     pending = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1394,7 +1410,7 @@ def approve_pending_prs(config, github_token, workspace_dir):
                     "-f",
                     f"body={pr['body']}",
                 ],
-                Path(workspace_dir),
+                resolve_workspace_path(workspace_dir),
                 github_token,
             )
             pr_payload = json.loads(pr_response.stdout)
@@ -1508,7 +1524,8 @@ def collect_security_report(config, github_token, allowlisted_repos, labels, wor
     with tracer.start_as_current_span("secops.github_fetch") as span:
         span.set_attribute("github.repo_count", len(allowlisted_repos))
         span.add_event("github_fetch.started", {"repos": ",".join(allowlisted_repos)})
-        gh_cwd = Path(workspace_dir) if workspace_dir else Path(".")
+        gh_cwd = resolve_workspace_path(workspace_dir) if workspace_dir else Path(".").resolve()
+        gh_cwd.mkdir(parents=True, exist_ok=True)
         total_code_scanning = 0
         for repo in allowlisted_repos:
             repo_entry = {"dependabot": [], "issues": {}, "code_scanning": []}
@@ -1686,7 +1703,7 @@ def generate_llm_markdown(report, total_alerts, total_issues, llm_settings):
 
 
 def write_report(report, workspace_dir, filename, total_alerts, total_issues, llm_settings):
-    workspace_path = Path(workspace_dir)
+    workspace_path = resolve_workspace_path(workspace_dir)
     workspace_path.mkdir(parents=True, exist_ok=True)
     report_path = workspace_path / filename
     markdown = generate_llm_markdown(report, total_alerts, total_issues, llm_settings)
@@ -1804,7 +1821,8 @@ def fetch_security_alerts(
         report, total_alerts, total_issues, total_code_scanning = collect_security_report(
             config, github_token, allowlist, label_list, workspace_dir=workspace
         )
-        raw_path = Path(workspace) / _RAW_ALERTS_FILE
+        workspace_path = resolve_workspace_path(workspace)
+        raw_path = workspace_path / _RAW_ALERTS_FILE
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         raw_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         span.set_attribute("fetch.total_alerts", total_alerts)
@@ -1832,7 +1850,7 @@ def generate_security_report(
     store, session = create_secops_session()
     _, workspace, _, _ = get_secops_credentials(config, store, session)
     llm_settings = get_llm_settings(config, store, session, provider_override=provider)
-    raw_path = Path(workspace) / _RAW_ALERTS_FILE
+    raw_path = resolve_workspace_path(workspace) / _RAW_ALERTS_FILE
     if not raw_path.exists():
         return {"status": "error", "error": "No alert data found. Call fetch_security_alerts first."}
     report = json.loads(raw_path.read_text(encoding="utf-8"))
