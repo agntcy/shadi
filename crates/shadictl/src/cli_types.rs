@@ -88,6 +88,10 @@ pub(crate) struct TraceCli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
+    #[command(name = "config")]
+    Config(ConfigCli),
+    #[command(name = "policy")]
+    Policy(PolicyCli),
     #[command(name = "memory")]
     Memory(MemoryCli),
     #[command(name = "trace")]
@@ -108,6 +112,124 @@ pub(crate) enum Commands {
     VerifyAgentIdentity(VerifyAgentIdentityArgs),
     #[command(name = "put-key")]
     PutKey(PutKeyArgs),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "config", about = "Inspect effective SHADI configuration")]
+pub(crate) struct ConfigCli {
+    #[command(subcommand)]
+    pub(crate) command: ConfigCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ConfigCommand {
+    Show(ConfigShowArgs),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "policy", about = "Inspect and diff effective sandbox policy")]
+pub(crate) struct PolicyCli {
+    #[command(subcommand)]
+    pub(crate) command: PolicyCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum PolicyCommand {
+    Explain(PolicyExplainArgs),
+    Diff(PolicyDiffArgs),
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub(crate) enum OutputFormat {
+    Json,
+    Text,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "show", about = "Show effective runtime config")]
+pub(crate) struct ConfigShowArgs {
+    #[arg(long = "profile", value_enum, value_name = "PROFILE")]
+    pub(crate) profile: Option<LauncherProfile>,
+
+    #[arg(long = "policy", value_name = "FILE")]
+    pub(crate) policy_file: Option<PathBuf>,
+
+    #[arg(long = "allow", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) allow: Vec<PathBuf>,
+
+    #[arg(long = "read", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) read: Vec<PathBuf>,
+
+    #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) write: Vec<PathBuf>,
+
+    #[arg(long = "net-block", action = ArgAction::SetTrue)]
+    pub(crate) net_block: bool,
+
+    #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
+    pub(crate) allow_command: Vec<String>,
+
+    #[arg(long = "format", value_enum, default_value = "json")]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "explain", about = "Explain resolved policy and source inputs")]
+pub(crate) struct PolicyExplainArgs {
+    #[arg(long = "profile", value_enum, value_name = "PROFILE")]
+    pub(crate) profile: Option<LauncherProfile>,
+
+    #[arg(long = "policy", value_name = "FILE")]
+    pub(crate) policy_file: Option<PathBuf>,
+
+    #[arg(long = "allow", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) allow: Vec<PathBuf>,
+
+    #[arg(long = "read", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) read: Vec<PathBuf>,
+
+    #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) write: Vec<PathBuf>,
+
+    #[arg(long = "net-block", action = ArgAction::SetTrue)]
+    pub(crate) net_block: bool,
+
+    #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
+    pub(crate) allow_command: Vec<String>,
+
+    #[arg(long = "format", value_enum, default_value = "json")]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "diff", about = "Diff effective policy against a baseline")]
+pub(crate) struct PolicyDiffArgs {
+    #[arg(long = "against", value_name = "TARGET")]
+    pub(crate) against: String,
+
+    #[arg(long = "profile", value_enum, value_name = "PROFILE")]
+    pub(crate) profile: Option<LauncherProfile>,
+
+    #[arg(long = "policy", value_name = "FILE")]
+    pub(crate) policy_file: Option<PathBuf>,
+
+    #[arg(long = "allow", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) allow: Vec<PathBuf>,
+
+    #[arg(long = "read", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) read: Vec<PathBuf>,
+
+    #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) write: Vec<PathBuf>,
+
+    #[arg(long = "net-block", action = ArgAction::SetTrue)]
+    pub(crate) net_block: bool,
+
+    #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
+    pub(crate) allow_command: Vec<String>,
+
+    #[arg(long = "format", value_enum, default_value = "json")]
+    pub(crate) format: OutputFormat,
 }
 
 #[derive(Subcommand, Debug)]
@@ -368,7 +490,7 @@ pub(crate) struct PutKeyArgs {
     pub(crate) input: PathBuf,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub(crate) struct PolicyFile {
     #[serde(default)]
     pub(crate) allow: Vec<String>,

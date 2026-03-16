@@ -1,10 +1,18 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(not(any(test, feature = "coverage")))]
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
 use security_framework_sys::base::errSecItemNotFound;
+
+#[cfg(any(test, feature = "coverage"))]
+use std::collections::HashMap;
+#[cfg(any(test, feature = "coverage"))]
+use std::fmt;
+#[cfg(any(test, feature = "coverage"))]
+use std::sync::{Mutex, OnceLock};
 
 use crate::{SecretError, SecretResult, SecretStore};
 use crate::memory::SecretBytes;
@@ -15,6 +23,84 @@ pub struct MacosKeychainStore {
 }
 
 const REGISTRY_ACCOUNT: &str = "__shadi_registry__";
+
+#[cfg(any(test, feature = "coverage"))]
+#[derive(Debug, Clone)]
+struct KeychainError {
+    code: i32,
+    message: &'static str,
+}
+
+#[cfg(any(test, feature = "coverage"))]
+impl KeychainError {
+    fn not_found() -> Self {
+        Self {
+            code: errSecItemNotFound,
+            message: "item not found",
+        }
+    }
+
+    fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+#[cfg(any(test, feature = "coverage"))]
+impl fmt::Display for KeychainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.message, self.code)
+    }
+}
+
+#[cfg(any(test, feature = "coverage"))]
+fn keychain_fixture() -> &'static Mutex<HashMap<(String, String), Vec<u8>>> {
+    static FIXTURE: OnceLock<Mutex<HashMap<(String, String), Vec<u8>>>> = OnceLock::new();
+    FIXTURE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(any(test, feature = "coverage"))]
+fn set_generic_password(service: &str, account: &str, secret: &[u8]) -> Result<(), KeychainError> {
+    let mut guard = keychain_fixture()
+        .lock()
+        .map_err(|_| KeychainError {
+            code: -1,
+            message: "fixture lock poisoned",
+        })?;
+    guard.insert((service.to_string(), account.to_string()), secret.to_vec());
+    Ok(())
+}
+
+#[cfg(any(test, feature = "coverage"))]
+fn get_generic_password(service: &str, account: &str) -> Result<Vec<u8>, KeychainError> {
+    let guard = keychain_fixture()
+        .lock()
+        .map_err(|_| KeychainError {
+            code: -1,
+            message: "fixture lock poisoned",
+        })?;
+    guard
+        .get(&(service.to_string(), account.to_string()))
+        .cloned()
+        .ok_or_else(KeychainError::not_found)
+}
+
+#[cfg(any(test, feature = "coverage"))]
+fn delete_generic_password(service: &str, account: &str) -> Result<(), KeychainError> {
+    let mut guard = keychain_fixture()
+        .lock()
+        .map_err(|_| KeychainError {
+            code: -1,
+            message: "fixture lock poisoned",
+        })?;
+    if guard
+        .remove(&(service.to_string(), account.to_string()))
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(KeychainError::not_found())
+    }
+}
 
 impl MacosKeychainStore {
     pub fn new(service: impl Into<String>) -> Self {
@@ -119,14 +205,18 @@ impl SecretStore for MacosKeychainStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn unique_key(prefix: &str) -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time went backwards")
             .as_nanos();
-        format!("{}-{}-{}", prefix, std::process::id(), nanos)
+        let seq = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{}-{}-{}-{}", prefix, std::process::id(), nanos, seq)
     }
 
     fn unique_service() -> String {
@@ -135,9 +225,6 @@ mod tests {
 
     #[test]
     fn keychain_roundtrip_put_get_delete() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let store = MacosKeychainStore::new(unique_service());
         let key = unique_key("shadi-key");
         let secret = b"secret-value";
@@ -151,9 +238,6 @@ mod tests {
 
     #[test]
     fn list_keys_tracks_registry_updates() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let store = MacosKeychainStore::new(unique_service());
         let key_one = unique_key("shadi-key-a");
         let key_two = unique_key("shadi-key-b");
@@ -174,9 +258,6 @@ mod tests {
 
     #[test]
     fn list_keys_excludes_registry_account() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let store = MacosKeychainStore::new(unique_service());
         store
             .put(REGISTRY_ACCOUNT, b"value", SecretPolicy::default())
@@ -188,9 +269,6 @@ mod tests {
 
     #[test]
     fn list_keys_dedups_registry_entries() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let store = MacosKeychainStore::new(unique_service());
         let key = unique_key("shadi-key");
 
@@ -205,9 +283,6 @@ mod tests {
 
     #[test]
     fn list_keys_empty_when_registry_missing() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let store = MacosKeychainStore::new(unique_service());
         let keys = store.list_keys().unwrap();
         assert!(keys.is_empty());
@@ -222,9 +297,6 @@ mod tests {
 
     #[test]
     fn list_keys_trims_registry_entries() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let service = unique_service();
         let store = MacosKeychainStore::new(service.clone());
         let payload = b"key-a\n\n  key-b  \n";
@@ -239,9 +311,6 @@ mod tests {
 
     #[test]
     fn list_keys_errors_on_invalid_utf8_registry() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let service = unique_service();
         let store = MacosKeychainStore::new(service.clone());
         let payload = vec![0xff, 0xfe, 0xfd];
@@ -255,9 +324,6 @@ mod tests {
 
     #[test]
     fn get_missing_key_returns_error() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let store = MacosKeychainStore::new(unique_service());
         let err = store.get("missing-key").err().expect("error");
         assert!(matches!(err, SecretError::StorageFailure));
@@ -265,9 +331,6 @@ mod tests {
 
     #[test]
     fn delete_missing_key_returns_error() {
-        if std::env::var("SHADI_KEYCHAIN_TESTS").as_deref() != Ok("1") {
-            return;
-        }
         let store = MacosKeychainStore::new(unique_service());
         let err = store.delete("missing-key").unwrap_err();
         assert!(matches!(err, SecretError::StorageFailure));

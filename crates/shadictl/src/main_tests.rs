@@ -951,6 +951,58 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_named_command_dispatches_config_variant() {
+        let code = run_named_command(Commands::Config(ConfigCli {
+            command: ConfigCommand::Show(ConfigShowArgs {
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_named_command_dispatches_policy_explain_variant() {
+        let code = run_named_command(Commands::Policy(PolicyCli {
+            command: PolicyCommand::Explain(PolicyExplainArgs {
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_named_command_dispatches_policy_diff_variant() {
+        let code = run_named_command(Commands::Policy(PolicyCli {
+            command: PolicyCommand::Diff(PolicyDiffArgs {
+                against: "profile:balanced".to_string(),
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                net_block: false,
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
+        }));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
     fn run_cli_subcommand_branch_executes_direct_dispatch() {
         let dir = temp_dir();
         let trace_file = dir.path().join("trace.jsonl");
@@ -962,6 +1014,50 @@ members = [{ did = "did:key:zA", role = "human" }]
             command: TraceCommand::Summary { limit: 10 },
         }));
         cli.run_command.clear();
+
+        assert_eq!(run_cli(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_cli_run_command_dispatches_config_subcommand() {
+        let mut cli = build_cli();
+        cli.subcommand = None;
+        cli.run_command = vec![
+            "config".to_string(),
+            "show".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_cli_run_command_dispatches_policy_explain_subcommand() {
+        let mut cli = build_cli();
+        cli.subcommand = None;
+        cli.run_command = vec![
+            "policy".to_string(),
+            "explain".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_cli_run_command_dispatches_policy_diff_subcommand() {
+        let mut cli = build_cli();
+        cli.subcommand = None;
+        cli.run_command = vec![
+            "policy".to_string(),
+            "diff".to_string(),
+            "--against".to_string(),
+            "profile:balanced".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
 
         assert_eq!(run_cli(cli), ExitCode::SUCCESS);
     }

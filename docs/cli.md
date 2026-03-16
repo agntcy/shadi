@@ -45,6 +45,113 @@ By default `shadictl` uses the OS keychain. To use 1Password instead, set:
 The 1Password backend requires the `op` CLI to be installed and authenticated.
 For CI, export `OP_SERVICE_ACCOUNT_TOKEN`.
 
+### Config and policy introspection
+
+Inspect effective runtime config (profile, policy source, backend metadata, and
+effective policy):
+
+```bash
+cargo run -p shadictl -- config show --format json
+```
+
+Explain resolved policy with source inputs (profile defaults, policy file, and
+CLI overrides):
+
+```bash
+cargo run -p shadictl -- policy explain --format json
+```
+
+Diff effective policy against a baseline profile:
+
+```bash
+cargo run -p shadictl -- policy diff --against profile:strict --format json
+```
+
+Diff effective policy against another policy file:
+
+```bash
+cargo run -p shadictl -- policy diff --against file:./sandbox.json --format json
+```
+
+Supported formats for these commands: `json` (default) and `text`.
+
+#### Practical examples
+
+Show effective config with explicit overrides:
+
+```bash
+cargo run -p shadictl -- \
+  config show \
+  --profile connected \
+  --policy ./sandbox.json \
+  --allow . \
+  --read /tmp \
+  --allow-command curl \
+  --format json
+```
+
+Expected JSON fields include:
+
+```json
+{
+  "profile": "connected",
+  "policy_file": "./sandbox.json",
+  "secret_backend": {
+    "selected": "keychain"
+  },
+  "overrides": {
+    "allow_command": ["curl"]
+  },
+  "effective_policy": {
+    "net_block": false
+  }
+}
+```
+
+Explain policy source inputs and inspect only the source section:
+
+```bash
+cargo run -p shadictl -- \
+  policy explain \
+  --profile balanced \
+  --policy ./sandbox.json \
+  --allow . \
+  --format json
+```
+
+```bash
+cargo run -q -p shadictl -- \
+  policy explain --policy ./sandbox.json --format json \
+  | jq '.sources'
+```
+
+Diff current effective policy against a baseline policy file:
+
+```bash
+cargo run -p shadictl -- \
+  policy diff \
+  --policy ./sandbox.json \
+  --allow . \
+  --against file:./policies/demo/secops-a.json \
+  --format json
+```
+
+Inspect only changed fields from the diff payload:
+
+```bash
+cargo run -q -p shadictl -- \
+  policy diff --against profile:strict --format json \
+  | jq '.diff.changed_fields'
+```
+
+Invalid baseline targets return exit code `2` with an error message. Accepted
+`--against` values are:
+
+- `profile:strict`
+- `profile:balanced`
+- `profile:connected`
+- `file:<path>`
+
 ### Sandbox execution
 
 Run a command inside the sandbox after flags:
