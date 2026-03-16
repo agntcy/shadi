@@ -1,11 +1,5 @@
 # Launcher Scripts
 
-The project task runner now keeps the root [Justfile](../Justfile) as a thin
-entrypoint that imports focused files from [just/core.just](../just/core.just),
-[just/secops.just](../just/secops.just), and [just/demo.just](../just/demo.just).
-Recipe names did not change, so existing commands such as `just launch-avatar`
-and `just secops-run` still work as before.
-
 ## Quickstart
 
 Open three terminals and run:
