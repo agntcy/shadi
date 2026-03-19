@@ -434,6 +434,18 @@ fn to_wide(value: &str) -> Vec<u16> {
         .collect()
 }
 
+/// Strip the `\\?\` extended-path prefix that `Path::canonicalize` produces on
+/// Windows. Security APIs (`SetNamedSecurityInfoW`, `GetNamedSecurityInfoW`)
+/// do not accept the extended-length prefix and return `ERROR_ACCESS_DENIED`.
+fn strip_extended_path_prefix(path: &Path) -> std::borrow::Cow<'_, str> {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix("\\\\?\\") {
+        std::borrow::Cow::Owned(stripped.to_string())
+    } else {
+        s
+    }
+}
+
 fn path_to_wide(path: &Path) -> Vec<u16> {
     path.as_os_str()
         .encode_wide()
@@ -554,7 +566,7 @@ fn grant_path_access(
         return Err(win32_error_message("SetEntriesInAclW", result));
     }
 
-    let path_w = to_wide(path.to_string_lossy().as_ref());
+    let path_w = to_wide(&strip_extended_path_prefix(path));
     let result = unsafe {
         SetNamedSecurityInfoW(
             path_w.as_ptr() as *mut u16,
@@ -581,7 +593,7 @@ fn grant_path_access(
 fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
     let mut dacl: *mut core::ffi::c_void = std::ptr::null_mut();
     let mut security_descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
-    let path_w = to_wide(path.to_string_lossy().as_ref());
+    let path_w = to_wide(&strip_extended_path_prefix(path));
     let result = unsafe {
         GetNamedSecurityInfoW(
             path_w.as_ptr() as *mut u16,

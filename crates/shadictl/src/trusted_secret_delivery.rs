@@ -355,7 +355,8 @@ impl PendingTrustedSecretDelivery {
         }
     }
 
-    pub(crate) fn deliver_after_spawn(&mut self, #[cfg(unix)] child_pid: u32) -> Result<(), String> {
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    pub(crate) fn deliver_after_spawn(&mut self, child_pid: u32) -> Result<(), String> {
         #[cfg(unix)]
         {
             for prepared in &mut self.secrets {
@@ -744,9 +745,9 @@ fn executable_candidates(base: &Path, program: &Path) -> Vec<PathBuf> {
         for extension in pathext.to_string_lossy().split(';').filter(|value| !value.is_empty()) {
             let trimmed = extension.trim();
             let ext = if trimmed.starts_with('.') {
-                trimmed.to_string()
+                trimmed.to_lowercase()
             } else {
-                format!(".{}", trimmed)
+                format!(".{}", trimmed).to_lowercase()
             };
             candidates.push(base.join(format!("{}{}", program.display(), ext)));
         }
