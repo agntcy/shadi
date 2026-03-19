@@ -70,6 +70,24 @@ mod tests {
 
     #[cfg(feature = "onepassword")]
     #[test]
+    fn selected_backend_uses_onepassword_when_requested() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        std::env::set_var("SHADI_SECRET_BACKEND", "onepassword");
+        assert_eq!(selected_backend_for_tests(), "onepassword");
+        std::env::remove_var("SHADI_SECRET_BACKEND");
+    }
+
+    #[cfg(feature = "onepassword")]
+    #[test]
+    fn default_store_constructs_onepassword_backend_when_requested() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        std::env::set_var("SHADI_SECRET_BACKEND", "onepassword");
+        let _store = default_store();
+        std::env::remove_var("SHADI_SECRET_BACKEND");
+    }
+
+    #[cfg(feature = "onepassword")]
+    #[test]
     fn selected_backend_ignores_other_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         std::env::set_var("SHADI_SECRET_BACKEND", "noop");

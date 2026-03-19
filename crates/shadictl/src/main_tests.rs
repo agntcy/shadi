@@ -53,6 +53,13 @@
         }
     }
 
+    fn assert_common_direct_trusted_secret_report(report: &str) {
+        assert!(report.contains("agent_token=agent-value"));
+        assert!(report.contains("tool_secret_present=false"));
+        assert!(report.contains("tool_fd_present=true"));
+        assert!(report.contains("secret_payload=tool-value"));
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")
@@ -307,6 +314,16 @@
         assert!(resolved.policy.allow_read().iter().any(|p| p == &allow_path));
         assert!(resolved.policy.allow_write().iter().any(|p| p == &allow_path));
         assert!(resolved.allow.contains("rm"));
+    }
+
+    #[test]
+    fn build_cli_uses_expected_defaults() {
+        let cli = build_cli();
+        assert!(cli.trusted_secret_fd_env.is_empty());
+        assert!(!cli.git_snapshot);
+        assert!(cli.git_snapshot_dir.is_none());
+        assert!(!cli.git_snapshot_untracked);
+        assert!(cli.subcommand.is_none());
     }
 
     #[test]
@@ -573,6 +590,22 @@
     }
 
     #[test]
+    fn summarize_status_lines_counts_all_status_kinds() {
+        let summary = summarize_status_lines(&[
+            "D  removed.txt".to_string(),
+            "C  copied.txt".to_string(),
+            "UU conflict.txt".to_string(),
+            "X  unknown.txt".to_string(),
+        ]);
+
+        assert_eq!(summary.deleted, 1);
+        assert_eq!(summary.copied, 1);
+        assert_eq!(summary.unmerged, 2);
+        assert_eq!(summary.other, 1);
+        assert!(summary.changed);
+    }
+
+    #[test]
     fn git_snapshot_layout_default_starts_empty() {
         let layout = GitSnapshotLayout::default();
 
@@ -623,6 +656,29 @@
 
         assert_eq!(exit, ExitCode::from(2));
     }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn run_sandboxed_command_returns_error_for_invalid_injected_keychain_mapping() {
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+
+        let mut cli = build_cli();
+        let (command, command_prefix) = snapshot_test_command();
+        cli.run_command = command;
+        cli.allow.push(command_prefix);
+        cli.inject_keychain = vec!["invalid".to_string()];
+
+        let file_policy = PolicyFile {
+            net_block: Some(false),
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+
+        assert!(!resolved.policy.net_blocked());
+        assert_eq!(run_sandboxed_command(&cli, &resolved, &file_policy, &cwd), ExitCode::from(2));
+    }
+
 
     #[test]
     #[cfg(target_os = "macos")]
@@ -779,11 +835,8 @@
         assert_eq!(run_cli(cli), ExitCode::from(0));
 
         let report = std::fs::read_to_string(&report_path).expect("read direct report");
-        assert!(report.contains("agent_token=agent-value"));
-        assert!(report.contains("tool_secret_present=false"));
-        assert!(report.contains("tool_fd_present=true"));
+        assert_common_direct_trusted_secret_report(&report);
         assert!(report.contains("tool_nonce_present=true"));
-        assert!(report.contains("secret_payload=tool-value"));
     }
 
     #[test]
@@ -838,11 +891,8 @@
 
         assert_eq!(exit, ExitCode::from(0));
         let report = std::fs::read_to_string(&report_path).expect("read direct report");
-        assert!(report.contains("agent_token=agent-value"));
-        assert!(report.contains("tool_secret_present=false"));
-        assert!(report.contains("tool_fd_present=true"));
+        assert_common_direct_trusted_secret_report(&report);
         assert!(report.contains("protocol=consume-close-v1"));
-        assert!(report.contains("secret_payload=tool-value"));
     }
 
     #[test]
