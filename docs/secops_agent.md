@@ -245,3 +245,97 @@ cargo run -p shadictl -- memory list --db "$SHADI_SECOPS_MEMORY_DB" \
 
 - When `SHADI_SECRET_BACKEND=onepassword`, the launch scripts pre-read required secrets before entering the sandbox because the sandbox may block the `op` CLI biometric/background flow.
 - If Avatar reports a SLIM session handshake failure, check that the SecOps A2A server is running and that both sides share the same endpoint, shared secret, identity, and TLS settings.
+
+## Secret handling model
+
+For agent workloads such as SecOps, separate **agent intent** from **secret delivery**.
+
+### Working rule
+
+The agent may decide that a tool should run, but SHADI should remain the secret
+delivery authority until the final authorized consumer process exists.
+
+That means:
+
+- avoid treating secrets as ambient process environment by default,
+- avoid having a parent agent carry a secret solely so a child tool can use it,
+- prefer SHADI-mediated delivery to the exact child tool that needs the secret.
+
+### What this means for SecOps
+
+SecOps is a useful example because it legitimately needs more than one kind of
+credential:
+
+- a SLIM or identity bootstrap secret may need to be disclosed to the agent
+	itself if the agent must directly join or authenticate into a secure group,
+- a GitHub token may be better delegated to a trusted child tool or tightly
+	scoped HTTP client process,
+- an LLM provider API key should be treated as high-risk for prompt-injection
+	exfiltration and should not be exposed to the agent process unless there is no
+	safer mediated path.
+
+### Recommended action mapping
+
+Think about secrets by allowed action:
+
+- `disclose`: the process can read the secret value directly.
+- `delegate-to-child`: the process can request that SHADI deliver the secret to
+	a specific authorized child tool.
+- `use`: the process can trigger an operation that depends on the secret without
+	necessarily receiving reusable plaintext itself.
+
+For SecOps-like workloads, the safest default is:
+
+- identity/bootstrap secret: allow `disclose` only when the agent truly needs
+	it to establish the secure session,
+- GitHub remediation token: prefer `delegate-to-child` when a trusted tool or
+	helper process can perform the operation,
+- LLM provider key: prefer `use` via a SHADI-managed adapter or broker instead
+	of raw disclosure to the LLM-facing process.
+
+### Why this helps with prompt injection
+
+Prompt injection is dangerous only after a process can already see a secret.
+The action-based model narrows that exposure:
+
+- process-boundary controls decide whether the secret reaches the process at all,
+- action choice decides whether an LLM-facing process ever gets raw disclosure,
+- SHADI-mediated child delivery avoids storing sensitive tokens in a parent
+	agent environment where unrelated descendants could inherit them.
+
+### Current operational rule
+
+For SecOps-style workloads, the operational rule is:
+
+1. The agent requests a tool invocation.
+2. SHADI verifies the tool executable and allowed secret action.
+3. SHADI delivers the secret directly to the final authorized tool process when delegated delivery is available.
+4. The agent receives the tool result, not the secret.
+
+This still allows intentional direct disclosure when the workload truly needs
+it, but keeps final-consumer delivery as the preferred secure pattern.
+
+### Platform note
+
+For Windows agent workloads, the same security rule applies:
+
+- the parent agent may request the tool run,
+- SHADI remains the secret delivery authority,
+- the final child tool should be the intended consumer,
+- the parent agent should not receive the secret-bearing handle or plaintext just
+	to help the child.
+
+### Current policy framework for SecOps
+
+SecOps should now be documented and configured in terms of SHADI's three launch
+time secret rule types:
+
+- `process_inject_keychain`: explicit disclosure to the SecOps process when the agent itself truly needs the plaintext value.
+- `process_trusted_secret`: process-scoped direct trusted-secret delivery to the launched process.
+- `process_secret_policy`: action-based rules such as `delegate-to-child` when the agent should launch a child tool but not hold the token itself.
+
+Recommended mapping for a SecOps-style workload:
+
+- SLIM or identity bootstrap secret: `disclose` only when the agent must directly join or authenticate.
+- GitHub remediation token: prefer `delegate-to-child` when a trusted helper or tightly scoped tool can perform the operation.
+- LLM provider key: avoid direct disclosure when possible; prefer a narrower mediated `use` pattern.

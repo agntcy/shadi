@@ -33,6 +33,9 @@ fn build_policy_cli(
         net_block,
         allow_command,
         inject_keychain: Vec::new(),
+        trusted_secret: Vec::new(),
+        trusted_secret_exec: Vec::new(),
+        trusted_secret_fd_env: Vec::new(),
         list_keychain: false,
         list_prefix: None,
         print_policy: false,
@@ -573,7 +576,7 @@ mod tests {
 
     #[test]
     fn secret_backend_from_env_reads_values() {
-        std::env::set_var("SHADI_SECRET_BACKEND", "onepassword");
+        std::env::set_var("SHADI_SECRET_BACKEND", "external-backend");
         std::env::set_var("SHADI_OP_VAULT", "vault-a");
         std::env::set_var("SHADI_OP_ACCOUNT", "account-a");
         let cfg = secret_backend_from_env();
@@ -581,7 +584,7 @@ mod tests {
         std::env::remove_var("SHADI_OP_VAULT");
         std::env::remove_var("SHADI_OP_ACCOUNT");
 
-        assert_eq!(cfg.selected, "onepassword");
+        assert_eq!(cfg.selected, "external-backend");
         assert_eq!(cfg.op_vault.as_deref(), Some("vault-a"));
         assert_eq!(cfg.op_account.as_deref(), Some("account-a"));
     }

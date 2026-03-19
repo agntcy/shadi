@@ -147,3 +147,131 @@ html [data-md-color-primary="black"] .md-nav--primary .md-nav__title[for="__draw
 [data-md-color-scheme="default"] code {
   background-color: rgb(246, 248, 250) !important;
 }
+
+.md-typeset .mermaid {
+  text-align: center;
+}
+
+.md-typeset .mermaid svg {
+  max-width: 100%;
+}
+
+.md-typeset .mermaid .label,
+.md-typeset .mermaid .cluster-label,
+.md-typeset .mermaid .edgeLabel,
+.md-typeset .mermaid .nodeLabel,
+.md-typeset .mermaid .messageText,
+.md-typeset .mermaid .noteText,
+.md-typeset .mermaid .loopText,
+.md-typeset .mermaid .labelText,
+.md-typeset .mermaid .actor > text,
+.md-typeset .mermaid .sectionTitle,
+.md-typeset .mermaid .taskText,
+.md-typeset .mermaid .taskTextOutsideRight,
+.md-typeset .mermaid .taskTextOutsideLeft {
+  color: var(--md-default-fg-color) !important;
+  fill: var(--md-default-fg-color) !important;
+}
+
+.md-typeset .mermaid .edgeLabel rect,
+.md-typeset .mermaid .labelBox,
+.md-typeset .mermaid .labelBkg,
+.md-typeset .mermaid .loopText > tspan,
+.md-typeset .mermaid .note,
+.md-typeset .mermaid .note rect {
+  fill: var(--md-default-bg-color) !important;
+  opacity: 0.95;
+}
+
+.md-typeset .mermaid .node rect,
+.md-typeset .mermaid .node polygon,
+.md-typeset .mermaid .node circle,
+.md-typeset .mermaid .node ellipse,
+.md-typeset .mermaid .node path,
+.md-typeset .mermaid .actor,
+.md-typeset .mermaid .note,
+.md-typeset .mermaid .label-container {
+  fill: var(--md-footer-bg-color) !important;
+  stroke: var(--md-typeset-a-color) !important;
+  stroke-width: 1.1px !important;
+}
+
+.md-typeset .mermaid .cluster rect {
+  fill: var(--md-footer-bg-color) !important;
+  stroke: var(--md-typeset-a-color) !important;
+  opacity: 0.6;
+}
+
+.md-typeset .mermaid .node rect,
+.md-typeset .mermaid .node polygon,
+.md-typeset .mermaid .node circle,
+.md-typeset .mermaid .node path {
+  rx: 8px;
+  ry: 8px;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid .label,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .cluster-label,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .edgeLabel,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .nodeLabel,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .messageText,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .noteText,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .loopText,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .labelText,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .sectionTitle,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .taskText,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .taskTextOutsideRight,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .taskTextOutsideLeft,
+[data-md-color-scheme="slate"] .md-typeset .mermaid text,
+[data-md-color-scheme="slate"] .md-typeset .mermaid tspan {
+  color: var(--md-default-fg-color) !important;
+  fill: var(--md-default-fg-color) !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid .node rect,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .node polygon,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .node circle,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .node ellipse,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .node path,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .actor,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .note,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .label-container {
+  fill: rgb(6, 48, 86) !important;
+  stroke: var(--md-primary-bg-color) !important;
+  stroke-width: 1.25px !important;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.18));
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid .cluster rect {
+  fill: rgb(8, 25, 46) !important;
+  stroke: var(--md-primary-bg-color) !important;
+  stroke-width: 1.1px !important;
+  opacity: 0.72;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid .edgeLabel rect,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .labelBkg,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .labelBox,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .loopText > tspan,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .note,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .note rect,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .actor,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .actor rect {
+  fill: rgb(3, 20, 43) !important;
+  stroke: var(--md-primary-bg-color) !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid .edgePath .path,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .flowchart-link,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .messageLine0,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .messageLine1,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .actor-line,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .loopLine {
+  stroke: var(--md-primary-bg-color) !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid marker path,
+[data-md-color-scheme="slate"] .md-typeset .mermaid .arrowheadPath {
+  fill: var(--md-primary-bg-color) !important;
+  stroke: var(--md-primary-bg-color) !important;
+}

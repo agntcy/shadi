@@ -4,7 +4,7 @@
 pub mod policy;
 mod platform;
 
-pub use policy::SandboxPolicy;
+pub use policy::{PlatformSandboxProfile, SandboxPolicy};
 use std::process::{Command, ExitStatus};
 use std::io;
 use tracing::{field, info_span};

@@ -6,15 +6,15 @@ use std::ffi::{CStr, CString};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use crate::{SandboxError, SandboxPolicy, SandboxedChild};
+use crate::{PlatformSandboxProfile, SandboxError, SandboxPolicy, SandboxedChild};
 
 const DEFAULT_READ_PATHS: &[&str] = &[
     "/System",
     "/usr/lib",
+    "/usr/share",
     "/usr/libexec",
     "/Library",
     "/etc",
-    "/private/var",
     "/opt/homebrew",
 ];
 
@@ -45,6 +45,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
 
 fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     let mut rules = Vec::new();
+    let compatibility_profile = policy.platform_profile() == PlatformSandboxProfile::Compatibility;
 
     rules.push("(version 1)".to_string());
     rules.push("(deny default)".to_string());
@@ -52,6 +53,7 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     rules.push("(allow process-exec)".to_string());
     rules.push("(allow sysctl-read)".to_string());
     rules.push("(allow mach-lookup)".to_string());
+    rules.push("(allow file-read-data file-read-metadata (literal \"/\"))".to_string());
 
     for path in DEFAULT_READ_PATHS {
         rules.push(format!(
@@ -60,63 +62,71 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         ));
     }
 
-    rules.push("(allow file-read* file-write* (subpath \"/private/var\"))".to_string());
+    if compatibility_profile {
+        rules.push("(allow file-read* file-write* (subpath \"/private/var\"))".to_string());
 
-    rules.push("(allow file-read* file-write* (subpath \"/Library/Keychains\"))".to_string());
-    rules.push("(allow file-read* file-write* (subpath \"/private/var/db/Keychains\"))".to_string());
-    rules.push("(allow file-read* file-write* (subpath \"/private/var/db/SystemKey\"))".to_string());
-    if let Ok(home) = std::env::var("HOME") {
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{}/Library/Keychains\"))",
-            home
-        ));
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{}/Library\"))",
-            home
-        ));
-        // Allow the 1Password CLI config dir (socket, config, lock files).
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{}/.config\"))",
-            home
-        ));
-        // Allow the slim_bindings local storage directory (~/.slim).
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{}/.slim\"))",
-            home
-        ));
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{}/.local\"))",
-            home
-        ));
-        // Allow gh CLI cache directory (~/.cache) used by gh and git credential helpers.
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{}/.cache\"))",
-            home
-        ));
+        rules.push("(allow file-read* file-write* (subpath \"/Library/Keychains\"))".to_string());
+        rules.push("(allow file-read* file-write* (subpath \"/private/var/db/Keychains\"))".to_string());
+        rules.push("(allow file-read* file-write* (subpath \"/private/var/db/SystemKey\"))".to_string());
+        if let Ok(home) = std::env::var("HOME") {
+            let home = escape_profile_string(&home)?;
+            rules.push(format!(
+                "(allow file-read* file-write* (subpath \"{}/Library/Keychains\"))",
+                home
+            ));
+            rules.push(format!(
+                "(allow file-read* file-write* (subpath \"{}/Library\"))",
+                home
+            ));
+            // Allow the 1Password CLI config dir (socket, config, lock files).
+            rules.push(format!(
+                "(allow file-read* file-write* (subpath \"{}/.config\"))",
+                home
+            ));
+            // Allow the slim_bindings local storage directory (~/.slim).
+            rules.push(format!(
+                "(allow file-read* file-write* (subpath \"{}/.slim\"))",
+                home
+            ));
+            rules.push(format!(
+                "(allow file-read* file-write* (subpath \"{}/.local\"))",
+                home
+            ));
+            // Allow gh CLI cache directory (~/.cache) used by gh and git credential helpers.
+            rules.push(format!(
+                "(allow file-read* file-write* (subpath \"{}/.cache\"))",
+                home
+            ));
+        }
+        // Allow /var/folders (op daemon temp dir). /var → /private/var but Seatbelt
+        // matches on the literal path seen by the caller, so cover both spellings.
+        rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
+        rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
+        // Allow /dev/null and other character devices needed by subprocesses (e.g. git, gh).
+        rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
+        if let Ok(tmpdir) = std::env::var("TMPDIR") {
+            let canonical = escape_profile_string(tmpdir.trim_end_matches('/'))?;
+            rules.push(format!(
+                "(allow file-read* file-write* (subpath \"{canonical}\"))"
+            ));
+        }
+        // Allow Mach IPC and POSIX IPC for child processes (op daemon, system services).
+        rules.push("(allow ipc-posix-shm)".to_string());
     }
-    // Allow /var/folders (op daemon temp dir). /var → /private/var but Seatbelt
-    // matches on the literal path seen by the caller, so cover both spellings.
-    rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
-    rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
-    // Allow /dev/null and other character devices needed by subprocesses (e.g. git, gh).
-    rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
-    if let Ok(tmpdir) = std::env::var("TMPDIR") {
-        let canonical = tmpdir.trim_end_matches('/').to_string();
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{canonical}\"))"
-        ));
+
+    if compatibility_profile || policy.local_unix_sockets_allowed() {
+        // Allow Unix-domain socket connections for tightly scoped brokered secret delivery
+        // and compatibility-mode daemon IPC.
+        rules.push("(allow network-outbound (local unix-socket))".to_string());
+        rules.push("(allow network-inbound (local unix-socket))".to_string());
     }
-    // Allow Mach IPC and POSIX IPC for child processes (op daemon, system services).
-    rules.push("(allow ipc-posix-shm)".to_string());
-    // Allow Unix-domain socket connections (op daemon uses ~/.config/op/op-daemon.sock).
-    rules.push("(allow network-outbound (local unix-socket))".to_string());
-    rules.push("(allow network-inbound (local unix-socket))".to_string());
 
     for path in policy.allow_read() {
         let abs = resolve_path(path);
         let Some(s) = abs.to_str() else {
             return Err(SandboxError::InvalidConfig);
         };
+        let s = escape_profile_string(s)?;
         rules.push(format!(
             "(allow file-read* file-map-executable (subpath \"{}\"))",
             s
@@ -128,6 +138,7 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         let Some(s) = abs.to_str() else {
             return Err(SandboxError::InvalidConfig);
         };
+        let s = escape_profile_string(s)?;
         rules.push(format!(
             "(allow file-write* file-map-executable (subpath \"{}\"))",
             s
@@ -139,6 +150,14 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     }
 
     Ok(rules.join("\n"))
+}
+
+fn escape_profile_string(value: &str) -> Result<String, SandboxError> {
+    if value.contains('\0') {
+        return Err(SandboxError::InvalidConfig);
+    }
+
+    Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Resolve a path to absolute.  Seatbelt requires absolute paths for
@@ -304,6 +323,40 @@ mod tests {
     }
 
     #[test]
+    fn minimal_profile_skips_compatibility_allowances() {
+        let _guard = HOME_LOCK.lock().expect("home lock");
+        let original = std::env::var("HOME").ok();
+        let tmp_dir = tmp_root();
+        let home_dir = format!("{}/shadi-minimal-home", tmp_dir);
+        std::env::set_var("HOME", &home_dir);
+
+        let policy = SandboxPolicy::new().use_minimal_platform_profile();
+        let profile = build_profile(&policy).unwrap();
+
+        assert!(!profile.contains(&format!("{}/Library", home_dir)));
+        assert!(!profile.contains(&format!("{}/.config", home_dir)));
+        assert!(!profile.contains(&format!("{}/.cache", home_dir)));
+        assert!(!profile.contains("/private/var/db/Keychains"));
+        assert!(!profile.contains("(allow network-outbound (local unix-socket))"));
+
+        if let Some(value) = original {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn minimal_profile_can_opt_into_local_unix_sockets() {
+        let policy = SandboxPolicy::new()
+            .use_minimal_platform_profile()
+            .allow_local_unix_sockets();
+        let profile = build_profile(&policy).unwrap();
+        assert!(profile.contains("(allow network-outbound (local unix-socket))"));
+        assert!(profile.contains("(allow network-inbound (local unix-socket))"));
+    }
+
+    #[test]
     fn build_profile_rejects_non_utf8_paths() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
@@ -339,5 +392,21 @@ mod tests {
     fn apply_profile_noop_in_tests() {
         let profile = CStr::from_bytes_with_nul(b"(version 1)\0").expect("cstr");
         apply_profile(profile).expect("apply");
+    }
+
+    #[test]
+    fn build_profile_escapes_tmpdir_literals() {
+        let _guard = HOME_LOCK.lock().expect("home lock");
+        let original = std::env::var("TMPDIR").ok();
+        std::env::set_var("TMPDIR", "/tmp/shadi-\"quoted\"");
+
+        let profile = build_profile(&SandboxPolicy::new()).unwrap();
+        assert!(profile.contains("/tmp/shadi-\\\"quoted\\\""));
+
+        if let Some(value) = original {
+            std::env::set_var("TMPDIR", value);
+        } else {
+            std::env::remove_var("TMPDIR");
+        }
     }
 }

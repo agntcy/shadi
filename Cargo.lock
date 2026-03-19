@@ -2942,6 +2942,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hkdf",
+ "libc",
  "reqwest",
  "sequoia-openpgp",
  "serde",
@@ -2953,6 +2954,7 @@ dependencies = [
  "slim_mas",
  "tempfile",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

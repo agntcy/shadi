@@ -3,11 +3,19 @@
 
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformSandboxProfile {
+    Compatibility,
+    Minimal,
+}
+
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     allow_read: Vec<PathBuf>,
     allow_write: Vec<PathBuf>,
     net_block: bool,
+    platform_profile: PlatformSandboxProfile,
+    allow_local_unix_sockets: bool,
 }
 
 impl SandboxPolicy {
@@ -16,6 +24,8 @@ impl SandboxPolicy {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
             net_block: false,
+            platform_profile: PlatformSandboxProfile::Compatibility,
+            allow_local_unix_sockets: false,
         }
     }
 
@@ -34,6 +44,16 @@ impl SandboxPolicy {
         self
     }
 
+    pub fn use_minimal_platform_profile(mut self) -> Self {
+        self.platform_profile = PlatformSandboxProfile::Minimal;
+        self
+    }
+
+    pub fn allow_local_unix_sockets(mut self) -> Self {
+        self.allow_local_unix_sockets = true;
+        self
+    }
+
     pub fn allow_read(&self) -> &[PathBuf] {
         &self.allow_read
     }
@@ -44,6 +64,14 @@ impl SandboxPolicy {
 
     pub fn net_blocked(&self) -> bool {
         self.net_block
+    }
+
+    pub fn platform_profile(&self) -> PlatformSandboxProfile {
+        self.platform_profile
+    }
+
+    pub fn local_unix_sockets_allowed(&self) -> bool {
+        self.allow_local_unix_sockets
     }
 }
 
@@ -72,5 +100,18 @@ mod tests {
         assert!(policy.allow_read().iter().any(|p| p == Path::new(&tmp_dir)));
         assert!(policy.allow_write().iter().any(|p| p == Path::new(&tmp_dir)));
         assert!(policy.net_blocked());
+        assert_eq!(policy.platform_profile(), PlatformSandboxProfile::Compatibility);
+    }
+
+    #[test]
+    fn policy_can_switch_to_minimal_platform_profile() {
+        let policy = SandboxPolicy::new().use_minimal_platform_profile();
+        assert_eq!(policy.platform_profile(), PlatformSandboxProfile::Minimal);
+    }
+
+    #[test]
+    fn policy_can_allow_local_unix_sockets() {
+        let policy = SandboxPolicy::new().allow_local_unix_sockets();
+        assert!(policy.local_unix_sockets_allowed());
     }
 }

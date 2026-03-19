@@ -1,6 +1,11 @@
 use super::*;
 
-pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &Path) -> ExitCode {
+pub(crate) fn run_sandboxed_command(
+    cli: &Cli,
+    resolved: &ResolvedPolicy,
+    file_policy: &PolicyFile,
+    cwd: &Path,
+) -> ExitCode {
     let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
     let policy_source = cli
         .policy_file
@@ -21,8 +26,46 @@ pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &
         command.args(&cli.run_command[1..]);
     }
     command.current_dir(cwd);
+    #[cfg(test)]
+    scrub_test_secret_backend_env(&mut command);
 
-    if let Err(err) = inject_keychain_secrets(&mut command, &cli.inject_keychain) {
+    let secret_config = match resolve_launch_secret_config(&command, cli, file_policy) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("failed to resolve launch secret policy: {}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    let mut pending_trusted_secrets = match PendingTrustedSecretDelivery::new(
+        &mut command,
+        &secret_config.trusted_secret,
+        &secret_config.trusted_secret_exec,
+        &secret_config.trusted_secret_fd_env,
+        &secret_config.process_secret_policy,
+    ) {
+        Ok(session) => session,
+        Err(err) => {
+            eprintln!("failed to configure trusted secret delivery: {}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    let mut runtime_policy = resolved.policy.clone();
+    if let Some(pending) = pending_trusted_secrets.as_ref() {
+        for path in pending.endpoint_paths() {
+            runtime_policy = runtime_policy
+                .allow_read_path(&path)
+                .allow_write_path(&path);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if pending_trusted_secrets.is_some() {
+        runtime_policy = runtime_policy.allow_local_unix_sockets();
+    }
+
+    if let Err(err) = inject_keychain_secrets(&mut command, &secret_config.inject_keychain) {
         eprintln!("failed to inject keychain secrets: {}", err);
         return ExitCode::from(2);
     }
@@ -43,10 +86,47 @@ pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &
     );
     let _guard = span.enter();
 
-    match spawn_sandboxed(&mut command, &resolved.policy) {
-        Ok(mut child) => match child.wait() {
+    match spawn_sandboxed(&mut command, &runtime_policy) {
+        Ok(mut child) => {
+            if let Some(pending) = pending_trusted_secrets.as_mut() {
+                if let Err(err) = pending.deliver_after_spawn(child.id()) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    pending.close_parent_fds();
+                    span.record("exit.code", &-1);
+                    let snapshot_path = finalize_git_snapshot(
+                        snapshot.as_mut(),
+                        None,
+                        Some(format!("failed to deliver trusted secret: {}", err)),
+                    );
+                    if let Some(path) = snapshot_path {
+                        span.record("snapshot.path", &path.display().to_string());
+                    }
+                    eprintln!("failed to deliver trusted secret: {}", err);
+                    return ExitCode::from(1);
+                }
+            }
+
+            let exit = match child.wait() {
             Ok(status) => {
                 let exit_code = status.code().unwrap_or(1);
+                if let Some(pending) = pending_trusted_secrets.as_mut() {
+                    if let Err(err) = pending.wait_for_background_delivery() {
+                        span.record("exit.code", &-1);
+                        let snapshot_path = finalize_git_snapshot(
+                            snapshot.as_mut(),
+                            None,
+                            Some(format!("failed to complete trusted secret delivery: {}", err)),
+                        );
+                        if let Some(path) = snapshot_path {
+                            span.record("snapshot.path", &path.display().to_string());
+                        }
+                        pending.close_parent_fds();
+                        eprintln!("failed to complete trusted secret delivery: {}", err);
+                        return ExitCode::from(1);
+                    }
+                    pending.close_parent_fds();
+                }
                 span.record("exit.code", &exit_code);
                 let snapshot_path = finalize_git_snapshot(snapshot.as_mut(), status.code(), None);
                 if let Some(path) = snapshot_path {
@@ -67,7 +147,10 @@ pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &
                 eprintln!("failed to wait for child: {}", err);
                 ExitCode::from(1)
             }
-        },
+            };
+
+            exit
+        }
         Err(err) => {
             span.record("exit.code", &-1);
             let snapshot_path = finalize_git_snapshot(

@@ -28,9 +28,19 @@ Each layer builds on the previous one to reduce blast radius and make behavior a
 4. **Encrypted Memory**: SQLCipher-backed local state for agent memory.
 5. **Secure Transport**: MLS-backed messaging via SLIM and A2A.
 
+## Architecture Snapshot
+
+SHADI presents the runtime as four product layers:
+
+1. **Experience and control**: operators define profiles, policies, and workload launch intent.
+2. **Secure runtime**: identity, secret control, trusted delivery, sandboxing, transport, and encrypted memory enforce the launch contract.
+3. **Protected workloads**: agents and tools run inside that approved boundary.
+4. **External systems**: GitHub, model providers, and SLIM/A2A peers are reached only after policy and trust checks succeed.
+
 ## Core Capabilities
 
 - Git-backed sandbox snapshots for before/after capture and audit trails.
+- Process-scoped secret injection and trusted delivery with exact executable matching.
 - Python bindings for secrets, memory, and sandboxed execution.
 - CLI workflows for policy, identity, key management, and sandbox execution.
 - Example agents and demos, including a SecOps workflow against real GitHub signals.
@@ -70,9 +80,15 @@ Each layer builds on the previous one to reduce blast radius and make behavior a
 ## Runtime Model (At a Glance)
 
 1. Identity verification determines whether a session is trusted.
-2. Secrets are released only to verified sessions.
-3. Sandbox policy is resolved before process start and enforced by the OS.
+2. Secrets are released only to verified sessions and only through the policy-approved disclosure or trusted-delivery path.
+3. Sandbox policy and secret-delivery policy are resolved before process start and enforced by the OS plus SHADI launch mediation.
 4. Local memory stays encrypted at rest.
 5. Inter-agent transport is protected by MLS-backed messaging.
+
+The current policy framework distinguishes three secret-delivery modes:
+
+- explicit disclosure to the launched process (`--inject-keychain`, `process_inject_keychain`)
+- process-scoped trusted secret delivery to the launched process (`process_trusted_secret`)
+- action-based delegated delivery to a verified child process on Unix/macOS (`process_secret_policy` with `delegate-to-child`)
 
 For a deeper walkthrough, continue to [Architecture](architecture.md).

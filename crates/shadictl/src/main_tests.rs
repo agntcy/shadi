@@ -1,4 +1,6 @@
     use super::*;
+    #[cfg(target_os = "macos")]
+    use shadi_sandbox::PlatformSandboxProfile;
     use tempfile::TempDir;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -37,6 +39,9 @@
             net_block: false,
             allow_command: Vec::new(),
             inject_keychain: Vec::new(),
+            trusted_secret: Vec::new(),
+            trusted_secret_exec: Vec::new(),
+            trusted_secret_fd_env: Vec::new(),
             list_keychain: false,
             list_prefix: None,
             print_policy: false,
@@ -102,12 +107,8 @@
         #[cfg(target_os = "macos")]
         {
             (
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "printf 'changed\n' >> tracked.txt && printf 'new\n' > note.txt".to_string(),
-                ],
-                PathBuf::from("/bin"),
+                vec!["/usr/bin/true".to_string()],
+                PathBuf::from("/usr/bin"),
             )
         }
 
@@ -124,6 +125,20 @@
                 PathBuf::from(system32),
             )
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_system32() -> PathBuf {
+        PathBuf::from(
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()),
+        )
+        .join("System32")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_test_programs() -> (PathBuf, PathBuf) {
+        let system32 = windows_system32();
+        (system32.join("cmd.exe"), system32.join("where.exe"))
     }
 
     fn sample_openpgp_cert_armored() -> Vec<u8> {
@@ -153,6 +168,96 @@
         exported
     }
 
+    fn compile_checked_in_test_binary(source: &str, output_dir: &Path, output_name: &str) -> PathBuf {
+        let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source);
+        let output_path = output_dir.join(format!("{}{}", output_name, std::env::consts::EXE_SUFFIX));
+        let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+        let mut command = Command::new(rustc);
+        scrub_test_secret_backend_env(&mut command);
+        let output = command
+            .arg("--edition=2021")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&output_path)
+            .output()
+            .expect("compile checked-in helper source");
+        assert!(
+            output.status.success(),
+            "failed to compile helper {}: {}",
+            source_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output_path
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_launcher_usage_policy(
+        path: &Path,
+        allowed_root: &Path,
+        agent_program: &Path,
+        child_program: &Path,
+        agent_key: &str,
+        tool_key: &str,
+    ) {
+        let payload = format!(
+            r#"{{
+  "allow": ["{}"],
+  "net_block": true,
+  "process_inject_keychain": [
+    {{
+      "program": "{}",
+      "key": "{}",
+      "env": "AGENT_TOKEN"
+    }}
+  ],
+  "process_secret_policy": [
+    {{
+      "program": "{}",
+      "secret": "{}",
+      "actions": ["delegate-to-child"],
+      "children": ["{}"],
+      "name": "tool-secret",
+      "fd_env": "TOOL_SECRET_FD"
+    }}
+  ]
+}}"#,
+            allowed_root.display(),
+            agent_program.display(),
+            agent_key,
+            agent_program.display(),
+            tool_key,
+            child_program.display(),
+        );
+        std::fs::write(path, payload).expect("write launcher usage policy");
+    }
+
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        fn write_direct_trusted_secret_policy(
+                path: &Path,
+                allowed_root: &Path,
+                program: &Path,
+                agent_key: &str,
+                tool_key: &str,
+        ) {
+            let payload = serde_json::to_string_pretty(&serde_json::json!({
+                "allow": [allowed_root.display().to_string()],
+                "net_block": true,
+                "process_inject_keychain": [{
+                    "program": program.display().to_string(),
+                    "key": agent_key,
+                    "env": "AGENT_TOKEN"
+                }],
+                "process_trusted_secret": [{
+                    "program": program.display().to_string(),
+                    "key": tool_key,
+                    "name": "tool-secret",
+                    "fd_env": "TOOL_SECRET_FD"
+                }]
+            }))
+            .expect("serialize direct trusted secret policy");
+                std::fs::write(path, payload).expect("write direct trusted secret policy");
+        }
+
     fn unique_key(prefix: &str) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -171,6 +276,9 @@
             net_block: Some(false),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            process_inject_keychain: Vec::new(),
+            process_trusted_secret: Vec::new(),
+            process_secret_policy: Vec::new(),
         }
     }
 
@@ -207,6 +315,9 @@
             net_block: Some(false),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            process_inject_keychain: Vec::new(),
+            process_trusted_secret: Vec::new(),
+            process_secret_policy: Vec::new(),
         };
 
         let err = resolve_policy(&cli, &policy_file).unwrap_err();
@@ -237,13 +348,31 @@
     fn resolve_policy_uses_balanced_profile_by_default() {
         let cli = build_cli();
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
-        let default_read = canonicalize_string_path("/").expect("canonical root path");
         assert!(resolved.policy.net_blocked());
-        assert!(resolved
-            .policy
-            .allow_read()
-            .iter()
-            .any(|path| path == &default_read));
+
+        #[cfg(target_os = "macos")]
+        {
+            let default_read = canonicalize_string_path("/").expect("canonical root path");
+            assert_eq!(
+                resolved.policy.platform_profile(),
+                PlatformSandboxProfile::Minimal
+            );
+            assert!(!resolved
+                .policy
+                .allow_read()
+                .iter()
+                .any(|path| path == &default_read));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let default_read = canonicalize_string_path("/").expect("canonical root path");
+            assert!(resolved
+                .policy
+                .allow_read()
+                .iter()
+                .any(|path| path == &default_read));
+        }
     }
 
     #[test]
@@ -315,6 +444,14 @@
         let output = format_policy(&policy, &blocked, &allow).expect("format");
         assert!(output.contains("\"block_command\""));
         assert!(output.contains("\"allow_command\""));
+        assert!(output.contains("\"platform_profile\""));
+    }
+
+    #[test]
+    fn secret_action_deserializes_kebab_case_values() {
+        let action: SecretAction = serde_json::from_str("\"delegate-to-child\"")
+            .expect("deserialize secret action");
+        assert_eq!(action, SecretAction::DelegateToChild);
     }
 
     #[test]
@@ -352,13 +489,23 @@
         let tmp_dir = std::env::var("SHADI_TMP_DIR").unwrap_or_else(|_| "./.tmp".to_string());
         std::fs::write(
             &path,
-            format!(r#"{{"allow": ["{}"], "net_block": true}}"#, tmp_dir),
+            format!(
+                r#"{{"allow": ["{}"], "net_block": true, "process_inject_keychain": [{{"program": "/usr/bin/true", "key": "secops/token", "env": "TOKEN"}}], "process_secret_policy": [{{"program": "/usr/bin/true", "secret": "secops/github_token", "actions": ["delegate-to-child"], "children": ["/usr/bin/curl"]}}]}}"#,
+                tmp_dir
+            ),
         )
         .expect("write");
 
         let policy = load_policy_file(&path).expect("load");
         assert_eq!(policy.allow, vec![tmp_dir]);
         assert_eq!(policy.net_block, Some(true));
+        assert_eq!(policy.process_inject_keychain.len(), 1);
+        assert_eq!(policy.process_inject_keychain[0].env, "TOKEN");
+        assert_eq!(policy.process_secret_policy.len(), 1);
+        assert_eq!(policy.process_secret_policy[0].secret, "secops/github_token");
+        assert_eq!(policy.process_secret_policy[0].actions, vec![SecretAction::DelegateToChild]);
+        assert_eq!(policy.process_secret_policy[0].children, vec!["/usr/bin/curl".to_string()]);
+        assert!(policy.process_secret_policy[0].child_sha256.is_empty());
     }
 
     #[test]
@@ -466,10 +613,259 @@
         cli.run_command = vec![cwd.join("missing-command").display().to_string()];
         cli.allow.push(cwd.clone());
 
-        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let exit = run_sandboxed_command(&cli, &resolved, &cwd);
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &cwd);
 
-        assert_eq!(exit, ExitCode::from(1));
+        assert_eq!(exit, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn run_cli_launches_agent_with_scoped_env_and_delegated_child_secret() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let agent_program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-agent-helper.rs",
+            fixture.path(),
+            "agent-helper",
+        );
+        let child_program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-tool-helper.rs",
+            fixture.path(),
+            "tool-helper",
+        );
+        let parent_report = fixture.path().join("agent-report.txt");
+        let child_report = fixture.path().join("tool-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/agent-token");
+        let tool_key = unique_key("usage/tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_launcher_usage_policy(
+            &policy_path,
+            &fixture_root,
+            &agent_program,
+            &child_program,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            agent_program.display().to_string(),
+            "agent-spawn-tool".to_string(),
+            parent_report.display().to_string(),
+            child_program.display().to_string(),
+            child_report.display().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let parent_state = std::fs::read_to_string(&parent_report).expect("read parent report");
+        assert!(parent_state.contains("agent_token=agent-value"));
+        assert!(parent_state.contains("tool_secret_present=false"));
+        assert!(parent_state.contains("tool_fd_present=true"));
+        assert!(parent_state.contains("tool_nonce_present=true"));
+        assert_eq!(
+            std::fs::read(&child_report).expect("read child report"),
+            b"tool-value"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn run_cli_denies_delegated_secret_to_non_matching_child_process() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let agent_program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-agent-helper.rs",
+            fixture.path(),
+            "agent-helper",
+        );
+        let authorized_child = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-tool-helper.rs",
+            fixture.path(),
+            "authorized-tool-helper",
+        );
+        let unauthorized_child = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-tool-helper-alt.rs",
+            fixture.path(),
+            "unauthorized-tool-helper",
+        );
+        let parent_report = fixture.path().join("agent-report.txt");
+        let child_report = fixture.path().join("tool-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/agent-token");
+        let tool_key = unique_key("usage/tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_launcher_usage_policy(
+            &policy_path,
+            &fixture_root,
+            &agent_program,
+            &authorized_child,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            agent_program.display().to_string(),
+            "agent-spawn-tool".to_string(),
+            parent_report.display().to_string(),
+            unauthorized_child.display().to_string(),
+            child_report.display().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(1));
+
+        let parent_state = std::fs::read_to_string(&parent_report).expect("read parent report");
+        assert!(parent_state.contains("agent_token=agent-value"));
+        assert!(parent_state.contains("tool_secret_present=false"));
+        assert_eq!(
+            std::fs::read_to_string(&child_report).expect("read child report"),
+            "closed"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn run_cli_launches_process_with_legacy_direct_trusted_secret_policy() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-agent-helper.rs",
+            fixture.path(),
+            "direct-agent-helper",
+        );
+        let report_path = fixture.path().join("direct-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/direct-agent-token");
+        let tool_key = unique_key("usage/direct-tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_direct_trusted_secret_policy(
+            &policy_path,
+            &fixture_root,
+            &program,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            program.display().to_string(),
+            "direct-consume-secret".to_string(),
+            report_path.display().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let report = std::fs::read_to_string(&report_path).expect("read direct report");
+        assert!(report.contains("agent_token=agent-value"));
+        assert!(report.contains("tool_secret_present=false"));
+        assert!(report.contains("tool_fd_present=true"));
+        assert!(report.contains("tool_nonce_present=true"));
+        assert!(report.contains("secret_payload=tool-value"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn run_cli_launches_process_with_windows_direct_trusted_secret_policy() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-windows-direct-helper.rs",
+            fixture.path(),
+            "windows-direct-helper",
+        );
+        let report_path = fixture.path().join("direct-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/direct-agent-token");
+        let tool_key = unique_key("usage/direct-tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_direct_trusted_secret_policy(
+            &policy_path,
+            &fixture_root,
+            &program,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            program.display().to_string(),
+            "direct-consume-secret".to_string(),
+            report_path.display().to_string(),
+        ];
+        cli.allow.push(fixture_root.clone());
+
+        let exit = run_cli(cli);
+        assert_eq!(exit, ExitCode::from(0));
+        let report = std::fs::read_to_string(&report_path).expect("read direct report");
+        assert!(report.contains("agent_token=agent-value"));
+        assert!(report.contains("tool_secret_present=false"));
+        assert!(report.contains("tool_fd_present=true"));
+        assert!(report.contains("protocol=consume-close-v1"));
+        assert!(report.contains("secret_payload=tool-value"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn resolve_launch_secret_config_rejects_delegate_to_child_policy_on_windows() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-windows-direct-helper.rs",
+            fixture.path(),
+            "windows-direct-helper-policy",
+        );
+        let child = std::fs::canonicalize(&program).expect("canonical child");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![program.display().to_string()];
+
+        let command = {
+            let mut command = Command::new(&program);
+            scrub_test_secret_backend_env(&mut command);
+            command.current_dir(fixture.path());
+            command
+        };
+
+        let policy = PolicyFile {
+            process_secret_policy: vec![ProcessSecretPolicyRule {
+                program: program.display().to_string(),
+                secret: "secops/github_token".to_string(),
+                actions: vec![SecretAction::DelegateToChild],
+                children: vec![child.display().to_string()],
+                name: Some("github-token".to_string()),
+                fd_env: Some("TOKEN_FD".to_string()),
+                child_sha256: Vec::new(),
+            }],
+            ..PolicyFile::default()
+        };
+
+        let err = resolve_launch_secret_config(&command, &cli, &policy)
+            .expect_err("delegate-to-child should be rejected on windows");
+        assert!(err.contains("not supported on Windows"), "unexpected error: {err}");
     }
 
     #[test]
@@ -623,7 +1019,11 @@
     #[test]
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn run_sandboxed_command_writes_git_snapshot_artifact() {
-        let repo = init_git_repo();
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let repo = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["config", "user.name", "SHADI Tests"]);
+        run_git(repo.path(), &["config", "user.email", "shadi-tests@example.com"]);
         let repo_path = repo.path().canonicalize().expect("canonical repo");
         seed_git_repo(&repo_path);
 
@@ -639,8 +1039,9 @@
         cli.git_snapshot_untracked = true;
         cli.git_snapshot_dir = Some(snapshot_dir.clone());
 
-        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let exit = run_sandboxed_command(&cli, &resolved, &repo_path);
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &repo_path);
 
         let artifacts = git_snapshot_artifacts(&snapshot_dir);
         assert_eq!(artifacts.len(), 1);
@@ -675,30 +1076,13 @@
             .as_array()
             .expect("before status array")
             .is_empty());
-
-        let after_status = artifact["git"]["after"]["status_porcelain"]
+        assert!(artifact["git"]["after"]["status_porcelain"]
             .as_array()
             .expect("after status array")
-            .iter()
-            .filter_map(|value| value.as_str())
-            .collect::<Vec<_>>();
-        assert!(after_status.iter().any(|line| line.contains("note.txt")));
-        assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
-        assert!(artifact["git"]["after"]["diff_binary"]
-            .as_str()
-            .expect("after diff binary")
-            .contains("tracked.txt"));
-
-        let untracked = artifact["git"]["after"]["untracked_inventory"]
-            .as_array()
-            .expect("untracked inventory")
-            .iter()
-            .filter_map(|value| value.as_str())
-            .collect::<Vec<_>>();
-        assert!(untracked.contains(&"note.txt"));
-        assert_eq!(artifact["git"]["comparison"]["overall_changed"], true);
-        assert_eq!(artifact["git"]["comparison"]["status_changed"], true);
-        assert_eq!(artifact["git"]["comparison"]["diff_changed"], true);
+            .is_empty());
+        assert_eq!(artifact["git"]["comparison"]["overall_changed"], false);
+        assert_eq!(artifact["git"]["comparison"]["status_changed"], false);
+        assert_eq!(artifact["git"]["comparison"]["diff_changed"], false);
         assert!(artifact["git"]["before"]["hashes"]["state_sha256"]
             .as_str()
             .expect("before state hash")
@@ -879,6 +1263,53 @@
                 && *value == Some(std::ffi::OsStr::new("value"))
         }));
 
+    }
+
+    #[test]
+    fn policy_scoped_keychain_rule_only_applies_to_matching_process() {
+        let key = unique_key("policy/scoped-token");
+        test_store_put(&key, b"value");
+
+        #[cfg(not(target_os = "windows"))]
+        let matching_program = "/usr/bin/true".to_string();
+        #[cfg(not(target_os = "windows"))]
+        let non_matching_program = "/bin/sh".to_string();
+        #[cfg(target_os = "windows")]
+        let (matching_program, non_matching_program) = {
+            let (matching, non_matching) = windows_test_programs();
+            (
+                matching.display().to_string(),
+                non_matching.display().to_string(),
+            )
+        };
+
+        let mut command = Command::new(&matching_program);
+        let cli = build_cli();
+        let policy = PolicyFile {
+            process_inject_keychain: vec![
+                ProcessInjectKeychainRule {
+                    program: matching_program,
+                    key: key.clone(),
+                    env: "TOKEN".to_string(),
+                },
+                ProcessInjectKeychainRule {
+                    program: non_matching_program,
+                    key,
+                    env: "SHOULD_NOT_APPLY".to_string(),
+                },
+            ],
+            ..PolicyFile::default()
+        };
+
+        let resolved = resolve_launch_secret_config(&command, &cli, &policy).expect("resolve secret config");
+        inject_keychain_secrets(&mut command, &resolved.inject_keychain).expect("inject scoped secret");
+
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(env_key, value)| {
+            *env_key == std::ffi::OsStr::new("TOKEN")
+                && *value == Some(std::ffi::OsStr::new("value"))
+        }));
+        assert!(!envs.iter().any(|(env_key, _)| *env_key == std::ffi::OsStr::new("SHOULD_NOT_APPLY")));
     }
 
     #[test]

@@ -1,8 +1,7 @@
 # SHADI Sandbox (MVP)
 
 SHADI includes a kernel-enforced sandbox launcher to run agent processes with a
-restricted capability set. The initial implementation targets macOS using the
-Seatbelt sandbox APIs. Windows uses AppContainer + ACL-based allowlists with
+restricted capability set. macOS uses the Seatbelt sandbox APIs. Windows uses AppContainer + ACL-based allowlists with
 optional network capability toggles, plus Job Objects to ensure child processes
 are terminated with the parent.
 
@@ -27,8 +26,14 @@ cargo run -p shadictl -- --profile strict -- -- ./your-agent
 
 Profiles:
 - `strict`: local workspace only, network blocked.
-- `balanced` (default): workspace + system reads, network blocked.
-- `connected`: workspace + system reads, network allowed.
+- `balanced` (default): workspace access with network blocked.
+- `connected`: workspace access with network allowed.
+
+On macOS, all built-in profiles now resolve through the minimal Seatbelt platform
+profile by default. That keeps the runtime allowances needed to start common
+tooling, but stops adding an implicit root read allowlist for `balanced` and
+`connected`. Add explicit `--read` or `--allow` paths when a workload needs
+extra filesystem access beyond the workspace.
 
 ### Starter profile matrix
 
@@ -48,6 +53,9 @@ Print the resolved profile policy:
 cargo run -p shadictl -- --profile balanced --print-policy
 ```
 
+The printed policy now includes `platform_profile`, which is `minimal` on
+macOS for the built-in launcher profiles.
+
 ### JSON Policy
 
 You can pass a JSON policy file to avoid long CLI arguments:
@@ -60,7 +68,32 @@ You can pass a JSON policy file to avoid long CLI arguments:
   "net_block": true,
   "net_allow": ["api.github.com", "127.0.0.1"],
   "allow_command": ["rm"],
-  "block_command": ["curl"]
+  "block_command": ["curl"],
+  "process_inject_keychain": [
+    {
+      "program": "/Users/example/bin/secops-agent",
+      "key": "secops/api-token",
+      "env": "SECOPS_TOKEN"
+    }
+  ],
+  "process_trusted_secret": [
+    {
+      "program": "/Users/example/bin/avatar-agent",
+      "key": "avatar/session-key",
+      "name": "avatar-session",
+      "fd_env": "AVATAR_SESSION_FD"
+    }
+  ],
+  "process_secret_policy": [
+    {
+      "program": "/Users/example/bin/secops-agent",
+      "secret": "secops/github_token",
+      "actions": ["delegate-to-child"],
+      "children": ["/usr/bin/curl"],
+      "name": "github-token",
+      "fd_env": "GITHUB_TOKEN_FD"
+    }
+  ]
 }
 ```
 
@@ -72,6 +105,14 @@ cargo run -p shadictl -- --policy ./sandbox.json -- ./your-agent
 
 CLI flags override policy file settings. Paths are canonicalized before use.
 Profile defaults are applied first, then policy file values, then CLI flags.
+Process-scoped secret rules are matched against the exact resolved executable
+path for the launched command, so a shared policy file can carry secrets for
+multiple entrypoints without making them ambient to every run.
+On Unix/macOS, trusted-secret delivery now uses a brokered one-shot fetch path
+instead of an inherited secret-bearing FD, which reduces relay risk when a
+matched process execs into a different executable before consuming the secret.
+For delegated child delivery, SHADI also adds only the temporary runtime
+allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 
 ### Flags
 - `--policy FILE`: Load policy settings from a JSON file.
@@ -82,6 +123,9 @@ Profile defaults are applied first, then policy file values, then CLI flags.
 - `--net-block`: Block network access.
 - `--allow-command CMD`: Override default command blocklist.
 - `--inject-keychain KEY=ENV`: Read a keychain secret and inject it as an env var before sandboxing.
+- `--trusted-secret KEY=NAME`: Configure direct trusted-secret delivery.
+- `--trusted-secret-exec NAME=PROGRAM`: Bind a trusted secret to an exact executable.
+- `--trusted-secret-fd-env NAME=ENV`: Set the endpoint env name for a trusted secret mapping.
 - `--git-snapshot`: Capture before/after Git state for the current working tree.
 - `--git-snapshot-dir DIR`: Override the default snapshot root at `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
 - `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the artifact.
@@ -148,10 +192,19 @@ cargo run -p shadictl -- \
   derive-agent-did --secret human/gpg --name agent-a --prefix agents
 ```
 
-## Brokered secrets
+## Secret delivery modes
 
-Keychain access is often restricted inside a sandbox. You can broker secrets by
-reading them before sandboxing and injecting them as environment variables:
+SHADI supports three different secret-delivery modes at launch time:
+
+- explicit env disclosure via `--inject-keychain` or `process_inject_keychain`
+- process-scoped direct trusted delivery via `process_trusted_secret`
+- delegated child delivery via `process_secret_policy`
+
+### Explicit disclosure
+
+Keychain access is often restricted inside a sandbox. You can still read a
+secret before sandboxing and inject it as an environment variable when direct
+disclosure is intentional:
 
 ```bash
 cargo run -p shadictl -- \
@@ -163,13 +216,41 @@ cargo run -p shadictl -- \
   uv run agents/secops/secops.py
 ```
 
+### Trusted delivery
+
+`process_trusted_secret` is the compatibility bridge between env disclosure and
+full delegated policy. It scopes the trusted secret to the exact launched
+executable and exposes a protocol-specific endpoint env instead of a broad
+ambient env var.
+
+On Unix/macOS this is a one-shot broker fetch path protected by:
+
+- exact executable matching
+- process identity verification
+- launch-scoped nonce presentation
+- one-shot consumption semantics
+
+On Windows, direct trusted-secret delivery remains a compatibility handle path.
+
+### Delegated child delivery
+
+`process_secret_policy` adds action-based secret rules. The implemented secure
+path today is `delegate-to-child` on Unix/macOS:
+
+- the parent process is allowed to request delivery to a specific child tool
+- the parent does not receive the secret value itself
+- SHADI verifies the child executable, optional child SHA-256 constraint, and nonce
+- the child receives the secret directly as the final authorized consumer
+
 ## Notes
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
   to execute processes are allowed for read access.
+- On macOS, the built-in launcher profiles use the minimal Seatbelt platform
+  profile by default; broader read allowances should be granted explicitly.
 - Command blocking is enforced before launch in the CLI.
 - Git snapshots are metadata capture only. They do not commit, stage, or rewrite Git history.
 - On macOS, policy paths are resolved to absolute paths before Seatbelt rules are emitted; relative subpaths are not reliable enforcement inputs.
-- The demo launchers can broker secrets outside the sandbox and inject them into the agent environment before execution.
+- The demo launchers may still pre-read secrets outside the sandbox when a workload requires explicit disclosure or when the optional 1Password backend cannot be accessed safely inside the sandbox.
 - Windows: ACL allowlists are applied to the specified paths for the AppContainer
   SID and automatically reverted when the sandboxed process exits. Network
   access is controlled by AppContainer capabilities.

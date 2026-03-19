@@ -17,6 +17,59 @@ actions and prevent unauthorized data access or exfiltration.
 - Provide complete metadata privacy for network traffic in v1.
 - Replace upstream MLS or OS keystore implementations.
 
+## Architecture overview
+
+```mermaid
+flowchart TB
+  subgraph Experience[Experience and Control]
+    Operator[Operators and platform teams]
+    Configuration[Policies, profiles, and workload configuration]
+    Launch[Secure launch orchestration]
+  end
+
+  subgraph Platform[SHADI secure runtime]
+    Identity[Identity and session trust]
+    SecretControl[Secret control plane]
+    Delivery[Trusted secret delivery]
+    Enforcement[OS sandbox enforcement]
+    Memory[Encrypted local memory]
+    Transport[Secure agent transport]
+  end
+
+  subgraph Workloads[Protected workloads]
+    Agents[Agents, tools, and automations]
+  end
+
+  subgraph Services[External systems]
+    Repos[GitHub and developer systems]
+    Models[Model providers]
+    Peers[SLIM and A2A peers]
+  end
+
+  Operator --> Configuration
+  Configuration --> Launch
+  Launch --> Identity
+  Launch --> SecretControl
+  Launch --> Enforcement
+  Identity --> SecretControl
+  SecretControl --> Delivery
+  SecretControl --> Memory
+  Enforcement --> Agents
+  Delivery -. scoped secret access .-> Agents
+  Memory -. encrypted state .-> Agents
+  Transport --> Agents
+  Agents --> Repos
+  Agents --> Models
+  Agents --> Peers
+```
+
+The system can be read as four presentation layers:
+
+- **Experience and control**: operators, policies, profiles, and `shadictl` define the launch contract before a process starts.
+- **Secure runtime**: identity, secret control, trusted delivery, sandboxing, transport, and encrypted memory enforce that contract during execution.
+- **Protected workloads**: agents, tools, and automations run inside the approved runtime boundary.
+- **External systems**: workloads connect to GitHub, model providers, and SLIM/A2A peers only after policy and trust checks are in place.
+
 ## Core components
 
 ### 1) Secrets layer
@@ -56,11 +109,11 @@ actions and prevent unauthorized data access or exfiltration.
 ### 2) Sandbox layer
 - **macOS**: Seatbelt profile enforcement for filesystem and network policies.
 - **Windows**: AppContainer + ACL allowlists + Job Objects (kill-on-close).
-- **CLI**: `shadi` provides JSON policy loading, profile defaults, optional command blocklists, and brokered secret injection.
+- **CLI**: `shadi` provides JSON policy loading, profile defaults, optional command blocklists, process-scoped secret disclosure, and trusted secret delivery.
 - **Portable launcher model**: `shadi` supports built-in profiles
   (`strict`, `balanced`, `connected`) for portable secure launch defaults.
 - **Launch-time enforcement**: Policy is resolved before the agent process starts, so the sandbox is not a prompt-level suggestion that the agent can rewrite from inside the session.
-- **Operational hardening**: macOS launcher support now resolves relative paths before emitting Seatbelt rules and accounts for required local IPC paths such as 1Password and SLIM runtime state.
+- **Operational hardening**: macOS launcher support now resolves relative paths before emitting Seatbelt rules and accounts for required local IPC paths such as 1Password, SLIM runtime state, and temporary trusted-secret broker endpoints.
 
 #### Key modules
 - `crates/shadi_sandbox/src/policy.rs`: policy model and helpers.
@@ -85,15 +138,149 @@ actions and prevent unauthorized data access or exfiltration.
 #### Key modules
 - `crates/agent_transport_slim/src/lib.rs`: transport adapter and verifier gating.
 
-### 5) Brokered secret injection (optional)
-- If sandbox rules prevent keystore access, secrets can be brokered outside the
-  sandbox and injected as environment variables into the agent process.
-- This is also the fallback path used by the demo launchers when the optional
-  1Password backend is enabled: required items are read in the foreground and
-  exported into the sandboxed process environment.
+### 5) Secret delivery and policy framework
+
+SHADI now has a launch-time secret-delivery framework with exact executable
+matching. The important distinction is not just what secret is being requested,
+but which process may receive it and whether the secret is being disclosed or
+trusted-delivered.
+
+#### Current rule types
+
+- `process_inject_keychain`: explicit env disclosure to the exact launched executable.
+- `process_trusted_secret`: process-scoped direct trusted-secret delivery to the exact launched executable.
+- `process_secret_policy`: action-based rules for a launched executable, including delegated child delivery on Unix/macOS.
+
+CLI compatibility flags exist for the same concepts:
+
+- `--inject-keychain KEY=ENV`
+- `--trusted-secret KEY=NAME`
+- `--trusted-secret-exec NAME=PROGRAM`
+- `--trusted-secret-fd-env NAME=ENV`
+
+#### Current delivery modes
+
+1. **Explicit disclosure**
+  SHADI reads the secret before launch and injects it into the target process
+  environment. This is compatibility-oriented and should be treated as
+  intentional disclosure.
+
+2. **Process-scoped trusted delivery**
+  The launched executable receives a protocol-specific endpoint reference
+  rather than a broad ambient secret. On Unix/macOS the current implementation
+  is a one-shot brokered fetch with a launch-scoped nonce companion env.
+
+3. **Delegated child delivery**
+  A launched parent process can be allowed to request delivery of a secret to a
+  specific child executable. On Unix/macOS, SHADI verifies the child process,
+  optional child SHA-256 constraints, and the presented nonce before releasing
+  the secret. The parent process does not receive the secret itself.
 
 #### Key modules
-- `crates/shadictl/src/main.rs`: `--inject-keychain` and policy enforcement.
+- `crates/shadictl/src/trusted_secret_delivery.rs`: secret resolution, exact-program matching, broker lifecycle, and delegated child verification.
+- `crates/shadictl/src/sandbox_snapshot.rs`: launch orchestration, runtime policy augmentation for broker endpoints, and trusted-secret post-spawn delivery.
+- `crates/shadictl/src/policy_helpers.rs`: env disclosure helpers for explicit inject-keychain behavior.
+- `crates/shadi_sandbox/src/policy.rs`: minimal-profile and local Unix socket opt-in controls.
+
+## Secret delivery security model
+
+The current implementation distinguishes explicit disclosure from final-consumer
+delivery. The important distinction is not only what secret is being requested,
+but which process may receive it and whether that process needs raw disclosure
+at all.
+
+### Problem statement
+
+Two different risks need different controls:
+
+- **Wrong-process disclosure**: a secret is placed in a parent process or its
+  ambient environment and becomes available to unrelated descendants.
+- **Prompt-injection misuse**: an LLM-driven process that legitimately sees a
+  secret is induced to exfiltrate it.
+
+The current trusted-secret path improves the first risk on Unix/macOS. The
+current model is based on these security properties:
+
+- SHADI remains the delivery authority until the final authorized consumer
+  process exists.
+- A parent process may request or authorize a child tool launch, but the parent
+  does not become the carrier of the secret.
+- Environment injection is treated as explicit disclosure, not as the default secure path.
+
+### Secret actions
+
+Policy should be expressed in terms of actions on a secret rather than a coarse secret category.
+
+- `disclose`: the process may read the secret value directly.
+- `use`: the policy may represent a narrower operation that depends on the secret without implying ambient plaintext disclosure.
+- `delegate-to-child`: the process may request that SHADI deliver the secret to
+  a specific child process, but the parent does not receive the secret.
+- `sign` or `authenticate`: the process may invoke a narrower operation backed
+  by the secret without receiving the raw secret when the platform integration
+  supports that shape.
+
+### Final-consumer delivery rule
+
+The core enforcement rule is:
+
+> A secret must be delivered by SHADI directly to the final authorized consumer
+> process, not inherited through a parent process and not placed into a general
+> environment visible to unrelated descendants.
+
+This rule applies even when the process tree is parent-driven:
+
+1. An agent or parent tool requests launch of child tool `T`.
+2. SHADI validates that `T` is allowed to receive action `A` on secret `S`.
+3. SHADI verifies the exact executable identity for `T`.
+4. SHADI launches or mediates the final consumer boundary.
+5. SHADI delivers the secret to `T` one time.
+6. The parent does not receive the secret as an env var, inherited fd, handle,
+   or reusable fetch token.
+
+### Prompt-injection boundary
+
+Prompt injection is a separate concern from wrong-process delivery.
+
+- Process-boundary controls decide **which process can receive a secret**.
+- Prompt-injection controls decide **whether that process should ever receive a
+  raw secret at all**.
+
+This means LLM-driven executables should default away from `disclose` whenever a
+safer action is available.
+
+- Deterministic or tightly scoped tools may receive `disclose` when necessary.
+- LLM-driven agents should more commonly receive `delegate-to-child` or a
+  narrower `use` capability.
+- High-value provider credentials should prefer mediation patterns where SHADI
+  or a trusted adapter performs the authenticated action and returns only the
+  result.
+
+### Current cross-platform behavior
+
+The common security property is:
+
+> SHADI delivers the secret to the final authorized consumer process after that
+> process exists and has been verified, without requiring the parent process to
+> carry the secret.
+
+The transport can be platform-specific, but the policy and trust boundary should
+stay the same.
+
+- **macOS / Linux**: local broker endpoint after spawn, with peer PID and
+  executable verification before one-shot delivery.
+- **Windows**: direct trusted-secret delivery currently uses a compatibility
+  inherited-handle transport. The final-consumer delegated path described above
+  is documented for Unix/macOS.
+
+### Compatibility mode
+
+The existing env-injection and inherited-handle paths may still be kept as
+explicit compatibility mechanisms, but they should be documented as disclosure
+mode rather than the target secure design.
+
+- env injection: explicit `disclose` to the target process,
+- inherited Windows handles: compatibility path for direct trusted delivery,
+- brokered final-consumer delivery: preferred secure path.
 
 ## Python bindings
 SHADI exposes a Python extension for secrets, SQLCipher memory, and sandbox
@@ -138,119 +325,117 @@ not part of the core runtime itself.
 6. For container CVEs, locate the authoritative Dockerfile from GitHub workflow metadata when possible and recommend image rebuilds or base-image refreshes instead of ad-hoc package-install edits.
 7. Create remediation issues and optional PRs, then write `secops_security_report.json` to the workspace.
 
-## Updated system view
+## Detailed flow diagrams
 
-```mermaid
-flowchart TB
-  subgraph Operator[Operator and Control Plane]
-    Human[Human operator]
-    Config[secops.toml and policy JSON]
-    Launchers[Launch scripts and shadictl]
-  end
+The overview diagram above shows the main blocks. The following diagrams zoom in
+on the paths that matter most when reading or operating the system.
 
-  subgraph Trust[Identity and Secret Plane]
-    Verify[PySessionContext and verifier]
-    Secrets[ShadiStore]
-    Keychain[OS keychain or 1Password backend]
-    MemoryKey[SQLCipher memory key]
-  end
-
-  subgraph Runtime[Sandboxed Runtime Plane]
-    Sandbox[shadi_sandbox policy enforcement]
-    Avatar[Avatar ADK agent]
-    SecOps[SecOps agent or A2A server]
-    Memory[SqlCipherMemoryStore]
-  end
-
-  subgraph External[External Services]
-    GitHub[GitHub APIs and gh CLI]
-    Models[LLM provider endpoints]
-    SLIM[SLIM or A2A transport]
-  end
-
-  Human --> Launchers
-  Config --> Launchers
-  Launchers --> Sandbox
-  Human --> Verify
-  Verify --> Secrets
-  Secrets --> Keychain
-  Secrets --> MemoryKey
-  Sandbox --> Avatar
-  Sandbox --> SecOps
-  Avatar --> SLIM
-  SecOps --> SLIM
-  SecOps --> GitHub
-  SecOps --> Models
-  SecOps --> Memory
-  MemoryKey --> Memory
-  Avatar -. verified secret reads .-> Secrets
-  SecOps -. verified secret reads .-> Secrets
-```
-
-The main architecture update is that SHADI now has a clearer split between:
-- control-plane launch logic that resolves policy and optional secret brokerage before process start,
-- runtime enforcement that the agent cannot weaken by rewriting a local denylist path string,
-- and application-layer behavior implemented by example workloads such as SecOps remediation planning and Avatar-to-SecOps orchestration.
-
-## Demo workload behavior: SecOps remediation model
-
-- Dependency remediation still edits supported manifests directly and can open PRs.
-- Container CVEs are handled as rebuild guidance, not by mutating Dockerfiles with ad-hoc OS package commands.
-- Dockerfile discovery prefers `.github/workflows/*` as the authoritative source of build definitions, then falls back to portable filesystem scanning.
-- If only guidance is needed, SecOps opens a remediation issue so the repo owner can refresh the base image or rebuild the container in the right place.
-
-## Data flow (high level)
-1. Human identity material is ingested (OpenPGP or seed bytes).
-2. Agent local keypair + `did:key` are deterministically derived and stored.
-3. Optional human DID binding is stored for provenance checks.
-4. Agent session starts and performs DID/VC verification.
-5. SHADI sandbox applies OS-level restrictions to the agent process.
-6. Agent requests secrets; access is granted only if verification succeeds.
-7. Agent communicates over SLIM/MLS; messages are encrypted end-to-end.
-
-```mermaid
-sequenceDiagram
-  participant Human
-  participant Agent
-  participant SHADI
-  participant Sandbox
-  participant Keystore
-  participant MemoryStore
-  participant SLIM
-
-  Human->>SHADI: Provide source identity material
-  SHADI->>SHADI: HKDF derive agent local key + did:key
-  SHADI->>Keystore: Store agent keys + DID (+ optional human binding)
-  Agent->>SHADI: Start session + DID/VC
-  SHADI->>Sandbox: Apply OS policy
-  Agent->>SHADI: Secret request
-  SHADI->>Keystore: Read secret (if verified)
-  Keystore-->>SHADI: Secret bytes
-  SHADI-->>Agent: Secret handle
-  Agent->>MemoryStore: Write encrypted summary (SQLCipher)
-  MemoryStore-->>Agent: Persisted entry id
-  Agent->>SLIM: Send MLS message
-  SLIM-->>Agent: Encrypted transport
-```
+### 1) Identity, secret storage, and memory bootstrap
 
 ```mermaid
 flowchart LR
-  A[Profile Defaults] --> B[Sandbox Policy]
-  A2[Policy JSON] --> B
-  A3[CLI Flags] --> B
-  B --> C[macOS Seatbelt]
-  B --> D[Windows AppContainer + ACL]
-  H0[Human Identity Source] --> H1[HKDF Derivation]
-  H1 --> H2[Agent Local Keypair]
-  H2 --> H3[did:key]
-  H3 --> G
-  E[Session Verification] --> F[Secrets Access]
-  F --> G[OS Keystore]
-  G --> J[Memory Key]
-  J --> K[SQLCipher Memory Store]
-  E --> K
-  H[SLIM/MLS] --> I[Agent-to-Agent Secure Channel]
+  Source[Human identity source] --> Derive[Derive agent identity]
+  Derive --> Register[Register trusted secrets]
+  Register --> Verify[Verify session and operator context]
+  Verify --> Access[Authorize secret access]
+  Access --> Protect[Release memory key]
+  Protect --> Persist[Persist encrypted state]
 ```
+
+This is the trust bootstrap path:
+
+1. Human identity material is imported or derived.
+2. SHADI stores agent keys, DIDs, and optional provenance bindings in the secret store.
+3. Session verification gates later reads.
+4. The SQLCipher memory key is retrieved through the same secret-control path rather than living in plaintext config.
+
+### 2) Policy resolution and sandbox launch
+
+```mermaid
+flowchart LR
+  Profiles[Launcher profiles] --> Resolve[Resolve effective policy]
+  Policy[Policy file] --> Resolve
+  Overrides[CLI overrides] --> Resolve
+  Resolve --> SecretPolicy[Resolve secret delivery intent]
+  SecretPolicy --> Runtime[Prepare runtime guardrails]
+  Runtime --> Launch[Launch protected process]
+```
+
+This launch path matters because the agent does not get to reinterpret the policy from inside the session.
+
+- Profile defaults establish the baseline (`strict`, `balanced`, or `connected`).
+- Policy JSON adds exact executable rules and file/network allowances.
+- CLI flags override or extend the result.
+- Secret rules are resolved before spawn so SHADI knows whether a secret is being disclosed, directly trusted-delivered, or delegated to a child.
+- Runtime policy is expanded only as needed, for example to allow a temporary broker endpoint or local Unix socket transport.
+
+### 3) Trusted secret delivery and delegated child flow
+
+```mermaid
+sequenceDiagram
+  participant SHADI as SHADI runtime
+  participant Parent as Parent workload
+  participant Broker as Delivery broker
+  participant Child as Authorized child tool
+  participant Store as Secret store
+
+  SHADI->>Store: Resolve secret rule and target identity
+  SHADI->>Parent: Launch protected parent process
+  SHADI->>Broker: Create launch-scoped delivery channel
+  Broker-->>Parent: Endpoint reference and nonce
+  Parent->>Child: Start authorized tool
+  Child->>Broker: Request secret delivery
+  Broker->>Broker: Verify process identity, executable path, and optional hash
+  Broker->>Store: Read approved secret payload
+  Store-->>Broker: Secret bytes
+  Broker-->>Child: Release one-time secret payload
+  Broker-->>Broker: Close channel and revoke reuse
+```
+
+This is the main architecture change in the PR series:
+
+- `process_inject_keychain` remains explicit disclosure.
+- `process_trusted_secret` provides direct process-scoped trusted delivery.
+- `process_secret_policy` adds action-based rules such as `delegate-to-child`.
+- On Unix/macOS, SHADI verifies the final child consumer before releasing the secret.
+
+### 4) Runtime workload flow
+
+```mermaid
+flowchart LR
+  Workload[Protected workload] --> Secrets[Verified secret access]
+  Workload --> Memory[Encrypted memory]
+  Workload --> Transport[Secure transport]
+  Workload --> GitHub[GitHub and developer systems]
+  Workload --> Models[Model providers]
+  Workload --> Outcomes[Reports, issues, PRs, or actions]
+```
+
+Example workloads such as SecOps or Avatar sit on top of the same runtime contract:
+
+- secret reads are still gated by verification,
+- local persistence still flows through encrypted memory,
+- network access still depends on the resolved sandbox policy,
+- and transport still uses SLIM/A2A when agents communicate with each other.
+
+### 5) SecOps remediation flow
+
+```mermaid
+flowchart TD
+  Inputs[Configuration and approved credentials] --> Collect[Collect security signals]
+  Collect --> Triage[Classify remediation path]
+  Triage --> Dependency[Patch supported dependencies]
+  Triage --> Container[Recommend rebuild or base-image refresh]
+  Dependency --> Publish[Create reports, issues, or PRs]
+  Container --> Publish
+  Publish --> Learn[Persist remediation memory]
+```
+
+SecOps behavior stays intentionally split by remediation type:
+
+- Dependency remediation can edit supported manifests directly.
+- Container CVEs are handled as rebuild guidance rather than ad-hoc Dockerfile package-install edits.
+- Dockerfile discovery prefers authoritative workflow definitions before falling back to repository scanning.
 
 ## Threats addressed
 
@@ -305,7 +490,7 @@ flowchart LR
 
 ## Deployment guidance
 - Prefer running agents under the sandbox with a JSON policy file.
-- Use brokered secrets for demos, and keystore access for production where allowed.
+- Use explicit disclosure only when a demo or workload truly needs the secret in the parent process, and prefer process-scoped or delegated trusted delivery where possible.
 - Rotate secrets and use short-lived tokens whenever possible.
 
 ## Policy examples
@@ -326,7 +511,3 @@ flowchart LR
 }
 ```
 
-## Future work
-- Signed policy files with provenance (Sigstore/DSSE).
-- OS-enforced network allowlist/denylist policies.
-- Stronger metadata privacy controls.

@@ -37,6 +37,7 @@ mod policy_helpers;
 mod sandbox_snapshot;
 mod slim_mas_command;
 mod trace_command;
+mod trusted_secret_delivery;
 
 use cli_types::*;
 use introspection_command::*;
@@ -46,6 +47,7 @@ use policy_helpers::*;
 use sandbox_snapshot::*;
 use slim_mas_command::*;
 use trace_command::*;
+use trusted_secret_delivery::*;
 
 #[cfg(test)]
 static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
@@ -115,6 +117,19 @@ fn test_store_put(key: &str, value: &[u8]) {
 fn test_store_get(key: &str) -> Option<Vec<u8>> {
     let guard = test_secret_store_map().lock().expect("test store lock");
     guard.get(key).cloned()
+}
+
+#[cfg(test)]
+pub(crate) fn scrub_test_secret_backend_env(command: &mut Command) {
+    for key in [
+        "SHADI_SECRET_BACKEND",
+        "SHADI_OP_VAULT",
+        "SHADI_OP_ACCOUNT",
+        "SHADI_OP_BINARY",
+        "OP_SERVICE_ACCOUNT_TOKEN",
+    ] {
+        command.env_remove(key);
+    }
 }
 
 
@@ -249,7 +264,7 @@ fn run_cli(mut cli: Cli) -> ExitCode {
         }
     };
 
-    run_sandboxed_command(&cli, &resolved, &cwd)
+    run_sandboxed_command(&cli, &resolved, &file_policy, &cwd)
 }
 
 #[cfg(test)]

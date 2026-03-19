@@ -8,7 +8,10 @@ use std::process::Command;
 
 use crate::{SandboxError, SandboxPolicy, SandboxedChild, WindowsAclRollback, WindowsChild};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS, HANDLE_FLAG_INHERIT,
+    SetHandleInformation,
+};
 use windows_sys::Win32::Security::{
     DeriveCapabilitySidsFromName, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, NO_INHERITANCE,
 };
@@ -28,13 +31,17 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
     DeleteProcThreadAttributeList, PROCESS_INFORMATION, STARTUPINFOEXW,
-    EXTENDED_STARTUPINFO_PRESENT, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
 };
 use windows_sys::Win32::Foundation::LocalFree;
 
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let program = command.get_program().to_string_lossy().to_string();
     let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+    let environment = build_environment_block(command);
+    let current_dir = command.get_current_dir().map(path_to_wide);
+    let inherited_handles = extract_inherited_handles(command).map_err(SandboxError::ApplyFailed)?;
     let profile_name = sandbox_profile_name();
 
     let appcontainer = AppContainer::new(&profile_name, policy.net_blocked())
@@ -43,7 +50,14 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     let mut rollbacks = apply_policy_acl_grants(appcontainer.sid(), policy)
         .map_err(SandboxError::ApplyFailed)?;
 
-    let process_info = match spawn_appcontainer_process(&program, &args, &appcontainer) {
+    let process_info = match spawn_appcontainer_process(
+        &program,
+        &args,
+        &appcontainer,
+        environment.as_deref(),
+        current_dir.as_deref(),
+        &inherited_handles,
+    ) {
         Ok(info) => info,
         Err(err) => {
             rollback_acl_changes(&mut rollbacks);
@@ -225,6 +239,9 @@ fn spawn_appcontainer_process(
     program: &str,
     args: &[String],
     appcontainer: &AppContainer,
+    environment: Option<&[u16]>,
+    current_dir: Option<&[u16]>,
+    inherited_handles: &[HANDLE],
 ) -> Result<PROCESS_INFORMATION, String> {
     let cmdline = build_command_line(program, args);
     let mut cmdline_w = to_wide(&cmdline);
@@ -237,9 +254,20 @@ fn spawn_appcontainer_process(
         Reserved: 0,
     };
 
-    let attribute_list = ProcThreadAttributeList::new(1)?;
+    let attribute_count = if inherited_handles.is_empty() { 1 } else { 2 };
+    let attribute_list = ProcThreadAttributeList::new(attribute_count)?;
     attribute_list.set_security_capabilities(&mut security_caps)?;
-    create_process_with_attributes(application_name.as_deref(), &mut cmdline_w, attribute_list.list)
+    if !inherited_handles.is_empty() {
+        attribute_list.set_handle_list(inherited_handles)?;
+    }
+    create_process_with_attributes(
+        application_name.as_deref(),
+        &mut cmdline_w,
+        attribute_list.list,
+        environment,
+        current_dir,
+        !inherited_handles.is_empty(),
+    )
 }
 
 struct ProcThreadAttributeList {
@@ -288,6 +316,24 @@ impl ProcThreadAttributeList {
         }
         Ok(())
     }
+
+    fn set_handle_list(&self, handles: &[HANDLE]) -> Result<(), String> {
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                self.list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr() as *mut _,
+                std::mem::size_of_val(handles),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_win32_error_message("UpdateProcThreadAttribute"));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ProcThreadAttributeList {
@@ -302,6 +348,9 @@ fn create_process_with_attributes(
     application_name_w: Option<&[u16]>,
     cmdline_w: &mut [u16],
     list: windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST,
+    environment: Option<&[u16]>,
+    current_dir: Option<&[u16]>,
+    inherit_handles: bool,
 ) -> Result<PROCESS_INFORMATION, String> {
     let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -316,10 +365,14 @@ fn create_process_with_attributes(
             cmdline_w.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            0,
-            EXTENDED_STARTUPINFO_PRESENT,
-            std::ptr::null_mut(),
-            std::ptr::null(),
+            inherit_handles as i32,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            environment
+                .map(|value| value.as_ptr() as *mut _)
+                .unwrap_or(std::ptr::null_mut()),
+            current_dir
+                .map(|value| value.as_ptr())
+                .unwrap_or(std::ptr::null()),
             &startup.StartupInfo,
             &mut info,
         )
@@ -379,6 +432,84 @@ fn to_wide(value: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+fn path_to_wide(path: &Path) -> Vec<u16> {
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn build_environment_block(command: &Command) -> Option<Vec<u16>> {
+    let mut env_map = std::env::vars_os()
+        .map(|(key, value)| (normalize_env_key(&key), (key, value)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for (key, value) in command.get_envs() {
+        if normalize_env_key(key) == "SHADI_INTERNAL_TRUSTED_SECRET_HANDLES" {
+            continue;
+        }
+
+        let normalized = normalize_env_key(key);
+        match value {
+            Some(value) => {
+                env_map.insert(normalized, (key.to_os_string(), value.to_os_string()));
+            }
+            None => {
+                env_map.remove(&normalized);
+            }
+        }
+    }
+
+    if env_map.is_empty() {
+        return None;
+    }
+
+    let mut block = Vec::new();
+    for (_, (key, value)) in env_map {
+        append_env_entry(&mut block, &key, &value);
+    }
+    block.push(0);
+    Some(block)
+}
+
+fn append_env_entry(target: &mut Vec<u16>, key: &OsStr, value: &OsStr) {
+    target.extend(key.encode_wide());
+    target.push('=' as u16);
+    target.extend(value.encode_wide());
+    target.push(0);
+}
+
+fn normalize_env_key(key: &OsStr) -> String {
+    key.to_string_lossy().to_ascii_uppercase()
+}
+
+fn extract_inherited_handles(command: &Command) -> Result<Vec<HANDLE>, String> {
+    let mut handles = Vec::new();
+    for (key, value) in command.get_envs() {
+        if normalize_env_key(key) != "SHADI_INTERNAL_TRUSTED_SECRET_HANDLES" {
+            continue;
+        }
+
+        let Some(value) = value else {
+            continue;
+        };
+
+        for raw in value.to_string_lossy().split(',').filter(|part| !part.is_empty()) {
+            let handle_value = raw
+                .parse::<usize>()
+                .map_err(|_| format!("invalid inherited handle value '{}'", raw))?;
+            let handle = handle_value as HANDLE;
+            let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+            if ok == 0 {
+                return Err(last_win32_error_message("SetHandleInformation"));
+            }
+            handles.push(handle);
+        }
+    }
+
+    Ok(handles)
 }
 
 fn grant_path_access(
