@@ -130,6 +130,7 @@
     }
 
     #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
     fn windows_system32() -> PathBuf {
         PathBuf::from(
             std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()),
@@ -138,6 +139,7 @@
     }
 
     #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
     fn windows_test_programs() -> (PathBuf, PathBuf) {
         let system32 = windows_system32();
         (system32.join("cmd.exe"), system32.join("where.exe"))
