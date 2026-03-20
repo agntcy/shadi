@@ -395,6 +395,13 @@ mod tests {
     }
 
     #[test]
+    fn compute_policy_diff_treats_non_object_values_as_equivalent() {
+        let diff = compute_policy_diff(&json!(["a"]), &json!(["b"]));
+        assert_eq!(diff.get("equivalent"), Some(&Value::Bool(true)));
+        assert_eq!(diff.get("changed_fields"), Some(&json!([])));
+    }
+
+    #[test]
     fn run_config_show_returns_success_with_defaults() {
         let code = run_config_show(ConfigShowArgs {
             profile: None,
@@ -410,6 +417,49 @@ mod tests {
     }
 
     #[test]
+    fn run_config_show_supports_text_output_with_connected_profile_and_paths() {
+        let dir = tempdir().expect("tempdir");
+        let policy_path = dir.path().join("policy.json");
+        let allow_path = dir.path().join("allow");
+        let read_path = dir.path().join("read");
+        let write_path = dir.path().join("write");
+        std::fs::write(&policy_path, "{}").expect("write policy");
+        std::fs::create_dir(&allow_path).expect("create allow path");
+        std::fs::create_dir(&read_path).expect("create read path");
+        std::fs::create_dir(&write_path).expect("create write path");
+
+        let code = run_config_show(ConfigShowArgs {
+            profile: Some(LauncherProfile::Connected),
+            policy_file: Some(policy_path),
+            allow: vec![allow_path],
+            read: vec![read_path],
+            write: vec![write_path],
+            net_block: false,
+            allow_command: vec!["echo".to_string()],
+            format: OutputFormat::Text,
+        });
+
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_config_show_returns_error_for_invalid_allow_path() {
+        let dir = tempdir().expect("tempdir");
+        let code = run_config_show(ConfigShowArgs {
+            profile: None,
+            policy_file: None,
+            allow: vec![dir.path().join("missing-allow")],
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            format: OutputFormat::Json,
+        });
+
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
     fn run_policy_explain_returns_success_with_defaults() {
         let code = run_policy_explain(PolicyExplainArgs {
             profile: None,
@@ -422,6 +472,49 @@ mod tests {
             format: OutputFormat::Json,
         });
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_policy_explain_supports_text_output_with_strict_profile_and_paths() {
+        let dir = tempdir().expect("tempdir");
+        let policy_path = dir.path().join("policy.json");
+        let allow_path = dir.path().join("allow");
+        let read_path = dir.path().join("read");
+        let write_path = dir.path().join("write");
+        std::fs::write(&policy_path, "{}").expect("write policy");
+        std::fs::create_dir(&allow_path).expect("create allow path");
+        std::fs::create_dir(&read_path).expect("create read path");
+        std::fs::create_dir(&write_path).expect("create write path");
+
+        let code = run_policy_explain(PolicyExplainArgs {
+            profile: Some(LauncherProfile::Strict),
+            policy_file: Some(policy_path),
+            allow: vec![allow_path],
+            read: vec![read_path],
+            write: vec![write_path],
+            net_block: true,
+            allow_command: vec!["echo".to_string()],
+            format: OutputFormat::Text,
+        });
+
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_policy_explain_returns_error_for_invalid_allow_path() {
+        let dir = tempdir().expect("tempdir");
+        let code = run_policy_explain(PolicyExplainArgs {
+            profile: None,
+            policy_file: None,
+            allow: vec![dir.path().join("missing-allow")],
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            format: OutputFormat::Json,
+        });
+
+        assert_eq!(code, ExitCode::from(2));
     }
 
     #[test]
@@ -458,6 +551,24 @@ mod tests {
             format: OutputFormat::Json,
         });
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_policy_diff_returns_error_for_invalid_current_allow_path() {
+        let dir = tempdir().expect("tempdir");
+        let code = run_policy_diff(PolicyDiffArgs {
+            against: "profile:balanced".to_string(),
+            profile: None,
+            policy_file: None,
+            allow: vec![dir.path().join("missing-allow")],
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            format: OutputFormat::Json,
+        });
+
+        assert_eq!(code, ExitCode::from(2));
     }
 
     #[test]
