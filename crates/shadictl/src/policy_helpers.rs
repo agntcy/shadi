@@ -1,4 +1,5 @@
 use super::*;
+use shadi_sandbox::PlatformSandboxProfile;
 
 pub(crate) fn format_policy(
     policy: &SandboxPolicy,
@@ -11,6 +12,7 @@ pub(crate) fn format_policy(
         read: Vec<String>,
         write: Vec<String>,
         net_block: bool,
+        platform_profile: String,
         allow_command: Vec<String>,
         block_command: Vec<String>,
     }
@@ -43,6 +45,10 @@ pub(crate) fn format_policy(
         read: read_paths,
         write: write_paths,
         net_block: policy.net_blocked(),
+        platform_profile: match policy.platform_profile() {
+            PlatformSandboxProfile::Compatibility => "compatibility".to_string(),
+            PlatformSandboxProfile::Minimal => "minimal".to_string(),
+        },
         allow_command: allow_list,
         block_command: blocked_list,
     };
@@ -86,6 +92,11 @@ pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<Reso
     let mut policy = SandboxPolicy::new()
         .block_network(cli.net_block || file_policy.net_block.unwrap_or(profile_net_block));
 
+    #[cfg(target_os = "macos")]
+    {
+        policy = policy.use_minimal_platform_profile();
+    }
+
     policy = apply_string_paths(policy, &profile.read, PathMode::Read)?;
     policy = apply_string_paths(policy, &profile.write, PathMode::Write)?;
     policy = apply_string_paths(policy, &profile.allow, PathMode::Allow)?;
@@ -121,22 +132,37 @@ pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
             net_block: Some(true),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            process_inject_keychain: Vec::new(),
+            process_trusted_secret: Vec::new(),
+            process_secret_policy: Vec::new(),
         },
         LauncherProfile::Balanced => PolicyFile {
             allow: vec![".".to_string()],
+            #[cfg(target_os = "macos")]
+            read: Vec::new(),
+            #[cfg(not(target_os = "macos"))]
             read: vec!["/".to_string()],
             write: Vec::new(),
             net_block: Some(true),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            process_inject_keychain: Vec::new(),
+            process_trusted_secret: Vec::new(),
+            process_secret_policy: Vec::new(),
         },
         LauncherProfile::Connected => PolicyFile {
             allow: vec![".".to_string()],
+            #[cfg(target_os = "macos")]
+            read: Vec::new(),
+            #[cfg(not(target_os = "macos"))]
             read: vec!["/".to_string()],
             write: Vec::new(),
             net_block: Some(false),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            process_inject_keychain: Vec::new(),
+            process_trusted_secret: Vec::new(),
+            process_secret_policy: Vec::new(),
         },
     }
 }

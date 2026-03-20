@@ -14,6 +14,7 @@ SHADI is designed for environments where agents are long-lived, hold real creden
 - Verified secret access gates (`agent_secrets`) with OS keychain backends.
 - Deterministic human -> agent identity derivation (`did:key`) and provenance verification.
 - Kernel-enforced sandbox execution policies (`shadi_sandbox`) with portable profile defaults.
+- Process-scoped secret delivery policy with exact executable matching, explicit disclosure paths, and trusted child-delivery on Unix/macOS.
 - Opt-in Git-backed sandbox snapshots for before/after working-tree capture and audit trails.
 - SQLCipher-backed encrypted local memory (`shadi_memory`).
 - Python bindings (`shadi_py`) for secrets, memory, and sandboxed execution.
@@ -46,9 +47,22 @@ SHADI runtime flow:
 1. Ingest human identity material (`gpg` secret material or generic seed).
 2. Derive deterministic Ed25519 local keys and `did:key` identities per agent.
 3. Optionally bind agent identities to a stored human DID and verify provenance.
-4. Apply sandbox policy (filesystem/network/command controls).
-5. Gate secret access on verified sessions.
+4. Resolve sandbox and secret-delivery policy for the exact launched executable.
+5. Gate secret access on verified sessions and deliver secrets through the allowed disclosure or trusted-delivery path.
 6. Persist agent memory encrypted at rest.
+
+Current secret-delivery modes:
+
+- `--inject-keychain` and `process_inject_keychain`: explicit env disclosure to the launched process.
+- `process_trusted_secret`: process-scoped direct trusted-secret delivery; on Unix/macOS this is a one-shot broker fetch with a nonce-bound endpoint, and on Windows it remains a compatibility handle path.
+- `process_secret_policy`: action-based policy rules. `delegate-to-child` is implemented for Unix/macOS final-consumer delivery; `use` is modeled in policy for narrower future mediation patterns.
+
+Platform presentation layers:
+
+1. **Experience and control**: operators define profiles, policies, and launch intent.
+2. **Secure runtime**: identity, secret control, trusted delivery, sandboxing, transport, and encrypted memory enforce the launch contract.
+3. **Protected workloads**: agents and tools run inside the approved runtime boundary.
+4. **External systems**: GitHub, model providers, and SLIM/A2A peers are reached only after policy and trust checks pass.
 
 For full details, see `docs/architecture.md` and `docs/security.md`.
 

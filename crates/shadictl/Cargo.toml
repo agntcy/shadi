@@ -19,9 +19,16 @@ hkdf = "0.12"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tracing = "0.1"
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
+windows-sys = { version = "0.61", features = [
+	"Win32_Foundation",
+	"Win32_Security",
+	"Win32_Storage_FileSystem",
+	"Win32_System_Pipes",
+] }
 
 [target.'cfg(not(windows))'.dependencies]
 sequoia-openpgp = { version = "2.2" }

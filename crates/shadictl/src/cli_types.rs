@@ -28,6 +28,15 @@ pub(crate) struct Cli {
     #[arg(long = "inject-keychain", value_name = "KEY=ENV", action = ArgAction::Append)]
     pub(crate) inject_keychain: Vec<String>,
 
+    #[arg(long = "trusted-secret", value_name = "KEY=NAME", action = ArgAction::Append)]
+    pub(crate) trusted_secret: Vec<String>,
+
+    #[arg(long = "trusted-secret-exec", value_name = "NAME=PROGRAM", action = ArgAction::Append)]
+    pub(crate) trusted_secret_exec: Vec<String>,
+
+    #[arg(long = "trusted-secret-fd-env", value_name = "NAME=ENV", action = ArgAction::Append)]
+    pub(crate) trusted_secret_fd_env: Vec<String>,
+
     #[arg(long = "list-keychain", action = ArgAction::SetTrue)]
     pub(crate) list_keychain: bool,
 
@@ -504,6 +513,51 @@ pub(crate) struct PolicyFile {
     pub(crate) allow_command: Vec<String>,
     #[serde(default)]
     pub(crate) block_command: Vec<String>,
+    #[serde(default)]
+    pub(crate) process_inject_keychain: Vec<ProcessInjectKeychainRule>,
+    #[serde(default)]
+    pub(crate) process_trusted_secret: Vec<ProcessTrustedSecretRule>,
+    #[serde(default)]
+    pub(crate) process_secret_policy: Vec<ProcessSecretPolicyRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SecretAction {
+    Disclose,
+    Use,
+    DelegateToChild,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ProcessSecretPolicyRule {
+    pub(crate) program: String,
+    pub(crate) secret: String,
+    #[serde(default)]
+    pub(crate) actions: Vec<SecretAction>,
+    #[serde(default)]
+    pub(crate) children: Vec<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) fd_env: Option<String>,
+    #[serde(default)]
+    pub(crate) child_sha256: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ProcessInjectKeychainRule {
+    pub(crate) program: String,
+    pub(crate) key: String,
+    pub(crate) env: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ProcessTrustedSecretRule {
+    pub(crate) program: String,
+    pub(crate) key: String,
+    pub(crate) name: String,
+    pub(crate) fd_env: String,
 }
 
 #[derive(Debug)]

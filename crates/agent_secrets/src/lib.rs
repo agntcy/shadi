@@ -157,4 +157,25 @@ mod tests {
         assert_eq!(SecretError::InvalidInput.to_string(), "invalid input");
         assert_eq!(SecretError::StorageFailure.to_string(), "storage failure");
     }
+
+    #[test]
+    fn default_store_constructs_a_backend() {
+        let _store = default_store();
+    }
+
+    #[test]
+    fn memory_store_lists_inserted_keys() {
+        let store = MemoryStore::new();
+        store
+            .put("alpha", b"one", SecretPolicy::default())
+            .expect("put alpha");
+        store
+            .put("beta", b"two", SecretPolicy::default())
+            .expect("put beta");
+
+        let mut keys = store.list_keys().expect("list keys");
+        keys.sort();
+
+        assert_eq!(keys, vec!["alpha".to_string(), "beta".to_string()]);
+    }
 }

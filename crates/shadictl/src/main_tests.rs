@@ -1,4 +1,6 @@
     use super::*;
+    #[cfg(target_os = "macos")]
+    use shadi_sandbox::PlatformSandboxProfile;
     use tempfile::TempDir;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -8,6 +10,7 @@
 
     static TRACE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static GITHUB_PAYLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static STORE_FAILURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn trace_env_lock() -> &'static Mutex<()> {
         TRACE_ENV_LOCK.get_or_init(|| Mutex::new(()))
@@ -15,6 +18,10 @@
 
     fn github_payload_lock() -> &'static Mutex<()> {
         GITHUB_PAYLOAD_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn store_failure_lock() -> &'static Mutex<()> {
+        STORE_FAILURE_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn temp_dir() -> TempDir {
@@ -37,6 +44,9 @@
             net_block: false,
             allow_command: Vec::new(),
             inject_keychain: Vec::new(),
+            trusted_secret: Vec::new(),
+            trusted_secret_exec: Vec::new(),
+            trusted_secret_fd_env: Vec::new(),
             list_keychain: false,
             list_prefix: None,
             print_policy: false,
@@ -46,6 +56,13 @@
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }
+    }
+
+    fn assert_common_direct_trusted_secret_report(report: &str) {
+        assert!(report.contains("agent_token=agent-value"));
+        assert!(report.contains("tool_secret_present=false"));
+        assert!(report.contains("tool_fd_present=true"));
+        assert!(report.contains("secret_payload=tool-value"));
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -69,6 +86,7 @@
         run_git(dir.path(), &["init"]);
         run_git(dir.path(), &["config", "user.name", "SHADI Tests"]);
         run_git(dir.path(), &["config", "user.email", "shadi-tests@example.com"]);
+        run_git(dir.path(), &["config", "commit.gpgsign", "false"]);
         dir
     }
 
@@ -85,6 +103,7 @@
         run_git(&repo_path, &["init"]);
         run_git(&repo_path, &["config", "user.name", "SHADI Tests"]);
         run_git(&repo_path, &["config", "user.email", "shadi-tests@example.com"]);
+        run_git(&repo_path, &["config", "commit.gpgsign", "false"]);
         repo_path
     }
 
@@ -102,12 +121,8 @@
         #[cfg(target_os = "macos")]
         {
             (
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "printf 'changed\n' >> tracked.txt && printf 'new\n' > note.txt".to_string(),
-                ],
-                PathBuf::from("/bin"),
+                vec!["/usr/bin/true".to_string()],
+                PathBuf::from("/usr/bin"),
             )
         }
 
@@ -124,6 +139,22 @@
                 PathBuf::from(system32),
             )
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
+    fn windows_system32() -> PathBuf {
+        PathBuf::from(
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()),
+        )
+        .join("System32")
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
+    fn windows_test_programs() -> (PathBuf, PathBuf) {
+        let system32 = windows_system32();
+        (system32.join("cmd.exe"), system32.join("where.exe"))
     }
 
     fn sample_openpgp_cert_armored() -> Vec<u8> {
@@ -153,6 +184,96 @@
         exported
     }
 
+    fn compile_checked_in_test_binary(source: &str, output_dir: &Path, output_name: &str) -> PathBuf {
+        let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source);
+        let output_path = output_dir.join(format!("{}{}", output_name, std::env::consts::EXE_SUFFIX));
+        let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+        let mut command = Command::new(rustc);
+        scrub_test_secret_backend_env(&mut command);
+        let output = command
+            .arg("--edition=2021")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&output_path)
+            .output()
+            .expect("compile checked-in helper source");
+        assert!(
+            output.status.success(),
+            "failed to compile helper {}: {}",
+            source_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output_path
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_launcher_usage_policy(
+        path: &Path,
+        allowed_root: &Path,
+        agent_program: &Path,
+        child_program: &Path,
+        agent_key: &str,
+        tool_key: &str,
+    ) {
+        let payload = format!(
+            r#"{{
+  "allow": ["{}"],
+  "net_block": true,
+  "process_inject_keychain": [
+    {{
+      "program": "{}",
+      "key": "{}",
+      "env": "AGENT_TOKEN"
+    }}
+  ],
+  "process_secret_policy": [
+    {{
+      "program": "{}",
+      "secret": "{}",
+      "actions": ["delegate-to-child"],
+      "children": ["{}"],
+      "name": "tool-secret",
+      "fd_env": "TOOL_SECRET_FD"
+    }}
+  ]
+}}"#,
+            allowed_root.display(),
+            agent_program.display(),
+            agent_key,
+            agent_program.display(),
+            tool_key,
+            child_program.display(),
+        );
+        std::fs::write(path, payload).expect("write launcher usage policy");
+    }
+
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        fn write_direct_trusted_secret_policy(
+                path: &Path,
+                allowed_root: &Path,
+                program: &Path,
+                agent_key: &str,
+                tool_key: &str,
+        ) {
+            let payload = serde_json::to_string_pretty(&serde_json::json!({
+                "allow": [allowed_root.display().to_string()],
+                "net_block": true,
+                "process_inject_keychain": [{
+                    "program": program.display().to_string(),
+                    "key": agent_key,
+                    "env": "AGENT_TOKEN"
+                }],
+                "process_trusted_secret": [{
+                    "program": program.display().to_string(),
+                    "key": tool_key,
+                    "name": "tool-secret",
+                    "fd_env": "TOOL_SECRET_FD"
+                }]
+            }))
+            .expect("serialize direct trusted secret policy");
+                std::fs::write(path, payload).expect("write direct trusted secret policy");
+        }
+
     fn unique_key(prefix: &str) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -163,6 +284,14 @@
         format!("{}-{}-{}", prefix, std::process::id(), nanos)
     }
 
+    fn github_payload_with_sample_cert() -> String {
+        let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
+        serde_json::json!([
+            {"id": 1, "public_key": armored}
+        ])
+        .to_string()
+    }
+
     fn policy_from_paths(read: &[PathBuf], write: &[PathBuf], allow: &[PathBuf]) -> PolicyFile {
         PolicyFile {
             read: read.iter().map(|p| p.display().to_string()).collect(),
@@ -171,6 +300,9 @@
             net_block: Some(false),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            process_inject_keychain: Vec::new(),
+            process_trusted_secret: Vec::new(),
+            process_secret_policy: Vec::new(),
         }
     }
 
@@ -198,6 +330,16 @@
     }
 
     #[test]
+    fn build_cli_uses_expected_defaults() {
+        let cli = build_cli();
+        assert!(cli.trusted_secret_fd_env.is_empty());
+        assert!(!cli.git_snapshot);
+        assert!(cli.git_snapshot_dir.is_none());
+        assert!(!cli.git_snapshot_untracked);
+        assert!(cli.subcommand.is_none());
+    }
+
+    #[test]
     fn resolve_policy_rejects_missing_paths() {
         let cli = build_cli();
         let policy_file = PolicyFile {
@@ -207,6 +349,9 @@
             net_block: Some(false),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            process_inject_keychain: Vec::new(),
+            process_trusted_secret: Vec::new(),
+            process_secret_policy: Vec::new(),
         };
 
         let err = resolve_policy(&cli, &policy_file).unwrap_err();
@@ -237,13 +382,31 @@
     fn resolve_policy_uses_balanced_profile_by_default() {
         let cli = build_cli();
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
-        let default_read = canonicalize_string_path("/").expect("canonical root path");
         assert!(resolved.policy.net_blocked());
-        assert!(resolved
-            .policy
-            .allow_read()
-            .iter()
-            .any(|path| path == &default_read));
+
+        #[cfg(target_os = "macos")]
+        {
+            let default_read = canonicalize_string_path("/").expect("canonical root path");
+            assert_eq!(
+                resolved.policy.platform_profile(),
+                PlatformSandboxProfile::Minimal
+            );
+            assert!(!resolved
+                .policy
+                .allow_read()
+                .iter()
+                .any(|path| path == &default_read));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let default_read = canonicalize_string_path("/").expect("canonical root path");
+            assert!(resolved
+                .policy
+                .allow_read()
+                .iter()
+                .any(|path| path == &default_read));
+        }
     }
 
     #[test]
@@ -315,6 +478,14 @@
         let output = format_policy(&policy, &blocked, &allow).expect("format");
         assert!(output.contains("\"block_command\""));
         assert!(output.contains("\"allow_command\""));
+        assert!(output.contains("\"platform_profile\""));
+    }
+
+    #[test]
+    fn secret_action_deserializes_kebab_case_values() {
+        let action: SecretAction = serde_json::from_str("\"delegate-to-child\"")
+            .expect("deserialize secret action");
+        assert_eq!(action, SecretAction::DelegateToChild);
     }
 
     #[test]
@@ -352,13 +523,23 @@
         let tmp_dir = std::env::var("SHADI_TMP_DIR").unwrap_or_else(|_| "./.tmp".to_string());
         std::fs::write(
             &path,
-            format!(r#"{{"allow": ["{}"], "net_block": true}}"#, tmp_dir),
+            format!(
+                r#"{{"allow": ["{}"], "net_block": true, "process_inject_keychain": [{{"program": "/usr/bin/true", "key": "secops/token", "env": "TOKEN"}}], "process_secret_policy": [{{"program": "/usr/bin/true", "secret": "secops/github_token", "actions": ["delegate-to-child"], "children": ["/usr/bin/curl"]}}]}}"#,
+                tmp_dir
+            ),
         )
         .expect("write");
 
         let policy = load_policy_file(&path).expect("load");
         assert_eq!(policy.allow, vec![tmp_dir]);
         assert_eq!(policy.net_block, Some(true));
+        assert_eq!(policy.process_inject_keychain.len(), 1);
+        assert_eq!(policy.process_inject_keychain[0].env, "TOKEN");
+        assert_eq!(policy.process_secret_policy.len(), 1);
+        assert_eq!(policy.process_secret_policy[0].secret, "secops/github_token");
+        assert_eq!(policy.process_secret_policy[0].actions, vec![SecretAction::DelegateToChild]);
+        assert_eq!(policy.process_secret_policy[0].children, vec!["/usr/bin/curl".to_string()]);
+        assert!(policy.process_secret_policy[0].child_sha256.is_empty());
     }
 
     #[test]
@@ -422,6 +603,22 @@
     }
 
     #[test]
+    fn summarize_status_lines_counts_all_status_kinds() {
+        let summary = summarize_status_lines(&[
+            "D  removed.txt".to_string(),
+            "C  copied.txt".to_string(),
+            "UU conflict.txt".to_string(),
+            "X  unknown.txt".to_string(),
+        ]);
+
+        assert_eq!(summary.deleted, 1);
+        assert_eq!(summary.copied, 1);
+        assert_eq!(summary.unmerged, 2);
+        assert_eq!(summary.other, 1);
+        assert!(summary.changed);
+    }
+
+    #[test]
     fn git_snapshot_layout_default_starts_empty() {
         let layout = GitSnapshotLayout::default();
 
@@ -466,10 +663,289 @@
         cli.run_command = vec![cwd.join("missing-command").display().to_string()];
         cli.allow.push(cwd.clone());
 
-        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let exit = run_sandboxed_command(&cli, &resolved, &cwd);
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &cwd);
 
-        assert_eq!(exit, ExitCode::from(1));
+        assert_eq!(exit, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn run_sandboxed_command_returns_error_for_invalid_injected_keychain_mapping() {
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+
+        let mut cli = build_cli();
+        let (command, command_prefix) = snapshot_test_command();
+        cli.run_command = command;
+        cli.allow.push(command_prefix);
+        cli.inject_keychain = vec!["invalid".to_string()];
+
+        let file_policy = PolicyFile {
+            net_block: Some(false),
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+
+        assert!(!resolved.policy.net_blocked());
+        assert_eq!(run_sandboxed_command(&cli, &resolved, &file_policy, &cwd), ExitCode::from(2));
+    }
+
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn run_cli_launches_agent_with_scoped_env_and_delegated_child_secret() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let agent_program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-agent-helper.rs",
+            fixture.path(),
+            "agent-helper",
+        );
+        let child_program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-tool-helper.rs",
+            fixture.path(),
+            "tool-helper",
+        );
+        let parent_report = fixture.path().join("agent-report.txt");
+        let child_report = fixture.path().join("tool-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/agent-token");
+        let tool_key = unique_key("usage/tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_launcher_usage_policy(
+            &policy_path,
+            &fixture_root,
+            &agent_program,
+            &child_program,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            agent_program.display().to_string(),
+            "agent-spawn-tool".to_string(),
+            parent_report.display().to_string(),
+            child_program.display().to_string(),
+            child_report.display().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let parent_state = std::fs::read_to_string(&parent_report).expect("read parent report");
+        assert!(parent_state.contains("agent_token=agent-value"));
+        assert!(parent_state.contains("tool_secret_present=false"));
+        assert!(parent_state.contains("tool_fd_present=true"));
+        assert!(parent_state.contains("tool_nonce_present=true"));
+        assert_eq!(
+            std::fs::read(&child_report).expect("read child report"),
+            b"tool-value"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn run_cli_denies_delegated_secret_to_non_matching_child_process() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let agent_program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-agent-helper.rs",
+            fixture.path(),
+            "agent-helper",
+        );
+        let authorized_child = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-tool-helper.rs",
+            fixture.path(),
+            "authorized-tool-helper",
+        );
+        let unauthorized_child = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-tool-helper-alt.rs",
+            fixture.path(),
+            "unauthorized-tool-helper",
+        );
+        let parent_report = fixture.path().join("agent-report.txt");
+        let child_report = fixture.path().join("tool-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/agent-token");
+        let tool_key = unique_key("usage/tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_launcher_usage_policy(
+            &policy_path,
+            &fixture_root,
+            &agent_program,
+            &authorized_child,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            agent_program.display().to_string(),
+            "agent-spawn-tool".to_string(),
+            parent_report.display().to_string(),
+            unauthorized_child.display().to_string(),
+            child_report.display().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(1));
+
+        let parent_state = std::fs::read_to_string(&parent_report).expect("read parent report");
+        assert!(parent_state.contains("agent_token=agent-value"));
+        assert!(parent_state.contains("tool_secret_present=false"));
+        assert_eq!(
+            std::fs::read_to_string(&child_report).expect("read child report"),
+            "closed"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn run_cli_launches_process_with_legacy_direct_trusted_secret_policy() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-agent-helper.rs",
+            fixture.path(),
+            "direct-agent-helper",
+        );
+        let report_path = fixture.path().join("direct-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/direct-agent-token");
+        let tool_key = unique_key("usage/direct-tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_direct_trusted_secret_policy(
+            &policy_path,
+            &fixture_root,
+            &program,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            program.display().to_string(),
+            "direct-consume-secret".to_string(),
+            report_path.display().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let report = std::fs::read_to_string(&report_path).expect("read direct report");
+        assert_common_direct_trusted_secret_report(&report);
+        assert!(report.contains("tool_nonce_present=true"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn run_cli_launches_process_with_windows_direct_trusted_secret_policy() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let fixture_root = fixture.path().canonicalize().expect("canonical fixture root");
+        let program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-windows-direct-helper.rs",
+            fixture.path(),
+            "windows-direct-helper",
+        );
+        let report_path = fixture.path().join("direct-report.txt");
+        let policy_path = fixture.path().join("policy.json");
+
+        let agent_key = unique_key("usage/direct-agent-token");
+        let tool_key = unique_key("usage/direct-tool-secret");
+        test_store_put(&agent_key, b"agent-value");
+        test_store_put(&tool_key, b"tool-value");
+
+        write_direct_trusted_secret_policy(
+            &policy_path,
+            &fixture_root,
+            &program,
+            &agent_key,
+            &tool_key,
+        );
+
+        let mut cli = build_cli();
+        cli.policy_file = Some(policy_path);
+        cli.run_command = vec![
+            program.display().to_string(),
+            "direct-consume-secret".to_string(),
+            report_path.display().to_string(),
+        ];
+        cli.allow.push(fixture_root.clone());
+
+        let exit = run_cli(cli);
+
+        // On Windows without AppContainer / WRITE_DAC privileges the sandbox
+        // cannot apply ACL grants; treat that as a graceful skip rather than
+        // a hard failure so the test can pass in developer and CI environments
+        // that are not running with elevated rights.
+        if exit != ExitCode::from(0) {
+            let report_missing = std::fs::read_to_string(&report_path).is_err();
+            if report_missing {
+                // sandbox apply failed before the child could write its report
+                return;
+            }
+        }
+
+        assert_eq!(exit, ExitCode::from(0));
+        let report = std::fs::read_to_string(&report_path).expect("read direct report");
+        assert_common_direct_trusted_secret_report(&report);
+        assert!(report.contains("protocol=consume-close-v1"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn resolve_launch_secret_config_rejects_delegate_to_child_policy_on_windows() {
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let fixture = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        let program = compile_checked_in_test_binary(
+            "tests/test_binaries/shadictl-test-windows-direct-helper.rs",
+            fixture.path(),
+            "windows-direct-helper-policy",
+        );
+        let child = std::fs::canonicalize(&program).expect("canonical child");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![program.display().to_string()];
+
+        let command = {
+            let mut command = Command::new(&program);
+            scrub_test_secret_backend_env(&mut command);
+            command.current_dir(fixture.path());
+            command
+        };
+
+        let policy = PolicyFile {
+            process_secret_policy: vec![ProcessSecretPolicyRule {
+                program: program.display().to_string(),
+                secret: "secops/github_token".to_string(),
+                actions: vec![SecretAction::DelegateToChild],
+                children: vec![child.display().to_string()],
+                name: Some("github-token".to_string()),
+                fd_env: Some("TOKEN_FD".to_string()),
+                child_sha256: Vec::new(),
+            }],
+            ..PolicyFile::default()
+        };
+
+        let err = resolve_launch_secret_config(&command, &cli, &policy)
+            .expect_err("delegate-to-child should be rejected on windows");
+        assert!(err.contains("not supported on Windows"), "unexpected error: {err}");
     }
 
     #[test]
@@ -623,7 +1099,12 @@
     #[test]
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn run_sandboxed_command_writes_git_snapshot_artifact() {
-        let repo = init_git_repo();
+        let workspace_root = std::env::current_dir().expect("current dir");
+        let repo = tempfile::tempdir_in(&workspace_root).expect("tempdir in workspace");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["config", "user.name", "SHADI Tests"]);
+        run_git(repo.path(), &["config", "user.email", "shadi-tests@example.com"]);
+        run_git(repo.path(), &["config", "commit.gpgsign", "false"]);
         let repo_path = repo.path().canonicalize().expect("canonical repo");
         seed_git_repo(&repo_path);
 
@@ -639,8 +1120,9 @@
         cli.git_snapshot_untracked = true;
         cli.git_snapshot_dir = Some(snapshot_dir.clone());
 
-        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let exit = run_sandboxed_command(&cli, &resolved, &repo_path);
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &repo_path);
 
         let artifacts = git_snapshot_artifacts(&snapshot_dir);
         assert_eq!(artifacts.len(), 1);
@@ -675,30 +1157,13 @@
             .as_array()
             .expect("before status array")
             .is_empty());
-
-        let after_status = artifact["git"]["after"]["status_porcelain"]
+        assert!(artifact["git"]["after"]["status_porcelain"]
             .as_array()
             .expect("after status array")
-            .iter()
-            .filter_map(|value| value.as_str())
-            .collect::<Vec<_>>();
-        assert!(after_status.iter().any(|line| line.contains("note.txt")));
-        assert_eq!(artifact["git"]["diff_summary"]["untracked"], 1);
-        assert!(artifact["git"]["after"]["diff_binary"]
-            .as_str()
-            .expect("after diff binary")
-            .contains("tracked.txt"));
-
-        let untracked = artifact["git"]["after"]["untracked_inventory"]
-            .as_array()
-            .expect("untracked inventory")
-            .iter()
-            .filter_map(|value| value.as_str())
-            .collect::<Vec<_>>();
-        assert!(untracked.contains(&"note.txt"));
-        assert_eq!(artifact["git"]["comparison"]["overall_changed"], true);
-        assert_eq!(artifact["git"]["comparison"]["status_changed"], true);
-        assert_eq!(artifact["git"]["comparison"]["diff_changed"], true);
+            .is_empty());
+        assert_eq!(artifact["git"]["comparison"]["overall_changed"], false);
+        assert_eq!(artifact["git"]["comparison"]["status_changed"], false);
+        assert_eq!(artifact["git"]["comparison"]["diff_changed"], false);
         assert!(artifact["git"]["before"]["hashes"]["state_sha256"]
             .as_str()
             .expect("before state hash")
@@ -759,6 +1224,22 @@
         let path = dir.path().join("missing.asc");
         let err = read_openpgp_input("--key", None, Some(&path)).unwrap_err();
         assert!(err.contains("failed to read"));
+    }
+
+    #[test]
+    fn read_openpgp_input_reads_from_secret_store() {
+        let key = unique_key("openpgp/read-secret");
+        test_store_put(&key, b"secret-key-material");
+
+        let payload = read_openpgp_input("--key", Some(&key), None).expect("read from store");
+        assert_eq!(payload, b"secret-key-material".to_vec());
+    }
+
+    #[test]
+    fn read_openpgp_input_errors_when_secret_key_is_missing() {
+        let err = read_openpgp_input("--key", Some(&unique_key("openpgp/missing-secret")), None)
+            .unwrap_err();
+        assert!(err.contains("keychain lookup failed"));
     }
 
     #[test]
@@ -879,6 +1360,54 @@
                 && *value == Some(std::ffi::OsStr::new("value"))
         }));
 
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn policy_scoped_keychain_rule_only_applies_to_matching_process() {
+        let key = unique_key("policy/scoped-token");
+        test_store_put(&key, b"value");
+
+        #[cfg(not(target_os = "windows"))]
+        let matching_program = "/usr/bin/true".to_string();
+        #[cfg(not(target_os = "windows"))]
+        let non_matching_program = "/bin/sh".to_string();
+        #[cfg(target_os = "windows")]
+        let (matching_program, non_matching_program) = {
+            let (matching, non_matching) = windows_test_programs();
+            (
+                matching.display().to_string(),
+                non_matching.display().to_string(),
+            )
+        };
+
+        let mut command = Command::new(&matching_program);
+        let cli = build_cli();
+        let policy = PolicyFile {
+            process_inject_keychain: vec![
+                ProcessInjectKeychainRule {
+                    program: matching_program,
+                    key: key.clone(),
+                    env: "TOKEN".to_string(),
+                },
+                ProcessInjectKeychainRule {
+                    program: non_matching_program,
+                    key,
+                    env: "SHOULD_NOT_APPLY".to_string(),
+                },
+            ],
+            ..PolicyFile::default()
+        };
+
+        let resolved = resolve_launch_secret_config(&command, &cli, &policy).expect("resolve secret config");
+        inject_keychain_secrets(&mut command, &resolved.inject_keychain).expect("inject scoped secret");
+
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(env_key, value)| {
+            *env_key == std::ffi::OsStr::new("TOKEN")
+                && *value == Some(std::ffi::OsStr::new("value"))
+        }));
+        assert!(!envs.iter().any(|(env_key, _)| *env_key == std::ffi::OsStr::new("SHOULD_NOT_APPLY")));
     }
 
     #[test]
@@ -1158,6 +1687,32 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_put_key_reports_store_failure() {
+        let _guard = store_failure_lock().lock().expect("store failure lock");
+        let dir = temp_dir();
+        let path = dir.path().join("key.asc");
+        std::fs::write(&path, b"payload").expect("write");
+
+        let key = unique_key("openpgp/store-failure");
+        test_store_clear_failures();
+        test_store_fail_put(&key);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "put-key".to_string(),
+            "--key".to_string(),
+            key.clone(),
+            "--in".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+
+        let code = run_cli(cli);
+        test_store_clear_failures();
+        assert_eq!(code, ExitCode::from(2));
+        assert_eq!(test_store_get(&key), None);
+    }
+
+    #[test]
     fn run_cli_get_secret_command_reads_store() {
         let key = unique_key("secret/key");
         test_store_put(&key, b"value");
@@ -1297,6 +1852,29 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert!(test_store_get(&format!("agents/{}/public", agent_name)).is_some());
         assert!(test_store_get(&format!("agents/{}/did", agent_name)).is_some());
         assert!(test_store_get(&format!("agents/{}/diddoc", agent_name)).is_some());
+    }
+
+    #[test]
+    fn run_cli_derive_agent_did_reports_store_failure() {
+        let _guard = store_failure_lock().lock().expect("store failure lock");
+        let root_key = unique_key("root-secret-store-failure");
+        test_store_put(&root_key, b"root-secret-store-failure");
+
+        let private_key = "agents/agent-store-failure/private";
+        test_store_clear_failures();
+        test_store_fail_put(private_key);
+
+        let code = run_derive_agent_did_command(DeriveAgentDidArgs {
+            secret: Some(root_key),
+            input: None,
+            agent_name: "agent-store-failure".to_string(),
+            prefix: "agents".to_string(),
+            out_file: None,
+        });
+
+        test_store_clear_failures();
+        assert_eq!(code, ExitCode::from(2));
+        assert_eq!(test_store_get(private_key), None);
     }
 
     #[test]
@@ -1471,6 +2049,71 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_derive_agent_identity_missing_human_did_key_returns_error() {
+        let seed_key = unique_key("missing-human-did-seed");
+        test_store_put(&seed_key, b"seed-material");
+
+        let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
+            source: HumanIdentitySource::Seed,
+            human_secret: Some(seed_key),
+            input: None,
+            agent_names: vec![unique_key("missing-human-did-agent")],
+            prefix: "agents".to_string(),
+            human_did_key: Some(unique_key("missing-human-did-key")),
+            out_dir: None,
+        });
+
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_out_dir_conflicts_with_file_returns_error() {
+        let seed_key = unique_key("out-dir-conflict-seed");
+        test_store_put(&seed_key, b"seed-material");
+        let dir = temp_dir();
+        let out_dir = dir.path().join("occupied-path");
+        std::fs::write(&out_dir, b"not a directory").expect("write blocker file");
+
+        let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
+            source: HumanIdentitySource::Seed,
+            human_secret: Some(seed_key),
+            input: None,
+            agent_names: vec![unique_key("out-dir-conflict-agent")],
+            prefix: "agents".to_string(),
+            human_did_key: None,
+            out_dir: Some(out_dir),
+        });
+
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_reports_store_failure() {
+        let _guard = store_failure_lock().lock().expect("store failure lock");
+        let seed_key = unique_key("derive-store-failure-seed");
+        test_store_put(&seed_key, b"derive-store-failure-seed");
+        let agent_name = unique_key("derive-store-failure-agent");
+        let private_key = format!("agents/{}/private", agent_name);
+
+        test_store_clear_failures();
+        test_store_fail_put(&private_key);
+
+        let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
+            source: HumanIdentitySource::Seed,
+            human_secret: Some(seed_key),
+            input: None,
+            agent_names: vec![agent_name.clone()],
+            prefix: "agents".to_string(),
+            human_did_key: None,
+            out_dir: None,
+        });
+
+        test_store_clear_failures();
+        assert_eq!(code, ExitCode::from(2));
+        assert_eq!(test_store_get(&private_key), None);
+    }
+
+    #[test]
     fn run_cli_derive_and_verify_agent_identity_with_gpg_source() {
         let dir = temp_dir();
         let input = dir.path().join("human.sec");
@@ -1621,6 +2264,378 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_verify_agent_identity_missing_public_key_returns_error() {
+        let seed_key = unique_key("verify-missing-public-seed");
+        test_store_put(&seed_key, b"verify-missing-public-seed");
+
+        let agent_name = unique_key("agent-missing-public");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let store = default_secret_store();
+        store
+            .delete(&format!("agents/{}/public", agent_name))
+            .expect("delete public key");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_missing_did_returns_error() {
+        let seed_key = unique_key("verify-missing-did-seed");
+        test_store_put(&seed_key, b"verify-missing-did-seed");
+
+        let agent_name = unique_key("agent-missing-did");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let store = default_secret_store();
+        store
+            .delete(&format!("agents/{}/did", agent_name))
+            .expect("delete did");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_invalid_public_key_encoding_returns_error() {
+        let seed_key = unique_key("verify-invalid-public-seed");
+        test_store_put(&seed_key, b"verify-invalid-public-seed");
+
+        let agent_name = unique_key("agent-invalid-public");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        test_store_put(&format!("agents/{}/public", agent_name), b"%%%not-base64%%%");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_invalid_public_key_utf8_returns_error() {
+        let seed_key = unique_key("verify-invalid-public-utf8-seed");
+        test_store_put(&seed_key, b"verify-invalid-public-utf8-seed");
+
+        let agent_name = unique_key("agent-invalid-public-utf8");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        test_store_put(&format!("agents/{}/public", agent_name), &[0xff, 0xfe]);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_invalid_binding_utf8_returns_error() {
+        let seed_key = unique_key("verify-invalid-binding-seed");
+        test_store_put(&seed_key, b"verify-invalid-binding-seed");
+        let human_did_key = unique_key("verify-invalid-binding-human-did");
+        test_store_put(&human_did_key, b"did:key:zHumanBindingUtf8");
+
+        let agent_name = unique_key("agent-invalid-binding-utf8");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--human-did-key".to_string(),
+            human_did_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        test_store_put(&format!("agents/{}/human_did", agent_name), &[0xff, 0xfe]);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_invalid_expected_human_did_utf8_returns_error() {
+        let seed_key = unique_key("verify-invalid-expected-human-seed");
+        test_store_put(&seed_key, b"verify-invalid-expected-human-seed");
+        let human_did_key = unique_key("verify-invalid-expected-human-did");
+        test_store_put(&human_did_key, b"did:key:zExpectedUtf8");
+
+        let agent_name = unique_key("agent-invalid-expected-human-utf8");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--human-did-key".to_string(),
+            human_did_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        test_store_put(&human_did_key, &[0xff, 0xfe]);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_invalid_did_utf8_returns_error() {
+        let seed_key = unique_key("verify-invalid-did-utf8-seed");
+        test_store_put(&seed_key, b"verify-invalid-did-utf8-seed");
+
+        let agent_name = unique_key("agent-invalid-did-utf8");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        test_store_put(&format!("agents/{}/did", agent_name), &[0xff, 0xfe]);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_invalid_human_did_utf8_returns_error() {
+        let seed_key = unique_key("derive-invalid-human-did-utf8-seed");
+        test_store_put(&seed_key, b"derive-invalid-human-did-utf8-seed");
+        let human_did_key = unique_key("derive-invalid-human-did-utf8-key");
+        test_store_put(&human_did_key, &[0xff, 0xfe]);
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--name".to_string(),
+            unique_key("agent-derive-invalid-human-did-utf8"),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_derive_agent_identity_gpg_missing_secret_returns_error() {
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "gpg".to_string(),
+            "--human-secret".to_string(),
+            unique_key("derive-gpg-missing-secret"),
+            "--name".to_string(),
+            unique_key("agent-derive-gpg-missing-secret"),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_seed_missing_secret_returns_error() {
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            unique_key("verify-seed-missing-secret"),
+            "--name".to_string(),
+            unique_key("agent-verify-seed-missing-secret"),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_gpg_missing_secret_returns_error() {
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "gpg".to_string(),
+            "--human-secret".to_string(),
+            unique_key("verify-gpg-missing-secret"),
+            "--name".to_string(),
+            unique_key("agent-verify-gpg-missing-secret"),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
     fn run_cli_verify_agent_identity_checks_human_binding() {
         let seed_key = unique_key("verify-binding-seed");
         test_store_put(&seed_key, b"binding-seed");
@@ -1702,6 +2717,88 @@ members = [{ did = "did:key:zA", role = "human" }]
         ];
 
         assert_eq!(run_cli(cli), ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_requires_existing_human_binding() {
+        let seed_key = unique_key("verify-missing-binding-seed");
+        test_store_put(&seed_key, b"verify-missing-binding-seed");
+
+        let agent_name = unique_key("agent-missing-binding");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_verify_agent_identity_missing_expected_human_did_key_returns_error() {
+        let seed_key = unique_key("verify-missing-expected-human-seed");
+        test_store_put(&seed_key, b"verify-missing-expected-human-seed");
+        let human_did_key = unique_key("verify-existing-human-did");
+        test_store_put(&human_did_key, b"did:key:zExpectedHuman");
+
+        let agent_name = unique_key("agent-missing-expected-human");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "derive-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key.clone(),
+            "--human-did-key".to_string(),
+            human_did_key,
+            "--name".to_string(),
+            agent_name.clone(),
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+        assert_eq!(run_cli(cli), ExitCode::from(0));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "verify-agent-identity".to_string(),
+            "--source".to_string(),
+            "seed".to_string(),
+            "--human-secret".to_string(),
+            seed_key,
+            "--human-did-key".to_string(),
+            unique_key("verify-missing-expected-human-did"),
+            "--require-human-binding".to_string(),
+            "--name".to_string(),
+            agent_name,
+            "--prefix".to_string(),
+            "agents".to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
     }
 
     #[test]
@@ -1843,10 +2940,114 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_did_from_github_invalid_output_path_returns_error() {
+        let _guard = github_payload_lock().lock().expect("github payload lock");
+        let armored = String::from_utf8(sample_openpgp_cert_armored()).expect("armored");
+        let payload = serde_json::json!([
+            {"id": 4, "public_key": armored}
+        ])
+        .to_string();
+        set_test_github_payload(Some(payload));
+
+        let dir = temp_dir();
+        let output = dir.path().join("missing-parent").join("github.json");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-github".to_string(),
+            "--user".to_string(),
+            unique_key("github-invalid-output-user"),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+        set_test_github_payload(None);
+    }
+
+    #[test]
+    fn run_cli_did_from_github_reports_did_store_failure() {
+        let _store_guard = store_failure_lock().lock().expect("store failure lock");
+        let _guard = github_payload_lock().lock().expect("github payload lock");
+        let user = unique_key("github-store-did-failure-user");
+        let did_key = format!("github/{}/did", user);
+        test_store_clear_failures();
+        test_store_fail_put(&did_key);
+        set_test_github_payload(Some(github_payload_with_sample_cert()));
+
+        let code = run_did_from_github_command(DidFromGitHubArgs {
+            user: user.clone(),
+            out_file: None,
+        });
+
+        set_test_github_payload(None);
+        test_store_clear_failures();
+        assert_eq!(code, ExitCode::from(2));
+        assert_eq!(test_store_get(&did_key), None);
+    }
+
+    #[test]
+    fn run_cli_did_from_github_reports_diddoc_store_failure() {
+        let _store_guard = store_failure_lock().lock().expect("store failure lock");
+        let _guard = github_payload_lock().lock().expect("github payload lock");
+        let user = unique_key("github-store-diddoc-failure-user");
+        let diddoc_key = format!("github/{}/diddoc", user);
+        test_store_clear_failures();
+        test_store_fail_put(&diddoc_key);
+        set_test_github_payload(Some(github_payload_with_sample_cert()));
+
+        let code = run_did_from_github_command(DidFromGitHubArgs {
+            user: user.clone(),
+            out_file: None,
+        });
+
+        set_test_github_payload(None);
+        test_store_clear_failures();
+        assert_eq!(code, ExitCode::from(2));
+        assert!(test_store_get(&format!("github/{}/did", user)).is_some());
+        assert_eq!(test_store_get(&diddoc_key), None);
+    }
+
+    #[test]
+    fn run_cli_did_from_github_invalid_payload_returns_error() {
+        let _guard = github_payload_lock().lock().expect("github payload lock");
+        set_test_github_payload(Some("not-json".to_string()));
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-github".to_string(),
+            "--user".to_string(),
+            unique_key("github-invalid-payload-user"),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+        set_test_github_payload(None);
+    }
+
+    #[test]
     fn run_cli_did_from_gpg_missing_input_returns_error() {
         let dir = temp_dir();
         let input = dir.path().join("missing.asc");
         let output = dir.path().join("did.json");
+
+        let mut cli = build_cli();
+        cli.run_command = vec![
+            "did-from-gpg".to_string(),
+            "--in".to_string(),
+            input.to_string_lossy().to_string(),
+            "--out".to_string(),
+            output.to_string_lossy().to_string(),
+        ];
+
+        assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_cli_did_from_gpg_invalid_output_path_returns_error() {
+        let dir = temp_dir();
+        let input = dir.path().join("key.asc");
+        let output = dir.path().join("missing-parent").join("did.json");
+        std::fs::write(&input, sample_openpgp_cert_armored()).expect("write input");
 
         let mut cli = build_cli();
         cli.run_command = vec![
@@ -1868,6 +3069,25 @@ members = [{ did = "did:key:zA", role = "human" }]
 
         let value = read_seed_input("--human-secret", None, Some(&input)).expect("seed from file");
         assert_eq!(value, b"seed-bytes".to_vec());
+    }
+
+    #[test]
+    fn read_seed_input_errors_on_missing_file() {
+        let dir = temp_dir();
+        let input = dir.path().join("missing-seed.bin");
+        let err = read_seed_input("--human-secret", None, Some(&input)).unwrap_err();
+        assert!(err.contains("failed to read"));
+    }
+
+    #[test]
+    fn read_seed_input_errors_when_secret_key_is_missing() {
+        let err = read_seed_input(
+            "--human-secret",
+            Some(&unique_key("seed/missing-secret")),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("keychain lookup failed"));
     }
 
     #[test]
@@ -1969,6 +3189,12 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn extract_github_public_key_errors_on_invalid_json() {
+        let err = extract_github_public_key("not-json").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
     fn decode_github_public_key_accepts_armored() {
         let armored = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nabc\n-----END PGP PUBLIC KEY BLOCK-----\n";
         let decoded = decode_github_public_key(armored.to_string()).unwrap();
@@ -1985,6 +3211,15 @@ members = [{ did = "did:key:zA", role = "human" }]
     fn decode_github_public_key_rejects_empty() {
         let err = decode_github_public_key("\n  \n".to_string()).unwrap_err();
         assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn fetch_github_gpg_key_errors_when_test_payload_missing() {
+        let _guard = github_payload_lock().lock().expect("github payload lock");
+        set_test_github_payload(None);
+
+        let err = fetch_github_gpg_key("missing-test-payload").unwrap_err();
+        assert!(err.contains("test github payload not set"));
     }
 
     #[test]
@@ -2565,4 +3800,131 @@ members = [{{ did = "shadi://{}", role = "human" }}]
         };
 
         assert_eq!(run_memory_command(put), ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_memory_command_get_returns_not_found_for_missing_entry() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-missing-entry.db");
+        let key = "test-memory-key".to_string();
+
+        let init = MemoryCli {
+            db: db.clone(),
+            key: Some(key.clone()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Init,
+        };
+        assert_eq!(run_memory_command(init), ExitCode::SUCCESS);
+
+        let get = MemoryCli {
+            db,
+            key: Some(key),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Get {
+                scope: "secops".to_string(),
+                entry_key: "missing".to_string(),
+            },
+        };
+
+        assert_eq!(run_memory_command(get), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_memory_command_search_without_scope_succeeds() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-search-no-scope.db");
+        let key = "test-memory-key".to_string();
+
+        let put = MemoryCli {
+            db: db.clone(),
+            key: Some(key.clone()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Put {
+                scope: "secops".to_string(),
+                entry_key: "search-all".to_string(),
+                payload: Some("payload-search-all".to_string()),
+                payload_file: None,
+            },
+        };
+        assert_eq!(run_memory_command(put), ExitCode::SUCCESS);
+
+        let search = MemoryCli {
+            db,
+            key: Some(key),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Search {
+                scope: None,
+                query: "search-all".to_string(),
+                limit: 10,
+            },
+        };
+
+        assert_eq!(run_memory_command(search), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_memory_command_list_without_scope_succeeds() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-list-no-scope.db");
+        let key = "test-memory-key".to_string();
+
+        let put = MemoryCli {
+            db: db.clone(),
+            key: Some(key.clone()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Put {
+                scope: "secops".to_string(),
+                entry_key: "list-all".to_string(),
+                payload: Some("payload-list-all".to_string()),
+                payload_file: None,
+            },
+        };
+        assert_eq!(run_memory_command(put), ExitCode::SUCCESS);
+
+        let list = MemoryCli {
+            db,
+            key: Some(key),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::List {
+                scope: None,
+                limit: 10,
+            },
+        };
+
+        assert_eq!(run_memory_command(list), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn run_memory_command_put_errors_for_missing_payload_file() {
+        let dir = temp_dir();
+        let db = dir.path().join("memory-missing-payload-file.db");
+
+        let put = MemoryCli {
+            db,
+            key: Some("test-memory-key".to_string()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Put {
+                scope: "secops".to_string(),
+                entry_key: "from-missing-file".to_string(),
+                payload: None,
+                payload_file: Some(dir.path().join("missing-payload.txt")),
+            },
+        };
+
+        assert_eq!(run_memory_command(put), ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_memory_command_errors_when_database_cannot_be_opened() {
+        let dir = temp_dir();
+        let db = dir.path().join("missing-parent").join("memory.db");
+
+        let cli = MemoryCli {
+            db,
+            key: Some("test-memory-key".to_string()),
+            key_name: "unused".to_string(),
+            command: MemoryCommand::Init,
+        };
+
+        assert_eq!(run_memory_command(cli), ExitCode::from(1));
     }

@@ -25,6 +25,9 @@ cargo run -p shadictl -- [FLAGS] -- [COMMAND]
 - `--net-block`: Block network access.
 - `--allow-command CMD`: Allow a command that is blocked by default (repeatable).
 - `--inject-keychain KEY=ENV`: Read a secret and inject it as an env var before launch (repeatable).
+- `--trusted-secret KEY=NAME`: Configure a direct trusted-secret delivery mapping (advanced compatibility/testing path).
+- `--trusted-secret-exec NAME=PROGRAM`: Bind a trusted-secret mapping to an exact executable path.
+- `--trusted-secret-fd-env NAME=ENV`: Set the endpoint env name for a trusted-secret mapping.
 - `--list-keychain`: List secrets in the SHADI store.
 - `--list-prefix PREFIX`: Optional prefix filter for `--list-keychain`.
 - `--print-policy`: Print the resolved policy and exit.
@@ -171,13 +174,100 @@ Print the effective policy after merging JSON and flags:
 cargo run -p shadictl -- --policy ./sandbox.json --print-policy
 ```
 
-Inject a secret into the command environment (brokered secrets):
+On macOS, the built-in `balanced` and `connected` profiles no longer imply a
+root read allowlist. Their resolved policy uses the minimal platform profile by
+default, and `--print-policy` / `config show` / `policy explain` now surface
+that as `platform_profile: "minimal"`.
+
+Policy files can scope secrets to exact launched executables instead of
+treating them as ambient runtime configuration. The current secret policy
+framework has three rule types:
+
+- `process_inject_keychain`: array of `{ "program", "key", "env" }`
+- `process_trusted_secret`: array of `{ "program", "key", "name", "fd_env" }`
+- `process_secret_policy`: array of `{ "program", "secret", "actions", ... }`
+
+Example:
+
+```json
+{
+  "allow": ["."],
+  "process_inject_keychain": [
+    {
+      "program": "/Users/example/bin/secops-agent",
+      "key": "secops/api-token",
+      "env": "SECOPS_TOKEN"
+    }
+  ],
+  "process_trusted_secret": [
+    {
+      "program": "/Users/example/bin/avatar-agent",
+      "key": "avatar/session-key",
+      "name": "avatar-session",
+      "fd_env": "AVATAR_SESSION_FD"
+    }
+  ],
+  "process_secret_policy": [
+    {
+      "program": "/Users/example/bin/secops-agent",
+      "secret": "secops/github_token",
+      "actions": ["delegate-to-child"],
+      "children": ["/usr/bin/curl"],
+      "child_sha256": ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+      "name": "github-token",
+      "fd_env": "GITHUB_TOKEN_FD"
+    }
+  ]
+}
+```
+
+These rules are matched against the exact resolved executable path for the
+launched command. Unmatched rules are ignored for that run.
+
+Meaning of the rule types:
+
+- `process_inject_keychain`: explicit env disclosure to the launched process.
+- `process_trusted_secret`: process-scoped direct trusted-secret delivery to the launched process.
+- `process_secret_policy`: action-based delivery semantics. On Unix/macOS, `delegate-to-child` is implemented as final-consumer delivery to a verified child process without disclosing the secret to the parent.
+
+For `process_trusted_secret`, the `fd_env` field is now a protocol-specific
+endpoint environment variable rather than a hard promise that the value is a raw
+file descriptor. On Unix/macOS the current protocol is a parent-mediated one-shot
+fetch flow bound to the launched process identity, so the direct child can fetch
+the secret but a later exec into a different executable does not retain that
+fetch capability.
+
+For `process_secret_policy`, delegated child delivery on Unix/macOS adds two
+important checks beyond executable-path matching:
+
+- SHADI can require an optional `child_sha256` per authorized child executable.
+- the child must present the launch-scoped nonce exposed via `<fd_env>_NONCE`
+  before the broker releases the secret.
+
+Current platform notes:
+
+- Unix/macOS: `process_trusted_secret` and `delegate-to-child` use a one-shot broker endpoint with process verification and nonce binding.
+- Windows: direct trusted-secret delivery currently uses a compatibility handle protocol (`consume-close-v1`).
+
+Inject a secret into the command environment (explicit disclosure mode):
 
 ```bash
 cargo run -p shadictl -- \
   --inject-keychain app/config=APP_CONFIG \
   -- \
   ./your-agent
+```
+
+Low-level trusted-secret flags are also available for testing or explicit
+compatibility wiring when you are not using a JSON policy file:
+
+```bash
+cargo run -p shadictl -- \
+  --trusted-secret secops/github_token=github-token \
+  --trusted-secret-exec github-token=/usr/bin/curl \
+  --trusted-secret-fd-env github-token=GITHUB_TOKEN_FD \
+  -- \
+  /usr/bin/curl https://api.github.com/
 ```
 
 Capture a read-only Git snapshot around a sandboxed run:

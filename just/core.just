@@ -4,7 +4,7 @@ build:
   {{ if os() == "windows" {
     "$env:PYO3_PYTHON = \"" + python312 + "\"; cargo build"
   } else if os() == "macos" {
-    "PYO3_PYTHON=\"" + python312 + "\" RUSTFLAGS=\"-C link-arg=-undefined -C link-arg=dynamic_lookup\" cargo build && cp target/debug/libshadi.dylib .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so && codesign --sign - --force .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so"
+    "PYO3_PYTHON=\"" + python312 + "\" RUSTFLAGS=\"-C link-arg=-undefined -C link-arg=dynamic_lookup\" cargo build && cp target/debug/libshadi.dylib .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so && (codesign --remove-signature .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so >/dev/null 2>&1 || true) && codesign --sign - --force .venv/lib/python3.12/site-packages/shadi/shadi.cpython-312-darwin.so"
   } else {
     "PYO3_PYTHON=\"" + python312 + "\" cargo build"
   } }}

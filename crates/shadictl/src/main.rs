@@ -37,6 +37,7 @@ mod policy_helpers;
 mod sandbox_snapshot;
 mod slim_mas_command;
 mod trace_command;
+mod trusted_secret_delivery;
 
 use cli_types::*;
 use introspection_command::*;
@@ -46,13 +47,22 @@ use policy_helpers::*;
 use sandbox_snapshot::*;
 use slim_mas_command::*;
 use trace_command::*;
+use trusted_secret_delivery::*;
 
 #[cfg(test)]
 static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 
 #[cfg(test)]
+static TEST_SECRET_STORE_PUT_FAILURES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+#[cfg(test)]
 fn test_secret_store_map() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     TEST_SECRET_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn test_secret_store_put_failures() -> &'static Mutex<HashSet<String>> {
+    TEST_SECRET_STORE_PUT_FAILURES.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 #[cfg(test)]
@@ -61,6 +71,14 @@ struct TestSecretStore;
 #[cfg(test)]
 impl SecretStore for TestSecretStore {
     fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> agent_secrets::SecretResult<()> {
+        if test_secret_store_put_failures()
+            .lock()
+            .map_err(|_| agent_secrets::SecretError::StorageFailure)?
+            .contains(key)
+        {
+            return Err(agent_secrets::SecretError::StorageFailure);
+        }
+
         let mut guard = test_secret_store_map()
             .lock()
             .map_err(|_| agent_secrets::SecretError::StorageFailure)?;
@@ -115,6 +133,35 @@ fn test_store_put(key: &str, value: &[u8]) {
 fn test_store_get(key: &str) -> Option<Vec<u8>> {
     let guard = test_secret_store_map().lock().expect("test store lock");
     guard.get(key).cloned()
+}
+
+#[cfg(test)]
+fn test_store_fail_put(key: &str) {
+    let mut guard = test_secret_store_put_failures()
+        .lock()
+        .expect("test store put failures lock");
+    guard.insert(key.to_string());
+}
+
+#[cfg(test)]
+fn test_store_clear_failures() {
+    let mut guard = test_secret_store_put_failures()
+        .lock()
+        .expect("test store put failures lock");
+    guard.clear();
+}
+
+#[cfg(test)]
+pub(crate) fn scrub_test_secret_backend_env(command: &mut Command) {
+    for key in [
+        "SHADI_SECRET_BACKEND",
+        "SHADI_OP_VAULT",
+        "SHADI_OP_ACCOUNT",
+        "SHADI_OP_BINARY",
+        "OP_SERVICE_ACCOUNT_TOKEN",
+    ] {
+        command.env_remove(key);
+    }
 }
 
 
@@ -249,7 +296,7 @@ fn run_cli(mut cli: Cli) -> ExitCode {
         }
     };
 
-    run_sandboxed_command(&cli, &resolved, &cwd)
+    run_sandboxed_command(&cli, &resolved, &file_policy, &cwd)
 }
 
 #[cfg(test)]

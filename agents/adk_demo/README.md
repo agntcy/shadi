@@ -12,7 +12,7 @@ agentic app.
 
 ## Tourist scheduling system demo
 
-To run the Tourist/Guide agents from agentic-apps with brokered secrets:
+To run the Tourist/Guide agents from agentic-apps with explicitly disclosed demo secrets:
 
 ```bash
 export AGENTIC_APPS_PATH=/path/to/agentic-apps

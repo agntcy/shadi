@@ -83,6 +83,21 @@ This confirms three things:
 - the sandbox launcher is functional on your host
 - the runtime path is ready for a real agent command
 
+## Understand Secret Delivery Policy
+
+SHADI now resolves secret-delivery policy at launch time in addition to the
+filesystem and network sandbox.
+
+The current secret-delivery model has three distinct paths:
+
+- `--inject-keychain` and `process_inject_keychain`: explicit env disclosure to the launched process.
+- `process_trusted_secret`: process-scoped trusted delivery to the launched process.
+- `process_secret_policy`: action-based rules such as `delegate-to-child`, where SHADI delivers the secret directly to a verified child tool on Unix/macOS without disclosing it to the parent.
+
+For the full model, including exact-program matching, nonce-bound trusted-secret
+protocols, and policy-file examples, continue to [Sandbox and Policies](sandbox.md)
+and [CLI Reference](cli.md).
+
 ## Prepare Identity and Secrets
 
 SHADI is most useful when the runtime can derive agent identity and gate secret

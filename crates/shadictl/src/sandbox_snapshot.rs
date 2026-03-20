@@ -1,6 +1,11 @@
 use super::*;
 
-pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &Path) -> ExitCode {
+pub(crate) fn run_sandboxed_command(
+    cli: &Cli,
+    resolved: &ResolvedPolicy,
+    file_policy: &PolicyFile,
+    cwd: &Path,
+) -> ExitCode {
     let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
     let policy_source = cli
         .policy_file
@@ -21,8 +26,46 @@ pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &
         command.args(&cli.run_command[1..]);
     }
     command.current_dir(cwd);
+    #[cfg(test)]
+    scrub_test_secret_backend_env(&mut command);
 
-    if let Err(err) = inject_keychain_secrets(&mut command, &cli.inject_keychain) {
+    let secret_config = match resolve_launch_secret_config(&command, cli, file_policy) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("failed to resolve launch secret policy: {}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    let mut pending_trusted_secrets = match PendingTrustedSecretDelivery::new(
+        &mut command,
+        &secret_config.trusted_secret,
+        &secret_config.trusted_secret_exec,
+        &secret_config.trusted_secret_fd_env,
+        &secret_config.process_secret_policy,
+    ) {
+        Ok(session) => session,
+        Err(err) => {
+            eprintln!("failed to configure trusted secret delivery: {}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    let mut runtime_policy = resolved.policy.clone();
+    if let Some(pending) = pending_trusted_secrets.as_ref() {
+        for path in pending.endpoint_paths() {
+            runtime_policy = runtime_policy
+                .allow_read_path(&path)
+                .allow_write_path(&path);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if pending_trusted_secrets.is_some() {
+        runtime_policy = runtime_policy.allow_local_unix_sockets();
+    }
+
+    if let Err(err) = inject_keychain_secrets(&mut command, &secret_config.inject_keychain) {
         eprintln!("failed to inject keychain secrets: {}", err);
         return ExitCode::from(2);
     }
@@ -43,10 +86,47 @@ pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &
     );
     let _guard = span.enter();
 
-    match spawn_sandboxed(&mut command, &resolved.policy) {
-        Ok(mut child) => match child.wait() {
+    match spawn_sandboxed(&mut command, &runtime_policy) {
+        Ok(mut child) => {
+            if let Some(pending) = pending_trusted_secrets.as_mut() {
+                if let Err(err) = pending.deliver_after_spawn(child.id()) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    pending.close_parent_fds();
+                    span.record("exit.code", &-1);
+                    let snapshot_path = finalize_git_snapshot(
+                        snapshot.as_mut(),
+                        None,
+                        Some(format!("failed to deliver trusted secret: {}", err)),
+                    );
+                    if let Some(path) = snapshot_path {
+                        span.record("snapshot.path", &path.display().to_string());
+                    }
+                    eprintln!("failed to deliver trusted secret: {}", err);
+                    return ExitCode::from(1);
+                }
+            }
+
+            let exit = match child.wait() {
             Ok(status) => {
                 let exit_code = status.code().unwrap_or(1);
+                if let Some(pending) = pending_trusted_secrets.as_mut() {
+                    if let Err(err) = pending.wait_for_background_delivery() {
+                        span.record("exit.code", &-1);
+                        let snapshot_path = finalize_git_snapshot(
+                            snapshot.as_mut(),
+                            None,
+                            Some(format!("failed to complete trusted secret delivery: {}", err)),
+                        );
+                        if let Some(path) = snapshot_path {
+                            span.record("snapshot.path", &path.display().to_string());
+                        }
+                        pending.close_parent_fds();
+                        eprintln!("failed to complete trusted secret delivery: {}", err);
+                        return ExitCode::from(1);
+                    }
+                    pending.close_parent_fds();
+                }
                 span.record("exit.code", &exit_code);
                 let snapshot_path = finalize_git_snapshot(snapshot.as_mut(), status.code(), None);
                 if let Some(path) = snapshot_path {
@@ -67,7 +147,10 @@ pub(crate) fn run_sandboxed_command(cli: &Cli, resolved: &ResolvedPolicy, cwd: &
                 eprintln!("failed to wait for child: {}", err);
                 ExitCode::from(1)
             }
-        },
+            };
+
+            exit
+        }
         Err(err) => {
             span.record("exit.code", &-1);
             let snapshot_path = finalize_git_snapshot(
@@ -778,4 +861,359 @@ fn unix_timestamp_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Cli, PolicyFile, resolve_policy};
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_dir() -> TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    fn build_cli() -> Cli {
+        Cli {
+            profile: None,
+            policy_file: None,
+            allow: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            net_block: false,
+            allow_command: Vec::new(),
+            inject_keychain: Vec::new(),
+            trusted_secret: Vec::new(),
+            trusted_secret_exec: Vec::new(),
+            trusted_secret_fd_env: Vec::new(),
+            list_keychain: false,
+            list_prefix: None,
+            print_policy: false,
+            git_snapshot: false,
+            git_snapshot_dir: None,
+            git_snapshot_untracked: false,
+            subcommand: None,
+            run_command: vec!["echo".to_string(), "ok".to_string()],
+        }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .expect("run git");
+        if !output.status.success() {
+            panic!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn init_git_repo() -> TempDir {
+        let dir = temp_dir();
+        run_git(dir.path(), &["init"]);
+        run_git(dir.path(), &["config", "user.name", "SHADI Tests"]);
+        run_git(dir.path(), &["config", "user.email", "shadi-tests@example.com"]);
+        run_git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        dir
+    }
+
+    fn seed_git_repo(repo_path: &Path) {
+        let tracked = repo_path.join("tracked.txt");
+        std::fs::write(&tracked, "initial\n").expect("write tracked file");
+        run_git(repo_path, &["add", "tracked.txt"]);
+        run_git(repo_path, &["commit", "-m", "initial"]);
+    }
+
+    fn init_nested_git_repo(parent: &Path, name: &str) -> PathBuf {
+        let repo_path = parent.join(name);
+        std::fs::create_dir_all(&repo_path).expect("create nested repo dir");
+        run_git(&repo_path, &["init"]);
+        run_git(&repo_path, &["config", "user.name", "SHADI Tests"]);
+        run_git(&repo_path, &["config", "user.email", "shadi-tests@example.com"]);
+        run_git(&repo_path, &["config", "commit.gpgsign", "false"]);
+        repo_path
+    }
+
+    fn sample_git_repo_state(untracked_inventory: Option<Vec<String>>) -> GitRepoState {
+        let head = Some("head-sha".to_string());
+        let status_porcelain = vec![" M tracked.txt".to_string()];
+        let diff_binary = "diff --git a/tracked.txt b/tracked.txt".to_string();
+        let hashes = build_git_repo_state_hashes(
+            head.as_deref(),
+            &status_porcelain,
+            &diff_binary,
+            untracked_inventory.as_deref(),
+        );
+
+        GitRepoState {
+            head,
+            status_porcelain,
+            diff_binary,
+            untracked_inventory,
+            hashes,
+        }
+    }
+
+    #[test]
+    fn git_snapshot_record_sync_primary_repository_fields_clears_without_repositories() {
+        let mut record = GitSnapshotRecord {
+            detected: true,
+            changed_repositories: 1,
+            any_repo_changed: true,
+            repo_root: Some("root".to_string()),
+            include_untracked_inventory: false,
+            before: Some(sample_git_repo_state(None)),
+            after: Some(sample_git_repo_state(Some(vec!["scratch.txt".to_string()]))),
+            diff_summary: Some(GitDiffSummary {
+                changed: true,
+                ..GitDiffSummary::default()
+            }),
+            comparison: Some(GitStateComparison {
+                before_state_sha256: Some("a".repeat(64)),
+                after_state_sha256: Some("b".repeat(64)),
+                head_changed: true,
+                status_changed: true,
+                diff_changed: true,
+                untracked_changed: Some(true),
+                overall_changed: true,
+            }),
+            capture_error: Some("stale".to_string()),
+            repositories: Vec::new(),
+        };
+
+        record.sync_primary_repository_fields();
+
+        assert!(record.repo_root.is_none());
+        assert!(record.before.is_none());
+        assert!(record.after.is_none());
+        assert!(record.diff_summary.is_none());
+        assert!(record.comparison.is_none());
+        assert!(record.capture_error.is_none());
+    }
+
+    #[test]
+    fn default_git_snapshot_dir_falls_back_without_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os("SHADI_TMP_DIR");
+        std::env::remove_var("SHADI_TMP_DIR");
+
+        let path = default_git_snapshot_dir();
+
+        match previous {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+
+        assert_eq!(path, PathBuf::from("./.tmp").join("git-snapshots"));
+    }
+
+    #[test]
+    fn build_snapshot_artifact_id_uses_command_fallback_when_name_is_empty() {
+        let artifact_id = build_snapshot_artifact_id(&["!!!".to_string()], 42);
+        assert!(artifact_id.ends_with("-command"));
+    }
+
+    #[test]
+    fn capture_git_snapshot_reports_no_repo_outside_git() {
+        let dir = temp_dir();
+        let record = capture_git_snapshot(dir.path(), true);
+
+        assert!(!record.detected);
+        assert_eq!(record.changed_repositories, 0);
+        assert!(!record.any_repo_changed);
+        assert!(record.repo_root.is_none());
+        assert!(record.before.is_none());
+        assert!(record.after.is_none());
+        assert!(record.diff_summary.is_none());
+        assert!(record.comparison.is_none());
+        assert!(record.capture_error.is_none());
+        assert!(record.repositories.is_empty());
+        assert!(record.include_untracked_inventory);
+    }
+
+    #[test]
+    fn capture_git_repository_snapshot_records_missing_repo_error() {
+        let dir = temp_dir();
+        let missing_repo = dir.path().join("missing-repo");
+
+        let repository = capture_git_repository_snapshot(dir.path(), &missing_repo, false);
+
+        assert_eq!(repository.repo_root, missing_repo.display().to_string());
+        assert!(repository.before.is_none());
+        assert!(repository.after.is_none());
+        assert!(repository.diff_summary.is_none());
+        assert!(repository.comparison.is_none());
+        assert!(repository.capture_error.as_deref().unwrap_or_default().contains("git status"));
+    }
+
+    #[test]
+    fn repo_relative_path_handles_parent_and_unrelated_roots() {
+        let dir = temp_dir();
+        let cwd = dir.path().join("workspace").join("repo");
+        let unrelated = dir.path().join("external-repo");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        std::fs::create_dir_all(&unrelated).expect("create unrelated dir");
+
+        assert_eq!(repo_relative_path(&cwd, dir.path()), ".");
+        assert_eq!(repo_relative_path(&cwd, &unrelated), unrelated.display().to_string());
+    }
+
+    #[test]
+    fn canonicalize_or_clone_returns_missing_path_unchanged() {
+        let dir = temp_dir();
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(canonicalize_or_clone(&missing), missing);
+    }
+
+    #[test]
+    fn detect_git_repo_root_returns_none_outside_git() {
+        let dir = temp_dir();
+        assert!(detect_git_repo_root(dir.path()).expect("detect git root").is_none());
+    }
+
+    #[test]
+    fn run_git_capture_reports_git_failures() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        let err = run_git_capture(&repo_path, &["definitely-not-a-real-git-subcommand"]).unwrap_err();
+        assert!(err.contains("git definitely-not-a-real-git-subcommand failed"));
+    }
+
+    #[test]
+    fn run_git_capture_optional_returns_none_on_git_failures() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        let output = run_git_capture_optional(&repo_path, &["show-ref", "--verify", "refs/heads/does-not-exist"])
+            .expect("optional git output");
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn build_git_state_comparison_marks_untracked_presence_change() {
+        let before = sample_git_repo_state(None);
+        let after = sample_git_repo_state(Some(vec!["scratch.txt".to_string()]));
+
+        let comparison = build_git_state_comparison(Some(&before), Some(&after)).expect("comparison");
+        assert_eq!(comparison.untracked_changed, Some(true));
+    }
+
+    #[test]
+    fn git_snapshot_session_records_after_capture_error_when_nested_repo_disappears() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let nested_repo = init_nested_git_repo(&repo_path, "nested-missing-after-start");
+        std::fs::write(nested_repo.join("nested.txt"), "initial\n").expect("write nested file");
+        run_git(&nested_repo, &["add", "nested.txt"]);
+        run_git(&nested_repo, &["commit", "-m", "initial"]);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_dir = Some(snapshot_dir);
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        std::fs::remove_dir_all(&nested_repo).expect("remove nested repo");
+
+        let artifact_path = session.finish(Some(0), None).expect("finish snapshot");
+        let payload = std::fs::read_to_string(&artifact_path).expect("read artifact");
+        let artifact: Value = serde_json::from_str(&payload).expect("parse artifact");
+
+        let repositories = artifact["git"]["repositories"]
+            .as_array()
+            .expect("repository array");
+        let nested = repositories
+            .iter()
+            .find(|repository| repository["relative_path"] == "nested-missing-after-start")
+            .expect("nested repository entry");
+        assert!(nested["capture_error"].as_str().expect("capture error").contains("git status"));
+    }
+
+    #[test]
+    fn git_snapshot_session_reports_run_dir_creation_failure() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let run_dir = snapshot_dir.join("runs").join(&session.artifact.artifact_id);
+        std::fs::create_dir_all(run_dir.parent().expect("runs parent")).expect("create runs parent");
+        std::fs::write(&run_dir, "occupied\n").expect("block run dir with file");
+
+        let err = session.finish(Some(0), None).unwrap_err();
+        assert!(err.contains("failed to create"));
+    }
+
+    #[test]
+    fn git_snapshot_session_reports_snapshot_write_failure() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        let run_dir = snapshot_dir.join("runs").join(&session.artifact.artifact_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        std::fs::create_dir(run_dir.join("snapshot.json")).expect("block snapshot file with dir");
+
+        let err = session.finish(Some(0), None).unwrap_err();
+        assert!(err.contains("failed to write"));
+    }
+
+    #[test]
+    fn git_snapshot_session_reports_latest_write_failure() {
+        let repo = init_git_repo();
+        let repo_path = repo.path().canonicalize().expect("canonical repo");
+        seed_git_repo(&repo_path);
+
+        let snapshot_root = temp_dir();
+        let snapshot_dir = snapshot_root.path().join("git-snapshots");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["portable-test".to_string()];
+        cli.git_snapshot = true;
+        cli.git_snapshot_dir = Some(snapshot_dir.clone());
+
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
+        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+
+        std::fs::create_dir_all(&snapshot_dir).expect("create snapshot dir");
+        std::fs::create_dir(snapshot_dir.join("latest.json")).expect("block latest file with dir");
+
+        let err = session.finish(Some(0), None).unwrap_err();
+        assert!(err.contains("failed to write"));
+    }
 }
