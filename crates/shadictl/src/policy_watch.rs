@@ -523,4 +523,188 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(!sock_path.exists());
     }
+
+    #[test]
+    fn default_socket_path_contains_pid() {
+        let path = default_socket_path(42);
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.contains("42"));
+        assert!(name.ends_with(".sock"));
+    }
+
+    #[test]
+    fn handle_patch_removes_commands() {
+        let live = test_live_policy();
+        // "rm" and "sudo" are in the initial blocked set.
+        let patch = PolicyPatch {
+            remove_block_command: vec!["rm".to_string()],
+            add_allow_command: vec!["git".to_string()],
+            remove_allow_command: vec!["git".to_string()],
+            ..Default::default()
+        };
+        let resp = handle_patch(&live, patch);
+        match resp {
+            ControlResponse::PatchResult(r) => {
+                assert!(r.accepted);
+                assert_eq!(r.commands, PatchAxisStatus::Applied);
+            }
+            _ => panic!("expected PatchResult"),
+        }
+        let guard = live.lock().unwrap();
+        assert!(!guard.blocked.contains("rm"));
+        assert!(guard.blocked.contains("sudo"));
+        assert!(!guard.allow.contains("git"));
+    }
+
+    #[test]
+    fn handle_patch_removes_net_allow() {
+        let live = test_live_policy();
+        // First add a network entry.
+        let patch1 = PolicyPatch {
+            add_net_allow: vec!["example.com".to_string()],
+            ..Default::default()
+        };
+        handle_patch(&live, patch1);
+        // Now remove it.
+        let patch2 = PolicyPatch {
+            remove_net_allow: vec!["example.com".to_string()],
+            ..Default::default()
+        };
+        let resp = handle_patch(&live, patch2);
+        match resp {
+            ControlResponse::PatchResult(r) => {
+                assert!(r.accepted);
+                assert_eq!(r.network, PatchAxisStatus::PendingRestart);
+            }
+            _ => panic!("expected PatchResult"),
+        }
+        let guard = live.lock().unwrap();
+        assert!(guard.staged_net_allow.is_empty());
+    }
+
+    #[test]
+    fn handle_patch_deduplicates_net_allow() {
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_net_allow: vec!["dup.com".to_string(), "dup.com".to_string()],
+            ..Default::default()
+        };
+        handle_patch(&live, patch);
+        let guard = live.lock().unwrap();
+        assert_eq!(guard.staged_net_allow, vec!["dup.com"]);
+    }
+
+    #[test]
+    fn handle_patch_stages_allow_paths() {
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_allow: vec!["/opt/shared".to_string()],
+            ..Default::default()
+        };
+        let resp = handle_patch(&live, patch);
+        match resp {
+            ControlResponse::PatchResult(r) => {
+                assert!(r.accepted);
+                assert_eq!(r.filesystem, PatchAxisStatus::PendingRestart);
+            }
+            _ => panic!("expected PatchResult"),
+        }
+        let guard = live.lock().unwrap();
+        assert_eq!(guard.staged_allow, vec!["/opt/shared"]);
+    }
+
+    #[test]
+    fn handle_patch_combined_axes() {
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_allow_command: vec!["npm".to_string()],
+            add_read: vec!["/opt/data".to_string()],
+            add_net_allow: vec!["cdn.example.com".to_string()],
+            ..Default::default()
+        };
+        let resp = handle_patch(&live, patch);
+        match resp {
+            ControlResponse::PatchResult(r) => {
+                assert!(r.accepted);
+                assert_eq!(r.commands, PatchAxisStatus::Applied);
+                assert_eq!(r.filesystem, PatchAxisStatus::PendingRestart);
+                assert_eq!(r.network, PatchAxisStatus::PendingRestart);
+                assert_eq!(r.pending_restart.len(), 2);
+                assert!(r.message.contains("require process restart"));
+            }
+            _ => panic!("expected PatchResult"),
+        }
+    }
+
+    #[test]
+    fn handle_stream_tolerates_invalid_json() {
+        use std::io::Cursor;
+
+        let live = test_live_policy();
+        let input = b"not valid json\n";
+        let mut buf = Vec::new();
+        buf.extend_from_slice(input);
+        // Provide enough capacity for the response.
+        let stream = Cursor::new(buf);
+        handle_stream(stream, &live);
+        // No panic — the error path was exercised.
+    }
+
+    #[test]
+    fn handle_stream_skips_blank_lines() {
+        use std::io::Cursor;
+
+        let live = test_live_policy();
+        let input = b"\n   \n";
+        let stream = Cursor::new(input.to_vec());
+        handle_stream(stream, &live);
+    }
+
+    #[test]
+    fn send_message_fails_on_bad_path() {
+        let bad_path = Path::new("/tmp/shadi-nonexistent-test.sock");
+        let msg = ControlMessage::QueryPolicy;
+        let result = send_message(bad_path, &msg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn send_patch_propagates_connect_error() {
+        let bad_path = Path::new("/tmp/shadi-nonexistent-test.sock");
+        let patch = PolicyPatch::default();
+        let result = send_patch(bad_path, &patch);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn query_policy_propagates_connect_error() {
+        let bad_path = Path::new("/tmp/shadi-nonexistent-test.sock");
+        let result = query_policy(bad_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handle_query_includes_staged_data() {
+        let live = test_live_policy();
+        {
+            let mut guard = live.lock().unwrap();
+            guard.staged_read.push("/staged/read".to_string());
+            guard.staged_write.push("/staged/write".to_string());
+            guard.staged_allow.push("/staged/allow".to_string());
+            guard.staged_net_allow.push("staged.example.com".to_string());
+            guard.allow.insert("allowed-cmd".to_string());
+        }
+        let resp = handle_query(&live);
+        match resp {
+            ControlResponse::Policy { policy } => {
+                assert_eq!(policy["staged_read"][0], "/staged/read");
+                assert_eq!(policy["staged_write"][0], "/staged/write");
+                assert_eq!(policy["staged_allow"][0], "/staged/allow");
+                assert_eq!(policy["staged_net_allow"][0], "staged.example.com");
+                let allow_cmds = policy["allow_command"].as_array().unwrap();
+                assert!(allow_cmds.iter().any(|v| v == "allowed-cmd"));
+            }
+            _ => panic!("expected Policy"),
+        }
+    }
 }
