@@ -1,12 +1,15 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Unix-domain control socket for runtime policy patches.
+//! Control channel for runtime policy patches.
 //!
-//! When `--watch-policy` is passed, `shadictl` creates a control socket at
-//! `$TMPDIR/shadi-ctl-<pid>.sock`.  External callers (including
-//! `shadictl policy patch`) connect, send a JSON [`ControlMessage`], and
-//! receive a JSON [`ControlResponse`].
+//! When `--watch-policy` is passed, `shadictl` creates a local AF_UNIX
+//! control socket.  On Unix the path is `$TMPDIR/shadi-ctl-<pid>.sock`;
+//! on Windows (10 1803+) it is `%TEMP%\shadi-ctl-<pid>.sock` using the
+//! native `AF_UNIX` support via the [`uds_windows`] crate.
+//!
+//! External callers (including `shadictl policy patch`) connect, send a JSON
+//! [`ControlMessage`], and receive a JSON [`ControlResponse`].
 //!
 //! Only user-space axes (command allow/block lists) can be applied immediately.
 //! Filesystem and network changes are staged and reported as
@@ -14,10 +17,15 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+
+#[cfg(windows)]
+use uds_windows::UnixListener;
 
 use shadi_sandbox::{
     ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
@@ -39,8 +47,7 @@ pub(crate) struct LivePolicy {
     pub(crate) staged_net_allow: Vec<String>,
 }
 
-/// Handle to a running control socket listener. Dropping it removes the socket
-/// file.
+/// Handle to a running control listener. Dropping it removes the endpoint file.
 pub(crate) struct ControlSocketHandle {
     path: PathBuf,
     _thread: thread::JoinHandle<()>,
@@ -59,14 +66,25 @@ impl Drop for ControlSocketHandle {
 }
 
 /// Resolve the default control socket path for a given PID.
+#[cfg(unix)]
 pub(crate) fn default_socket_path(pid: u32) -> PathBuf {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", pid))
 }
 
-/// Start the control socket listener on a background thread.
+/// Resolve the default control socket path for a given PID.
 ///
-/// Returns a [`ControlSocketHandle`] whose lifetime owns the socket file.
+/// On Windows this is an `AF_UNIX` socket file (requires Windows 10 1803+).
+#[cfg(windows)]
+pub(crate) fn default_socket_path(pid: u32) -> PathBuf {
+    let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", pid))
+}
+
+// ---------------------------------------------------------------------------
+// Listener (AF_UNIX on all platforms)
+// ---------------------------------------------------------------------------
+
 pub(crate) fn start_control_socket(
     path: &Path,
     live: Arc<Mutex<LivePolicy>>,
@@ -77,8 +95,6 @@ pub(crate) fn start_control_socket(
     let listener =
         UnixListener::bind(path).map_err(|e| format!("failed to bind control socket: {}", e))?;
 
-    // Make accepts non-blocking so the thread can exit when the main process
-    // drops the handle (the socket file is removed, causing accept to fail).
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("failed to set non-blocking: {}", e))?;
@@ -100,16 +116,10 @@ fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_pa
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
-                handle_connection(stream, live);
+                handle_stream(stream, live);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No pending connections — sleep briefly and retry.
-                // When the socket file is removed (on handle drop), we may
-                // eventually get an error here, but the main guard is the
-                // process exit.
                 std::thread::sleep(std::time::Duration::from_millis(100));
-
-                // If the socket file has been removed, exit the loop.
                 if !socket_path.exists() {
                     break;
                 }
@@ -120,33 +130,36 @@ fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_pa
     }
 }
 
-fn handle_connection(
-    stream: std::os::unix::net::UnixStream,
-    live: &Arc<Mutex<LivePolicy>>,
-) {
+// ---------------------------------------------------------------------------
+// Shared: stream handling and patch logic
+// ---------------------------------------------------------------------------
+
+fn handle_stream(stream: impl std::io::Read + std::io::Write, live: &Arc<Mutex<LivePolicy>>) {
     let span = info_span!("shadi.policy.control_socket");
     let _guard = span.enter();
 
-    let reader = BufReader::new(&stream);
-    let mut writer = &stream;
+    let mut reader = BufReader::new(stream);
+    let mut line_buf = String::new();
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
+    loop {
+        line_buf.clear();
+        match reader.read_line(&mut line_buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
             Err(_) => break,
-        };
+        }
 
-        if line.trim().is_empty() {
+        if line_buf.trim().is_empty() {
             continue;
         }
 
-        let msg: ControlMessage = match serde_json::from_str(&line) {
+        let msg: ControlMessage = match serde_json::from_str(&line_buf) {
             Ok(m) => m,
             Err(e) => {
                 let resp = ControlResponse::Error {
                     message: format!("invalid message: {}", e),
                 };
-                let _ = write_response(&mut writer, &resp);
+                let _ = write_response(reader.get_mut(), &resp);
                 continue;
             }
         };
@@ -156,7 +169,7 @@ fn handle_connection(
             ControlMessage::Patch(patch) => handle_patch(live, patch),
         };
 
-        if write_response(&mut writer, &resp).is_err() {
+        if write_response(reader.get_mut(), &resp).is_err() {
             break;
         }
     }
@@ -299,7 +312,11 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
     })
 }
 
-/// Send a patch to a running control socket and return the response.
+// ---------------------------------------------------------------------------
+// Client helpers (cross-platform)
+// ---------------------------------------------------------------------------
+
+/// Send a patch to a running control endpoint and return the response.
 pub(crate) fn send_patch(socket_path: &Path, patch: &PolicyPatch) -> Result<PolicyPatchResponse, String> {
     let msg = ControlMessage::Patch(patch.clone());
     let resp = send_message(socket_path, &msg)?;
@@ -310,7 +327,7 @@ pub(crate) fn send_patch(socket_path: &Path, patch: &PolicyPatch) -> Result<Poli
     }
 }
 
-/// Query the current effective policy from a running control socket.
+/// Query the current effective policy from a running control endpoint.
 pub(crate) fn query_policy(socket_path: &Path) -> Result<serde_json::Value, String> {
     let msg = ControlMessage::QueryPolicy;
     let resp = send_message(socket_path, &msg)?;
@@ -322,10 +339,14 @@ pub(crate) fn query_policy(socket_path: &Path) -> Result<serde_json::Value, Stri
 }
 
 fn send_message(socket_path: &Path, msg: &ControlMessage) -> Result<ControlResponse, String> {
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+    #[cfg(windows)]
+    use uds_windows::UnixStream;
 
     let mut stream =
         UnixStream::connect(socket_path).map_err(|e| format!("failed to connect: {}", e))?;
+
     let json =
         serde_json::to_string(msg).map_err(|e| format!("failed to serialize message: {}", e))?;
     stream
@@ -498,7 +519,7 @@ mod tests {
         assert!(has_node);
 
         drop(handle);
-        // Socket file should be cleaned up.
+        // Endpoint file should be cleaned up.
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(!sock_path.exists());
     }

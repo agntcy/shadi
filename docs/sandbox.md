@@ -245,9 +245,19 @@ path today is `delegate-to-child` on Unix/macOS:
 ## Dynamic Policy Updates
 
 `shadictl` supports runtime policy updates for long-running sandboxed workloads.
-When launched with `--watch-policy`, a Unix-domain control socket is created so
+When launched with `--watch-policy`, an `AF_UNIX` control socket is created so
 external callers can query and patch the effective policy without restarting the
-agent process.
+agent process.  The same Unix-domain socket protocol is used on all platforms:
+
+| Platform | Socket path |
+| --- | --- |
+| macOS / Linux | `$TMPDIR/shadi-ctl-<pid>.sock` |
+| Windows (10 1803+) | `%TEMP%\shadi-ctl-<pid>.sock` |
+
+Windows 10 version 1803 and later support `AF_UNIX` natively.  The
+[`uds_windows`](https://crates.io/crates/uds_windows) crate provides the
+binding so the control channel implementation is shared across all platforms
+with no TCP fallback.
 
 ### Enabling the control socket
 

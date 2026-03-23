@@ -23,6 +23,7 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
+uds_windows = "1.2"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Security",
