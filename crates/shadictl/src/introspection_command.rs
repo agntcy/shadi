@@ -42,6 +42,7 @@ fn build_policy_cli(
         git_snapshot: false,
         git_snapshot_dir: None,
         git_snapshot_untracked: false,
+        watch_policy: false,
         subcommand: None,
         run_command: Vec::new(),
     }
@@ -133,6 +134,8 @@ pub(crate) fn run_policy_command(cli: PolicyCli) -> ExitCode {
     match cli.command {
         PolicyCommand::Explain(args) => run_policy_explain(args),
         PolicyCommand::Diff(args) => run_policy_diff(args),
+        PolicyCommand::Patch(args) => run_policy_patch_command(args),
+        PolicyCommand::Query(args) => run_policy_query_command(args),
     }
 }
 
@@ -343,6 +346,60 @@ fn print_output(value: &Value, format: OutputFormat) -> ExitCode {
         OutputFormat::Text => {
             println!("{}", value);
             ExitCode::from(0)
+        }
+    }
+}
+
+fn run_policy_patch_command(args: PolicyPatchArgs) -> ExitCode {
+    use shadi_sandbox::PolicyPatch;
+
+    let mut patch = if let Some(ref path) = args.patch_file {
+        match std::fs::read_to_string(path) {
+            Ok(data) => match serde_json::from_str::<PolicyPatch>(&data) {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("invalid patch file: {}", err);
+                    return ExitCode::from(2);
+                }
+            },
+            Err(err) => {
+                eprintln!("failed to read patch file {}: {}", path.display(), err);
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        PolicyPatch::default()
+    };
+
+    // Merge CLI flags on top of patch file.
+    patch.add_read.extend(args.add_read);
+    patch.add_write.extend(args.add_write);
+    patch.add_allow.extend(args.add_allow);
+    patch.add_allow_command.extend(args.add_allow_command);
+    patch.remove_allow_command.extend(args.remove_allow_command);
+    patch.add_block_command.extend(args.add_block_command);
+    patch.remove_block_command.extend(args.remove_block_command);
+    patch.add_net_allow.extend(args.add_net_allow);
+    patch.remove_net_allow.extend(args.remove_net_allow);
+
+    match send_patch(&args.socket, &patch) {
+        Ok(result) => {
+            let value = serde_json::to_value(&result).unwrap_or_default();
+            print_output(&value, args.format)
+        }
+        Err(err) => {
+            eprintln!("patch failed: {}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_policy_query_command(args: PolicyQueryArgs) -> ExitCode {
+    match query_policy(&args.socket) {
+        Ok(value) => print_output(&value, args.format),
+        Err(err) => {
+            eprintln!("query failed: {}", err);
+            ExitCode::from(1)
         }
     }
 }

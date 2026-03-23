@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod policy;
+pub mod policy_patch;
 mod platform;
 
 pub use policy::{PlatformSandboxProfile, SandboxPolicy};
+pub use policy_patch::{
+    ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
+};
 use std::process::{Command, ExitStatus};
 use std::io;
 use tracing::{field, info_span};

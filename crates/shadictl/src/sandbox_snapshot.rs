@@ -73,6 +73,33 @@ pub(crate) fn run_sandboxed_command(
     let mut snapshot = GitSnapshotSession::start(cli, resolved, cwd);
     let snapshot_enabled = snapshot.is_some();
 
+    // Start the control socket for dynamic policy updates if requested.
+    let _control_handle = if cli.watch_policy {
+        let live = std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
+            policy: runtime_policy.clone(),
+            blocked: resolved.blocked.clone(),
+            allow: resolved.allow.clone(),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            staged_net_allow: Vec::new(),
+        }));
+        let pid = std::process::id();
+        let sock_path = default_socket_path(pid);
+        match start_control_socket(&sock_path, live) {
+            Ok(handle) => {
+                eprintln!("control socket: {}", handle.path().display());
+                Some(handle)
+            }
+            Err(err) => {
+                eprintln!("warning: failed to start control socket: {}", err);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let span = info_span!(
         "shadi.sandbox.run",
         command = %cmd_name,
@@ -895,6 +922,7 @@ mod tests {
             git_snapshot: false,
             git_snapshot_dir: None,
             git_snapshot_untracked: false,
+            watch_policy: false,
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }

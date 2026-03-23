@@ -53,6 +53,7 @@
             git_snapshot: false,
             git_snapshot_dir: None,
             git_snapshot_untracked: false,
+            watch_policy: false,
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }

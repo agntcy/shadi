@@ -2914,6 +2914,8 @@ name = "shadi_sandbox"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "windows-sys 0.61.2",

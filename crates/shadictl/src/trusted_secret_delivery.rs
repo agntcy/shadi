@@ -1291,6 +1291,7 @@ mod tests {
             git_snapshot: false,
             git_snapshot_dir: None,
             git_snapshot_untracked: false,
+            watch_policy: false,
             subcommand: None,
             run_command: vec![program.display().to_string()],
         }
