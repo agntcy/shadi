@@ -11,12 +11,13 @@
 //! (ABI V4). The implementation probes from the highest ABI downward and
 //! uses the best available version.
 
+#[cfg(not(any(test, feature = "coverage")))]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
 use landlock::{
-    Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort,
+    Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible,
     PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
 use tracing::{debug, info, warn};
@@ -99,17 +100,75 @@ fn abi_label(abi: ABI) -> &'static str {
 ///
 /// If tests or coverage builds are active the sandbox is applied in the
 /// parent process instead (same as the macOS test path).
+/// Collected sandbox configuration — all owned data, `Send + Sync` safe
+/// for use in `pre_exec`.
+struct LandlockConfig {
+    abi: ABI,
+    read_paths: Vec<std::path::PathBuf>,
+    write_paths: Vec<std::path::PathBuf>,
+    net_block: bool,
+}
+
+impl LandlockConfig {
+    /// Collect paths from the policy *before* forking.
+    fn from_policy(policy: &SandboxPolicy, abi: ABI) -> Self {
+        let mut read_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut write_paths: Vec<std::path::PathBuf> = Vec::new();
+
+        let compatibility =
+            policy.platform_profile() == PlatformSandboxProfile::Compatibility;
+
+        for &default in DEFAULT_READ_PATHS {
+            if Path::new(default).exists() {
+                read_paths.push(default.into());
+            }
+        }
+
+        if compatibility {
+            for extra in compatibility_read_paths() {
+                if Path::new(&extra).exists() {
+                    read_paths.push(extra);
+                }
+            }
+            for extra in compatibility_write_paths() {
+                if Path::new(&extra).exists() {
+                    write_paths.push(extra);
+                }
+            }
+        }
+
+        for p in policy.allow_read() {
+            read_paths.push(p.clone());
+        }
+        for p in policy.allow_write() {
+            write_paths.push(p.clone());
+        }
+
+        Self {
+            abi,
+            read_paths,
+            write_paths,
+            net_block: policy.net_blocked(),
+        }
+    }
+
+    /// Apply the Landlock sandbox.
+    fn apply(&self) -> Result<(), SandboxError> {
+        apply_landlock(self.abi, &self.read_paths, &self.write_paths, self.net_block)
+    }
+}
+
 #[cfg(not(any(test, feature = "coverage")))]
 pub fn spawn_sandboxed(
     command: &mut Command,
     policy: &SandboxPolicy,
 ) -> Result<SandboxedChild, SandboxError> {
     let abi = detect_abi()?;
-    let apply_fn = build_apply_closure(policy, abi)?;
+    let config = LandlockConfig::from_policy(policy, abi);
 
     unsafe {
         command.pre_exec(move || {
-            apply_fn().map_err(|e| std::io::Error::other(e.to_string()))
+            config.apply().map_err(|e| std::io::Error::other(e.to_string()))
         });
     }
 
@@ -127,61 +186,13 @@ pub fn spawn_sandboxed(
     policy: &SandboxPolicy,
 ) -> Result<SandboxedChild, SandboxError> {
     let abi = detect_abi()?;
-    let apply_fn = build_apply_closure(policy, abi)?;
-    apply_fn()?;
+    let config = LandlockConfig::from_policy(policy, abi);
+    config.apply()?;
 
     let child = command
         .spawn()
         .map_err(|e| SandboxError::SpawnFailed(e.to_string()))?;
     Ok(SandboxedChild::from_std(child))
-}
-
-/// Create a closure that, when called, sets `no_new_privs` and applies the
-/// Landlock ruleset. The closure captures only owned data so it is safe to
-/// move into `pre_exec`.
-fn build_apply_closure(
-    policy: &SandboxPolicy,
-    abi: ABI,
-) -> Result<Box<dyn FnOnce() -> Result<(), SandboxError> + Send>, SandboxError> {
-    // Collect every path rule we need *before* forking.
-    let mut read_paths: Vec<std::path::PathBuf> = Vec::new();
-    let mut write_paths: Vec<std::path::PathBuf> = Vec::new();
-
-    // Add default system read paths.
-    let compatibility =
-        policy.platform_profile() == PlatformSandboxProfile::Compatibility;
-
-    for &default in DEFAULT_READ_PATHS {
-        if Path::new(default).exists() {
-            read_paths.push(default.into());
-        }
-    }
-
-    // Compatibility profile: extra system paths (tmp, home config dirs, etc.)
-    if compatibility {
-        for extra in compatibility_read_paths() {
-            if Path::new(&extra).exists() {
-                read_paths.push(extra);
-            }
-        }
-        for extra in compatibility_write_paths() {
-            if Path::new(&extra).exists() {
-                write_paths.push(extra);
-            }
-        }
-    }
-
-    // User-specified paths
-    for p in policy.allow_read() {
-        read_paths.push(p.clone());
-    }
-    for p in policy.allow_write() {
-        write_paths.push(p.clone());
-    }
-
-    let net_block = policy.net_blocked();
-
-    Ok(Box::new(move || apply_landlock(abi, &read_paths, &write_paths, net_block)))
 }
 
 /// Extra read paths for the compatibility profile.
@@ -442,21 +453,23 @@ mod tests {
     }
 
     #[test]
-    fn build_apply_closure_succeeds_with_default_policy() {
+    fn landlock_config_from_default_policy() {
         let policy = SandboxPolicy::new();
         let abi = detect_abi().expect("Landlock available");
-        let closure = build_apply_closure(&policy, abi);
-        assert!(closure.is_ok(), "build_apply_closure should succeed");
+        let config = LandlockConfig::from_policy(&policy, abi);
+        // Default policy should have at least the system read paths.
+        assert!(!config.read_paths.is_empty());
     }
 
     #[test]
-    fn build_apply_closure_includes_user_paths() {
+    fn landlock_config_includes_user_paths() {
         let policy = SandboxPolicy::new()
             .allow_read_path("/usr")
             .allow_write_path("/tmp");
         let abi = detect_abi().expect("Landlock available");
-        let _closure = build_apply_closure(&policy, abi)
-            .expect("build_apply_closure should succeed with user paths");
+        let config = LandlockConfig::from_policy(&policy, abi);
+        assert!(config.read_paths.iter().any(|p| p == Path::new("/usr")));
+        assert!(config.write_paths.iter().any(|p| p == Path::new("/tmp")));
     }
 
     #[test]

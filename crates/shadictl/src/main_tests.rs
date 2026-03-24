@@ -1,5 +1,5 @@
     use super::*;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     use shadi_sandbox::PlatformSandboxProfile;
     use tempfile::TempDir;
     use std::collections::HashMap;
