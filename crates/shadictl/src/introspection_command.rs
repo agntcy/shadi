@@ -756,4 +756,198 @@ mod tests {
         assert_eq!(cfg.op_vault.as_deref(), Some("vault-a"));
         assert_eq!(cfg.op_account.as_deref(), Some("account-a"));
     }
+
+    // --- policy patch / query command tests ---
+
+    use crate::policy_watch::{start_control_socket, LivePolicy};
+    use std::collections::HashSet;
+
+    fn test_live_policy() -> std::sync::Arc<std::sync::Mutex<LivePolicy>> {
+        use shadi_sandbox::SandboxPolicy;
+        std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
+            policy: SandboxPolicy::new().block_network(true),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            staged_net_allow: Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn run_policy_patch_command_succeeds_via_socket() {
+        let live = test_live_policy();
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("ctl.sock");
+        let handle = start_control_socket(&sock, live).expect("start socket");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let code = run_policy_patch_command(PolicyPatchArgs {
+            socket: sock.clone(),
+            add_read: vec!["/opt/data".to_string()],
+            add_write: vec!["/tmp/out".to_string()],
+            add_allow: vec!["/shared".to_string()],
+            add_allow_command: vec!["npm".to_string()],
+            remove_allow_command: Vec::new(),
+            add_block_command: vec!["curl".to_string()],
+            remove_block_command: Vec::new(),
+            add_net_allow: vec!["cdn.example.com".to_string()],
+            remove_net_allow: Vec::new(),
+            patch_file: None,
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        drop(handle);
+    }
+
+    #[test]
+    fn run_policy_patch_command_loads_patch_file() {
+        let live = test_live_policy();
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("ctl.sock");
+        let handle = start_control_socket(&sock, live).expect("start socket");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let patch_path = dir.path().join("patch.json");
+        std::fs::write(
+            &patch_path,
+            r#"{"add_allow_command":["node"]}"#,
+        )
+        .expect("write patch");
+
+        let code = run_policy_patch_command(PolicyPatchArgs {
+            socket: sock.clone(),
+            add_read: Vec::new(),
+            add_write: Vec::new(),
+            add_allow: Vec::new(),
+            add_allow_command: Vec::new(),
+            remove_allow_command: Vec::new(),
+            add_block_command: Vec::new(),
+            remove_block_command: Vec::new(),
+            add_net_allow: Vec::new(),
+            remove_net_allow: Vec::new(),
+            patch_file: Some(patch_path),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        drop(handle);
+    }
+
+    #[test]
+    fn run_policy_patch_command_fails_on_bad_socket() {
+        let code = run_policy_patch_command(PolicyPatchArgs {
+            socket: PathBuf::from("/tmp/shadi-nonexistent.sock"),
+            add_read: Vec::new(),
+            add_write: Vec::new(),
+            add_allow: Vec::new(),
+            add_allow_command: Vec::new(),
+            remove_allow_command: Vec::new(),
+            add_block_command: Vec::new(),
+            remove_block_command: Vec::new(),
+            add_net_allow: Vec::new(),
+            remove_net_allow: Vec::new(),
+            patch_file: None,
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_policy_patch_command_fails_on_missing_patch_file() {
+        let code = run_policy_patch_command(PolicyPatchArgs {
+            socket: PathBuf::from("/tmp/shadi-nonexistent.sock"),
+            add_read: Vec::new(),
+            add_write: Vec::new(),
+            add_allow: Vec::new(),
+            add_allow_command: Vec::new(),
+            remove_allow_command: Vec::new(),
+            add_block_command: Vec::new(),
+            remove_block_command: Vec::new(),
+            add_net_allow: Vec::new(),
+            remove_net_allow: Vec::new(),
+            patch_file: Some(PathBuf::from("/tmp/shadi-nonexistent-patch.json")),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_policy_patch_command_fails_on_invalid_patch_file() {
+        let dir = tempdir().expect("tempdir");
+        let patch_path = dir.path().join("bad.json");
+        std::fs::write(&patch_path, "not json").expect("write");
+
+        let code = run_policy_patch_command(PolicyPatchArgs {
+            socket: PathBuf::from("/tmp/shadi-nonexistent.sock"),
+            add_read: Vec::new(),
+            add_write: Vec::new(),
+            add_allow: Vec::new(),
+            add_allow_command: Vec::new(),
+            remove_allow_command: Vec::new(),
+            add_block_command: Vec::new(),
+            remove_block_command: Vec::new(),
+            add_net_allow: Vec::new(),
+            remove_net_allow: Vec::new(),
+            patch_file: Some(patch_path),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_policy_query_command_succeeds_via_socket() {
+        let live = test_live_policy();
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("ctl.sock");
+        let handle = start_control_socket(&sock, live).expect("start socket");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let code = run_policy_query_command(PolicyQueryArgs {
+            socket: sock.clone(),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        drop(handle);
+    }
+
+    #[test]
+    fn run_policy_query_command_fails_on_bad_socket() {
+        let code = run_policy_query_command(PolicyQueryArgs {
+            socket: PathBuf::from("/tmp/shadi-nonexistent.sock"),
+            format: OutputFormat::Json,
+        });
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_policy_command_dispatches_patch_and_query() {
+        // Patch dispatch (fails on connect, but exercises the Patch arm).
+        let code = run_policy_command(PolicyCli {
+            command: PolicyCommand::Patch(PolicyPatchArgs {
+                socket: PathBuf::from("/tmp/shadi-nonexistent.sock"),
+                add_read: Vec::new(),
+                add_write: Vec::new(),
+                add_allow: Vec::new(),
+                add_allow_command: Vec::new(),
+                remove_allow_command: Vec::new(),
+                add_block_command: Vec::new(),
+                remove_block_command: Vec::new(),
+                add_net_allow: Vec::new(),
+                remove_net_allow: Vec::new(),
+                patch_file: None,
+                format: OutputFormat::Json,
+            }),
+        });
+        assert_eq!(code, ExitCode::from(1));
+
+        // Query dispatch.
+        let code = run_policy_command(PolicyCli {
+            command: PolicyCommand::Query(PolicyQueryArgs {
+                socket: PathBuf::from("/tmp/shadi-nonexistent.sock"),
+                format: OutputFormat::Json,
+            }),
+        });
+        assert_eq!(code, ExitCode::from(1));
+    }
 }
