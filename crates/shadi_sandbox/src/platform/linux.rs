@@ -168,6 +168,11 @@ pub fn spawn_sandboxed(
 
     unsafe {
         command.pre_exec(move || {
+            // Create a new process group so the parent can kill the entire
+            // tree with killpg(), mirroring the Windows Job-object pattern.
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             config.apply().map_err(|e| std::io::Error::other(e.to_string()))
         });
     }

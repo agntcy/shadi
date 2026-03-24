@@ -18,6 +18,31 @@ const DEFAULT_READ_PATHS: &[&str] = &[
     "/opt/homebrew",
 ];
 
+/// Essential Mach services needed by any sandboxed process on macOS.
+/// Used in Minimal profile to replace the blanket `(allow mach-lookup)`.
+const ESSENTIAL_MACH_SERVICES: &[&str] = &[
+    // launchd / bootstrap (required for any child process)
+    "com.apple.system.launchctl.system",
+    // DNS resolution
+    "com.apple.dnssd.service",
+    "com.apple.mDNSResponder",
+    // Security framework (code signing, keychain reads)
+    "com.apple.SecurityServer",
+    "com.apple.security.agent",
+    "com.apple.security.authhost",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
+    // System logging
+    "com.apple.system.logger",
+    "com.apple.diagnosticd",
+    // Core services / dyld
+    "com.apple.CoreServices.coreservicesd",
+    "com.apple.coreservices.launchservicesd",
+    // CF preferences (many binaries read defaults)
+    "com.apple.cfprefsd.daemon",
+    "com.apple.cfprefsd.agent",
+];
+
 #[cfg(not(any(test, feature = "coverage")))]
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
@@ -25,6 +50,11 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
 
     unsafe {
         command.pre_exec(move || {
+            // Create a new process group so the parent can kill the entire
+            // tree with killpg(), mirroring the Windows Job-object pattern.
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             apply_profile(&profile_cstr)
                 .map_err(std::io::Error::other)
         });
@@ -52,7 +82,22 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     rules.push("(allow process*)".to_string());
     rules.push("(allow process-exec)".to_string());
     rules.push("(allow sysctl-read)".to_string());
-    rules.push("(allow mach-lookup)".to_string());
+
+    // Mach IPC gating: Minimal profile restricts mach-lookup to an
+    // essential-services allowlist; Compatibility mode allows all lookups.
+    if compatibility_profile {
+        rules.push("(allow mach-lookup)".to_string());
+    } else {
+        // Essential system services needed for basic process execution,
+        // DNS resolution, security framework, and logging.
+        for svc in ESSENTIAL_MACH_SERVICES {
+            rules.push(format!(
+                "(allow mach-lookup (global-name \"{}\"))",
+                svc
+            ));
+        }
+    }
+
     rules.push("(allow file-read-data file-read-metadata (literal \"/\"))".to_string());
 
     for path in DEFAULT_READ_PATHS {
@@ -408,5 +453,95 @@ mod tests {
         } else {
             std::env::remove_var("TMPDIR");
         }
+    }
+
+    // ── mach-lookup gating tests ───────────────────────────────────────────
+
+    #[test]
+    fn compatibility_profile_allows_blanket_mach_lookup() {
+        let policy = SandboxPolicy::new(); // default is Compatibility
+        let profile = build_profile(&policy).unwrap();
+        // Compatibility mode should have the blanket allow.
+        assert!(
+            profile.contains("(allow mach-lookup)"),
+            "compatibility profile should allow all mach-lookup"
+        );
+    }
+
+    #[test]
+    fn minimal_profile_restricts_mach_lookup_to_allowlist() {
+        let policy = SandboxPolicy::new().use_minimal_platform_profile();
+        let profile = build_profile(&policy).unwrap();
+
+        // Should NOT have the blanket allow.
+        //
+        // We need to check for the exact bare form. The profile may contain
+        // mach-lookup with (global-name ...) qualifiers, which is fine.
+        let has_blanket = profile
+            .lines()
+            .any(|line| line.trim() == "(allow mach-lookup)");
+        assert!(
+            !has_blanket,
+            "minimal profile should not have blanket mach-lookup"
+        );
+
+        // Should contain targeted allows for essential services.
+        assert!(
+            profile.contains("com.apple.dnssd.service"),
+            "minimal profile should allow DNS service"
+        );
+        assert!(
+            profile.contains("com.apple.SecurityServer"),
+            "minimal profile should allow SecurityServer"
+        );
+        assert!(
+            profile.contains("com.apple.trustd"),
+            "minimal profile should allow trustd"
+        );
+        assert!(
+            profile.contains("com.apple.cfprefsd.daemon"),
+            "minimal profile should allow cfprefsd"
+        );
+    }
+
+    #[test]
+    fn essential_mach_services_is_non_empty() {
+        assert!(
+            !ESSENTIAL_MACH_SERVICES.is_empty(),
+            "ESSENTIAL_MACH_SERVICES should have entries"
+        );
+    }
+
+    #[test]
+    fn minimal_profile_mach_rules_use_global_name_syntax() {
+        let policy = SandboxPolicy::new().use_minimal_platform_profile();
+        let profile = build_profile(&policy).unwrap();
+        // Each service should be wrapped in (allow mach-lookup (global-name "..."))
+        for svc in ESSENTIAL_MACH_SERVICES {
+            let expected = format!("(allow mach-lookup (global-name \"{}\"))", svc);
+            assert!(
+                profile.contains(&expected),
+                "missing mach-lookup rule for {}",
+                svc
+            );
+        }
+    }
+
+    // ── process group cleanup tests ────────────────────────────────────────
+
+    #[test]
+    fn kill_uses_killpg_for_process_group() {
+        // Verify that kill() works on a spawned child that may be in its
+        // own process group. In test mode setsid isn't called, so killpg
+        // may fail and fall back to single-process kill — either way the
+        // child must be stopped.
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let mut wrapped = crate::SandboxedChild::from_std(child);
+        wrapped.kill().expect("kill");
+        let status = wrapped.wait().expect("wait");
+        assert!(!status.success(), "killed process should not exit 0");
     }
 }

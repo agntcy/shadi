@@ -86,7 +86,28 @@ impl SandboxedChild {
         let _guard = span.enter();
 
         match &mut self.inner {
-            SandboxedChildInner::Std(child) => child.kill(),
+            SandboxedChildInner::Std(child) => {
+                // On macOS/Linux the sandboxed child runs in its own
+                // process group (via setsid in pre_exec). Kill the entire
+                // group so that grandchild processes are cleaned up too,
+                // mirroring the Windows Job-object behaviour.
+                #[cfg(unix)]
+                {
+                    let pid = child.id() as i32;
+                    // killpg sends the signal to every process in the group.
+                    // SAFETY: killpg with SIGKILL is always safe.
+                    let rc = unsafe { libc::killpg(pid, libc::SIGKILL) };
+                    if rc == 0 {
+                        return Ok(());
+                    }
+                    // Fall back to single-process kill if killpg fails
+                    // (e.g. the child didn't get a new process group in
+                    // test/coverage mode).
+                    child.kill()
+                }
+                #[cfg(not(unix))]
+                child.kill()
+            }
             #[cfg(target_os = "windows")]
             SandboxedChildInner::Windows(child) => child.kill(),
         }

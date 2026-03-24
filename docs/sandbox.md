@@ -335,6 +335,29 @@ the updated policy to take effect.
 Command allow/block lists are enforced in user space by `shadictl` and can
 always be updated immediately.
 
+### Process group cleanup (macOS / Linux)
+
+On macOS and Linux, the sandboxed child process is placed in its own process
+group via `setsid()` in `pre_exec`. When `SandboxedChild::kill()` is called,
+SHADI sends `SIGKILL` to the entire process group using `killpg()`, ensuring
+that any grandchild processes spawned by the agent are also terminated. This
+mirrors the Windows Job-object pattern (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
+
+### Mach IPC hardening (macOS)
+
+In **Minimal** Seatbelt profile mode, `mach-lookup` is restricted to an
+essential-services allowlist rather than being blanket-allowed. Only the Mach
+services required for basic process execution, DNS resolution, Security
+framework operations, system logging, and CF preferences are permitted.
+
+In **Compatibility** mode, `mach-lookup` remains unrestricted to support
+third-party tools (1Password CLI, `gh`, `git` credential helpers, etc.) that
+communicate with background daemons via Mach IPC.
+
+Network filtering on macOS remains all-or-nothing because Seatbelt does not
+support domain-level or port-level allowlists. `net_blocked` disables all TCP/IP;
+Unix-domain sockets can still be selectively allowed.
+
 ## Notes
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
   to execute processes are allowed for read access.
