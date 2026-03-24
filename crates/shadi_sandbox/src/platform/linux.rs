@@ -429,6 +429,16 @@ mod tests {
     }
 
     #[test]
+    fn read_access_flags_stable_across_abis() {
+        // Core read flags should be present at every ABI level.
+        for &abi in &ABI_PROBE_ORDER {
+            let flags = read_access_flags(abi);
+            assert!(flags.contains(AccessFs::ReadFile));
+            assert!(flags.contains(AccessFs::ReadDir));
+        }
+    }
+
+    #[test]
     fn write_access_flags_include_write_and_create() {
         let flags = write_access_flags(ABI::V1);
         assert!(flags.contains(AccessFs::WriteFile));
@@ -438,10 +448,28 @@ mod tests {
     }
 
     #[test]
+    fn write_access_flags_v3_includes_truncate() {
+        // Truncate was added in ABI V3.
+        let flags = write_access_flags(ABI::V3);
+        assert!(
+            flags.contains(AccessFs::Truncate),
+            "V3+ should include Truncate"
+        );
+    }
+
+    #[test]
     fn default_read_paths_exist_on_linux() {
         // At minimum /usr and /etc should exist on any Linux system.
         assert!(Path::new("/usr").exists());
         assert!(Path::new("/etc").exists());
+    }
+
+    #[test]
+    fn default_read_paths_are_non_empty() {
+        assert!(
+            !DEFAULT_READ_PATHS.is_empty(),
+            "DEFAULT_READ_PATHS should contain at least one entry"
+        );
     }
 
     #[test]
@@ -453,12 +481,69 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_read_paths_include_home_dirs() {
+        // HOME is typically set in CI and on dev machines.
+        if let Ok(home) = std::env::var("HOME") {
+            let paths = compatibility_read_paths();
+            let config_path: std::path::PathBuf = format!("{}/.config", home).into();
+            let local_path: std::path::PathBuf = format!("{}/.local", home).into();
+            let cache_path: std::path::PathBuf = format!("{}/.cache", home).into();
+            assert!(paths.contains(&config_path), "missing ~/.config");
+            assert!(paths.contains(&local_path), "missing ~/.local");
+            assert!(paths.contains(&cache_path), "missing ~/.cache");
+        }
+    }
+
+    #[test]
+    fn compatibility_write_paths_include_home_dirs() {
+        if let Ok(home) = std::env::var("HOME") {
+            let paths = compatibility_write_paths();
+            let config_path: std::path::PathBuf = format!("{}/.config", home).into();
+            assert!(paths.contains(&config_path), "missing ~/.config in write paths");
+        }
+    }
+
+    #[test]
+    fn compatibility_write_paths_include_tmpdir() {
+        // Set TMPDIR and verify it appears.
+        let original = std::env::var("TMPDIR").ok();
+        std::env::set_var("TMPDIR", "/tmp/shadi-test-tmpdir");
+        let paths = compatibility_write_paths();
+        assert!(
+            paths.iter().any(|p| p == Path::new("/tmp/shadi-test-tmpdir")),
+            "TMPDIR should be in compatibility write paths"
+        );
+        // Restore.
+        match original {
+            Some(val) => std::env::set_var("TMPDIR", val),
+            None => std::env::remove_var("TMPDIR"),
+        }
+    }
+
+    #[test]
+    fn compatibility_read_paths_include_dev_and_run() {
+        let paths = compatibility_read_paths();
+        assert!(paths.iter().any(|p| p == Path::new("/dev")));
+        assert!(paths.iter().any(|p| p == Path::new("/run")));
+    }
+
+    #[test]
+    fn compatibility_write_paths_include_dev_null_and_tty() {
+        let paths = compatibility_write_paths();
+        assert!(paths.iter().any(|p| p == Path::new("/dev/null")));
+        assert!(paths.iter().any(|p| p == Path::new("/dev/tty")));
+    }
+
+    #[test]
     fn landlock_config_from_default_policy() {
         let policy = SandboxPolicy::new();
         let abi = detect_abi().expect("Landlock available");
         let config = LandlockConfig::from_policy(&policy, abi);
-        // Default policy should have at least the system read paths.
+        // Default policy uses Compatibility profile, so paths should include
+        // both default system paths and compatibility extras.
         assert!(!config.read_paths.is_empty());
+        // Default policy does not block network.
+        assert!(!config.net_block);
     }
 
     #[test]
@@ -470,6 +555,99 @@ mod tests {
         let config = LandlockConfig::from_policy(&policy, abi);
         assert!(config.read_paths.iter().any(|p| p == Path::new("/usr")));
         assert!(config.write_paths.iter().any(|p| p == Path::new("/tmp")));
+    }
+
+    #[test]
+    fn landlock_config_minimal_profile_skips_compatibility_paths() {
+        let policy = SandboxPolicy::new().use_minimal_platform_profile();
+        let abi = detect_abi().expect("Landlock available");
+        let config = LandlockConfig::from_policy(&policy, abi);
+        // Minimal profile should NOT include /run (a compatibility-only path).
+        assert!(
+            !config.read_paths.iter().any(|p| p == Path::new("/run")),
+            "minimal profile should not include /run"
+        );
+    }
+
+    #[test]
+    fn landlock_config_compatibility_profile_includes_extra_paths() {
+        let policy = SandboxPolicy::new(); // default is Compatibility
+        let abi = detect_abi().expect("Landlock available");
+        let config = LandlockConfig::from_policy(&policy, abi);
+        // Compatibility should include /tmp if it exists.
+        if Path::new("/tmp").exists() {
+            assert!(
+                config.read_paths.iter().any(|p| p == Path::new("/tmp")),
+                "compatibility profile should include /tmp read"
+            );
+        }
+    }
+
+    #[test]
+    fn landlock_config_net_block_flag() {
+        let policy = SandboxPolicy::new().block_network(true);
+        let abi = detect_abi().expect("Landlock available");
+        let config = LandlockConfig::from_policy(&policy, abi);
+        assert!(config.net_block, "net_block should be true when policy blocks network");
+
+        let policy_no_block = SandboxPolicy::new().block_network(false);
+        let config_no_block = LandlockConfig::from_policy(&policy_no_block, abi);
+        assert!(!config_no_block.net_block, "net_block should be false");
+    }
+
+    #[test]
+    fn landlock_config_preserves_abi() {
+        let policy = SandboxPolicy::new();
+        let abi = detect_abi().expect("Landlock available");
+        let config = LandlockConfig::from_policy(&policy, abi);
+        assert_eq!(config.abi, abi, "config should preserve the detected ABI");
+    }
+
+    #[test]
+    fn add_path_rule_succeeds_for_existing_path() {
+        let abi = detect_abi().expect("Landlock available");
+        let ruleset = Ruleset::default()
+            .set_compatibility(CompatLevel::BestEffort)
+            .handle_access(AccessFs::from_all(abi))
+            .expect("handle fs access")
+            .create()
+            .expect("create ruleset");
+
+        let flags = read_access_flags(abi);
+        // /usr always exists on Linux.
+        let result = add_path_rule(ruleset, Path::new("/usr"), flags, "read");
+        assert!(result.is_ok(), "add_path_rule should succeed for /usr");
+    }
+
+    #[test]
+    fn add_path_rule_skips_nonexistent_path() {
+        let abi = detect_abi().expect("Landlock available");
+        let ruleset = Ruleset::default()
+            .set_compatibility(CompatLevel::BestEffort)
+            .handle_access(AccessFs::from_all(abi))
+            .expect("handle fs access")
+            .create()
+            .expect("create ruleset");
+
+        let flags = read_access_flags(abi);
+        // This path should not exist.
+        let result = add_path_rule(
+            ruleset,
+            Path::new("/nonexistent-shadi-test-path-42"),
+            flags,
+            "read",
+        );
+        assert!(
+            result.is_ok(),
+            "add_path_rule should skip nonexistent path without error"
+        );
+    }
+
+    #[test]
+    fn set_no_new_privs_succeeds() {
+        // PR_SET_NO_NEW_PRIVS is idempotent — safe to call multiple times.
+        let result = set_no_new_privs();
+        assert!(result.is_ok(), "set_no_new_privs should succeed: {:?}", result.err());
     }
 
     #[test]
@@ -491,5 +669,36 @@ mod tests {
         // V1 is the minimum; if Landlock is available at all this passes.
         let result = probe_abi(ABI::V1);
         assert!(result.is_ok(), "ABI V1 probe should succeed: {:?}", result.err());
+    }
+
+    #[test]
+    fn probe_abi_all_up_to_detected() {
+        // Every ABI at or below the detected level should probe successfully.
+        let detected = detect_abi().expect("Landlock available");
+        for &abi in &ABI_PROBE_ORDER {
+            if abi <= detected {
+                let result = probe_abi(abi);
+                assert!(
+                    result.is_ok(),
+                    "ABI {:?} should probe successfully (detected {:?}): {:?}",
+                    abi,
+                    detected,
+                    result.err(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn abi_probe_order_is_descending() {
+        // Verify the probe order goes from highest to lowest.
+        for window in ABI_PROBE_ORDER.windows(2) {
+            assert!(
+                window[0] > window[1],
+                "ABI_PROBE_ORDER should be descending: {:?} > {:?}",
+                window[0],
+                window[1],
+            );
+        }
     }
 }
