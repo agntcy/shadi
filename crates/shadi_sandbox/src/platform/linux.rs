@@ -245,7 +245,43 @@ fn apply_landlock(
     // 1. PR_SET_NO_NEW_PRIVS — required for unprivileged Landlock.
     set_no_new_privs()?;
 
-    // 2. Build ruleset.
+    // 2. Build the ruleset (factored out so we can test this without
+    //    the irreversible restrict_self call).
+    let ruleset = build_landlock_ruleset(abi, read_paths, write_paths, net_block)?;
+
+    // 3. restrict_self() — irreversible.
+    let status = ruleset.restrict_self().map_err(|e| {
+        SandboxError::ApplyFailed(format!("restrict_self failed: {}", e))
+    })?;
+
+    match status.ruleset {
+        landlock::RulesetStatus::FullyEnforced => {
+            info!("Landlock sandbox fully enforced");
+        }
+        landlock::RulesetStatus::PartiallyEnforced => {
+            debug!("Landlock sandbox partially enforced (best-effort fallback)");
+        }
+        landlock::RulesetStatus::NotEnforced => {
+            return Err(SandboxError::ApplyFailed(
+                "Landlock sandbox was not enforced".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a Landlock `RulesetCreated` from the given paths and flags.
+///
+/// This is separated from [`apply_landlock`] so that tests can exercise
+/// ruleset construction (filesystem rules, network handling) without
+/// the irreversible `restrict_self()` call.
+fn build_landlock_ruleset(
+    abi: ABI,
+    read_paths: &[std::path::PathBuf],
+    write_paths: &[std::path::PathBuf],
+    net_block: bool,
+) -> Result<landlock::RulesetCreated, SandboxError> {
     let handled_fs = AccessFs::from_all(abi);
     debug!("Handling filesystem access: {:?}", handled_fs);
 
@@ -285,7 +321,7 @@ fn apply_landlock(
         SandboxError::ApplyFailed(format!("failed to create Landlock ruleset: {}", e))
     })?;
 
-    // 3. Add filesystem rules.
+    // Add filesystem rules.
     let read_access = read_access_flags(abi);
     let write_access = write_access_flags(abi);
 
@@ -298,26 +334,7 @@ fn apply_landlock(
         ruleset = add_path_rule(ruleset, path, read_access | write_access, "write")?;
     }
 
-    // 4. restrict_self() — irreversible.
-    let status = ruleset.restrict_self().map_err(|e| {
-        SandboxError::ApplyFailed(format!("restrict_self failed: {}", e))
-    })?;
-
-    match status.ruleset {
-        landlock::RulesetStatus::FullyEnforced => {
-            info!("Landlock sandbox fully enforced");
-        }
-        landlock::RulesetStatus::PartiallyEnforced => {
-            debug!("Landlock sandbox partially enforced (best-effort fallback)");
-        }
-        landlock::RulesetStatus::NotEnforced => {
-            return Err(SandboxError::ApplyFailed(
-                "Landlock sandbox was not enforced".to_string(),
-            ));
-        }
-    }
-
-    Ok(())
+    Ok(ruleset)
 }
 
 /// Map `SandboxPolicy` read access to Landlock flags.
@@ -662,6 +679,140 @@ mod tests {
         let write = write_access_flags(abi);
         assert!(!read.is_empty());
         assert!(!write.is_empty());
+    }
+
+    // ── build_landlock_ruleset tests ───────────────────────────────────────
+
+    #[test]
+    fn build_ruleset_default_read_paths() {
+        let abi = detect_abi().expect("Landlock available");
+        let read: Vec<std::path::PathBuf> = DEFAULT_READ_PATHS
+            .iter()
+            .filter(|p| Path::new(p).exists())
+            .map(|&p| p.into())
+            .collect();
+        let result = build_landlock_ruleset(abi, &read, &[], false);
+        assert!(result.is_ok(), "build_landlock_ruleset should succeed with default paths");
+    }
+
+    #[test]
+    fn build_ruleset_with_write_paths() {
+        let abi = detect_abi().expect("Landlock available");
+        let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
+        let write: Vec<std::path::PathBuf> = vec!["/tmp".into()];
+        let result = build_landlock_ruleset(abi, &read, &write, false);
+        assert!(result.is_ok(), "build_landlock_ruleset should succeed with write paths");
+    }
+
+    #[test]
+    fn build_ruleset_with_net_block() {
+        let abi = detect_abi().expect("Landlock available");
+        let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
+        // net_block=true exercises the network branch.
+        let result = build_landlock_ruleset(abi, &read, &[], true);
+        assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=true");
+    }
+
+    #[test]
+    fn build_ruleset_without_net_block() {
+        let abi = detect_abi().expect("Landlock available");
+        let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
+        let result = build_landlock_ruleset(abi, &read, &[], false);
+        assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=false");
+    }
+
+    #[test]
+    fn build_ruleset_empty_paths() {
+        let abi = detect_abi().expect("Landlock available");
+        let result = build_landlock_ruleset(abi, &[], &[], false);
+        assert!(result.is_ok(), "build_landlock_ruleset with no paths should still succeed");
+    }
+
+    #[test]
+    fn build_ruleset_mixed_existing_and_nonexistent_paths() {
+        let abi = detect_abi().expect("Landlock available");
+        let read: Vec<std::path::PathBuf> = vec![
+            "/usr".into(),
+            "/nonexistent-shadi-path-xyz".into(),
+        ];
+        let write: Vec<std::path::PathBuf> = vec![
+            "/tmp".into(),
+            "/nonexistent-shadi-write-xyz".into(),
+        ];
+        let result = build_landlock_ruleset(abi, &read, &write, false);
+        assert!(
+            result.is_ok(),
+            "nonexistent paths should be skipped gracefully"
+        );
+    }
+
+    #[test]
+    fn build_ruleset_with_all_abi_levels() {
+        // Verify build_landlock_ruleset works at every supported ABI level.
+        let detected = detect_abi().expect("Landlock available");
+        for &abi in &ABI_PROBE_ORDER {
+            if abi <= detected {
+                let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
+                let result = build_landlock_ruleset(abi, &read, &[], false);
+                assert!(
+                    result.is_ok(),
+                    "build_landlock_ruleset should succeed at ABI {:?}: {:?}",
+                    abi,
+                    result.err(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_ruleset_net_block_at_v1_triggers_warning_path() {
+        // ABI V1 does not support network filtering. net_block=true should
+        // still succeed but take the "warn" branch.
+        let result = build_landlock_ruleset(ABI::V1, &["/usr".into()], &[], true);
+        assert!(
+            result.is_ok(),
+            "net_block with V1 should succeed (warn path): {:?}",
+            result.err(),
+        );
+    }
+
+    #[test]
+    fn build_ruleset_net_block_at_v4_or_above() {
+        // If V4+ is available, net_block=true should take the network
+        // filtering branch rather than the warn branch.
+        let detected = detect_abi().expect("Landlock available");
+        if detected >= ABI::V4 {
+            let result = build_landlock_ruleset(
+                ABI::V4,
+                &["/usr".into()],
+                &[],
+                true,
+            );
+            assert!(
+                result.is_ok(),
+                "net_block with V4+ should succeed (network filtering): {:?}",
+                result.err(),
+            );
+        }
+    }
+
+    // ── spawn_sandboxed coverage test ──────────────────────────────────────
+
+    #[test]
+    fn spawn_sandboxed_runs_echo() {
+        // Exercise the test/coverage `spawn_sandboxed` variant end-to-end.
+        // Use a very permissive policy so the test runner survives the
+        // (irreversible) sandbox application in-process.
+        let policy = SandboxPolicy::new(); // Compatibility — broadest
+        let mut cmd = Command::new("/bin/echo");
+        cmd.arg("landlock-test");
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        let result = spawn_sandboxed(&mut cmd, &policy);
+        assert!(result.is_ok(), "spawn_sandboxed should succeed: {:?}", result.err());
+        let mut child = result.unwrap();
+        let status = child.wait().expect("wait for child");
+        assert!(status.success(), "echo should exit 0");
     }
 
     #[test]
