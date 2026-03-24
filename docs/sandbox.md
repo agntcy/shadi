@@ -242,6 +242,91 @@ path today is `delegate-to-child` on Unix/macOS:
 - SHADI verifies the child executable, optional child SHA-256 constraint, and nonce
 - the child receives the secret directly as the final authorized consumer
 
+## Dynamic Policy Updates
+
+`shadictl` supports runtime policy updates for long-running sandboxed workloads.
+When launched with `--watch-policy`, an `AF_UNIX` control socket is created so
+external callers can query and patch the effective policy without restarting the
+agent process.  The same Unix-domain socket protocol is used on all platforms:
+
+| Platform | Socket path |
+| --- | --- |
+| macOS / Linux | `$TMPDIR/shadi-ctl-<pid>.sock` |
+| Windows (10 1803+) | `%TEMP%\shadi-ctl-<pid>.sock` |
+
+Windows 10 version 1803 and later support `AF_UNIX` natively.  The
+[`uds_windows`](https://crates.io/crates/uds_windows) crate provides the
+binding so the control channel implementation is shared across all platforms
+with no TCP fallback.
+
+### Enabling the control socket
+
+```bash
+cargo run -p shadictl -- --watch-policy --profile balanced -- ./your-agent
+```
+
+On startup, `shadictl` prints the control socket path to stderr:
+
+```
+control socket: /tmp/shadi-ctl-12345.sock
+```
+
+### Querying the current policy
+
+```bash
+cargo run -p shadictl -- policy query --socket /tmp/shadi-ctl-12345.sock
+```
+
+### Sending a policy patch
+
+From the CLI:
+
+```bash
+cargo run -p shadictl -- policy patch \
+  --socket /tmp/shadi-ctl-12345.sock \
+  --add-allow-command npm \
+  --add-block-command curl \
+  --add-read /opt/new-tool
+```
+
+From a JSON patch file:
+
+```json
+{
+  "add_allow_command": ["npm"],
+  "add_block_command": ["curl"],
+  "add_read": ["/opt/new-tool"],
+  "add_net_allow": ["registry.npmjs.org"]
+}
+```
+
+```bash
+cargo run -p shadictl -- policy patch \
+  --socket /tmp/shadi-ctl-12345.sock \
+  --patch-file ./patch.json
+```
+
+### Patch axis status
+
+Each axis of a policy patch returns one of:
+
+| Status | Meaning |
+| --- | --- |
+| `applied` | Change took effect immediately (command allow/block lists). |
+| `pending_restart` | Change is staged but requires a process restart to take effect (filesystem paths, network rules). |
+| `unchanged` | No change was requested for this axis. |
+| `rejected` | The change was invalid or denied. |
+
+### Platform limitations
+
+macOS Seatbelt profiles are compiled once at process launch via `sandbox_init`.
+Filesystem and network rules **cannot** be widened at runtime. These axes are
+staged (reported as `pending_restart`) and require relaunching the agent with
+the updated policy to take effect.
+
+Command allow/block lists are enforced in user space by `shadictl` and can
+always be updated immediately.
+
 ## Notes
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
   to execute processes are allowed for read access.

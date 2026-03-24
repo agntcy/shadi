@@ -55,6 +55,9 @@ pub(crate) struct Cli {
     #[arg(long = "git-snapshot-untracked", action = ArgAction::SetTrue)]
     pub(crate) git_snapshot_untracked: bool,
 
+    #[arg(long = "watch-policy", action = ArgAction::SetTrue)]
+    pub(crate) watch_policy: bool,
+
     #[command(subcommand)]
     pub(crate) subcommand: Option<Commands>,
 
@@ -146,6 +149,8 @@ pub(crate) struct PolicyCli {
 pub(crate) enum PolicyCommand {
     Explain(PolicyExplainArgs),
     Diff(PolicyDiffArgs),
+    Patch(PolicyPatchArgs),
+    Query(PolicyQueryArgs),
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -236,6 +241,56 @@ pub(crate) struct PolicyDiffArgs {
 
     #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) allow_command: Vec<String>,
+
+    #[arg(long = "format", value_enum, default_value = "json")]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "patch", about = "Send an incremental policy patch to a running sandbox session")]
+pub(crate) struct PolicyPatchArgs {
+    #[arg(long = "socket", value_name = "PATH")]
+    pub(crate) socket: PathBuf,
+
+    #[arg(long = "add-read", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) add_read: Vec<String>,
+
+    #[arg(long = "add-write", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) add_write: Vec<String>,
+
+    #[arg(long = "add-allow", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) add_allow: Vec<String>,
+
+    #[arg(long = "add-allow-command", value_name = "CMD", action = ArgAction::Append)]
+    pub(crate) add_allow_command: Vec<String>,
+
+    #[arg(long = "remove-allow-command", value_name = "CMD", action = ArgAction::Append)]
+    pub(crate) remove_allow_command: Vec<String>,
+
+    #[arg(long = "add-block-command", value_name = "CMD", action = ArgAction::Append)]
+    pub(crate) add_block_command: Vec<String>,
+
+    #[arg(long = "remove-block-command", value_name = "CMD", action = ArgAction::Append)]
+    pub(crate) remove_block_command: Vec<String>,
+
+    #[arg(long = "add-net-allow", value_name = "HOST", action = ArgAction::Append)]
+    pub(crate) add_net_allow: Vec<String>,
+
+    #[arg(long = "remove-net-allow", value_name = "HOST", action = ArgAction::Append)]
+    pub(crate) remove_net_allow: Vec<String>,
+
+    #[arg(long = "patch-file", value_name = "FILE")]
+    pub(crate) patch_file: Option<PathBuf>,
+
+    #[arg(long = "format", value_enum, default_value = "json")]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "query", about = "Query the effective policy of a running sandbox session")]
+pub(crate) struct PolicyQueryArgs {
+    #[arg(long = "socket", value_name = "PATH")]
+    pub(crate) socket: PathBuf,
 
     #[arg(long = "format", value_enum, default_value = "json")]
     pub(crate) format: OutputFormat,
