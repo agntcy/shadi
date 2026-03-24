@@ -661,9 +661,7 @@ fn reject_reparse_points(path: &Path) -> Result<(), String> {
 
 fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
     use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
-    use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, SECURITY_DESCRIPTOR_REVISION,
-    };
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 
     let mut dacl: *mut core::ffi::c_void = std::ptr::null_mut();
     let mut security_descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
@@ -688,7 +686,7 @@ fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
     let ok = unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             security_descriptor,
-            SECURITY_DESCRIPTOR_REVISION,
+            1, // SECURITY_DESCRIPTOR_REVISION
             DACL_SECURITY_INFORMATION,
             &mut sddl_ptr,
             std::ptr::null_mut(),

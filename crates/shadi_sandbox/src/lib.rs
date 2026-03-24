@@ -503,7 +503,7 @@ fn restore_windows_acl_journal_entry(entry: &WindowsAclRollbackJournalEntry) -> 
         SetNamedSecurityInfoW,
     };
     use windows_sys::Win32::Security::{
-        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, SECURITY_DESCRIPTOR_REVISION,
+        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION,
     };
 
     let sddl: Vec<u16> = std::ffi::OsStr::new(&entry.dacl_sddl)
@@ -514,7 +514,7 @@ fn restore_windows_acl_journal_entry(entry: &WindowsAclRollbackJournalEntry) -> 
     let ok = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
-            SECURITY_DESCRIPTOR_REVISION,
+            1, // SECURITY_DESCRIPTOR_REVISION
             &mut security_descriptor,
             std::ptr::null_mut(),
         )
