@@ -613,6 +613,8 @@ pub(crate) struct ProcessTrustedSecretRule {
     pub(crate) key: String,
     pub(crate) name: String,
     pub(crate) fd_env: String,
+    #[serde(default)]
+    pub(crate) exec_sha256: Option<String>,
 }
 
 #[derive(Debug)]

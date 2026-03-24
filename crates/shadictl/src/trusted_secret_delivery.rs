@@ -458,6 +458,27 @@ pub(crate) fn resolve_launch_secret_config(
     for rule in &file_policy.process_trusted_secret {
         let rule_program = canonicalize_policy_program(&rule.program, command)?;
         if rule_program == command_path {
+            if let Some(expected_hex) = &rule.exec_sha256 {
+                let expected = parse_sha256_hex(expected_hex).map_err(|err| {
+                    format!(
+                        "process trusted secret '{}' has invalid exec_sha256: {}",
+                        rule.name, err
+                    )
+                })?;
+                let actual = compute_file_sha256(&rule_program).map_err(|err| {
+                    format!(
+                        "process trusted secret '{}' executable could not be hashed: {}",
+                        rule.name, err
+                    )
+                })?;
+                if actual != expected {
+                    return Err(format!(
+                        "process trusted secret '{}' exec_sha256 does not match current executable",
+                        rule.name
+                    ));
+                }
+            }
+
             resolved
                 .trusted_secret
                 .push(format!("{}={}", rule.key, rule.name));
@@ -1356,12 +1377,14 @@ mod tests {
                     key: "secops/token".to_string(),
                     name: "token".to_string(),
                     fd_env: "TOKEN_FD".to_string(),
+                    exec_sha256: None,
                 },
                 ProcessTrustedSecretRule {
                     program: "/bin/sh".to_string(),
                     key: "other/token".to_string(),
                     name: "other".to_string(),
                     fd_env: "OTHER_FD".to_string(),
+                    exec_sha256: None,
                 },
             ],
             process_secret_policy: vec![
@@ -1547,6 +1570,56 @@ mod tests {
 
         let err = resolve_config_error(&command, &helper, &policy);
         assert!(err.contains("sha256 does not match current executable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_launch_secret_config_accepts_matching_process_trusted_secret_exec_sha256() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (helper, mut command) = build_test_helper_command(&temp);
+        crate::scrub_test_secret_backend_env(&mut command);
+
+        let digest = compute_file_sha256(&helper)
+            .expect("hash helper")
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<String>();
+
+        let policy = PolicyFile {
+            process_trusted_secret: vec![ProcessTrustedSecretRule {
+                program: helper.display().to_string(),
+                key: "secops/token".to_string(),
+                name: "token".to_string(),
+                fd_env: "TOKEN_FD".to_string(),
+                exec_sha256: Some(digest),
+            }],
+            ..PolicyFile::default()
+        };
+
+        let cli = build_test_cli(&helper);
+        let resolved = resolve_launch_secret_config(&command, &cli, &policy).expect("resolve");
+        assert_eq!(resolved.trusted_secret, vec!["secops/token=token".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_launch_secret_config_rejects_mismatched_process_trusted_secret_exec_sha256() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (helper, command) = build_test_helper_command(&temp);
+
+        let policy = PolicyFile {
+            process_trusted_secret: vec![ProcessTrustedSecretRule {
+                program: helper.display().to_string(),
+                key: "secops/token".to_string(),
+                name: "token".to_string(),
+                fd_env: "TOKEN_FD".to_string(),
+                exec_sha256: Some("00".repeat(32)),
+            }],
+            ..PolicyFile::default()
+        };
+
+        let err = resolve_config_error(&command, &helper, &policy);
+        assert!(err.contains("exec_sha256 does not match current executable"));
     }
 
     #[cfg(unix)]

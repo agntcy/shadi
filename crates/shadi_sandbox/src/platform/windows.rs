@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::{SandboxError, SandboxPolicy, SandboxedChild, WindowsAclRollback, WindowsChild};
+use tracing::{info, warn};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS, HANDLE_FLAG_INHERIT,
@@ -35,6 +36,7 @@ use windows_sys::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
 };
 use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let program = command.get_program().to_string_lossy().to_string();
@@ -43,6 +45,16 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     let current_dir = command.get_current_dir().map(path_to_wide);
     let inherited_handles = extract_inherited_handles(command).map_err(SandboxError::ApplyFailed)?;
     let profile_name = sandbox_profile_name();
+
+    info!(
+        target: "shadi.sandbox.windows",
+        command = %program,
+        arg_count = args.len(),
+        read_paths = policy.allow_read().len(),
+        write_paths = policy.allow_write().len(),
+        net_blocked = policy.net_blocked(),
+        "starting Windows AppContainer sandbox"
+    );
 
     let appcontainer = AppContainer::new(&profile_name, policy.net_blocked())
         .map_err(SandboxError::ApplyFailed)?;
@@ -60,6 +72,11 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     ) {
         Ok(info) => info,
         Err(err) => {
+            warn!(
+                target: "shadi.sandbox.windows",
+                error = %err,
+                "AppContainer process spawn failed; rolling back ACL changes"
+            );
             rollback_acl_changes(&mut rollbacks);
             return Err(SandboxError::SpawnFailed(err));
         }
@@ -110,6 +127,13 @@ fn apply_policy_acl_grants(
 }
 
 fn rollback_acl_changes(rollbacks: &mut Vec<WindowsAclRollback>) {
+    if !rollbacks.is_empty() {
+        warn!(
+            target: "shadi.sandbox.windows",
+            rollback_count = rollbacks.len(),
+            "restoring ACL rollback entries"
+        );
+    }
     crate::restore_windows_acl_rollbacks(rollbacks);
 }
 
@@ -530,6 +554,8 @@ fn grant_path_access(
     read: bool,
     write: bool,
 ) -> Result<WindowsAclRollback, String> {
+    reject_reparse_points(path)?;
+
     let mut access_mask: u32 = 0;
     if read {
         access_mask |= windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
@@ -588,6 +614,27 @@ fn grant_path_access(
     }
 
     Ok(rollback)
+}
+
+fn is_reparse_point_attributes(attributes: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn reject_reparse_points(path: &Path) -> Result<(), String> {
+    for ancestor in path.ancestors() {
+        let meta = std::fs::symlink_metadata(ancestor)
+            .map_err(|e| format!("failed to inspect path {}: {}", ancestor.display(), e))?;
+        #[allow(clippy::unnecessary_cast)]
+        let attrs = std::os::windows::fs::MetadataExt::file_attributes(&meta) as u32;
+        if is_reparse_point_attributes(attrs) {
+            return Err(format!(
+                "refusing ACL grant for path {} because ancestor {} is a reparse point",
+                path.display(),
+                ancestor.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
@@ -730,5 +777,12 @@ mod tests {
         let err = grant_path_access(std::ptr::null_mut(), &path, false, false)
             .expect_err("empty access mask should fail");
         assert_eq!(err, "no access requested");
+    }
+
+    #[test]
+    fn reparse_point_attribute_detection_works() {
+        assert!(is_reparse_point_attributes(FILE_ATTRIBUTE_REPARSE_POINT));
+        assert!(is_reparse_point_attributes(FILE_ATTRIBUTE_REPARSE_POINT | 0x20));
+        assert!(!is_reparse_point_attributes(0));
     }
 }

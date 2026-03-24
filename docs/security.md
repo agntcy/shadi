@@ -68,6 +68,7 @@ protocol.
 - Unix/macOS trusted delivery uses a launch-scoped broker endpoint, a companion nonce env (`*_NONCE`), peer-process verification, and one-shot release semantics.
 - macOS temporarily opts into local Unix socket permissions only for launches that require trusted-secret delivery.
 - Windows currently supports direct trusted-secret delivery through a compatibility inherited-handle path.
+- Windows direct trusted-secret rules can optionally pin the launched executable hash with `exec_sha256` to avoid path-only trust.
 
 ### Policy intent
 
