@@ -759,7 +759,7 @@ mod tests {
 
     // --- policy patch / query command tests ---
 
-    use crate::policy_watch::{start_control_socket, LivePolicy};
+    use crate::policy_watch::{query_policy, start_control_socket, LivePolicy};
     use std::collections::HashSet;
 
     fn test_live_policy() -> std::sync::Arc<std::sync::Mutex<LivePolicy>> {
@@ -775,13 +775,24 @@ mod tests {
         }))
     }
 
+    fn wait_for_control_socket_ready(sock: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if sock.exists() && query_policy(sock).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("control socket did not become ready: {}", sock.display());
+    }
+
     #[test]
     fn run_policy_patch_command_succeeds_via_socket() {
         let live = test_live_policy();
         let dir = tempdir().expect("tempdir");
         let sock = dir.path().join("ctl.sock");
         let handle = start_control_socket(&sock, live).expect("start socket");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_for_control_socket_ready(&sock);
 
         let code = run_policy_patch_command(PolicyPatchArgs {
             socket: sock.clone(),
@@ -807,7 +818,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let sock = dir.path().join("ctl.sock");
         let handle = start_control_socket(&sock, live).expect("start socket");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_for_control_socket_ready(&sock);
 
         let patch_path = dir.path().join("patch.json");
         std::fs::write(
@@ -901,7 +912,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let sock = dir.path().join("ctl.sock");
         let handle = start_control_socket(&sock, live).expect("start socket");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_for_control_socket_ready(&sock);
 
         let code = run_policy_query_command(PolicyQueryArgs {
             socket: sock.clone(),

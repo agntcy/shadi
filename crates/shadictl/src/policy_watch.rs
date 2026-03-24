@@ -378,6 +378,28 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    fn wait_for_socket_ready(sock_path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if sock_path.exists() && query_policy(sock_path).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("control socket did not become ready: {}", sock_path.display());
+    }
+
+    fn wait_for_socket_removed(sock_path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if !sock_path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("control socket was not removed: {}", sock_path.display());
+    }
+
     fn test_live_policy() -> Arc<Mutex<LivePolicy>> {
         Arc::new(Mutex::new(LivePolicy {
             policy: SandboxPolicy::new().block_network(true),
@@ -497,9 +519,7 @@ mod tests {
 
         let handle = start_control_socket(&sock_path, live).expect("start socket");
         assert!(handle.path().exists());
-
-        // Give the listener thread a moment to start.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_for_socket_ready(&sock_path);
 
         // Send a command patch.
         let patch = PolicyPatch {
@@ -520,8 +540,7 @@ mod tests {
 
         drop(handle);
         // Endpoint file should be cleaned up.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!sock_path.exists());
+        wait_for_socket_removed(&sock_path);
     }
 
     #[test]
