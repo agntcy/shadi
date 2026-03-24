@@ -314,8 +314,11 @@ mod tests {
 
         let mut rollbacks = vec![WindowsAclRollback {
             path: to_wide(&path),
+            path_string: path.display().to_string(),
             dacl: std::ptr::null_mut(),
             security_descriptor: std::ptr::null_mut(),
+            dacl_sddl: String::new(),
+            journal_path: None,
         }];
 
         restore_windows_acl_rollbacks(&mut rollbacks);
@@ -323,15 +326,50 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_acl_journal_entry_round_trips() {
+        let entry = WindowsAclRollbackJournalEntry {
+            path: r"C:\temp\foo".to_string(),
+            dacl_sddl: "D:(A;;FA;;;SY)".to_string(),
+        };
+
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let restored: WindowsAclRollbackJournalEntry =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.path, entry.path);
+        assert_eq!(restored.dacl_sddl, entry.dacl_sddl);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_acl_journal_dir_uses_temp_dir() {
+        let dir = windows_acl_journal_dir();
+        assert!(dir.ends_with(WINDOWS_ACL_ROLLBACK_DIR_NAME));
+    }
 }
 
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct WindowsAclRollback {
     path: Vec<u16>,
+    path_string: String,
     dacl: *mut core::ffi::c_void,
     security_descriptor: *mut core::ffi::c_void,
+    dacl_sddl: String,
+    journal_path: Option<std::path::PathBuf>,
 }
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct WindowsAclRollbackJournalEntry {
+    path: String,
+    dacl_sddl: String,
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_ACL_ROLLBACK_DIR_NAME: &str = "shadi-acl-rollbacks";
 
 #[cfg(target_os = "windows")]
 pub struct WindowsChild {
@@ -425,15 +463,160 @@ impl Drop for WindowsChild {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_acl_journal_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(WINDOWS_ACL_ROLLBACK_DIR_NAME)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_acl_journal_path() -> std::path::PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    windows_acl_journal_dir().join(format!("rollback-{}-{}.json", std::process::id(), now))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn persist_windows_acl_rollback(rollback: &mut WindowsAclRollback) -> Result<(), String> {
+    if rollback.journal_path.is_some() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(windows_acl_journal_dir()).map_err(|err| err.to_string())?;
+    let journal_path = windows_acl_journal_path();
+    let entry = WindowsAclRollbackJournalEntry {
+        path: rollback.path_string.clone(),
+        dacl_sddl: rollback.dacl_sddl.clone(),
+    };
+    let json = serde_json::to_vec_pretty(&entry).map_err(|err| err.to_string())?;
+    std::fs::write(&journal_path, json).map_err(|err| err.to_string())?;
+    rollback.journal_path = Some(journal_path);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn restore_windows_acl_journal_entry(entry: &WindowsAclRollbackJournalEntry) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT,
+        SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, SECURITY_DESCRIPTOR_REVISION,
+    };
+
+    let sddl: Vec<u16> = std::ffi::OsStr::new(&entry.dacl_sddl)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut security_descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SECURITY_DESCRIPTOR_REVISION,
+            &mut security_descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    let result = (|| {
+        let mut dacl_present = 0;
+        let mut dacl = std::ptr::null_mut();
+        let mut defaulted = 0;
+        let ok = unsafe {
+            GetSecurityDescriptorDacl(
+                security_descriptor,
+                &mut dacl_present,
+                &mut dacl,
+                &mut defaulted,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+
+        let path_w: Vec<u16> = std::ffi::OsStr::new(&entry.path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                path_w.as_ptr() as *mut u16,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed (win32={})", rc));
+        }
+
+        Ok(())
+    })();
+
+    unsafe {
+        if !security_descriptor.is_null() {
+            LocalFree(security_descriptor);
+        }
+    }
+
+    result
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
+    use tracing::{info, warn};
+
+    let dir = windows_acl_journal_dir();
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut restored = 0;
+    for entry in std::fs::read_dir(&dir).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+
+        let data = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        let journal: WindowsAclRollbackJournalEntry =
+            serde_json::from_str(&data).map_err(|err| err.to_string())?;
+        match restore_windows_acl_journal_entry(&journal) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&path);
+                restored += 1;
+                info!(target: "shadi.sandbox.windows", journal = %path.display(), target_path = %journal.path, "restored stale ACL rollback journal");
+            }
+            Err(err) => {
+                warn!(target: "shadi.sandbox.windows", journal = %path.display(), error = %err, "failed to restore stale ACL rollback journal");
+            }
+        }
+    }
+
+    Ok(restored)
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn restore_windows_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
+    use tracing::warn;
     use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
     use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
     use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
     use windows_sys::Win32::Foundation::LocalFree;
 
-    for rollback in rollbacks.drain(..) {
+    for mut rollback in rollbacks.drain(..) {
+        let restored;
         unsafe {
-            let _ = SetNamedSecurityInfoW(
+            let rc = SetNamedSecurityInfoW(
                 rollback.path.as_ptr() as *mut u16,
                 SE_FILE_OBJECT,
                 DACL_SECURITY_INFORMATION,
@@ -442,10 +625,19 @@ pub(crate) fn restore_windows_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollba
                 rollback.dacl as *mut _,
                 std::ptr::null_mut(),
             );
+            restored = rc == 0;
 
             if !rollback.security_descriptor.is_null() {
                 LocalFree(rollback.security_descriptor);
             }
+        }
+
+        if restored {
+            if let Some(journal_path) = rollback.journal_path.take() {
+                let _ = std::fs::remove_file(journal_path);
+            }
+        } else {
+            warn!(target: "shadi.sandbox.windows", path = %rollback.path_string, "failed to restore ACL rollback in-memory; leaving journal for later recovery");
         }
     }
 }

@@ -368,8 +368,11 @@ Unix-domain sockets can still be selectively allowed.
 - On macOS, policy paths are resolved to absolute paths before Seatbelt rules are emitted; relative subpaths are not reliable enforcement inputs.
 - The demo launchers may still pre-read secrets outside the sandbox when a workload requires explicit disclosure or when the optional 1Password backend cannot be accessed safely inside the sandbox.
 - Windows: ACL allowlists are applied to the specified paths for the AppContainer
-  SID and automatically reverted when the sandboxed process exits. Network
-  access is controlled by AppContainer capabilities.
+  SID and automatically reverted when the sandboxed process exits. SHADI now
+  journals the original DACLs to disk before mutation and will replay any stale
+  rollback journals on the next Windows sandbox startup if a prior process
+  crashed before cleanup. Network access is controlled by AppContainer
+  capabilities.
 
 ### Sandbox boundary guidance
 
