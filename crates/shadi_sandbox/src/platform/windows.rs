@@ -683,13 +683,14 @@ fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
     }
 
     let mut sddl_ptr: *mut u16 = std::ptr::null_mut();
+    let mut sddl_len: u32 = 0;
     let ok = unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             security_descriptor,
             1, // SECURITY_DESCRIPTOR_REVISION
             DACL_SECURITY_INFORMATION,
             &mut sddl_ptr,
-            std::ptr::null_mut(),
+            &mut sddl_len,
         )
     };
     if ok == 0 {
@@ -704,13 +705,9 @@ fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
     }
 
     let dacl_sddl = unsafe {
-        let value = std::ffi::OsString::from_wide({
-            let mut len = 0;
-            while *sddl_ptr.add(len) != 0 {
-                len += 1;
-            }
-            std::slice::from_raw_parts(sddl_ptr, len)
-        });
+        let value = std::ffi::OsString::from_wide(
+            std::slice::from_raw_parts(sddl_ptr, sddl_len as usize),
+        );
         LocalFree(sddl_ptr as *mut _);
         value.to_string_lossy().to_string()
     };
