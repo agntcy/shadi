@@ -184,7 +184,7 @@ treating them as ambient runtime configuration. The current secret policy
 framework has three rule types:
 
 - `process_inject_keychain`: array of `{ "program", "key", "env" }`
-- `process_trusted_secret`: array of `{ "program", "key", "name", "fd_env" }`
+- `process_trusted_secret`: array of `{ "program", "key", "name", "fd_env", "exec_sha256?" }`
 - `process_secret_policy`: array of `{ "program", "secret", "actions", ... }`
 
 Example:
@@ -204,7 +204,8 @@ Example:
       "program": "/Users/example/bin/avatar-agent",
       "key": "avatar/session-key",
       "name": "avatar-session",
-      "fd_env": "AVATAR_SESSION_FD"
+      "fd_env": "AVATAR_SESSION_FD",
+      "exec_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     }
   ],
   "process_secret_policy": [
@@ -236,6 +237,11 @@ file descriptor. On Unix/macOS the current protocol is a parent-mediated one-sho
 fetch flow bound to the launched process identity, so the direct child can fetch
 the secret but a later exec into a different executable does not retain that
 fetch capability.
+
+`process_trusted_secret` now also supports optional `exec_sha256` pinning. When
+present, SHADI hashes the resolved launched executable and rejects the launch if
+the digest does not match. This adds a second trust check beyond path matching
+for direct trusted-secret delivery (including Windows compatibility mode).
 
 For `process_secret_policy`, delegated child delivery on Unix/macOS adds two
 important checks beyond executable-path matching:
