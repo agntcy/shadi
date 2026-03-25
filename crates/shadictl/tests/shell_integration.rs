@@ -7,6 +7,9 @@
 //! Tests in the "attached session" section spin up a mock sandbox control
 //! socket so the shell can attach and exercise policy query / patch commands
 //! against a live endpoint.
+//!
+//! These tests require Unix domain sockets and are skipped on Windows.
+#![cfg(unix)]
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
