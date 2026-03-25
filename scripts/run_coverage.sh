@@ -38,6 +38,17 @@ resolve_tool() {
 llvm_cov="$(resolve_tool llvm-cov)"
 llvm_profdata="$(resolve_tool llvm-profdata)"
 
+# On macOS, auto-resolve OPENSSL_DIR via Homebrew if not already set.
+# (Windows sets it in CI via GITHUB_ENV; Linux relies on pkg-config.)
+if [[ -z "${OPENSSL_DIR:-}" && "$(uname)" == "Darwin" ]]; then
+  for ossl_keg in "openssl@3" "openssl@1.1" "openssl"; do
+    if keg_path="$(brew --prefix "$ossl_keg" 2>/dev/null)"; then
+      export OPENSSL_DIR="$keg_path"
+      break
+    fi
+  done
+fi
+
 case "$mode" in
   lcov)
     format_args=(--lcov --output-path coverage/lcov.info)

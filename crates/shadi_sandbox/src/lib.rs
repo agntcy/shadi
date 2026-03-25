@@ -86,7 +86,28 @@ impl SandboxedChild {
         let _guard = span.enter();
 
         match &mut self.inner {
-            SandboxedChildInner::Std(child) => child.kill(),
+            SandboxedChildInner::Std(child) => {
+                // On macOS/Linux the sandboxed child runs in its own
+                // process group (via setsid in pre_exec). Kill the entire
+                // group so that grandchild processes are cleaned up too,
+                // mirroring the Windows Job-object behaviour.
+                #[cfg(unix)]
+                {
+                    let pid = child.id() as i32;
+                    // killpg sends the signal to every process in the group.
+                    // SAFETY: killpg with SIGKILL is always safe.
+                    let rc = unsafe { libc::killpg(pid, libc::SIGKILL) };
+                    if rc == 0 {
+                        return Ok(());
+                    }
+                    // Fall back to single-process kill if killpg fails
+                    // (e.g. the child didn't get a new process group in
+                    // test/coverage mode).
+                    child.kill()
+                }
+                #[cfg(not(unix))]
+                child.kill()
+            }
             #[cfg(target_os = "windows")]
             SandboxedChildInner::Windows(child) => child.kill(),
         }
@@ -119,6 +140,30 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     use std::os::windows::ffi::OsStrExt;
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_uses_killpg_when_child_is_process_group_leader() {
+        use std::os::unix::process::CommandExt;
+        // Spawn a child that calls setsid() in pre_exec so it becomes the
+        // leader of its own process group. killpg(pid, SIGKILL) should then
+        // succeed (rc == 0) and return Ok(()) without falling back to
+        // child.kill(), exercising the `return Ok(())` branch.
+        let child = unsafe {
+            Command::new("sleep")
+                .arg("30")
+                .pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                })
+                .spawn()
+                .expect("spawn sleep in own session")
+        };
+        let mut wrapped = SandboxedChild::from_std(child);
+        wrapped.kill().expect("killpg kill");
+        let status = wrapped.wait().expect("wait");
+        assert!(!status.success(), "killed process must not succeed");
+    }
 
     #[test]
     fn sandbox_error_display_message() {
