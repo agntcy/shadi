@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::process::Command;
 
-use crate::{SandboxError, SandboxPolicy, SandboxedChild, WindowsAclRollback, WindowsChild};
+use crate::{
+    persist_windows_acl_rollback, recover_windows_acl_rollbacks, SandboxError, SandboxPolicy,
+    SandboxedChild, WindowsAclRollback, WindowsChild,
+};
 use tracing::{info, warn};
 
 use windows_sys::Win32::Foundation::{
@@ -45,6 +48,24 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     let current_dir = command.get_current_dir().map(path_to_wide);
     let inherited_handles = extract_inherited_handles(command).map_err(SandboxError::ApplyFailed)?;
     let profile_name = sandbox_profile_name();
+
+    match recover_windows_acl_rollbacks() {
+        Ok(restored) if restored > 0 => {
+            info!(
+                target: "shadi.sandbox.windows",
+                restored = restored,
+                "recovered stale Windows ACL rollback journals before sandbox startup"
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            warn!(
+                target: "shadi.sandbox.windows",
+                error = %err,
+                "failed to recover stale Windows ACL rollback journals before sandbox startup"
+            );
+        }
+    }
 
     info!(
         target: "shadi.sandbox.windows",
@@ -569,7 +590,8 @@ fn grant_path_access(
         return Err("no access requested".to_string());
     }
 
-    let rollback = capture_dacl(path)?;
+    let mut rollback = capture_dacl(path)?;
+    persist_windows_acl_rollback(&mut rollback)?;
 
     let trustee = TRUSTEE_W {
         pMultipleTrustee: std::ptr::null_mut(),
@@ -638,6 +660,9 @@ fn reject_reparse_points(path: &Path) -> Result<(), String> {
 }
 
 fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
+    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+
     let mut dacl: *mut core::ffi::c_void = std::ptr::null_mut();
     let mut security_descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
     let path_w = to_wide(&strip_extended_path_prefix(path));
@@ -657,10 +682,46 @@ fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
         return Err(win32_error_message("GetNamedSecurityInfoW", result));
     }
 
+    let mut sddl_ptr: *mut u16 = std::ptr::null_mut();
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            security_descriptor,
+            1, // SECURITY_DESCRIPTOR_REVISION
+            DACL_SECURITY_INFORMATION,
+            &mut sddl_ptr,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        unsafe {
+            if !security_descriptor.is_null() {
+                LocalFree(security_descriptor);
+            }
+        }
+        return Err(last_win32_error_message(
+            "ConvertSecurityDescriptorToStringSecurityDescriptorW",
+        ));
+    }
+
+    let dacl_sddl = unsafe {
+        let value = std::ffi::OsString::from_wide({
+            let mut len = 0;
+            while *sddl_ptr.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(sddl_ptr, len)
+        });
+        LocalFree(sddl_ptr as *mut _);
+        value.to_string_lossy().to_string()
+    };
+
     Ok(WindowsAclRollback {
         path: path_w,
+        path_string: strip_extended_path_prefix(path).to_string(),
         dacl,
         security_descriptor,
+        dacl_sddl,
+        journal_path: None,
     })
 }
 
