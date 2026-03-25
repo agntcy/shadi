@@ -378,8 +378,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn wait_for_socket_ready(sock_path: &Path) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    fn wait_for_socket_ready_with_timeout(sock_path: &Path, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             if sock_path.exists() && query_policy(sock_path).is_ok() {
                 return;
@@ -389,8 +389,8 @@ mod tests {
         panic!("control socket did not become ready: {}", sock_path.display());
     }
 
-    fn wait_for_socket_removed(sock_path: &Path) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    fn wait_for_socket_removed_with_timeout(sock_path: &Path, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             if !sock_path.exists() {
                 return;
@@ -398,6 +398,32 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("control socket was not removed: {}", sock_path.display());
+    }
+
+    fn wait_for_socket_ready(sock_path: &Path) {
+        wait_for_socket_ready_with_timeout(sock_path, std::time::Duration::from_secs(2));
+    }
+
+    fn wait_for_socket_removed(sock_path: &Path) {
+        wait_for_socket_removed_with_timeout(sock_path, std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "control socket did not become ready")]
+    fn wait_for_socket_ready_times_out_on_missing_socket() {
+        wait_for_socket_ready_with_timeout(
+            Path::new("/tmp/shadi-nonexistent-test-never-exists.sock"),
+            std::time::Duration::from_millis(1),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "control socket was not removed")]
+    fn wait_for_socket_removed_times_out_when_file_persists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("still-here.txt");
+        std::fs::write(&sock_path, b"").expect("write");
+        wait_for_socket_removed_with_timeout(&sock_path, std::time::Duration::from_millis(1));
     }
 
     fn test_live_policy() -> Arc<Mutex<LivePolicy>> {

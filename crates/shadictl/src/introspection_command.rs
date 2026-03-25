@@ -775,8 +775,11 @@ mod tests {
         }))
     }
 
-    fn wait_for_control_socket_ready(sock: &std::path::Path) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    fn wait_for_control_socket_ready_with_timeout(
+        sock: &std::path::Path,
+        timeout: std::time::Duration,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             if sock.exists() && query_policy(sock).is_ok() {
                 return;
@@ -784,6 +787,19 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("control socket did not become ready: {}", sock.display());
+    }
+
+    fn wait_for_control_socket_ready(sock: &std::path::Path) {
+        wait_for_control_socket_ready_with_timeout(sock, std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "control socket did not become ready")]
+    fn wait_for_control_socket_ready_times_out_on_missing_socket() {
+        wait_for_control_socket_ready_with_timeout(
+            std::path::Path::new("/tmp/shadi-ctl-nonexistent-never-exists.sock"),
+            std::time::Duration::from_millis(1),
+        );
     }
 
     #[test]
