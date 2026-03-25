@@ -1,9 +1,15 @@
 # SHADI Sandbox (MVP)
 
 SHADI includes a kernel-enforced sandbox launcher to run agent processes with a
-restricted capability set. macOS uses the Seatbelt sandbox APIs. Windows uses AppContainer + ACL-based allowlists with
-optional network capability toggles, plus Job Objects to ensure child processes
-are terminated with the parent.
+restricted capability set.
+
+- **Linux**: Landlock LSM (kernel 5.13+) for filesystem isolation, with network
+  filtering on ABI V4+ (kernel 5.19+). `PR_SET_NO_NEW_PRIVS` prevents privilege
+  escalation through setuid binaries.
+- **macOS**: Seatbelt sandbox APIs (`sandbox_init`).
+- **Windows**: AppContainer + ACL-based allowlists with optional network
+  capability toggles, plus Job Objects to ensure child processes are terminated
+  with the parent.
 
 ## CLI
 
@@ -29,8 +35,10 @@ Profiles:
 - `balanced` (default): workspace access with network blocked.
 - `connected`: workspace access with network allowed.
 
-On macOS, all built-in profiles now resolve through the minimal Seatbelt platform
-profile by default. That keeps the runtime allowances needed to start common
+On macOS and Linux, all built-in profiles now resolve through the minimal platform
+profile by default. On macOS this uses a minimal Seatbelt profile; on Linux the
+Landlock backend supplies its own `DEFAULT_READ_PATHS` (e.g. `/usr`, `/lib`,
+`/etc`, `/proc/self`). That keeps the runtime allowances needed to start common
 tooling, but stops adding an implicit root read allowlist for `balanced` and
 `connected`. Add explicit `--read` or `--allow` paths when a workload needs
 extra filesystem access beyond the workspace.
@@ -54,7 +62,7 @@ cargo run -p shadictl -- --profile balanced --print-policy
 ```
 
 The printed policy now includes `platform_profile`, which is `minimal` on
-macOS for the built-in launcher profiles.
+macOS and Linux for the built-in launcher profiles.
 
 ### JSON Policy
 

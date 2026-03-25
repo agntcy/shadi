@@ -1,5 +1,5 @@
     use super::*;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     use shadi_sandbox::PlatformSandboxProfile;
     use tempfile::TempDir;
     use std::collections::HashMap;
@@ -385,7 +385,7 @@
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
         assert!(resolved.policy.net_blocked());
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let default_read = canonicalize_string_path("/").expect("canonical root path");
             assert_eq!(
@@ -399,7 +399,7 @@
                 .any(|path| path == &default_read));
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let default_read = canonicalize_string_path("/").expect("canonical root path");
             assert!(resolved

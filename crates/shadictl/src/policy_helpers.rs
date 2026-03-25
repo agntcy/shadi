@@ -92,7 +92,7 @@ pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<Reso
     let mut policy = SandboxPolicy::new()
         .block_network(cli.net_block || file_policy.net_block.unwrap_or(profile_net_block));
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         policy = policy.use_minimal_platform_profile();
     }
@@ -138,9 +138,9 @@ pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
         },
         LauncherProfile::Balanced => PolicyFile {
             allow: vec![".".to_string()],
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             read: Vec::new(),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             read: vec!["/".to_string()],
             write: Vec::new(),
             net_block: Some(true),
@@ -152,9 +152,9 @@ pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
         },
         LauncherProfile::Connected => PolicyFile {
             allow: vec![".".to_string()],
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             read: Vec::new(),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             read: vec!["/".to_string()],
             write: Vec::new(),
             net_block: Some(false),
