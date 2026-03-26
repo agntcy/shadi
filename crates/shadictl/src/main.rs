@@ -37,6 +37,7 @@ mod policy_helpers;
 mod policy_watch;
 mod resource_info;
 mod sandbox_snapshot;
+mod secrets_command;
 mod slim_mas_command;
 mod snapshot_command;
 mod trace_command;

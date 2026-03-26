@@ -19,6 +19,7 @@ use crate::cli_types::{
 };
 use crate::introspection_command::{run_config_command, run_policy_command};
 use crate::policy_watch;
+use crate::secrets_command;
 use crate::snapshot_command;
 use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
 use shadi_sandbox::PolicyPatch;
@@ -40,6 +41,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/snapshot list", "List git snapshot artifacts"),
     ("/snapshot show", "Show details of a git snapshot"),
     ("/resources", "Show resource usage of the sandboxed process"),
+    ("/secrets list", "List available keychain secret keys"),
+    ("/secrets rules", "Show secret delivery rules from policy"),
+    ("/secrets backend", "Show current secret backend configuration"),
     ("/history", "Show command history"),
     ("/clear", "Clear the terminal screen"),
     ("/exit", "Exit the interactive shell (alias: /q, /quit)"),
@@ -131,6 +135,29 @@ Usage: /resources
 
 Show resource usage (memory, CPU, threads) of the attached sandboxed process.
 Requires an attached session with --watch-policy enabled."),
+    ("/secrets list", "\
+Usage: /secrets list [--prefix PREFIX]
+
+List available keychain secret keys.
+
+Options:
+  --prefix PREFIX    Filter keys by prefix substring"),
+    ("/secrets rules", "\
+Usage: /secrets rules [--policy PATH]
+
+Show secret delivery rules from the policy file.
+
+Options:
+  --policy PATH    Path to the policy TOML file (default: sandbox.json)
+
+Displays inject_keychain, trusted_secret, and secret_policy rules with
+their associated key names, actions, and constraints."),
+    ("/secrets backend", "\
+Usage: /secrets backend
+
+Show the current secret backend configuration.
+Reads SHADI_SECRET_BACKEND, SHADI_OP_VAULT, and SHADI_OP_ACCOUNT
+environment variables."),
     ("/history", "\
 Usage: /history [--limit N] [--grep PATTERN]
 
@@ -294,6 +321,21 @@ impl Completer for ShellHelper {
             return Ok((offset, candidates));
         }
 
+        if let Some(sub_input) = input.strip_prefix("/secrets ") {
+            let sub_input = sub_input.trim_start();
+            let subs = ["list", "rules", "backend"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
         // Socket path completion for /attach.
         if let Some(path_input) = input.strip_prefix("/attach ") {
             let path_input = path_input.trim_start();
@@ -370,7 +412,7 @@ impl ShellSession {
 
         // Check for --help on any command.
         if parts.len() >= 2 && parts.last() == Some(&"--help") {
-            let cmd_key = if parts[0] == "/policy" || parts[0] == "/trace" || parts[0] == "/snapshot" {
+            let cmd_key = if parts[0] == "/policy" || parts[0] == "/trace" || parts[0] == "/snapshot" || parts[0] == "/secrets" {
                 if parts.len() >= 3 {
                     format!("{} {}", parts[0], parts[1])
                 } else {
@@ -446,6 +488,20 @@ impl ShellSession {
                 LoopAction::Continue
             }
             "/resources" => self.cmd_resources(),
+            "/secrets" if parts.len() >= 2 => match parts[1] {
+                "list" => self.cmd_secrets_list(&parts[2..]),
+                "rules" => self.cmd_secrets_rules(&parts[2..]),
+                "backend" => self.cmd_secrets_backend(),
+                _ => {
+                    eprintln!("unknown secrets subcommand: {}", parts[1]);
+                    eprintln!("  available: list, rules, backend");
+                    LoopAction::Continue
+                }
+            },
+            "/secrets" => {
+                eprintln!("usage: /secrets <list|rules|backend>");
+                LoopAction::Continue
+            }
             "/attach" => {
                 if parts.len() < 2 {
                     eprintln!("usage: /attach <socket-path>");
@@ -1004,6 +1060,43 @@ impl ShellSession {
             }
             Err(err) => eprintln!("error querying resources: {}", err),
         }
+        LoopAction::Continue
+    }
+
+    fn cmd_secrets_list(&self, args: &[&str]) -> LoopAction {
+        let mut prefix = None;
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--prefix" && i + 1 < args.len() {
+                prefix = Some(args[i + 1]);
+                i += 2;
+            } else {
+                eprintln!("unknown option: {}", args[i]);
+                return LoopAction::Continue;
+            }
+        }
+        secrets_command::secrets_list(prefix);
+        LoopAction::Continue
+    }
+
+    fn cmd_secrets_rules(&self, args: &[&str]) -> LoopAction {
+        let mut policy_path = None;
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--policy" && i + 1 < args.len() {
+                policy_path = Some(args[i + 1]);
+                i += 2;
+            } else {
+                eprintln!("unknown option: {}", args[i]);
+                return LoopAction::Continue;
+            }
+        }
+        secrets_command::secrets_rules(policy_path);
+        LoopAction::Continue
+    }
+
+    fn cmd_secrets_backend(&self) -> LoopAction {
+        secrets_command::secrets_backend();
         LoopAction::Continue
     }
 }
@@ -2079,5 +2172,70 @@ mod tests {
     #[test]
     fn given_session_when_resources_help_then_continues() {
         assert_continues(&mut session(), "/resources --help");
+    }
+
+    // ── secrets commands ─────────────────────────────────────
+
+    #[test]
+    fn given_session_when_secrets_list_then_continues() {
+        assert_continues(&mut session(), "/secrets list");
+    }
+
+    #[test]
+    fn given_session_when_secrets_list_with_prefix_then_continues() {
+        assert_continues(&mut session(), "/secrets list --prefix SHADI_");
+    }
+
+    #[test]
+    fn given_session_when_secrets_backend_then_continues() {
+        assert_continues(&mut session(), "/secrets backend");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_then_continues() {
+        assert_continues(&mut session(), "/secrets rules");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_with_policy_then_continues() {
+        assert_continues(&mut session(), "/secrets rules --policy sandbox.json");
+    }
+
+    #[test]
+    fn given_session_when_secrets_no_subcommand_then_continues() {
+        assert_continues(&mut session(), "/secrets");
+    }
+
+    #[test]
+    fn given_session_when_secrets_unknown_subcommand_then_continues() {
+        assert_continues(&mut session(), "/secrets bogus");
+    }
+
+    #[test]
+    fn given_session_when_help_secrets_list_then_continues() {
+        assert_continues(&mut session(), "/help secrets list");
+    }
+
+    #[test]
+    fn given_session_when_secrets_list_help_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets list --help");
+    }
+
+    // ── secrets tab completion ───────────────────────────────
+
+    #[test]
+    fn given_secrets_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/secrets l", 10, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 9);
+        assert!(
+            candidates.iter().any(|c| c.display == "list"),
+            "should complete secrets subcommands"
+        );
     }
 }
