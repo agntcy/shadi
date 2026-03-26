@@ -1,12 +1,13 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
+use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Context, EditMode, Editor, Helper};
@@ -21,8 +22,8 @@ use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
 use shadi_sandbox::PolicyPatch;
 
 const COMMANDS: &[(&str, &str)] = &[
-    ("/help", "Show available commands"),
-    ("/status", "Show current session status"),
+    ("/help", "Show available commands (alias: /h)"),
+    ("/status", "Show current session status (alias: /s)"),
     ("/attach", "Attach to a running sandbox session by socket path"),
     ("/detach", "Detach from the current session"),
     ("/sessions", "Discover running SHADI sandbox control sockets"),
@@ -33,26 +34,128 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/policy diff", "Diff effective policy against a baseline profile"),
     ("/trace list", "List recent trace log entries"),
     ("/trace summary", "Summarize trace logs by span name"),
+    ("/history", "Show command history"),
     ("/clear", "Clear the terminal screen"),
-    ("/exit", "Exit the interactive shell"),
-    ("/quit", "Exit the interactive shell"),
+    ("/exit", "Exit the interactive shell (alias: /q, /quit)"),
+];
+
+/// Detailed help text for commands that accept arguments.
+const COMMAND_HELP: &[(&str, &str)] = &[
+    ("/attach", "\
+Usage: /attach <socket-path>
+
+Attach to a running SHADI sandbox session via its control socket.
+
+Examples:
+  /attach /tmp/shadi-ctl-12345.sock"),
+    ("/policy query", "\
+Usage: /policy query
+
+Query the effective policy of the attached session and display it as JSON."),
+    ("/policy patch", "\
+Usage: /policy patch [options]
+
+Patch the policy of the attached session. Requires confirmation unless --force is given.
+
+Options:
+  --add-read PATH              Add a filesystem read path
+  --add-write PATH             Add a filesystem write path
+  --add-allow PATH             Add a filesystem allow (read+write) path
+  --add-allow-command CMD      Allow a command
+  --remove-allow-command CMD   Remove an allowed command
+  --add-block-command CMD      Block a command
+  --remove-block-command CMD   Remove a blocked command
+  --add-net-allow DEST         Allow a network destination
+  --remove-net-allow DEST      Remove an allowed network destination
+  --force                      Skip confirmation prompt
+  --dry-run                    Show what would change without applying
+
+Examples:
+  /policy patch --add-read /tmp --add-allow-command npm
+  /policy patch --add-net-allow api.example.com --force"),
+    ("/policy explain", "\
+Usage: /policy explain
+
+Explain the resolved policy and show source inputs as JSON."),
+    ("/policy diff", "\
+Usage: /policy diff <baseline>
+
+Diff the effective policy against a baseline profile or file.
+
+Baseline format:
+  profile:<strict|balanced|connected>
+  file:<path>
+
+Examples:
+  /policy diff profile:strict
+  /policy diff file:./my-policy.json"),
+    ("/trace list", "\
+Usage: /trace list [options]
+
+List recent trace log entries.
+
+Options:
+  --limit N          Maximum entries to show (default: 20)
+  --name SUBSTR      Filter by span name substring
+  --command SUBSTR   Filter by command substring
+  --exit-code CODE   Filter by exit code"),
+    ("/trace summary", "\
+Usage: /trace summary [--limit N]
+
+Summarize trace logs grouped by span name."),
+    ("/history", "\
+Usage: /history [--limit N] [--grep PATTERN]
+
+Show command history from the current and previous sessions.
+
+Options:
+  --limit N          Maximum entries to show (default: 20)
+  --grep PATTERN     Filter history entries by substring"),
 ];
 
 struct ShellHelper {
     hinter: HistoryHinter,
+    use_color: bool,
 }
 
 impl ShellHelper {
-    fn new() -> Self {
+    fn new(use_color: bool) -> Self {
         Self {
             hinter: HistoryHinter {},
+            use_color,
         }
     }
 }
 
 impl Helper for ShellHelper {}
 impl Validator for ShellHelper {}
-impl Highlighter for ShellHelper {}
+
+impl Highlighter for ShellHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        if !self.use_color || line.is_empty() {
+            return Cow::Borrowed(line);
+        }
+        // Highlight the command portion in yellow.
+        for &(cmd, _) in COMMANDS {
+            if line.starts_with(cmd) {
+                let rest = &line[cmd.len()..];
+                return Cow::Owned(format!("\x1b[1;33m{}\x1b[0m{}", cmd, rest));
+            }
+        }
+        // Also highlight aliases.
+        for alias in &["/h", "/s", "/q"] {
+            if line.starts_with(alias) {
+                let rest = &line[alias.len()..];
+                return Cow::Owned(format!("\x1b[1;33m{}\x1b[0m{}", alias, rest));
+            }
+        }
+        Cow::Borrowed(line)
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize, _forced: CmdKind) -> bool {
+        self.use_color
+    }
+}
 
 impl Hinter for ShellHelper {
     type Hint = String;
@@ -61,6 +164,21 @@ impl Hinter for ShellHelper {
         self.hinter.hint(line, pos, ctx)
     }
 }
+
+/// Policy patch flag names for argument completion.
+const PATCH_FLAGS: &[&str] = &[
+    "--add-read",
+    "--add-write",
+    "--add-allow",
+    "--add-allow-command",
+    "--remove-allow-command",
+    "--add-block-command",
+    "--remove-block-command",
+    "--add-net-allow",
+    "--remove-net-allow",
+    "--force",
+    "--dry-run",
+];
 
 impl Completer for ShellHelper {
     type Candidate = Pair;
@@ -74,11 +192,96 @@ impl Completer for ShellHelper {
         let input = &line[..pos];
         let mut candidates = Vec::new();
 
+        // If input starts with "/policy " or "/trace ", complete subcommands.
+        if let Some(sub_input) = input.strip_prefix("/policy ") {
+            let sub_input = sub_input.trim_start();
+            // Check if we're past the subcommand into patch flags.
+            if sub_input.starts_with("patch ") {
+                let flag_input = sub_input.strip_prefix("patch ").unwrap_or("");
+                // Find the last whitespace-delimited token being typed.
+                let last_token_start = flag_input.rfind(' ').map(|i| i + 1).unwrap_or(0);
+                let partial = &flag_input[last_token_start..];
+                if partial.starts_with('-') || partial.is_empty() {
+                    for flag in PATCH_FLAGS {
+                        if flag.starts_with(partial) {
+                            candidates.push(Pair {
+                                display: flag.to_string(),
+                                replacement: flag.to_string(),
+                            });
+                        }
+                    }
+                    // Offset from start of the last token.
+                    let offset = pos - partial.len();
+                    return Ok((offset, candidates));
+                }
+                return Ok((pos, candidates));
+            }
+            let subs = ["query", "patch", "explain", "diff"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
+        if let Some(sub_input) = input.strip_prefix("/trace ") {
+            let sub_input = sub_input.trim_start();
+            let subs = ["list", "summary"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
+        // Socket path completion for /attach.
+        if let Some(path_input) = input.strip_prefix("/attach ") {
+            let path_input = path_input.trim_start();
+            let tmpdir = std::env::temp_dir();
+            if let Ok(entries) = std::fs::read_dir(&tmpdir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
+                        let full = entry.path().to_string_lossy().to_string();
+                        if full.starts_with(path_input) || path_input.is_empty() {
+                            candidates.push(Pair {
+                                display: full.clone(),
+                                replacement: full,
+                            });
+                        }
+                    }
+                }
+            }
+            let offset = pos - path_input.len();
+            return Ok((offset, candidates));
+        }
+
+        // Top-level command completion.
         for &(cmd, _desc) in COMMANDS {
             if cmd.starts_with(input) {
                 candidates.push(Pair {
                     display: cmd.to_string(),
                     replacement: cmd.to_string(),
+                });
+            }
+        }
+        // Also offer aliases.
+        for &(alias, full) in &[("/h", "/help"), ("/s", "/status"), ("/q", "/quit")] {
+            if alias.starts_with(input) && !full.starts_with(input) {
+                candidates.push(Pair {
+                    display: format!("{} ({})", alias, full),
+                    replacement: alias.to_string(),
                 });
             }
         }
@@ -102,9 +305,40 @@ impl ShellSession {
             return LoopAction::Continue;
         }
 
+        // Check for --help on any command.
+        if parts.len() >= 2 && parts.last() == Some(&"--help") {
+            let cmd_key = if parts[0] == "/policy" || parts[0] == "/trace" {
+                if parts.len() >= 3 {
+                    format!("{} {}", parts[0], parts[1])
+                } else {
+                    parts[0].to_string()
+                }
+            } else {
+                parts[0].to_string()
+            };
+            return self.cmd_help_detail(&cmd_key);
+        }
+
         match parts[0] {
-            "/help" => self.cmd_help(),
-            "/status" => self.cmd_status(),
+            "/help" | "/h" => {
+                if parts.len() >= 2 {
+                    let target = if parts.len() >= 3 {
+                        format!("{} {}", parts[1], parts[2])
+                    } else {
+                        parts[1].to_string()
+                    };
+                    // Prepend / if not present.
+                    let key = if target.starts_with('/') {
+                        target
+                    } else {
+                        format!("/{}", target)
+                    };
+                    self.cmd_help_detail(&key)
+                } else {
+                    self.cmd_help()
+                }
+            }
+            "/status" | "/s" => self.cmd_status(),
             "/sessions" => self.cmd_sessions(),
             "/config" => self.cmd_config(),
             "/policy" if parts.len() >= 2 => match parts[1] {
@@ -147,17 +381,41 @@ impl ShellSession {
                 self.cmd_detach();
                 LoopAction::Continue
             }
+            "/history" => self.cmd_history(&parts[1..]),
             "/clear" => {
                 print!("\x1B[2J\x1B[1;1H");
                 LoopAction::Continue
             }
-            "/exit" | "/quit" => LoopAction::Exit,
+            "/exit" | "/quit" | "/q" => LoopAction::Exit,
             _ => {
                 eprintln!("unknown command: {}", parts[0]);
                 eprintln!("type '/help' for available commands");
                 LoopAction::Continue
             }
         }
+    }
+
+    fn cmd_help_detail(&self, cmd: &str) -> LoopAction {
+        let color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+        for &(key, text) in COMMAND_HELP {
+            if key == cmd {
+                if color {
+                    println!("\x1b[1m{}\x1b[0m\n", text);
+                } else {
+                    println!("{}\n", text);
+                }
+                return LoopAction::Continue;
+            }
+        }
+        // Fall back to the one-liner from COMMANDS.
+        for &(key, desc) in COMMANDS {
+            if key == cmd {
+                println!("{} — {}", key, desc);
+                return LoopAction::Continue;
+            }
+        }
+        eprintln!("no help available for '{}'", cmd);
+        LoopAction::Continue
     }
 
     fn cmd_help(&self) -> LoopAction {
@@ -237,6 +495,8 @@ impl ShellSession {
         };
 
         let mut patch = PolicyPatch::default();
+        let mut force = false;
+        let mut dry_run = false;
         let mut i = 0;
         while i < args.len() {
             match args[i] {
@@ -276,28 +536,53 @@ impl ShellSession {
                     patch.remove_net_allow.push(args[i + 1].to_string());
                     i += 2;
                 }
+                "--force" => {
+                    force = true;
+                    i += 1;
+                }
+                "--dry-run" => {
+                    dry_run = true;
+                    i += 1;
+                }
                 _ => {
                     eprintln!("unknown patch argument: {}", args[i]);
-                    eprintln!("usage: /policy patch [--add-read PATH] [--add-write PATH] [--add-allow PATH]");
-                    eprintln!("       [--add-allow-command CMD] [--remove-allow-command CMD]");
-                    eprintln!("       [--add-block-command CMD] [--remove-block-command CMD]");
-                    eprintln!("       [--add-net-allow DEST] [--remove-net-allow DEST]");
+                    eprintln!("use '/policy patch --help' for usage");
                     return LoopAction::Continue;
                 }
             }
         }
 
+        if dry_run {
+            println!("dry-run: the following patch would be applied:");
+            match serde_json::to_string_pretty(&patch) {
+                Ok(json) => println!("{}", json),
+                Err(err) => eprintln!("error formatting patch: {}", err),
+            }
+            return LoopAction::Continue;
+        }
+
+        // Confirmation prompt unless --force is given.
+        if !force && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            match serde_json::to_string_pretty(&patch) {
+                Ok(json) => println!("patch to apply:\n{}", json),
+                Err(err) => eprintln!("error formatting patch: {}", err),
+            }
+            eprint!("apply this patch? [y/N] ");
+            let mut answer = String::new();
+            if std::io::stdin().read_line(&mut answer).is_err() || !answer.trim().eq_ignore_ascii_case("y") {
+                println!("patch cancelled");
+                return LoopAction::Continue;
+            }
+        }
+
         match policy_watch::send_patch(sock, &patch) {
             Ok(resp) => {
-                println!("accepted:  {}", resp.accepted);
-                println!("filesystem: {:?}", resp.filesystem);
-                println!("commands:   {:?}", resp.commands);
-                println!("network:    {:?}", resp.network);
-                if !resp.message.is_empty() {
-                    println!("message:    {}", resp.message);
-                }
-                if !resp.pending_restart.is_empty() {
-                    println!("pending restart: {}", resp.pending_restart.join(", "));
+                match serde_json::to_string_pretty(&resp) {
+                    Ok(json) => println!("{}", json),
+                    Err(_) => {
+                        println!("accepted: {}", resp.accepted);
+                        println!("message:  {}", resp.message);
+                    }
                 }
             }
             Err(err) => eprintln!("error patching policy: {}", err),
@@ -478,6 +763,51 @@ impl ShellSession {
             println!("not attached to any session");
         }
     }
+
+    fn cmd_history(&self, args: &[&str]) -> LoopAction {
+        let mut limit: usize = 20;
+        let mut grep: Option<&str> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--limit" if i + 1 < args.len() => {
+                    limit = args[i + 1].parse().unwrap_or(20);
+                    i += 2;
+                }
+                "--grep" if i + 1 < args.len() => {
+                    grep = Some(args[i + 1]);
+                    i += 2;
+                }
+                _ => {
+                    eprintln!("usage: /history [--limit N] [--grep PATTERN]");
+                    return LoopAction::Continue;
+                }
+            }
+        }
+        let Some(path) = dirs_history_path() else {
+            eprintln!("history file not available");
+            return LoopAction::Continue;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let lines: Vec<&str> = contents.lines().collect();
+                let filtered: Vec<&&str> = if let Some(pat) = grep {
+                    lines.iter().filter(|l| l.contains(pat)).collect()
+                } else {
+                    lines.iter().collect()
+                };
+                let start = filtered.len().saturating_sub(limit);
+                for (idx, line) in filtered[start..].iter().enumerate() {
+                    println!("  {:>4}  {}", start + idx + 1, line);
+                }
+                if filtered.is_empty() {
+                    println!("(no matching history entries)");
+                }
+            }
+            Err(_) => println!("(no history yet)"),
+        }
+        LoopAction::Continue
+    }
 }
 
 enum LoopAction {
@@ -492,7 +822,8 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         .edit_mode(EditMode::Emacs)
         .build();
 
-    let helper = ShellHelper::new();
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let helper = ShellHelper::new(use_color);
     let mut rl = match Editor::with_config(config) {
         Ok(rl) => rl,
         Err(err) => {
@@ -509,7 +840,6 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
     }
 
     let mut session = ShellSession::new(args.socket);
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     print_banner(use_color);
     if let Some(ref sock) = session.socket {
@@ -588,30 +918,31 @@ fn print_banner(color: bool) {
     if color {
         println!(
             "\x1b[1;36m\
-  ____  _   _    _    ____ ___\n\
- / ___|| | | |  / \\  |  _ \\_ _|\n\
- \\___ \\| |_| | / _ \\ | | | | |\n\
-  ___) |  _  |/ ___ \\| |_| | |\n\
- |____/|_| |_/_/   \\_\\____/___|\x1b[0m"
+  ____  _   _   /^\\  ____ ___ \n\
+ / ___|| | | | /(_)\\ |  _ \\_ _|\n\
+ \\___ \\| |_| || |_| || | | | |\n\
+  ___) |  _  | \\   / | |_| | |\n\
+ |____/|_| |_|  \\_/  |____/___|\x1b[0m"
         );
         println!();
         println!(
-            "  \x1b[1mSandbox Hardening for AI Developer Infrastructure\x1b[0m"
+            "  \x1b[1mSandbox Hardening for AI Developer Infrastructure\x1b[0m  \x1b[2mv{}\x1b[0m",
+            env!("CARGO_PKG_VERSION")
         );
         println!(
-            "  \x1b[2mtype '/help' for available commands, '/exit' to quit\x1b[0m"
+            "  \x1b[2mtype '/help' for commands, '/exit' to quit, '<cmd> --help' for details\x1b[0m"
         );
     } else {
         println!(
             "\
-  ____  _   _    _    ____ ___\n\
- / ___|| | | |  / \\  |  _ \\_ _|\n\
- \\___ \\| |_| | / _ \\ | | | | |\n\
-  ___) |  _  |/ ___ \\| |_| | |\n\
- |____/|_| |_/_/   \\_\\____/___|\n"
+  ____  _   _   /^\\  ____ ___ \n\
+ / ___|| | | | /(_)\\ |  _ \\_ _|\n\
+ \\___ \\| |_| || |_| || | | | |\n\
+  ___) |  _  | \\   / | |_| | |\n\
+ |____/|_| |_|  \\_/  |____/___|\n"
         );
-        println!("  Sandbox Hardening for AI Developer Infrastructure");
-        println!("  type '/help' for available commands, '/exit' to quit");
+        println!("  Sandbox Hardening for AI Developer Infrastructure  v{}", env!("CARGO_PKG_VERSION"));
+        println!("  type '/help' for commands, '/exit' to quit, '<cmd> --help' for details");
     }
 }
 
@@ -806,7 +1137,7 @@ mod tests {
 
     #[test]
     fn given_slash_pol_when_completing_then_includes_policy_commands() {
-        let helper = ShellHelper::new();
+        let helper = ShellHelper::new(false);
         let rl_config = Config::builder().build();
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
@@ -823,7 +1154,7 @@ mod tests {
 
     #[test]
     fn given_slash_when_completing_then_returns_all_commands() {
-        let helper = ShellHelper::new();
+        let helper = ShellHelper::new(false);
         let rl_config = Config::builder().build();
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
@@ -957,7 +1288,7 @@ mod tests {
 
     #[test]
     fn given_helper_when_hint_invoked_then_returns_without_panic() {
-        let helper = ShellHelper::new();
+        let helper = ShellHelper::new(false);
         let rl_config = Config::builder().build();
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
@@ -981,47 +1312,47 @@ mod tests {
 
     #[test]
     fn given_attached_session_when_policy_patch_add_read_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-read /tmp");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-read /tmp");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_write_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-write /var/out");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-write /var/out");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-allow /opt/bin");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-allow /opt/bin");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_allow_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-allow-command npm");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-allow-command npm");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_allow_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --remove-allow-command npm");
+        assert_continues(&mut attached_session(), "/policy patch --force --remove-allow-command npm");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_block_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-block-command curl");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-block-command curl");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_block_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --remove-block-command curl");
+        assert_continues(&mut attached_session(), "/policy patch --force --remove-block-command curl");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_net_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-net-allow api.example.com");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-net-allow api.example.com");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_net_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --remove-net-allow api.example.com");
+        assert_continues(&mut attached_session(), "/policy patch --force --remove-net-allow api.example.com");
     }
 
     #[test]
@@ -1040,5 +1371,120 @@ mod tests {
     #[test]
     fn given_attached_session_when_help_then_shows_attached_to() {
         assert_continues(&mut attached_session(), "/help");
+    }
+
+    // ── aliases ──────────────────────────────────────────────
+
+    #[test]
+    fn given_session_when_alias_h_then_continues() {
+        assert_continues(&mut session(), "/h");
+    }
+
+    #[test]
+    fn given_session_when_alias_s_then_continues() {
+        assert_continues(&mut session(), "/s");
+    }
+
+    #[test]
+    fn given_session_when_alias_q_then_exits() {
+        assert_exits(&mut session(), "/q");
+    }
+
+    // ── per-command help ─────────────────────────────────────
+
+    #[test]
+    fn given_session_when_help_attach_then_continues() {
+        assert_continues(&mut session(), "/help attach");
+    }
+
+    #[test]
+    fn given_session_when_help_policy_then_continues() {
+        assert_continues(&mut session(), "/help policy");
+    }
+
+    #[test]
+    fn given_session_when_help_history_then_continues() {
+        assert_continues(&mut session(), "/help history");
+    }
+
+    #[test]
+    fn given_session_when_policy_patch_help_flag_then_continues() {
+        assert_continues(&mut session(), "/policy patch --help");
+    }
+
+    // ── dry-run ──────────────────────────────────────────────
+
+    #[test]
+    fn given_session_when_policy_patch_dry_run_then_continues() {
+        // dry-run does not require an attached socket; exits before send_patch
+        assert_continues(&mut session(), "/policy patch --dry-run --add-read /tmp");
+    }
+
+    // ── history command ──────────────────────────────────────
+
+    #[test]
+    fn given_session_when_history_then_continues() {
+        assert_continues(&mut session(), "/history");
+    }
+
+    #[test]
+    fn given_session_when_history_with_limit_then_continues() {
+        assert_continues(&mut session(), "/history --limit 5");
+    }
+
+    #[test]
+    fn given_session_when_history_with_grep_then_continues() {
+        assert_continues(&mut session(), "/history --grep attach");
+    }
+
+    // ── completion: subcommands ──────────────────────────────
+
+    #[test]
+    fn given_policy_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/policy ", 8, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 8);
+        assert!(
+            candidates.iter().any(|c| c.display == "query"),
+            "should complete /policy subcommands"
+        );
+    }
+
+    #[test]
+    fn given_trace_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/trace ", 7, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 7);
+        assert!(
+            candidates.iter().any(|c| c.display == "list"),
+            "should complete /trace subcommands"
+        );
+    }
+
+    #[test]
+    fn given_policy_patch_prefix_when_completing_then_returns_flags() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/policy patch --add-r", 21, &Context::new(rl.history()))
+                .unwrap();
+        assert_eq!(start, 14);
+        assert!(
+            candidates.iter().any(|c| c.display == "--add-read"),
+            "should complete patch flags"
+        );
     }
 }

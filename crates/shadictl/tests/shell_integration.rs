@@ -524,8 +524,8 @@ fn given_attached_session_when_policy_patch_command_then_shows_applied() {
     let out = run_shell(&input);
 
     out.assert_success()
-        .stdout_contains("accepted:  true")
-        .stdout_contains("Applied");
+        .stdout_contains("\"accepted\": true")
+        .stdout_contains("\"applied\"");
 }
 
 #[test]
@@ -540,8 +540,8 @@ fn given_attached_session_when_policy_patch_fs_then_shows_pending_restart() {
     let out = run_shell(&input);
 
     out.assert_success()
-        .stdout_contains("accepted:  true")
-        .stdout_contains("PendingRestart")
+        .stdout_contains("\"accepted\": true")
+        .stdout_contains("pending_restart")
         .stdout_contains("filesystem");
 }
 
@@ -557,8 +557,8 @@ fn given_attached_session_when_policy_patch_net_then_shows_pending_restart() {
     let out = run_shell(&input);
 
     out.assert_success()
-        .stdout_contains("accepted:  true")
-        .stdout_contains("PendingRestart")
+        .stdout_contains("\"accepted\": true")
+        .stdout_contains("pending_restart")
         .stdout_contains("network");
 }
 
@@ -645,9 +645,9 @@ fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
         .stdout_contains("allow_read")
         .stdout_contains("block_command")
         // policy patches
-        .stdout_contains("accepted:  true")
-        .stdout_contains("Applied")
-        .stdout_contains("PendingRestart")
+        .stdout_contains("\"accepted\": true")
+        .stdout_contains("\"applied\"")
+        .stdout_contains("pending_restart")
         // detach
         .stdout_contains("detached");
 }
