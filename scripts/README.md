@@ -2,40 +2,16 @@
 
 ## Quickstart
 
-Open three terminals and run:
+Start the SLIM message bus:
 
 ```bash
 ./scripts/launch_slim.sh
 ```
 
-```bash
-./scripts/import_secops_secrets.sh
-```
-
-```bash
-./scripts/launch_secops_a2a.sh
-```
-
-```bash
-./scripts/launch_avatar.sh
-```
-
-On Windows PowerShell, use the `.ps1` equivalents:
+On Windows PowerShell:
 
 ```powershell
 .\scripts\launch_slim.ps1
-```
-
-```powershell
-.\scripts\import_secops_secrets.ps1
-```
-
-```powershell
-.\scripts\launch_secops_a2a.ps1
-```
-
-```powershell
-.\scripts\launch_avatar.ps1
 ```
 
 ## Environment variables
@@ -49,17 +25,8 @@ These scripts default to local paths and can be overridden per terminal.
 - SHADI_SECRET_BACKEND: Secret store backend (`onepassword` or `keychain`, default: `keychain`).
 - SHADI_OP_VAULT: 1Password vault name (default: `shadi`). Only used when backend is `onepassword`.
 - SHADI_OP_ACCOUNT: 1Password account for multi-account setups. Only used when backend is `onepassword`.
-
-### SecOps A2A server
-- SHADI_SECOPS_CONFIG: Path to secops TOML (default: ${SHADI_TMP_DIR}/secops-a.toml).
-- SLIM_TLS_CERT: Client cert (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/client-secops-a.crt).
-- SLIM_TLS_KEY: Client key (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/client-secops-a.key).
-- SLIM_TLS_CA: CA cert (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/ca.crt).
-
-### Avatar agent
-- SHADI_SECOPS_CONFIG: Path to secops TOML (default: ${SHADI_TMP_DIR}/secops-a.toml).
-- SLIM_TLS_CERT: Client cert (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/client-avatar.crt).
-- SLIM_TLS_KEY: Client key (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/client-avatar.key).
+- SLIM_TLS_CERT: Client cert (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/client.crt).
+- SLIM_TLS_KEY: Client key (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/client.key).
 - SLIM_TLS_CA: CA cert (default: ${SHADI_TMP_DIR}/shadi-slim-mtls/ca.crt).
 
 ### SLIM node
@@ -81,44 +48,6 @@ Windows PowerShell:
 $env:SHADI_TMP_DIR = "./.tmp"
 $env:SLIM_ENDPOINT = "127.0.0.1:47357"
 .\scripts\launch_slim.ps1
-```
-
-Terminal 2 (SecOps A2A):
-
-```bash
-export SHADI_TMP_DIR="./.tmp"
-export SHADI_AGENT_ID="secops-a"
-export SHADI_OPERATOR_PRESENTATION="local-operator"
-./scripts/import_secops_secrets.sh
-./scripts/launch_secops_a2a.sh
-```
-
-Windows PowerShell:
-
-```powershell
-$env:SHADI_TMP_DIR = "./.tmp"
-$env:SHADI_AGENT_ID = "secops-a"
-$env:SHADI_OPERATOR_PRESENTATION = "local-operator"
-.\scripts\import_secops_secrets.ps1
-.\scripts\launch_secops_a2a.ps1
-```
-
-Terminal 3 (Avatar):
-
-```bash
-export SHADI_TMP_DIR="./.tmp"
-export SHADI_AGENT_ID="avatar-1"
-export SHADI_OPERATOR_PRESENTATION="local-operator"
-./scripts/launch_avatar.sh
-```
-
-Windows PowerShell:
-
-```powershell
-$env:SHADI_TMP_DIR = "./.tmp"
-$env:SHADI_AGENT_ID = "avatar-1"
-$env:SHADI_OPERATOR_PRESENTATION = "local-operator"
-.\scripts\launch_avatar.ps1
 ```
 
 ## Using 1Password as the secret backend

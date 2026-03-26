@@ -123,13 +123,12 @@ The system can be read as four presentation layers:
 ### 3) Memory layer
 - **Local encrypted store**: SQLCipher-backed SQLite for portable, on-device memory.
 - **Key management**: Encryption keys live in SHADI secrets (keychain backed).
-- **Agent usage**: workloads running on SHADI can persist local state in the encrypted store; the SecOps demo writes summaries there, while ADK memory remains in-process unless configured for persistent backends.
+- **Agent usage**: workloads running on SHADI can persist local state in the encrypted store.
 
 #### Key modules
 - `crates/shadi_memory/src/lib.rs`: SQLCipher store and query helpers.
 - `crates/shadictl/src/main.rs`: `shadictl memory` helper.
 - `crates/shadi_py/src/lib.rs`: SQLCipher bindings.
-- `agents/secops/skills.py`: example summary persistence used by the SecOps demo.
 
 ### 4) Transport layer
 - **SLIM/A2A**: MLS provides confidentiality and integrity between agents.
@@ -305,26 +304,6 @@ The CLI combines profile defaults, policy file settings, and explicit flags:
 - CLI flags override or extend resulting policy.
 - The effective policy can be printed with `--print-policy`.
 
-## Demo workload: SecOps agent
-The SecOps agent is an example workload that runs on top of SHADI. It uses the
-Python bindings for secrets plus GitHub APIs for security signals, but it is
-not part of the core runtime itself.
-
-#### Key modules
-- `agents/secops/skills.py`: skills to collect alerts and issues.
-- `agents/secops/secops.py`: runner invoking the skill.
-- `agents/secops/adk_agent/agent.py`: Google ADK agent.
-- `agents/secops/SKILL.md`: Agent Skills spec metadata and runbook.
-
-#### SecOps flow
-1. Read config from secops.toml.
-2. Fetch GitHub token and workspace path from SHADI.
-3. Collect Dependabot alerts and security-labeled issues.
-4. Collect code-scanning alerts for container findings via GitHub code scanning.
-5. For dependency alerts, patch supported manifests and stage repo-relative changes.
-6. For container CVEs, locate the authoritative Dockerfile from GitHub workflow metadata when possible and recommend image rebuilds or base-image refreshes instead of ad-hoc package-install edits.
-7. Create remediation issues and optional PRs, then write `secops_security_report.json` to the workspace.
-
 ## Detailed flow diagrams
 
 The overview diagram above shows the main blocks. The following diagrams zoom in
@@ -411,31 +390,12 @@ flowchart LR
   Workload --> Outcomes[Reports, issues, PRs, or actions]
 ```
 
-Example workloads such as SecOps or Avatar sit on top of the same runtime contract:
+Agent workloads sit on top of the same runtime contract:
 
 - secret reads are still gated by verification,
 - local persistence still flows through encrypted memory,
 - network access still depends on the resolved sandbox policy,
 - and transport still uses SLIM/A2A when agents communicate with each other.
-
-### 5) SecOps remediation flow
-
-```mermaid
-flowchart TD
-  Inputs[Configuration and approved credentials] --> Collect[Collect security signals]
-  Collect --> Triage[Classify remediation path]
-  Triage --> Dependency[Patch supported dependencies]
-  Triage --> Container[Recommend rebuild or base-image refresh]
-  Dependency --> Publish[Create reports, issues, or PRs]
-  Container --> Publish
-  Publish --> Learn[Persist remediation memory]
-```
-
-SecOps behavior stays intentionally split by remediation type:
-
-- Dependency remediation can edit supported manifests directly.
-- Container CVEs are handled as rebuild guidance rather than ad-hoc Dockerfile package-install edits.
-- Dockerfile discovery prefers authoritative workflow definitions before falling back to repository scanning.
 
 ## Threats addressed
 

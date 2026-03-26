@@ -221,7 +221,7 @@ cargo run -p shadictl -- \
   --net-block \
   --inject-keychain tourist_api_key=SHADI_BROKER_SECRET \
   -- \
-  uv run agents/secops/secops.py
+  uv run your_agent.py
 ```
 
 ### Trusted delivery

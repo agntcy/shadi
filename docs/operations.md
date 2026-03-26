@@ -37,35 +37,13 @@ entry point that tells you where to go and in what order.
 	- broker secrets into the process environment before sandboxing
 	- reason about the enforcement boundary on macOS and Windows
 
-=== "Local Demo"
-
-	Use [Demo Walkthrough](demo.md) when you want to run the local multi-agent demo.
-	That page covers:
-
-	- starting the local SLIM node
-	- seeding shared secrets into SHADI
-	- launching SecOps A2A servers
-	- launching Avatar and sending operator requests
-	- using the optional 1Password backend safely
-
-=== "Demo Runbooks"
-
-	Use [SecOps Demo](secops_agent.md) when you need a concrete example of a
-	SHADI-hosted workload with GitHub, SLIM/A2A, and remediation logic.
-
-	- configure the GitHub allowlist and required SHADI keys
-	- run scans and remediation mode
-	- understand the difference between dependency edits and container guidance
-	- inspect memory, reports, and pending PR artifacts
-	- run the focused Python test suite and skill scan
-
 ## Suggested Operator Flow
 
-For the current demo workflows, this is the practical order:
+For a typical sandboxed agent workflow, this is the practical order:
 
 1. Review [Sandbox and Policies](sandbox.md) and print the resolved policy you intend to run.
 2. Load secrets and identity material required by the chosen agent.
-3. Start transport dependencies from [Demo Walkthrough](demo.md).
+3. Start transport dependencies if multi-agent messaging is needed.
 4. Launch the sandboxed agent process.
 5. Inspect outputs such as policy, Git snapshot artifacts, report files, memory state, and queued PR artifacts.
 
@@ -80,8 +58,7 @@ Start from the symptom, then jump to the right page:
 
 - Sandbox launch or path access issue: [Sandbox and Policies](sandbox.md)
 - Git-backed sandbox snapshot or working-tree audit issue: [Sandbox and Policies](sandbox.md) and [CLI Reference](cli.md)
-- Avatar or SLIM handshake issue: [Demo Walkthrough](demo.md)
-- Demo workload or remediation behavior issue: [SecOps Demo](secops_agent.md)
+- Transport or SLIM handshake issue: [SLIM and A2A](slim_a2a.md)
 - Identity, DID, or secret access issue: [API Guide](api_integration.md) and [CLI Reference](cli.md)
 
 ## Operational References
