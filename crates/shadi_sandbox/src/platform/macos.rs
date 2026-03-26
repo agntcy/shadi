@@ -190,7 +190,14 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         ));
     }
 
-    if !policy.net_blocked() {
+    if !policy.net_allow().is_empty() {
+        // macOS Seatbelt `(remote ip ...)` only accepts * or localhost as the
+        // host component — it cannot filter by arbitrary IP/hostname.  When
+        // net_allow destinations are specified we enable outbound networking;
+        // the destination list is authoritative for policy auditing and for
+        // platforms (e.g., Linux) that support finer-grained enforcement.
+        rules.push("(allow network-outbound)".to_string());
+    } else if !policy.net_blocked() {
         rules.push("(allow network*)".to_string());
     }
 
@@ -310,6 +317,43 @@ mod tests {
     fn build_profile_blocks_network_when_enabled() {
         let policy = SandboxPolicy::new().block_network(true);
         let profile = build_profile(&policy).unwrap();
+        assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn build_profile_enables_outbound_when_net_allow_destinations_present() {
+        let policy = SandboxPolicy::new()
+            .block_network(true)
+            .allow_network_destination("1.1.1.1:80")
+            .allow_network_destination("127.0.0.1");
+
+        let profile = build_profile(&policy).unwrap();
+
+        // Seatbelt cannot filter by destination IP; we just enable outbound.
+        assert!(profile.contains("(allow network-outbound)"));
+        assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn build_profile_net_allow_overrides_blanket_block() {
+        let policy = SandboxPolicy::new()
+            .block_network(true)
+            .allow_network_destination("1.1.1.1");
+
+        let profile = build_profile(&policy).unwrap();
+        assert!(profile.contains("(allow network-outbound)"));
+        assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn build_profile_prefers_net_allow_over_blanket_network_access() {
+        let policy = SandboxPolicy::new()
+            .block_network(false)
+            .allow_network_destination("1.1.1.1:80");
+
+        let profile = build_profile(&policy).unwrap();
+
+        assert!(profile.contains("(allow network-outbound)"));
         assert!(!profile.contains("(allow network*)"));
     }
 

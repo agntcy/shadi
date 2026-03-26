@@ -22,6 +22,9 @@ pub(crate) struct Cli {
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
 
+    #[arg(long = "net-allow", value_name = "HOST[:PORT]", action = ArgAction::Append)]
+    pub(crate) net_allow: Vec<String>,
+
     #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) allow_command: Vec<String>,
 
@@ -241,6 +244,9 @@ pub(crate) struct PolicyDiffArgs {
 
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
+
+    #[arg(long = "net-allow", value_name = "HOST[:PORT]", action = ArgAction::Append)]
+    pub(crate) net_allow: Vec<String>,
 
     #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) allow_command: Vec<String>,
@@ -575,6 +581,8 @@ pub(crate) struct PolicyFile {
     pub(crate) write: Vec<String>,
     #[serde(default)]
     pub(crate) net_block: Option<bool>,
+    #[serde(default)]
+    pub(crate) net_allow: Vec<String>,
     #[serde(default)]
     pub(crate) allow_command: Vec<String>,
     #[serde(default)]

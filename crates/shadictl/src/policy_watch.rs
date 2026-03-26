@@ -18,11 +18,18 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
+
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
 #[cfg(windows)]
 use uds_windows::UnixListener;
@@ -39,6 +46,8 @@ pub(crate) struct LivePolicy {
     pub(crate) policy: SandboxPolicy,
     pub(crate) blocked: HashSet<String>,
     pub(crate) allow: HashSet<String>,
+    pub(crate) terminate_requested: Arc<AtomicBool>,
+    pub(crate) restart_requested: Arc<AtomicBool>,
     /// Filesystem patches staged for next restart.
     pub(crate) staged_read: Vec<String>,
     pub(crate) staged_write: Vec<String>,
@@ -95,6 +104,10 @@ pub(crate) fn start_control_socket(
     let listener =
         UnixListener::bind(path).map_err(|e| format!("failed to bind control socket: {}", e))?;
 
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to protect control socket permissions: {}", e))?;
+
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("failed to set non-blocking: {}", e))?;
@@ -115,7 +128,17 @@ pub(crate) fn start_control_socket(
 fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_path: &Path) {
     loop {
         match listener.accept() {
-            Ok((stream, _)) => {
+            Ok((mut stream, _)) => {
+                #[cfg(unix)]
+                if let Err(err) = authorize_control_peer(&stream) {
+                    let _ = write_response(
+                        &mut stream,
+                        &ControlResponse::Error {
+                            message: format!("unauthorized control socket peer: {}", err),
+                        },
+                    );
+                    continue;
+                }
                 handle_stream(stream, live);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -128,6 +151,52 @@ fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_pa
             Err(_) => break,
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn authorize_control_peer(stream: &UnixStream) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let current_uid = unsafe { libc::geteuid() };
+    if uid != current_uid {
+        return Err(format!("peer uid {} does not match current uid {}", uid, current_uid));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn authorize_control_peer(stream: &UnixStream) -> Result<(), String> {
+    use std::mem::size_of;
+    use std::os::fd::AsRawFd;
+
+    let mut peer_cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut peer_cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let current_uid = unsafe { libc::geteuid() };
+    if peer_cred.uid != current_uid {
+        return Err(format!(
+            "peer uid {} does not match current uid {}",
+            peer_cred.uid, current_uid
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +236,7 @@ fn handle_stream(stream: impl std::io::Read + std::io::Write, live: &Arc<Mutex<L
         let resp = match msg {
             ControlMessage::QueryPolicy => handle_query(live),
             ControlMessage::Patch(patch) => handle_patch(live, patch),
+            ControlMessage::Terminate => handle_terminate(live),
         };
 
         if write_response(reader.get_mut(), &resp).is_err() {
@@ -196,6 +266,7 @@ fn handle_query(live: &Arc<Mutex<LivePolicy>>) -> ControlResponse {
     let policy_json = serde_json::json!({
         "allow_read": guard.policy.allow_read().iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "allow_write": guard.policy.allow_write().iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "net_allow": guard.policy.net_allow(),
         "net_blocked": guard.policy.net_blocked(),
         "allow_command": guard.allow.iter().cloned().collect::<Vec<_>>(),
         "block_command": guard.blocked.iter().cloned().collect::<Vec<_>>(),
@@ -203,10 +274,27 @@ fn handle_query(live: &Arc<Mutex<LivePolicy>>) -> ControlResponse {
         "staged_write": guard.staged_write,
         "staged_allow": guard.staged_allow,
         "staged_net_allow": guard.staged_net_allow,
+        "restart_requested": guard.restart_requested.load(Ordering::SeqCst),
     });
 
     ControlResponse::Policy {
         policy: policy_json,
+    }
+}
+
+fn handle_terminate(live: &Arc<Mutex<LivePolicy>>) -> ControlResponse {
+    let guard = match live.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return ControlResponse::Error {
+                message: "internal lock error".to_string(),
+            }
+        }
+    };
+
+    guard.terminate_requested.store(true, Ordering::SeqCst);
+    ControlResponse::Ack {
+        message: "termination requested".to_string(),
     }
 }
 
@@ -277,16 +365,32 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
     let has_net_changes = !patch.add_net_allow.is_empty() || !patch.remove_net_allow.is_empty();
 
     if has_net_changes {
+        let mut next_allow = if guard.staged_net_allow.is_empty() {
+            guard.policy.net_allow().to_vec()
+        } else {
+            guard.staged_net_allow.clone()
+        };
+
         for dest in &patch.add_net_allow {
-            if !guard.staged_net_allow.contains(dest) {
-                guard.staged_net_allow.push(dest.clone());
+            if !next_allow.contains(dest) {
+                next_allow.push(dest.clone());
             }
         }
         for dest in &patch.remove_net_allow {
-            guard.staged_net_allow.retain(|d| d != dest);
+            next_allow.retain(|d| d != dest);
         }
-        net_status = PatchAxisStatus::PendingRestart;
-        pending_restart.push("network".to_string());
+
+        if next_allow == guard.policy.net_allow() {
+            guard.staged_net_allow.clear();
+        } else {
+            guard.staged_net_allow = next_allow;
+            net_status = PatchAxisStatus::PendingRestart;
+            pending_restart.push("network".to_string());
+        }
+    }
+
+    if !pending_restart.is_empty() {
+        guard.restart_requested.store(true, Ordering::SeqCst);
     }
 
     let accepted = commands_status != PatchAxisStatus::Rejected
@@ -297,7 +401,7 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
         "patch applied".to_string()
     } else {
         format!(
-            "patch accepted; {} require process restart to take effect",
+            "patch accepted; restarting sandboxed process to apply {}",
             pending_restart.join(", ")
         )
     };
@@ -310,6 +414,47 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
         message,
         pending_restart,
     })
+}
+
+pub(crate) fn snapshot_live_policy(live: &Arc<Mutex<LivePolicy>>) -> Result<SandboxPolicy, String> {
+    let guard = live
+        .lock()
+        .map_err(|_| "internal lock error".to_string())?;
+    Ok(guard.policy.clone())
+}
+
+pub(crate) fn apply_staged_policy_updates(live: &Arc<Mutex<LivePolicy>>) -> Result<bool, String> {
+    let mut guard = live
+        .lock()
+        .map_err(|_| "internal lock error".to_string())?;
+
+    let has_staged = !guard.staged_read.is_empty()
+        || !guard.staged_write.is_empty()
+        || !guard.staged_allow.is_empty()
+        || !guard.staged_net_allow.is_empty();
+
+    if !has_staged {
+        guard.restart_requested.store(false, Ordering::SeqCst);
+        return Ok(false);
+    }
+
+    let mut policy = guard.policy.clone();
+    for path in guard.staged_read.drain(..) {
+        policy = policy.allow_read_path(&path);
+    }
+    for path in guard.staged_write.drain(..) {
+        policy = policy.allow_write_path(&path);
+    }
+    for path in guard.staged_allow.drain(..) {
+        policy = policy.allow_read_path(&path).allow_write_path(&path);
+    }
+    if !guard.staged_net_allow.is_empty() || !guard.policy.net_allow().is_empty() {
+        policy = policy.with_network_destinations(std::mem::take(&mut guard.staged_net_allow));
+    }
+
+    guard.policy = policy;
+    guard.restart_requested.store(false, Ordering::SeqCst);
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +478,16 @@ pub(crate) fn query_policy(socket_path: &Path) -> Result<serde_json::Value, Stri
     let resp = send_message(socket_path, &msg)?;
     match resp {
         ControlResponse::Policy { policy } => Ok(policy),
+        ControlResponse::Error { message } => Err(message),
+        _ => Err("unexpected response type".to_string()),
+    }
+}
+
+pub(crate) fn send_terminate(socket_path: &Path) -> Result<String, String> {
+    let msg = ControlMessage::Terminate;
+    let resp = send_message(socket_path, &msg)?;
+    match resp {
+        ControlResponse::Ack { message } => Ok(message),
         ControlResponse::Error { message } => Err(message),
         _ => Err("unexpected response type".to_string()),
     }
@@ -431,6 +586,8 @@ mod tests {
             policy: SandboxPolicy::new().block_network(true),
             blocked: ["rm", "sudo"].iter().map(|s| s.to_string()).collect(),
             allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
@@ -570,6 +727,43 @@ mod tests {
     }
 
     #[test]
+    fn terminate_round_trip_sets_termination_flag() {
+        let live = test_live_policy();
+        let terminate_flag = {
+            let guard = live.lock().expect("lock live policy");
+            Arc::clone(&guard.terminate_requested)
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("terminate.sock");
+
+        let handle = start_control_socket(&sock_path, live).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let message = send_terminate(&sock_path).expect("send terminate");
+        assert_eq!(message, "termination requested");
+        assert!(terminate_flag.load(Ordering::SeqCst));
+
+        drop(handle);
+        wait_for_socket_removed(&sock_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_socket_is_created_with_owner_only_permissions() {
+        let live = test_live_policy();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("protected.sock");
+
+        let handle = start_control_socket(&sock_path, live).expect("start socket");
+        let mode = std::fs::metadata(handle.path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
     fn default_socket_path_contains_pid() {
         let path = default_socket_path(42);
         let name = path.file_name().unwrap().to_str().unwrap();
@@ -619,7 +813,9 @@ mod tests {
         match resp {
             ControlResponse::PatchResult(r) => {
                 assert!(r.accepted);
-                assert_eq!(r.network, PatchAxisStatus::PendingRestart);
+                // Removing the only addition reverts to the base policy,
+                // so staged is cleared and status is Unchanged.
+                assert_eq!(r.network, PatchAxisStatus::Unchanged);
             }
             _ => panic!("expected PatchResult"),
         }
@@ -675,7 +871,7 @@ mod tests {
                 assert_eq!(r.filesystem, PatchAxisStatus::PendingRestart);
                 assert_eq!(r.network, PatchAxisStatus::PendingRestart);
                 assert_eq!(r.pending_restart.len(), 2);
-                assert!(r.message.contains("require process restart"));
+                assert!(r.message.contains("restarting sandboxed process to apply"));
             }
             _ => panic!("expected PatchResult"),
         }
@@ -751,5 +947,345 @@ mod tests {
             }
             _ => panic!("expected Policy"),
         }
+    }
+
+    // ── apply_staged_policy_updates behavioral tests ──────────────────────
+
+    #[test]
+    fn apply_staged_returns_false_when_nothing_staged() {
+        let live = test_live_policy();
+        let changed = apply_staged_policy_updates(&live).expect("apply");
+        assert!(!changed);
+    }
+
+    #[test]
+    fn apply_staged_merges_read_paths_into_live_policy() {
+        let live = test_live_policy();
+        {
+            let mut guard = live.lock().unwrap();
+            guard.staged_read.push("/opt/new-read".to_string());
+        }
+        let changed = apply_staged_policy_updates(&live).expect("apply");
+        assert!(changed);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.staged_read.is_empty(), "staged_read should be drained");
+        assert!(
+            guard.policy.allow_read().iter().any(|p| p.to_str() == Some("/opt/new-read")),
+            "read path should be in effective policy"
+        );
+    }
+
+    #[test]
+    fn apply_staged_merges_write_paths_into_live_policy() {
+        let live = test_live_policy();
+        {
+            let mut guard = live.lock().unwrap();
+            guard.staged_write.push("/tmp/new-write".to_string());
+        }
+        let changed = apply_staged_policy_updates(&live).expect("apply");
+        assert!(changed);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.staged_write.is_empty());
+        assert!(
+            guard.policy.allow_write().iter().any(|p| p.to_str() == Some("/tmp/new-write")),
+            "write path should be in effective policy"
+        );
+    }
+
+    #[test]
+    fn apply_staged_merges_allow_paths_into_both_read_and_write() {
+        let live = test_live_policy();
+        {
+            let mut guard = live.lock().unwrap();
+            guard.staged_allow.push("/opt/shared".to_string());
+        }
+        let changed = apply_staged_policy_updates(&live).expect("apply");
+        assert!(changed);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.staged_allow.is_empty());
+        assert!(guard.policy.allow_read().iter().any(|p| p.to_str() == Some("/opt/shared")));
+        assert!(guard.policy.allow_write().iter().any(|p| p.to_str() == Some("/opt/shared")));
+    }
+
+    #[test]
+    fn apply_staged_replaces_net_allow_in_live_policy() {
+        let live = test_live_policy();
+        {
+            let mut guard = live.lock().unwrap();
+            guard.staged_net_allow.push("api.github.com".to_string());
+            guard.staged_net_allow.push("1.1.1.1:80".to_string());
+        }
+        let changed = apply_staged_policy_updates(&live).expect("apply");
+        assert!(changed);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.staged_net_allow.is_empty());
+        assert_eq!(
+            guard.policy.net_allow(),
+            &["api.github.com".to_string(), "1.1.1.1:80".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_staged_clears_restart_flag() {
+        let live = test_live_policy();
+        {
+            let mut guard = live.lock().unwrap();
+            guard.staged_read.push("/opt/path".to_string());
+            guard.restart_requested.store(true, Ordering::SeqCst);
+        }
+        apply_staged_policy_updates(&live).expect("apply");
+
+        let guard = live.lock().unwrap();
+        assert!(!guard.restart_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn apply_staged_is_idempotent_when_called_twice() {
+        let live = test_live_policy();
+        {
+            let mut guard = live.lock().unwrap();
+            guard.staged_read.push("/opt/tools".to_string());
+        }
+        let first = apply_staged_policy_updates(&live).expect("first apply");
+        assert!(first);
+
+        let second = apply_staged_policy_updates(&live).expect("second apply");
+        assert!(!second, "no more staged changes should remain");
+    }
+
+    // ── restart_requested behavioral tests ──────────────────────────────
+
+    #[test]
+    fn handle_patch_sets_restart_flag_for_filesystem_changes() {
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_read: vec!["/opt/data".to_string()],
+            ..Default::default()
+        };
+        handle_patch(&live, patch);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.restart_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn handle_patch_sets_restart_flag_for_network_changes() {
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_net_allow: vec!["cdn.example.com".to_string()],
+            ..Default::default()
+        };
+        handle_patch(&live, patch);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.restart_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn handle_patch_does_not_set_restart_flag_for_command_only_changes() {
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_allow_command: vec!["npm".to_string()],
+            ..Default::default()
+        };
+        handle_patch(&live, patch);
+
+        let guard = live.lock().unwrap();
+        assert!(!guard.restart_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn handle_patch_message_mentions_restarting_for_staged_changes() {
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_net_allow: vec!["api.example.com".to_string()],
+            add_read: vec!["/opt/data".to_string()],
+            ..Default::default()
+        };
+        let resp = handle_patch(&live, patch);
+        match resp {
+            ControlResponse::PatchResult(r) => {
+                assert!(r.message.contains("restarting"), "message should mention restart: {}", r.message);
+                assert!(r.message.contains("network"));
+                assert!(r.message.contains("filesystem"));
+            }
+            _ => panic!("expected PatchResult"),
+        }
+    }
+
+    #[test]
+    fn handle_query_includes_restart_requested_field() {
+        let live = test_live_policy();
+        {
+            let guard = live.lock().unwrap();
+            guard.restart_requested.store(true, Ordering::SeqCst);
+        }
+        let resp = handle_query(&live);
+        match resp {
+            ControlResponse::Policy { policy } => {
+                assert_eq!(policy["restart_requested"], true);
+            }
+            _ => panic!("expected Policy"),
+        }
+    }
+
+    #[test]
+    fn handle_query_includes_net_allow_from_effective_policy() {
+        let live = Arc::new(Mutex::new(LivePolicy {
+            policy: SandboxPolicy::new()
+                .block_network(true)
+                .allow_network_destination("10.0.0.1:443"),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            staged_net_allow: Vec::new(),
+        }));
+        let resp = handle_query(&live);
+        match resp {
+            ControlResponse::Policy { policy } => {
+                let net_allow = policy["net_allow"].as_array().unwrap();
+                assert_eq!(net_allow.len(), 1);
+                assert_eq!(net_allow[0], "10.0.0.1:443");
+            }
+            _ => panic!("expected Policy"),
+        }
+    }
+
+    // ── net_allow staged-then-applied round-trip ────────────────────────
+
+    #[test]
+    fn net_allow_patch_then_apply_updates_effective_policy() {
+        let live = test_live_policy();
+
+        // Patch adds network destinations.
+        let patch = PolicyPatch {
+            add_net_allow: vec!["api.github.com".to_string(), "1.1.1.1:80".to_string()],
+            ..Default::default()
+        };
+        let resp = handle_patch(&live, patch);
+        match &resp {
+            ControlResponse::PatchResult(r) => {
+                assert!(r.accepted);
+                assert_eq!(r.network, PatchAxisStatus::PendingRestart);
+            }
+            _ => panic!("expected PatchResult"),
+        }
+
+        // Apply staged changes.
+        let changed = apply_staged_policy_updates(&live).expect("apply");
+        assert!(changed);
+
+        // Effective policy now has the destinations.
+        let guard = live.lock().unwrap();
+        assert_eq!(
+            guard.policy.net_allow(),
+            &["api.github.com".to_string(), "1.1.1.1:80".to_string()]
+        );
+        assert!(!guard.restart_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn net_allow_remove_then_apply_removes_from_effective_policy() {
+        let live = Arc::new(Mutex::new(LivePolicy {
+            policy: SandboxPolicy::new()
+                .block_network(true)
+                .allow_network_destination("keep.example.com")
+                .allow_network_destination("remove.example.com"),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            staged_net_allow: Vec::new(),
+        }));
+
+        let patch = PolicyPatch {
+            remove_net_allow: vec!["remove.example.com".to_string()],
+            ..Default::default()
+        };
+        handle_patch(&live, patch);
+
+        let changed = apply_staged_policy_updates(&live).expect("apply");
+        assert!(changed);
+
+        let guard = live.lock().unwrap();
+        assert_eq!(guard.policy.net_allow(), &["keep.example.com".to_string()]);
+    }
+
+    #[test]
+    fn snapshot_live_policy_returns_current_effective_policy() {
+        let live = test_live_policy();
+        let snapshot = snapshot_live_policy(&live).expect("snapshot");
+        assert!(snapshot.net_blocked(), "default test policy is net-blocked");
+    }
+
+    // ── control-socket restart round-trip ──────────────────────────────
+
+    #[test]
+    fn control_socket_patch_sets_restart_flag_round_trip() {
+        let live = test_live_policy();
+        let restart_flag = {
+            let guard = live.lock().expect("lock");
+            Arc::clone(&guard.restart_requested)
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("restart.sock");
+        let handle = start_control_socket(&sock_path, live).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        // Send a filesystem patch via the socket.
+        let patch = PolicyPatch {
+            add_read: vec!["/opt/data".to_string()],
+            ..Default::default()
+        };
+        let result = send_patch(&sock_path, &patch).expect("send patch");
+        assert!(result.accepted);
+        assert_eq!(result.filesystem, PatchAxisStatus::PendingRestart);
+        assert!(result.message.contains("restarting"));
+
+        // Verify restart flag was set.
+        assert!(restart_flag.load(Ordering::SeqCst));
+
+        drop(handle);
+        wait_for_socket_removed(&sock_path);
+    }
+
+    #[test]
+    fn control_socket_command_patch_does_not_set_restart_flag() {
+        let live = test_live_policy();
+        let restart_flag = {
+            let guard = live.lock().expect("lock");
+            Arc::clone(&guard.restart_requested)
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("no-restart.sock");
+        let handle = start_control_socket(&sock_path, live).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let patch = PolicyPatch {
+            add_allow_command: vec!["node".to_string()],
+            ..Default::default()
+        };
+        let result = send_patch(&sock_path, &patch).expect("send patch");
+        assert!(result.accepted);
+        assert_eq!(result.commands, PatchAxisStatus::Applied);
+        assert_eq!(result.message, "patch applied");
+
+        assert!(!restart_flag.load(Ordering::SeqCst));
+
+        drop(handle);
+        wait_for_socket_removed(&sock_path);
     }
 }

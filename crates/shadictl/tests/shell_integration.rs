@@ -31,12 +31,14 @@ struct MockState {
     allow: HashSet<String>,
     staged_read: Vec<String>,
     staged_net_allow: Vec<String>,
+    terminated: bool,
 }
 
 /// A mock sandbox that listens on a Unix socket and responds to the SHADI
 /// control protocol.  Drop it to shut down.
 struct MockSandbox {
     sock_path: PathBuf,
+    state: Arc<Mutex<MockState>>,
     _thread: thread::JoinHandle<()>,
 }
 
@@ -54,10 +56,12 @@ impl MockSandbox {
             allow: HashSet::new(),
             staged_read: Vec::new(),
             staged_net_allow: Vec::new(),
+            terminated: false,
         }));
 
+        let state_for_thread = Arc::clone(&state);
         let handle = thread::spawn(move || {
-            mock_accept_loop(&listener, &state, &path_clone);
+            mock_accept_loop(&listener, &state_for_thread, &path_clone);
         });
 
         // Wait until the socket is ready.
@@ -74,12 +78,17 @@ impl MockSandbox {
 
         MockSandbox {
             sock_path,
+            state,
             _thread: handle,
         }
     }
 
     fn socket_path(&self) -> &str {
         self.sock_path.to_str().expect("socket path is utf-8")
+    }
+
+    fn terminated(&self) -> bool {
+        self.state.lock().expect("lock state").terminated
     }
 }
 
@@ -139,6 +148,7 @@ fn mock_handle_stream(
         let resp = match msg {
             ControlMessage::QueryPolicy => mock_query(state),
             ControlMessage::Patch(patch) => mock_patch(state, patch),
+            ControlMessage::Terminate => mock_terminate(state),
         };
 
         if write_mock_response(reader.get_mut(), &resp).is_err() {
@@ -224,7 +234,7 @@ fn mock_patch(state: &Arc<Mutex<MockState>>, patch: PolicyPatch) -> ControlRespo
         "patch applied".to_string()
     } else {
         format!(
-            "patch accepted; {} require process restart",
+            "patch accepted; restarting sandboxed process to apply {}",
             pending_restart.join(", ")
         )
     };
@@ -237,6 +247,14 @@ fn mock_patch(state: &Arc<Mutex<MockState>>, patch: PolicyPatch) -> ControlRespo
         message,
         pending_restart,
     })
+}
+
+fn mock_terminate(state: &Arc<Mutex<MockState>>) -> ControlResponse {
+    let mut guard = state.lock().unwrap();
+    guard.terminated = true;
+    ControlResponse::Ack {
+        message: "termination requested".to_string(),
+    }
 }
 
 fn run_shell(input: &str) -> ShellOutput {
@@ -518,7 +536,7 @@ fn given_attached_session_when_policy_patch_command_then_shows_applied() {
     let mock = MockSandbox::start(dir.path());
 
     let input = format!(
-        "/attach {}\n/policy patch --add-allow-command npm\n/exit\n",
+        "/attach {}\n/policy patch --force --add-allow-command npm\n/exit\n",
         mock.socket_path()
     );
     let out = run_shell(&input);
@@ -534,7 +552,7 @@ fn given_attached_session_when_policy_patch_fs_then_shows_pending_restart() {
     let mock = MockSandbox::start(dir.path());
 
     let input = format!(
-        "/attach {}\n/policy patch --add-read /opt/data\n/exit\n",
+        "/attach {}\n/policy patch --force --add-read /opt/data\n/exit\n",
         mock.socket_path()
     );
     let out = run_shell(&input);
@@ -551,7 +569,7 @@ fn given_attached_session_when_policy_patch_net_then_shows_pending_restart() {
     let mock = MockSandbox::start(dir.path());
 
     let input = format!(
-        "/attach {}\n/policy patch --add-net-allow api.github.com\n/exit\n",
+        "/attach {}\n/policy patch --force --add-net-allow api.github.com\n/exit\n",
         mock.socket_path()
     );
     let out = run_shell(&input);
@@ -576,6 +594,19 @@ fn given_attached_session_when_detach_then_status_shows_not_attached() {
     out.assert_success()
         .stdout_contains("detached")
         .stdout_contains("not attached");
+}
+
+#[test]
+fn given_attached_session_when_kill_then_termination_is_requested() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mock = MockSandbox::start(dir.path());
+
+    let input = format!("/attach {}\n/kill\n/exit\n", mock.socket_path());
+    let out = run_shell(&input);
+
+    out.assert_success()
+        .stdout_contains("termination requested");
+    assert!(mock.terminated());
 }
 
 #[test]
@@ -611,9 +642,9 @@ fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
          /attach {sock}\n\
          /status\n\
          /policy query\n\
-         /policy patch --add-allow-command node\n\
-         /policy patch --add-read /opt/tools\n\
-         /policy patch --add-net-allow api.github.com\n\
+         /policy patch --force --add-allow-command node\n\
+         /policy patch --force --add-read /opt/tools\n\
+         /policy patch --force --add-net-allow api.github.com\n\
          /policy query\n\
          /detach\n\
          /status\n\

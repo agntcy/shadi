@@ -13,6 +13,7 @@ pub enum PlatformSandboxProfile {
 pub struct SandboxPolicy {
     allow_read: Vec<PathBuf>,
     allow_write: Vec<PathBuf>,
+    net_allow: Vec<String>,
     net_block: bool,
     platform_profile: PlatformSandboxProfile,
     allow_local_unix_sockets: bool,
@@ -23,6 +24,7 @@ impl SandboxPolicy {
         Self {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
+            net_allow: Vec::new(),
             net_block: false,
             platform_profile: PlatformSandboxProfile::Compatibility,
             allow_local_unix_sockets: false,
@@ -41,6 +43,16 @@ impl SandboxPolicy {
 
     pub fn block_network(mut self, value: bool) -> Self {
         self.net_block = value;
+        self
+    }
+
+    pub fn allow_network_destination(mut self, destination: impl Into<String>) -> Self {
+        self.net_allow.push(destination.into());
+        self
+    }
+
+    pub fn with_network_destinations(mut self, destinations: Vec<String>) -> Self {
+        self.net_allow = destinations;
         self
     }
 
@@ -64,6 +76,10 @@ impl SandboxPolicy {
 
     pub fn net_blocked(&self) -> bool {
         self.net_block
+    }
+
+    pub fn net_allow(&self) -> &[String] {
+        &self.net_allow
     }
 
     pub fn platform_profile(&self) -> PlatformSandboxProfile {
@@ -101,6 +117,24 @@ mod tests {
         assert!(policy.allow_write().iter().any(|p| p == Path::new(&tmp_dir)));
         assert!(policy.net_blocked());
         assert_eq!(policy.platform_profile(), PlatformSandboxProfile::Compatibility);
+    }
+
+    #[test]
+    fn policy_can_collect_network_destinations() {
+        let policy = SandboxPolicy::new()
+            .allow_network_destination("1.1.1.1:80")
+            .allow_network_destination("api.github.com");
+
+        assert_eq!(policy.net_allow(), &["1.1.1.1:80".to_string(), "api.github.com".to_string()]);
+    }
+
+    #[test]
+    fn policy_can_replace_network_destinations() {
+        let policy = SandboxPolicy::new()
+            .allow_network_destination("1.1.1.1:80")
+            .with_network_destinations(vec!["2.2.2.2:443".to_string()]);
+
+        assert_eq!(policy.net_allow(), &["2.2.2.2:443".to_string()]);
     }
 
     #[test]

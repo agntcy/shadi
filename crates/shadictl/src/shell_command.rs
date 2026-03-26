@@ -11,6 +11,7 @@ use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Context, EditMode, Editor, Helper};
+use unicode_width::UnicodeWidthStr;
 
 use crate::cli_types::{
     ConfigCli, ConfigCommand, ConfigShowArgs, OutputFormat, PolicyCli, PolicyCommand,
@@ -26,6 +27,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/status", "Show current session status (alias: /s)"),
     ("/attach", "Attach to a running sandbox session by socket path"),
     ("/detach", "Detach from the current session"),
+    ("/kill", "Terminate the attached sandboxed process"),
     ("/sessions", "Discover running SHADI sandbox control sockets"),
     ("/config", "Show effective runtime configuration"),
     ("/policy query", "Query the effective policy of the attached session"),
@@ -111,6 +113,13 @@ Show command history from the current and previous sessions.
 Options:
   --limit N          Maximum entries to show (default: 20)
   --grep PATTERN     Filter history entries by substring"),
+        ("/kill", "\
+Usage: /kill
+
+Request termination of the attached sandboxed process.
+
+Examples:
+    /kill"),
 ];
 
 struct ShellHelper {
@@ -292,14 +301,27 @@ impl Completer for ShellHelper {
 
 struct ShellSession {
     socket: Option<PathBuf>,
+    pending_patch: Option<PendingPatch>,
+}
+
+struct PendingPatch {
+    socket: PathBuf,
+    patch: PolicyPatch,
 }
 
 impl ShellSession {
     fn new(socket: Option<PathBuf>) -> Self {
-        Self { socket }
+        Self {
+            socket,
+            pending_patch: None,
+        }
     }
 
     fn handle_command(&mut self, line: &str) -> LoopAction {
+        if self.pending_patch.is_some() {
+            return self.handle_pending_confirmation(line);
+        }
+
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
             return LoopAction::Continue;
@@ -377,6 +399,7 @@ impl ShellSession {
                 }
                 LoopAction::Continue
             }
+            "/kill" => self.cmd_kill(),
             "/detach" => {
                 self.cmd_detach();
                 LoopAction::Continue
@@ -393,6 +416,35 @@ impl ShellSession {
                 LoopAction::Continue
             }
         }
+    }
+
+    fn handle_pending_confirmation(&mut self, line: &str) -> LoopAction {
+        let answer = line.trim();
+        if matches!(answer, "/exit" | "/quit" | "/q") {
+            self.pending_patch = None;
+            return LoopAction::Exit;
+        }
+
+        let Some(pending) = self.pending_patch.take() else {
+            return LoopAction::Continue;
+        };
+
+        if !matches!(answer, "y" | "Y" | "yes" | "YES" | "Yes") {
+            println!("patch cancelled");
+            return LoopAction::Continue;
+        }
+
+        match policy_watch::send_patch(&pending.socket, &pending.patch) {
+            Ok(resp) => match serde_json::to_string_pretty(&resp) {
+                Ok(json) => println!("{}", json),
+                Err(_) => {
+                    println!("accepted: {}", resp.accepted);
+                    println!("message:  {}", resp.message);
+                }
+            },
+            Err(err) => eprintln!("error patching policy: {}", err),
+        }
+        LoopAction::Continue
     }
 
     fn cmd_help_detail(&self, cmd: &str) -> LoopAction {
@@ -488,7 +540,7 @@ impl ShellSession {
         LoopAction::Continue
     }
 
-    fn cmd_policy_patch(&self, args: &[&str]) -> LoopAction {
+    fn cmd_policy_patch(&mut self, args: &[&str]) -> LoopAction {
         let Some(ref sock) = self.socket else {
             eprintln!("not attached to a session; use '/attach <socket-path>' first");
             return LoopAction::Continue;
@@ -562,17 +614,16 @@ impl ShellSession {
         }
 
         // Confirmation prompt unless --force is given.
-        if !force && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        if !force {
             match serde_json::to_string_pretty(&patch) {
                 Ok(json) => println!("patch to apply:\n{}", json),
                 Err(err) => eprintln!("error formatting patch: {}", err),
             }
-            eprint!("apply this patch? [y/N] ");
-            let mut answer = String::new();
-            if std::io::stdin().read_line(&mut answer).is_err() || !answer.trim().eq_ignore_ascii_case("y") {
-                println!("patch cancelled");
-                return LoopAction::Continue;
-            }
+            self.pending_patch = Some(PendingPatch {
+                socket: sock.clone(),
+                patch,
+            });
+            return LoopAction::Continue;
         }
 
         match policy_watch::send_patch(sock, &patch) {
@@ -592,23 +643,15 @@ impl ShellSession {
 
     fn cmd_sessions(&self) -> LoopAction {
         let tmpdir = std::env::temp_dir();
-        let mut found = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&tmpdir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
-                    found.push(entry.path());
-                }
-            }
-        }
-        if found.is_empty() {
+        let found = discover_control_sockets(&tmpdir);
+        let sessions = classify_and_prune_control_sockets(found);
+
+        if sessions.is_empty() {
             println!("no running SHADI sandbox sessions found in {}", tmpdir.display());
         } else {
-            println!("found {} session(s):", found.len());
-            for sock in &found {
-                let reachable = policy_watch::query_policy(sock).is_ok();
-                let marker = if reachable { "reachable" } else { "stale" };
+            println!("found {} session(s):", sessions.len());
+            for (sock, reachable) in &sessions {
+                let marker = if *reachable { "reachable" } else { "stale" };
                 println!("  {} ({})", sock.display(), marker);
             }
         }
@@ -664,6 +707,7 @@ impl ShellSession {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         };
@@ -764,6 +808,19 @@ impl ShellSession {
         }
     }
 
+    fn cmd_kill(&self) -> LoopAction {
+        let Some(ref sock) = self.socket else {
+            eprintln!("not attached to a session; use '/attach <socket-path>' first");
+            return LoopAction::Continue;
+        };
+
+        match policy_watch::send_terminate(sock) {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error terminating session: {}", err),
+        }
+        LoopAction::Continue
+    }
+
     fn cmd_history(&self, args: &[&str]) -> LoopAction {
         let mut limit: usize = 20;
         let mut grep: Option<&str> = None;
@@ -852,15 +909,23 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
     println!();
 
     loop {
-        let prompt = if use_color {
-            match &session.socket {
-                Some(sock) => format!("\x1b[1;36mshadi\x1b[0m(\x1b[33m{}\x1b[0m)\x1b[1;36m>\x1b[0m ", short_socket_name(sock)),
-                None => "\x1b[1;36mshadi>\x1b[0m ".to_string(),
+        let prompt = if session.pending_patch.is_some() {
+            if use_color {
+                "\x1b[1;33mapply this patch? [y/N]\x1b[0m ".to_string()
+            } else {
+                "apply this patch? [y/N] ".to_string()
             }
         } else {
-            match &session.socket {
-                Some(sock) => format!("shadi({})> ", short_socket_name(sock)),
-                None => "shadi> ".to_string(),
+            if use_color {
+                match &session.socket {
+                    Some(sock) => format!("\x1b[1;36mshadi\x1b[0m(\x1b[33m{}\x1b[0m)\x1b[1;36m>\x1b[0m ", short_socket_name(sock)),
+                    None => "\x1b[1;36mshadi>\x1b[0m ".to_string(),
+                }
+            } else {
+                match &session.socket {
+                    Some(sock) => format!("shadi({})> ", short_socket_name(sock)),
+                    None => "shadi> ".to_string(),
+                }
             }
         };
 
@@ -868,9 +933,15 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
             Ok(line) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
+                    if session.pending_patch.is_some() {
+                        println!("patch cancelled");
+                        session.pending_patch = None;
+                    }
                     continue;
                 }
-                let _ = rl.add_history_entry(trimmed);
+                if session.pending_patch.is_none() {
+                    let _ = rl.add_history_entry(trimmed);
+                }
                 match session.handle_command(trimmed) {
                     LoopAction::Continue => {}
                     LoopAction::Exit => break,
@@ -905,6 +976,33 @@ fn short_socket_name(path: &Path) -> String {
         .to_string()
 }
 
+fn discover_control_sockets(tmpdir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(tmpdir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
+fn classify_and_prune_control_sockets(sockets: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
+    let mut sessions = Vec::new();
+    for sock in sockets {
+        let reachable = policy_watch::query_policy(&sock).is_ok();
+        if reachable {
+            sessions.push((sock, true));
+        } else {
+            let _ = std::fs::remove_file(&sock);
+        }
+    }
+    sessions
+}
+
 fn dirs_history_path() -> Option<PathBuf> {
     let dir = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -914,35 +1012,47 @@ fn dirs_history_path() -> Option<PathBuf> {
     Some(shadi_dir.join("shell_history"))
 }
 
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn pad_display(text: &str, width: usize) -> String {
+    let padding = width.saturating_sub(display_width(text));
+    format!("{}{}", text, " ".repeat(padding))
+}
+
 fn print_banner(color: bool) {
+    let title = format!(
+        "Secure Host for Agentic AI Dynamic Instantiation  v{}",
+        env!("CARGO_PKG_VERSION")
+    );
+    let hint = "type '/help' for commands, '/exit' to quit, '<cmd> --help' for details";
+    let lines = [
+        "🔒 SHADI".to_string(),
+        String::new(),
+        title,
+        hint.to_string(),
+    ];
+    let inner_width = lines
+        .iter()
+        .map(|line| display_width(line))
+        .max()
+        .unwrap_or(0);
+    let border = format!("+{}+", "-".repeat(inner_width + 2));
+
     if color {
-        println!(
-            "\x1b[1;36m\
-  ____  _   _   /^\\  ____ ___ \n\
- / ___|| | | | /(_)\\ |  _ \\_ _|\n\
- \\___ \\| |_| || |_| || | | | |\n\
-  ___) |  _  | \\   / | |_| | |\n\
- |____/|_| |_|  \\_/  |____/___|\x1b[0m"
-        );
-        println!();
-        println!(
-            "  \x1b[1mSandbox Hardening for AI Developer Infrastructure\x1b[0m  \x1b[2mv{}\x1b[0m",
-            env!("CARGO_PKG_VERSION")
-        );
-        println!(
-            "  \x1b[2mtype '/help' for commands, '/exit' to quit, '<cmd> --help' for details\x1b[0m"
-        );
+        println!("\x1b[1;36m{}\x1b[0m", border);
+        println!("\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[0], inner_width));
+        println!("\x1b[1;36m|\x1b[0m {} \x1b[1;36m|\x1b[0m", pad_display(&lines[1], inner_width));
+        println!("\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[2], inner_width));
+        println!("\x1b[1;36m|\x1b[0m \x1b[2m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[3], inner_width));
+        println!("\x1b[1;36m{}\x1b[0m", border);
     } else {
-        println!(
-            "\
-  ____  _   _   /^\\  ____ ___ \n\
- / ___|| | | | /(_)\\ |  _ \\_ _|\n\
- \\___ \\| |_| || |_| || | | | |\n\
-  ___) |  _  | \\   / | |_| | |\n\
- |____/|_| |_|  \\_/  |____/___|\n"
-        );
-        println!("  Sandbox Hardening for AI Developer Infrastructure  v{}", env!("CARGO_PKG_VERSION"));
-        println!("  type '/help' for commands, '/exit' to quit, '<cmd> --help' for details");
+        println!("{}", border);
+        for line in &lines {
+            println!("| {} |", pad_display(line, inner_width));
+        }
+        println!("{}", border);
     }
 }
 
@@ -963,6 +1073,7 @@ mod tests {
     fn attached_session() -> ShellSession {
         ShellSession {
             socket: Some(PathBuf::from("/tmp/shadi-fake-coverage.sock")),
+            pending_patch: None,
         }
     }
 
@@ -1043,6 +1154,54 @@ mod tests {
     #[test]
     fn given_no_sessions_when_sessions_then_continues() {
         assert_continues(&mut session(), "/sessions");
+    }
+
+    #[test]
+    fn given_stale_socket_when_discovering_sessions_then_it_is_pruned() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let stale_socket = tempdir.path().join("shadi-ctl-stale.sock");
+        std::fs::write(&stale_socket, b"stale").expect("create stale socket marker");
+
+        let sessions = classify_and_prune_control_sockets(discover_control_sockets(tempdir.path()));
+
+        assert!(sessions.is_empty());
+        assert!(!stale_socket.exists(), "stale socket should be removed");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_without_force_then_confirmation_is_pending() {
+        let mut s = attached_session();
+
+        assert_continues(&mut s, "/policy patch --add-net-allow 1.1.1.1");
+
+        let pending = s.pending_patch.as_ref().expect("pending patch");
+        assert_eq!(pending.socket, PathBuf::from("/tmp/shadi-fake-coverage.sock"));
+        assert_eq!(pending.patch.add_net_allow, vec!["1.1.1.1".to_string()]);
+    }
+
+    #[test]
+    fn given_pending_patch_when_confirmation_is_blank_then_patch_is_cancelled() {
+        let mut s = attached_session();
+        assert_continues(&mut s, "/policy patch --add-net-allow 1.1.1.1");
+
+        assert_continues(&mut s, "");
+
+        assert!(s.pending_patch.is_none());
+    }
+
+    #[test]
+    fn given_pending_patch_when_confirmation_is_no_then_patch_is_cancelled() {
+        let mut s = attached_session();
+        assert_continues(&mut s, "/policy patch --add-net-allow 1.1.1.1");
+
+        assert_continues(&mut s, "n");
+
+        assert!(s.pending_patch.is_none());
+    }
+
+    #[test]
+    fn given_no_attachment_when_kill_then_continues() {
+        assert_continues(&mut session(), "/kill");
     }
 
     #[test]
@@ -1371,6 +1530,11 @@ mod tests {
     #[test]
     fn given_attached_session_when_help_then_shows_attached_to() {
         assert_continues(&mut attached_session(), "/help");
+    }
+
+    #[test]
+    fn given_attached_session_when_kill_then_continues() {
+        assert_continues(&mut attached_session(), "/kill");
     }
 
     // ── aliases ──────────────────────────────────────────────

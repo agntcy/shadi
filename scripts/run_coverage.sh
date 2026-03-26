@@ -39,14 +39,24 @@ llvm_cov="$(resolve_tool llvm-cov)"
 llvm_profdata="$(resolve_tool llvm-profdata)"
 
 # On macOS, auto-resolve OPENSSL_DIR via Homebrew if not already set.
-# (Windows sets it in CI via GITHUB_ENV; Linux relies on pkg-config.)
-if [[ -z "${OPENSSL_DIR:-}" && "$(uname)" == "Darwin" ]]; then
-  for ossl_keg in "openssl@3" "openssl@1.1" "openssl"; do
-    if keg_path="$(brew --prefix "$ossl_keg" 2>/dev/null)"; then
-      export OPENSSL_DIR="$keg_path"
-      break
-    fi
-  done
+# On Linux, point to the system prefix where libssl-dev installs.
+# (Windows sets it in CI via GITHUB_ENV.)
+if [[ -z "${OPENSSL_DIR:-}" ]]; then
+  case "$(uname)" in
+    Darwin)
+      for ossl_keg in "openssl@3" "openssl@1.1" "openssl"; do
+        if keg_path="$(brew --prefix "$ossl_keg" 2>/dev/null)"; then
+          export OPENSSL_DIR="$keg_path"
+          break
+        fi
+      done
+      ;;
+    Linux)
+      if [[ -d /usr/include/openssl ]]; then
+        export OPENSSL_DIR=/usr
+      fi
+      ;;
+  esac
 fi
 
 case "$mode" in

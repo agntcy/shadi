@@ -22,6 +22,7 @@ fn build_policy_cli(
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
     net_block: bool,
+    net_allow: Vec<String>,
     allow_command: Vec<String>,
 ) -> Cli {
     Cli {
@@ -31,6 +32,7 @@ fn build_policy_cli(
         read,
         write,
         net_block,
+        net_allow,
         allow_command,
         inject_keychain: Vec::new(),
         trusted_secret: Vec::new(),
@@ -93,6 +95,7 @@ fn run_config_show(args: ConfigShowArgs) -> ExitCode {
         args.read.clone(),
         args.write.clone(),
         args.net_block,
+        Vec::new(),
         args.allow_command.clone(),
     );
 
@@ -155,6 +158,7 @@ fn run_policy_explain(args: PolicyExplainArgs) -> ExitCode {
         args.read.clone(),
         args.write.clone(),
         args.net_block,
+        Vec::new(),
         args.allow_command.clone(),
     );
 
@@ -249,6 +253,7 @@ fn run_policy_diff(args: PolicyDiffArgs) -> ExitCode {
         args.read.clone(),
         args.write.clone(),
         args.net_block,
+        args.net_allow.clone(),
         args.allow_command.clone(),
     );
 
@@ -302,6 +307,7 @@ fn run_policy_diff(args: PolicyDiffArgs) -> ExitCode {
         Vec::new(),
         Vec::new(),
         false,
+        Vec::new(),
         Vec::new(),
     );
 
@@ -584,6 +590,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -604,6 +611,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -621,6 +629,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -670,6 +679,7 @@ mod tests {
                 read: Vec::new(),
                 write: Vec::new(),
                 net_block: false,
+                net_allow: Vec::new(),
                 allow_command: Vec::new(),
                 format: OutputFormat::Json,
             }),
@@ -719,6 +729,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -736,6 +747,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -764,10 +776,14 @@ mod tests {
 
     fn test_live_policy() -> std::sync::Arc<std::sync::Mutex<LivePolicy>> {
         use shadi_sandbox::SandboxPolicy;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
         std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
             policy: SandboxPolicy::new().block_network(true),
             blocked: HashSet::new(),
             allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),

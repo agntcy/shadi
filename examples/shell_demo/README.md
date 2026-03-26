@@ -26,8 +26,12 @@ You should see output like:
 control socket: /tmp/shadi-ctl-12345.sock
 [demo-agent] starting — press Ctrl-C to stop
 [demo-agent] pid=12345
+[demo-agent] probe file=/private/etc/hosts
 [demo-agent] tick    1  14:30:00
-[demo-agent] tick    2  14:30:03
+[demo-agent] network probe=tcp://1.1.1.1:80
+[demo-agent] network probe        rc=1   nc: connectx to 1.1.1.1 port 80 (tcp) failed: Operation not permitted
+[demo-agent] file probe           rc=1   head: /private/etc/hosts: Operation not permitted
+[demo-agent] delete probe         rc=1   rm: /tmp/shadi-demo-marker: Operation not permitted
 ```
 
 Note the **control socket** path printed to stderr — you can use it to
@@ -46,14 +50,12 @@ cargo run -p shadictl -- shell
 You'll see the SHADI banner and prompt:
 
 ```
-  ____  _   _   /^\  ____ ___ 
- / ___|| | | | /(_)\ |  _ \_ _|
- \___ \| |_| || |_| || | | | |
-  ___) |  _  | \   / | |_| | |
- |____/|_| |_|  \_/  |____/___|
-
-  Sandbox Hardening for AI Developer Infrastructure  v0.1.0
-  type '/help' for commands, '/exit' to quit, '<cmd> --help' for details
++------------------------------------------------------------------------+
+| [DEFENSE] SHADI                                                        |
+|                                                                        |
+| Sandbox Hardening for AI Developer Infrastructure  v0.1.0              |
+| type '/help' for commands, '/exit' to quit, '<cmd> --help' for details |
++------------------------------------------------------------------------+
 
 shadi>
 ```
@@ -93,7 +95,62 @@ shadi(shadi-ctl-12345)> /policy query
 
 ## Step 5 — Patch the policy at runtime
 
-Unblock a command (interactive confirmation prompt; pass `--force` to skip):
+The demo agent is intentionally noisy: every tick it tries three things:
+
+- a TCP connect probe to `1.1.1.1:80` to show network enforcement
+- `head /private/etc/hosts` (macOS) or `head /etc/hosts` (Linux) to show blocked file reads
+- `rm -f /tmp/shadi-demo-marker` to show blocked command execution
+
+This lets you demonstrate both immediate and restart-gated policy changes.
+
+First, observe that the network probe is blocked by the sandbox's network policy and the delete probe is blocked by command policy.
+
+Then note the network limitation for this bash demo:
+
+- on macOS SHADI network enforcement is all-or-nothing for OS sandboxing
+- for this demo, the clear transition is `blocked now` vs `succeeds after restart with network enabled`
+
+So instead of patching a single hostname, restart the demo with a connected policy or with network blocking disabled.
+
+The shell will still show network patch staging, but that staging is not what makes the bash demo probe work on macOS.
+
+Example restart path:
+
+```
+cargo run -p shadictl -- \
+    --profile connected \
+    --policy examples/shell_demo/policy.json \
+    --watch-policy \
+    -- bash examples/shell_demo/demo_agent.sh
+```
+
+After restart, the network probe should report a successful TCP connect instead of `Operation not permitted`.
+
+You can also show an immediate command-policy change:
+
+```
+shadi(shadi-ctl-12345)> /policy patch --force --remove-block-command rm
+{
+  "accepted": true,
+  "filesystem": "unchanged",
+  "commands": "applied",
+  "network": "unchanged",
+  "message": "patch applied",
+  "pending_restart": []
+}
+```
+
+After the next tick, the delete probe should no longer fail with `Operation not permitted`.
+
+Then stage a file-read allowance for restart:
+
+```
+shadi(shadi-ctl-12345)> /policy patch --force --add-read /private/etc
+```
+
+On Linux, use `/etc` instead. After you restart the demo agent, the file probe should succeed.
+
+The existing patch UX is still available for dry-run and interactive confirmation:
 
 ```
 shadi(shadi-ctl-12345)> /policy patch --add-allow-command npm
@@ -124,16 +181,6 @@ dry-run: the following patch would be applied:
 }
 ```
 
-Apply without prompt (`--force`):
-
-```
-shadi(shadi-ctl-12345)> /policy patch --force --add-allow-command npm
-{
-  "accepted": true,
-  ...
-}
-```
-
 Add a filesystem path (requires process restart):
 
 ```
@@ -143,7 +190,7 @@ shadi(shadi-ctl-12345)> /policy patch --force --add-read /opt/tools
   "filesystem": "pending_restart",
   "commands": "unchanged",
   "network": "unchanged",
-  "message": "patch accepted; filesystem require process restart",
+  "message": "patch accepted; filesystem require process restart to take effect",
   "pending_restart": ["filesystem"]
 }
 ```
@@ -245,6 +292,6 @@ Type `<cmd> --help` for per-command usage, e.g. `/policy patch --help`.
 
 | File | Purpose |
 |------|---------|
-| `demo_agent.sh` | Bash ticker (runs inside Minimal sandbox profile) |
+| `demo_agent.sh` | Bash demo agent with blocked command, network, and file probes |
 | `demo_agent.py` | Python ticker (needs `--read ~/.pyenv` on macOS with pyenv) |
 | `policy.json` | Demo policy: read-only /usr, network blocked, dangerous commands blocked |

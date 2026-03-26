@@ -89,6 +89,8 @@ pub enum ControlMessage {
     QueryPolicy,
     /// Submit a policy patch.
     Patch(PolicyPatch),
+    /// Request that the running sandboxed process terminate.
+    Terminate,
 }
 
 /// A wire-level response sent back over the control socket.
@@ -99,6 +101,8 @@ pub enum ControlResponse {
     Policy { policy: serde_json::Value },
     /// Result of a patch request.
     PatchResult(PolicyPatchResponse),
+    /// Acknowledge a control action.
+    Ack { message: String },
     /// Error response.
     Error { message: String },
 }
@@ -172,5 +176,26 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ControlMessage = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(back, ControlMessage::QueryPolicy));
+    }
+
+    #[test]
+    fn terminate_message_round_trips() {
+        let msg = ControlMessage::Terminate;
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: ControlMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back, ControlMessage::Terminate));
+    }
+
+    #[test]
+    fn ack_response_round_trips() {
+        let resp = ControlResponse::Ack {
+            message: "termination requested".to_string(),
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let back: ControlResponse = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            ControlResponse::Ack { message } => assert_eq!(message, "termination requested"),
+            _ => panic!("expected Ack"),
+        }
     }
 }
