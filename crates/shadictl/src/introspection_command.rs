@@ -777,13 +777,14 @@ mod tests {
     fn test_live_policy() -> std::sync::Arc<std::sync::Mutex<LivePolicy>> {
         use shadi_sandbox::SandboxPolicy;
         use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
         std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
             policy: SandboxPolicy::new().block_network(true),
             blocked: HashSet::new(),
             allow: HashSet::new(),
             terminate_requested: Arc::new(AtomicBool::new(false)),
             restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),

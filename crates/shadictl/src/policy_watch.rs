@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -36,7 +36,7 @@ use uds_windows::UnixListener;
 
 use shadi_sandbox::{
     ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
-    SandboxPolicy,
+    ProcessResources, SandboxPolicy,
 };
 use tracing::info_span;
 
@@ -48,6 +48,8 @@ pub(crate) struct LivePolicy {
     pub(crate) allow: HashSet<String>,
     pub(crate) terminate_requested: Arc<AtomicBool>,
     pub(crate) restart_requested: Arc<AtomicBool>,
+    /// PID of the currently running sandboxed child (updated on restart).
+    pub(crate) child_pid: Arc<AtomicU32>,
     /// Filesystem patches staged for next restart.
     pub(crate) staged_read: Vec<String>,
     pub(crate) staged_write: Vec<String>,
@@ -237,6 +239,7 @@ fn handle_stream(stream: impl std::io::Read + std::io::Write, live: &Arc<Mutex<L
             ControlMessage::QueryPolicy => handle_query(live),
             ControlMessage::Patch(patch) => handle_patch(live, patch),
             ControlMessage::Terminate => handle_terminate(live),
+            ControlMessage::QueryResources => handle_resources(live),
         };
 
         if write_response(reader.get_mut(), &resp).is_err() {
@@ -295,6 +298,30 @@ fn handle_terminate(live: &Arc<Mutex<LivePolicy>>) -> ControlResponse {
     guard.terminate_requested.store(true, Ordering::SeqCst);
     ControlResponse::Ack {
         message: "termination requested".to_string(),
+    }
+}
+
+fn handle_resources(live: &Arc<Mutex<LivePolicy>>) -> ControlResponse {
+    let pid = match live.lock() {
+        Ok(g) => g.child_pid.load(Ordering::SeqCst),
+        Err(_) => {
+            return ControlResponse::Error {
+                message: "internal lock error".to_string(),
+            }
+        }
+    };
+
+    if pid == 0 {
+        return ControlResponse::Error {
+            message: "no child process is running".to_string(),
+        };
+    }
+
+    match crate::resource_info::query_process_resources(pid) {
+        Some(resources) => ControlResponse::Resources(resources),
+        None => ControlResponse::Error {
+            message: format!("failed to query resources for pid {}", pid),
+        },
     }
 }
 
@@ -493,6 +520,17 @@ pub(crate) fn send_terminate(socket_path: &Path) -> Result<String, String> {
     }
 }
 
+/// Query resource usage of the sandboxed child process.
+pub(crate) fn query_resources(socket_path: &Path) -> Result<ProcessResources, String> {
+    let msg = ControlMessage::QueryResources;
+    let resp = send_message(socket_path, &msg)?;
+    match resp {
+        ControlResponse::Resources(r) => Ok(r),
+        ControlResponse::Error { message } => Err(message),
+        _ => Err("unexpected response type".to_string()),
+    }
+}
+
 fn send_message(socket_path: &Path, msg: &ControlMessage) -> Result<ControlResponse, String> {
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
@@ -588,6 +626,7 @@ mod tests {
             allow: HashSet::new(),
             terminate_requested: Arc::new(AtomicBool::new(false)),
             restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
@@ -1143,6 +1182,7 @@ mod tests {
             allow: HashSet::new(),
             terminate_requested: Arc::new(AtomicBool::new(false)),
             restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
@@ -1203,6 +1243,7 @@ mod tests {
             allow: HashSet::new(),
             terminate_requested: Arc::new(AtomicBool::new(false)),
             restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
@@ -1359,5 +1400,88 @@ mod tests {
         let bad_path = Path::new("/tmp/shadi-nonexistent-test.sock");
         let result = send_terminate(bad_path);
         assert!(result.is_err());
+    }
+
+    // ── resource queries ─────────────────────────────────────────────────
+
+    #[test]
+    fn handle_resources_returns_error_when_no_child_pid() {
+        let live = test_live_policy();
+        let resp = handle_resources(&live);
+        match resp {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("no child process"));
+            }
+            _ => panic!("expected Error for pid 0"),
+        }
+    }
+
+    #[test]
+    fn handle_resources_returns_resources_for_own_pid() {
+        let live = test_live_policy();
+        {
+            let guard = live.lock().unwrap();
+            guard.child_pid.store(std::process::id(), Ordering::SeqCst);
+        }
+        let resp = handle_resources(&live);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        match resp {
+            ControlResponse::Resources(r) => {
+                assert_eq!(r.pid, std::process::id());
+                assert!(r.rss_bytes.unwrap() > 0);
+            }
+            _ => panic!("expected Resources"),
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        match resp {
+            ControlResponse::Error { .. } => {}
+            _ => panic!("expected Error on unsupported platform"),
+        }
+    }
+
+    #[test]
+    fn handle_stream_processes_query_resources_message() {
+        use std::io::Cursor;
+
+        let live = test_live_policy();
+        let msg = serde_json::to_string(&ControlMessage::QueryResources).unwrap();
+        let input = format!("{}\n", msg);
+        let stream = Cursor::new(input.into_bytes());
+        handle_stream(stream, &live);
+        // No panic — the resource query path was exercised.
+    }
+
+    #[test]
+    fn query_resources_propagates_connect_error() {
+        let bad_path = Path::new("/tmp/shadi-nonexistent-test.sock");
+        let result = query_resources(bad_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn query_resources_round_trip_via_socket() {
+        let live = test_live_policy();
+        {
+            let guard = live.lock().unwrap();
+            guard.child_pid.store(std::process::id(), Ordering::SeqCst);
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("resources.sock");
+        let handle = start_control_socket(&sock_path, live).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let result = query_resources(&sock_path);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let r = result.expect("query_resources");
+            assert_eq!(r.pid, std::process::id());
+            assert!(r.rss_bytes.is_some());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            assert!(result.is_err());
+        }
+
+        drop(handle);
     }
 }

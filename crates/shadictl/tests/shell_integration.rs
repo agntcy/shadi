@@ -149,6 +149,16 @@ fn mock_handle_stream(
             ControlMessage::QueryPolicy => mock_query(state),
             ControlMessage::Patch(patch) => mock_patch(state, patch),
             ControlMessage::Terminate => mock_terminate(state),
+            ControlMessage::QueryResources => ControlResponse::Resources(
+                shadi_sandbox::ProcessResources {
+                    pid: std::process::id(),
+                    rss_bytes: Some(1024 * 1024),
+                    virtual_bytes: Some(128 * 1024 * 1024),
+                    cpu_user_ms: Some(100),
+                    cpu_system_ms: Some(50),
+                    thread_count: Some(2),
+                },
+            ),
         };
 
         if write_mock_response(reader.get_mut(), &resp).is_err() {

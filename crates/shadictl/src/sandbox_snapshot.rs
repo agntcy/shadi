@@ -151,6 +151,7 @@ pub(crate) fn run_sandboxed_command(
             allow: resolved.allow.clone(),
             terminate_requested: std::sync::Arc::clone(&terminate_flag),
             restart_requested: std::sync::Arc::clone(&restart_flag),
+            child_pid: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
@@ -248,6 +249,15 @@ pub(crate) fn run_sandboxed_command(
                 return ExitCode::from(1);
             }
         };
+
+        // Update the child PID so the control socket can query resources.
+        if let Some(ref live) = control_live {
+            if let Ok(guard) = live.lock() {
+                guard
+                    .child_pid
+                    .store(child.id(), std::sync::atomic::Ordering::SeqCst);
+            }
+        }
 
         if let Some(pending) = pending_trusted_secrets.as_mut() {
             if let Err(err) = pending.deliver_after_spawn(child.id()) {

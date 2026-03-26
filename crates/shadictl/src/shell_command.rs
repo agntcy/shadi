@@ -19,6 +19,7 @@ use crate::cli_types::{
 };
 use crate::introspection_command::{run_config_command, run_policy_command};
 use crate::policy_watch;
+use crate::snapshot_command;
 use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
 use shadi_sandbox::PolicyPatch;
 
@@ -36,6 +37,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/policy diff", "Diff effective policy against a baseline profile"),
     ("/trace list", "List recent trace log entries"),
     ("/trace summary", "Summarize trace logs by span name"),
+    ("/snapshot list", "List git snapshot artifacts"),
+    ("/snapshot show", "Show details of a git snapshot"),
+    ("/resources", "Show resource usage of the sandboxed process"),
     ("/history", "Show command history"),
     ("/clear", "Clear the terminal screen"),
     ("/exit", "Exit the interactive shell (alias: /q, /quit)"),
@@ -105,6 +109,28 @@ Options:
 Usage: /trace summary [--limit N]
 
 Summarize trace logs grouped by span name."),
+    ("/snapshot list", "\
+Usage: /snapshot list [--dir PATH]
+
+List all git snapshot artifacts from the snapshot directory.
+
+Options:
+  --dir PATH   Override the default snapshot directory
+
+Default directory: $SHADI_TMP_DIR/git-snapshots or .tmp/git-snapshots"),
+    ("/snapshot show", "\
+Usage: /snapshot show <artifact-id|latest> [--dir PATH]
+
+Show a detailed summary of a git snapshot artifact.
+
+Examples:
+  /snapshot show latest
+  /snapshot show 1711234567890-12345-bash"),
+    ("/resources", "\
+Usage: /resources
+
+Show resource usage (memory, CPU, threads) of the attached sandboxed process.
+Requires an attached session with --watch-policy enabled."),
     ("/history", "\
 Usage: /history [--limit N] [--grep PATTERN]
 
@@ -253,6 +279,21 @@ impl Completer for ShellHelper {
             return Ok((offset, candidates));
         }
 
+        if let Some(sub_input) = input.strip_prefix("/snapshot ") {
+            let sub_input = sub_input.trim_start();
+            let subs = ["list", "show"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
         // Socket path completion for /attach.
         if let Some(path_input) = input.strip_prefix("/attach ") {
             let path_input = path_input.trim_start();
@@ -329,7 +370,7 @@ impl ShellSession {
 
         // Check for --help on any command.
         if parts.len() >= 2 && parts.last() == Some(&"--help") {
-            let cmd_key = if parts[0] == "/policy" || parts[0] == "/trace" {
+            let cmd_key = if parts[0] == "/policy" || parts[0] == "/trace" || parts[0] == "/snapshot" {
                 if parts.len() >= 3 {
                     format!("{} {}", parts[0], parts[1])
                 } else {
@@ -391,6 +432,20 @@ impl ShellSession {
                 eprintln!("usage: /trace <list|summary>");
                 LoopAction::Continue
             }
+            "/snapshot" if parts.len() >= 2 => match parts[1] {
+                "list" => self.cmd_snapshot_list(&parts[2..]),
+                "show" => self.cmd_snapshot_show(&parts[2..]),
+                _ => {
+                    eprintln!("unknown snapshot subcommand: {}", parts[1]);
+                    eprintln!("  available: list, show");
+                    LoopAction::Continue
+                }
+            },
+            "/snapshot" => {
+                eprintln!("usage: /snapshot <list|show>");
+                LoopAction::Continue
+            }
+            "/resources" => self.cmd_resources(),
             "/attach" => {
                 if parts.len() < 2 {
                     eprintln!("usage: /attach <socket-path>");
@@ -862,6 +917,92 @@ impl ShellSession {
                 }
             }
             Err(_) => println!("(no history yet)"),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_snapshot_list(&self, args: &[&str]) -> LoopAction {
+        let mut dir_override: Option<&str> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--dir" if i + 1 < args.len() => {
+                    dir_override = Some(args[i + 1]);
+                    i += 2;
+                }
+                _ => {
+                    eprintln!("usage: /snapshot list [--dir PATH]");
+                    return LoopAction::Continue;
+                }
+            }
+        }
+        snapshot_command::snapshot_list(dir_override);
+        LoopAction::Continue
+    }
+
+    fn cmd_snapshot_show(&self, args: &[&str]) -> LoopAction {
+        if args.is_empty() {
+            eprintln!("usage: /snapshot show <artifact-id|latest> [--dir PATH]");
+            return LoopAction::Continue;
+        }
+        let id = args[0];
+        let mut dir_override: Option<&str> = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i] {
+                "--dir" if i + 1 < args.len() => {
+                    dir_override = Some(args[i + 1]);
+                    i += 2;
+                }
+                _ => {
+                    eprintln!("usage: /snapshot show <artifact-id|latest> [--dir PATH]");
+                    return LoopAction::Continue;
+                }
+            }
+        }
+        snapshot_command::snapshot_show(id, dir_override);
+        LoopAction::Continue
+    }
+
+    fn cmd_resources(&self) -> LoopAction {
+        let Some(ref sock) = self.socket else {
+            eprintln!("not attached to a session; use '/attach <socket-path>' first");
+            return LoopAction::Continue;
+        };
+
+        match policy_watch::query_resources(sock) {
+            Ok(r) => {
+                println!("Process: PID {}", r.pid);
+                println!();
+                println!("Memory:");
+                if let Some(rss) = r.rss_bytes {
+                    println!(
+                        "  RSS:     {}",
+                        snapshot_command::format_bytes(rss)
+                    );
+                }
+                if let Some(virt) = r.virtual_bytes {
+                    println!(
+                        "  Virtual: {}",
+                        snapshot_command::format_bytes(virt)
+                    );
+                }
+                if r.cpu_user_ms.is_some() || r.cpu_system_ms.is_some() {
+                    println!();
+                    println!("CPU:");
+                    if let Some(user) = r.cpu_user_ms {
+                        println!("  User:    {} ms", user);
+                    }
+                    if let Some(sys) = r.cpu_system_ms {
+                        println!("  System:  {} ms", sys);
+                    }
+                }
+                if let Some(threads) = r.thread_count {
+                    println!();
+                    println!("Threads: {}", threads);
+                }
+            }
+            Err(err) => eprintln!("error querying resources: {}", err),
         }
         LoopAction::Continue
     }
@@ -1866,5 +2007,77 @@ mod tests {
         let helper = ShellHelper::new(false);
         let highlighted = Highlighter::highlight(&helper, "/help", 0);
         assert_eq!(highlighted.as_ref(), "/help");
+    }
+
+    // ── snapshot commands ────────────────────────────────────
+
+    #[test]
+    fn given_session_when_snapshot_list_then_continues() {
+        assert_continues(&mut session(), "/snapshot list");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_list_with_dir_then_continues() {
+        assert_continues(&mut session(), "/snapshot list --dir /tmp/nonexistent");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_latest_then_continues() {
+        assert_continues(&mut session(), "/snapshot show latest");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_no_args_then_continues() {
+        assert_continues(&mut session(), "/snapshot show");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_no_subcommand_then_continues() {
+        assert_continues(&mut session(), "/snapshot");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_unknown_subcommand_then_continues() {
+        assert_continues(&mut session(), "/snapshot foo");
+    }
+
+    // ── snapshot tab completion ──────────────────────────────
+
+    #[test]
+    fn given_snapshot_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/snapshot l", 11, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 10);
+        assert!(
+            candidates.iter().any(|c| c.display == "list"),
+            "should complete snapshot subcommands"
+        );
+    }
+
+    // ── resources command ────────────────────────────────────
+
+    #[test]
+    fn given_unattached_session_when_resources_then_continues() {
+        assert_continues(&mut session(), "/resources");
+    }
+
+    #[test]
+    fn given_attached_session_when_resources_then_continues() {
+        assert_continues(&mut attached_session(), "/resources");
+    }
+
+    #[test]
+    fn given_session_when_help_snapshot_list_then_continues() {
+        assert_continues(&mut session(), "/help snapshot list");
+    }
+
+    #[test]
+    fn given_session_when_resources_help_then_continues() {
+        assert_continues(&mut session(), "/resources --help");
     }
 }

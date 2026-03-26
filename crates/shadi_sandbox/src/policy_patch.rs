@@ -91,6 +91,30 @@ pub enum ControlMessage {
     Patch(PolicyPatch),
     /// Request that the running sandboxed process terminate.
     Terminate,
+    /// Request resource usage of the sandboxed child process.
+    QueryResources,
+}
+
+/// Resource usage of the sandboxed child process.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ProcessResources {
+    /// PID of the sandboxed child process.
+    pub pid: u32,
+    /// Resident set size in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    /// Virtual memory size in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub virtual_bytes: Option<u64>,
+    /// Total user CPU time in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_user_ms: Option<u64>,
+    /// Total system CPU time in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_system_ms: Option<u64>,
+    /// Thread count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_count: Option<u32>,
 }
 
 /// A wire-level response sent back over the control socket.
@@ -101,6 +125,8 @@ pub enum ControlResponse {
     Policy { policy: serde_json::Value },
     /// Result of a patch request.
     PatchResult(PolicyPatchResponse),
+    /// Resource usage of the sandboxed child.
+    Resources(ProcessResources),
     /// Acknowledge a control action.
     Ack { message: String },
     /// Error response.
@@ -196,6 +222,36 @@ mod tests {
         match back {
             ControlResponse::Ack { message } => assert_eq!(message, "termination requested"),
             _ => panic!("expected Ack"),
+        }
+    }
+
+    #[test]
+    fn query_resources_message_round_trips() {
+        let msg = ControlMessage::QueryResources;
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: ControlMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back, ControlMessage::QueryResources));
+    }
+
+    #[test]
+    fn resources_response_round_trips() {
+        let resp = ControlResponse::Resources(ProcessResources {
+            pid: 42,
+            rss_bytes: Some(1024 * 1024),
+            virtual_bytes: Some(128 * 1024 * 1024),
+            cpu_user_ms: Some(500),
+            cpu_system_ms: Some(100),
+            thread_count: Some(4),
+        });
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let back: ControlResponse = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            ControlResponse::Resources(r) => {
+                assert_eq!(r.pid, 42);
+                assert_eq!(r.rss_bytes, Some(1024 * 1024));
+                assert_eq!(r.thread_count, Some(4));
+            }
+            _ => panic!("expected Resources"),
         }
     }
 }

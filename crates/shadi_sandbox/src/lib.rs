@@ -8,6 +8,7 @@ mod platform;
 pub use policy::{PlatformSandboxProfile, SandboxPolicy};
 pub use policy_patch::{
     ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
+    ProcessResources,
 };
 use std::process::{Command, ExitStatus};
 use std::io;
