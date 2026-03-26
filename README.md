@@ -19,14 +19,7 @@ SHADI is designed for environments where agents are long-lived, hold real creden
 - SQLCipher-backed encrypted local memory (`shadi_memory`).
 - Python bindings (`shadi_py`) for secrets, memory, and sandboxed execution.
 - SLIM transport integration for secure agent-to-agent messaging.
-- Example agents and demos, including a practical SecOps workflow and launch scripts.
-
-Recent updates in this branch of the project:
-
-- SecOps now treats container CVEs as rebuild or base-image refresh work instead of mutating Dockerfiles with ad-hoc package upgrade lines.
-- Dockerfile resolution for container findings is workflow-first, using `.github/workflows/*` metadata before repo-wide scanning.
-- Demo launchers are hardened for the optional 1Password backend by reading required secrets before entering the sandbox.
-- Avatar surfaces clearer SLIM handshake errors when the SecOps A2A side is unavailable or misconfigured.
+- Interactive shell (`shadictl shell`) for live attach/detach, policy inspection, and trace review.
 
 ## Repository layout
 
@@ -36,9 +29,9 @@ Recent updates in this branch of the project:
 - `crates/shadi_memory`: SQLCipher memory library (accessed via `shadictl memory`).
 - `crates/shadi_py`: Python extension module `shadi`.
 - `crates/agent_transport_slim` + `crates/slim_mas`: secure transport and moderation helpers (with `shadictl slim-mas`).
-- `agents/secops`: example SecOps workload, A2A server, and skill implementation.
-- `docs`: architecture, security, CLI, demos, and integration docs.
-- `scripts`: local launch helpers for SLIM + agent demos.
+- `docs`: architecture, security, CLI, and integration docs.
+- `scripts`: local launch helpers for SLIM.
+- `examples/shell_demo`: interactive shell demo walkthrough.
 
 ## Architecture at a glance
 
@@ -174,7 +167,7 @@ SHA-256 hashes for captured Git payloads, and comparison fields such as
 
 If the workspace contains nested Git repos, the artifact also includes a
 `git.repositories` array with per-repo before/after state and comparison
-metadata. This is important for agent workflows like SecOps remediation where
+metadata. This is important for agent workflows where
 the agent may clone or update another repo under the current working folder:
 the outer repo can stay unchanged while the nested repo entry still reports the
 change.
@@ -225,33 +218,6 @@ The module exposes bindings for:
 - SQLCipher memory operations
 - sandbox policy handles and sandboxed process execution
 
-## SecOps demo and launch scripts
-
-The repo includes runnable demo workloads under `agents/secops` and helper scripts in `scripts/`.
-
-Common local flow:
-
-```bash
-./scripts/launch_slim.sh
-./scripts/import_secops_secrets.sh
-./scripts/launch_secops_a2a.sh
-./scripts/launch_avatar.sh
-```
-
-Focused Python tests for the SecOps skill:
-
-```bash
-just secops-test-python
-```
-
-Security scan for the SecOps skill package:
-
-```bash
-just secops-skill-scan
-```
-
-See `scripts/README.md` and `docs/demo.md` for full setup details.
-
 ## Documentation
 
 Primary docs live in `docs/`:
@@ -261,9 +227,6 @@ Primary docs live in `docs/`:
 - `docs/security.md`: threat model and security notes
 - `docs/cli.md`: complete CLI reference
 - `docs/sandbox.md`: policy model and profile behavior
-- `docs/demo.md`: demo walkthrough
-- `docs/secops_agent.md`: SecOps demo workload and remediation behavior
-
 Build/serve docs locally:
 
 ```bash

@@ -63,11 +63,10 @@ SHADI presents the runtime as four product layers:
 **Agent or Platform Engineer**
 - [Architecture](architecture.md)
 - [API Guide](api_integration.md)
-- [SLIM and A2A](slim_a2a.md) or [Google ADK](adk_integration.md)
+- [SLIM and A2A](slim_a2a.md)
 
 **Security Engineering**
 - [Security Notes](security.md)
-- [SecOps Demo](secops_agent.md)
 - [Design Overview](design.md)
 
 ## Documentation Map
