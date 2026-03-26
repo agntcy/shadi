@@ -20,6 +20,10 @@ libc = "0.2"
 landlock = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_System_JobObjects",

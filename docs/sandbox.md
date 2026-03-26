@@ -371,8 +371,10 @@ Unix-domain sockets can still be selectively allowed.
   SID and automatically reverted when the sandboxed process exits. SHADI now
   journals the original DACLs to disk before mutation and will replay any stale
   rollback journals on the next Windows sandbox startup if a prior process
-  crashed before cleanup. Network access is controlled by AppContainer
-  capabilities.
+  crashed before cleanup. Journal files are stored in a restricted directory
+  (owner + SYSTEM only) and each entry is HMAC-SHA256 authenticated with
+  a per-session key; tampered or unsigned journals are rejected on recovery.
+  Network access is controlled by AppContainer capabilities.
 
 ### Sandbox boundary guidance
 

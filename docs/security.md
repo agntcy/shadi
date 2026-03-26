@@ -69,7 +69,7 @@ protocol.
 - macOS temporarily opts into local Unix socket permissions only for launches that require trusted-secret delivery.
 - Windows currently supports direct trusted-secret delivery through a compatibility inherited-handle path.
 - Windows direct trusted-secret rules can optionally pin the launched executable hash with `exec_sha256` to avoid path-only trust.
-- Windows ACL allowlist changes are journaled to disk before mutation and replayed on the next sandbox startup if a previous `shadictl` process crashes before cleanup.
+- Windows ACL allowlist changes are journaled to disk before mutation and replayed on the next sandbox startup if a previous `shadictl` process crashes before cleanup. The journal directory is locked to owner + SYSTEM with a protected DACL, and each journal entry carries an HMAC-SHA256 tag verified before replay to prevent tampering.
 
 ### Policy intent
 

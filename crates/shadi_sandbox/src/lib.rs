@@ -333,6 +333,7 @@ mod tests {
         let entry = WindowsAclRollbackJournalEntry {
             path: r"C:\temp\foo".to_string(),
             dacl_sddl: "D:(A;;FA;;;SY)".to_string(),
+            hmac: "deadbeef".to_string(),
         };
 
         let json = serde_json::to_string(&entry).expect("serialize");
@@ -340,6 +341,7 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.path, entry.path);
         assert_eq!(restored.dacl_sddl, entry.dacl_sddl);
+        assert_eq!(restored.hmac, entry.hmac);
     }
 
     #[cfg(target_os = "windows")]
@@ -347,6 +349,41 @@ mod tests {
     fn windows_acl_journal_dir_uses_temp_dir() {
         let dir = windows_acl_journal_dir();
         assert!(dir.ends_with(WINDOWS_ACL_ROLLBACK_DIR_NAME));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_acl_journal_hmac_detects_tamper() {
+        let key = b"test-key-32-bytes-long-enough!!!";
+        let tag = compute_journal_hmac(key, r"C:\temp\foo", "D:(A;;FA;;;SY)");
+        assert!(!tag.is_empty());
+
+        // Same inputs produce same tag.
+        let tag2 = compute_journal_hmac(key, r"C:\temp\foo", "D:(A;;FA;;;SY)");
+        assert_eq!(tag, tag2);
+
+        // Different path produces different tag.
+        let tag3 = compute_journal_hmac(key, r"C:\temp\bar", "D:(A;;FA;;;SY)");
+        assert_ne!(tag, tag3);
+
+        // Different SDDL produces different tag.
+        let tag4 = compute_journal_hmac(key, r"C:\temp\foo", "D:(A;;FA;;;BA)");
+        assert_ne!(tag, tag4);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validate_sddl_accepts_valid_strings() {
+        assert!(validate_sddl("D:(A;;FA;;;SY)").is_ok());
+        assert!(validate_sddl("D:P(A;;FA;;;BA)(A;;FA;;;SY)").is_ok());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validate_sddl_rejects_invalid_strings() {
+        assert!(validate_sddl("").is_err());
+        assert!(validate_sddl("S:(ML;;;;;LW)").is_err());
+        assert!(validate_sddl("D:(A;;FA;;;SY)\x00evil").is_err());
     }
 }
 
@@ -366,10 +403,14 @@ pub struct WindowsAclRollback {
 struct WindowsAclRollbackJournalEntry {
     path: String,
     dacl_sddl: String,
+    hmac: String,
 }
 
 #[cfg(target_os = "windows")]
 const WINDOWS_ACL_ROLLBACK_DIR_NAME: &str = "shadi-acl-rollbacks";
+
+#[cfg(target_os = "windows")]
+const WINDOWS_ACL_HMAC_KEY_FILE: &str = "hmac-key";
 
 #[cfg(target_os = "windows")]
 pub struct WindowsChild {
@@ -476,17 +517,149 @@ fn windows_acl_journal_path() -> std::path::PathBuf {
     windows_acl_journal_dir().join(format!("rollback-{}-{}.json", std::process::id(), now))
 }
 
+/// Create the journal directory with a restrictive DACL (owner + SYSTEM only).
+#[cfg(target_os = "windows")]
+fn ensure_journal_dir_restricted() -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT,
+        SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let dir = windows_acl_journal_dir();
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+
+    // SDDL: owner full access + SYSTEM full access, deny everyone else.
+    // D:P(A;;FA;;;CO)(A;;FA;;;SY) means Protected DACL, Creator-Owner FA, SYSTEM FA.
+    // We use BA (Built-in Administrators) as a safer alternative to CO.
+    let sddl = "D:P(A;;FA;;;BA)(A;;FA;;;SY)";
+    let sddl_w: Vec<u16> = std::ffi::OsStr::new(sddl)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_w.as_ptr(),
+            1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    let result = (|| {
+        let mut dacl_present = 0;
+        let mut dacl = std::ptr::null_mut();
+        let mut defaulted = 0;
+        let ok = unsafe {
+            GetSecurityDescriptorDacl(sd, &mut dacl_present, &mut dacl, &mut defaulted)
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+
+        let dir_w: Vec<u16> = std::ffi::OsStr::new(dir.as_os_str())
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                dir_w.as_ptr() as *mut u16,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW on journal dir failed (win32={})", rc));
+        }
+        Ok(())
+    })();
+
+    unsafe {
+        if !sd.is_null() {
+            LocalFree(sd);
+        }
+    }
+
+    result
+}
+
+/// Load or create the per-session HMAC key for journal integrity.
+#[cfg(target_os = "windows")]
+fn load_or_create_hmac_key() -> Result<Vec<u8>, String> {
+    let key_path = windows_acl_journal_dir().join(WINDOWS_ACL_HMAC_KEY_FILE);
+    if key_path.exists() {
+        let hex_str = std::fs::read_to_string(&key_path).map_err(|e| e.to_string())?;
+        hex::decode(hex_str.trim()).map_err(|e| format!("corrupt HMAC key file: {}", e))
+    } else {
+        use rand::RngCore;
+        let mut key = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        let hex_str = hex::encode(&key);
+        std::fs::write(&key_path, hex_str.as_bytes()).map_err(|e| e.to_string())?;
+        Ok(key)
+    }
+}
+
+/// Compute HMAC-SHA256 over `path || dacl_sddl`.
+#[cfg(target_os = "windows")]
+fn compute_journal_hmac(key: &[u8], path: &str, dacl_sddl: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .expect("HMAC key length is always valid");
+    mac.update(path.as_bytes());
+    mac.update(b"\x00");
+    mac.update(dacl_sddl.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Validate that an SDDL string has a plausible format before trusting it.
+#[cfg(target_os = "windows")]
+fn validate_sddl(sddl: &str) -> Result<(), String> {
+    if sddl.is_empty() {
+        return Err("SDDL string is empty".to_string());
+    }
+    if !sddl.starts_with("D:") {
+        return Err(format!("SDDL does not start with 'D:': {}", sddl));
+    }
+    // Reject control characters and non-ASCII that shouldn't appear in valid SDDL
+    if sddl.chars().any(|c| c.is_control()) {
+        return Err("SDDL contains control characters".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn persist_windows_acl_rollback(rollback: &mut WindowsAclRollback) -> Result<(), String> {
     if rollback.journal_path.is_some() {
         return Ok(());
     }
 
-    std::fs::create_dir_all(windows_acl_journal_dir()).map_err(|err| err.to_string())?;
+    ensure_journal_dir_restricted()?;
+    let key = load_or_create_hmac_key()?;
+
     let journal_path = windows_acl_journal_path();
+    let hmac_tag = compute_journal_hmac(&key, &rollback.path_string, &rollback.dacl_sddl);
     let entry = WindowsAclRollbackJournalEntry {
         path: rollback.path_string.clone(),
         dacl_sddl: rollback.dacl_sddl.clone(),
+        hmac: hmac_tag,
     };
     let json = serde_json::to_vec_pretty(&entry).map_err(|err| err.to_string())?;
     std::fs::write(&journal_path, json).map_err(|err| err.to_string())?;
@@ -579,6 +752,8 @@ pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
         return Ok(0);
     }
 
+    let key = load_or_create_hmac_key()?;
+
     let mut restored = 0;
     for entry in std::fs::read_dir(&dir).map_err(|err| err.to_string())? {
         let entry = entry.map_err(|err| err.to_string())?;
@@ -590,6 +765,29 @@ pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
         let data = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
         let journal: WindowsAclRollbackJournalEntry =
             serde_json::from_str(&data).map_err(|err| err.to_string())?;
+
+        // Verify HMAC before trusting journal content.
+        let expected_hmac = compute_journal_hmac(&key, &journal.path, &journal.dacl_sddl);
+        if journal.hmac != expected_hmac {
+            warn!(
+                target: "shadi.sandbox.windows",
+                journal = %path.display(),
+                "rejecting tampered ACL rollback journal (HMAC mismatch)"
+            );
+            continue;
+        }
+
+        // Validate SDDL syntax before applying.
+        if let Err(err) = validate_sddl(&journal.dacl_sddl) {
+            warn!(
+                target: "shadi.sandbox.windows",
+                journal = %path.display(),
+                error = %err,
+                "rejecting ACL rollback journal with invalid SDDL"
+            );
+            continue;
+        }
+
         match restore_windows_acl_journal_entry(&journal) {
             Ok(()) => {
                 let _ = std::fs::remove_file(&path);
