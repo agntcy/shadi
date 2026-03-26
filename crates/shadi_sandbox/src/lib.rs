@@ -479,8 +479,9 @@ impl WindowsChild {
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         use std::os::windows::process::ExitStatusExt;
         use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, WaitForSingleObject, WAIT_OBJECT_0,
+            GetExitCodeProcess, WaitForSingleObject,
         };
+        const WAIT_OBJECT_0: u32 = 0;
 
         unsafe {
             let wait = WaitForSingleObject(self.process, 0);
