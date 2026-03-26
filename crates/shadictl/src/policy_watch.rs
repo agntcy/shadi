@@ -1288,4 +1288,76 @@ mod tests {
         drop(handle);
         wait_for_socket_removed(&sock_path);
     }
+
+    // ── handle_stream with valid messages ────────────────────────────────
+
+    #[test]
+    fn handle_stream_processes_query_message() {
+        use std::io::Cursor;
+
+        let live = test_live_policy();
+        let msg = serde_json::to_string(&ControlMessage::QueryPolicy).unwrap();
+        let input = format!("{}\n", msg);
+        let stream = Cursor::new(input.into_bytes());
+        handle_stream(stream, &live);
+        // If we got here without panic, the query path was exercised.
+    }
+
+    #[test]
+    fn handle_stream_processes_patch_message() {
+        use std::io::Cursor;
+
+        let live = test_live_policy();
+        let patch = PolicyPatch {
+            add_allow_command: vec!["node".to_string()],
+            ..Default::default()
+        };
+        let msg = serde_json::to_string(&ControlMessage::Patch(patch)).unwrap();
+        let input = format!("{}\n", msg);
+        let stream = Cursor::new(input.into_bytes());
+        handle_stream(stream, &live);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.allow.contains("node"));
+    }
+
+    #[test]
+    fn handle_stream_processes_terminate_message() {
+        use std::io::Cursor;
+
+        let live = test_live_policy();
+        let msg = serde_json::to_string(&ControlMessage::Terminate).unwrap();
+        let input = format!("{}\n", msg);
+        let stream = Cursor::new(input.into_bytes());
+        handle_stream(stream, &live);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.terminate_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn handle_stream_processes_multiple_messages() {
+        use std::io::Cursor;
+
+        let live = test_live_policy();
+        let q = serde_json::to_string(&ControlMessage::QueryPolicy).unwrap();
+        let patch = PolicyPatch {
+            add_allow_command: vec!["npm".to_string()],
+            ..Default::default()
+        };
+        let p = serde_json::to_string(&ControlMessage::Patch(patch)).unwrap();
+        let input = format!("{}\n{}\n", q, p);
+        let stream = Cursor::new(input.into_bytes());
+        handle_stream(stream, &live);
+
+        let guard = live.lock().unwrap();
+        assert!(guard.allow.contains("npm"));
+    }
+
+    #[test]
+    fn send_terminate_propagates_connect_error() {
+        let bad_path = Path::new("/tmp/shadi-nonexistent-test.sock");
+        let result = send_terminate(bad_path);
+        assert!(result.is_err());
+    }
 }

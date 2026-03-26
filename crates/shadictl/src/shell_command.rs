@@ -1651,4 +1651,220 @@ mod tests {
             "should complete patch flags"
         );
     }
+
+    // ── completion: slash prefix ─────────────────────────────
+
+    #[test]
+    fn given_slash_prefix_when_completing_then_returns_matching_commands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/he", 3, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 0);
+        assert!(
+            candidates.iter().any(|c| c.display == "/help"),
+            "should complete /he → /help"
+        );
+    }
+
+    #[test]
+    fn given_empty_input_when_completing_then_returns_all_commands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (_start, candidates) =
+            Completer::complete(helper, "", 0, &Context::new(rl.history())).unwrap();
+        assert!(!candidates.is_empty(), "empty line should list all commands");
+    }
+
+    #[test]
+    fn given_policy_patch_non_flag_token_when_completing_then_returns_empty() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (_start, candidates) =
+            Completer::complete(helper, "/policy patch /tmp/foo", 22, &Context::new(rl.history()))
+                .unwrap();
+        assert!(candidates.is_empty(), "non-flag token should have no completions");
+    }
+
+    // ── help detail ──────────────────────────────────────────
+
+    #[test]
+    fn given_session_when_help_detail_for_known_command_then_continues() {
+        assert_continues(&mut session(), "/help policy patch");
+    }
+
+    #[test]
+    fn given_session_when_help_detail_for_unknown_command_then_continues() {
+        assert_continues(&mut session(), "/help nonexistent");
+    }
+
+    #[test]
+    fn given_any_command_with_help_flag_then_continues() {
+        assert_continues(&mut session(), "/status --help");
+    }
+
+    #[test]
+    fn given_policy_subcommand_with_help_flag_then_continues() {
+        assert_continues(&mut session(), "/policy patch --help");
+    }
+
+    // ── status with attached socket ──────────────────────────
+
+    #[test]
+    fn given_attached_session_when_status_then_shows_unreachable() {
+        // The fake socket is not a real endpoint so query will fail.
+        assert_continues(&mut attached_session(), "/status");
+    }
+
+    // ── policy query/patch not attached ──────────────────────
+
+    #[test]
+    fn given_unattached_session_when_policy_query_then_continues() {
+        assert_continues(&mut session(), "/policy query");
+    }
+
+    #[test]
+    fn given_unattached_session_when_policy_patch_then_continues() {
+        assert_continues(&mut session(), "/policy patch --add-read /tmp");
+    }
+
+    // ── policy patch with --force and --dry-run on attached socket ──
+
+    #[test]
+    fn given_attached_session_when_policy_patch_dry_run_with_flags_then_continues() {
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --dry-run --add-read /opt --add-net-allow 1.1.1.1",
+        );
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_force_then_continues() {
+        // --force attempts socket write which fails on fake socket, but
+        // the code path is still exercised.
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-read /opt",
+        );
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_net_allow_force_then_continues() {
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-net-allow api.example.com",
+        );
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_remove_net_allow_force_then_continues() {
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --remove-net-allow api.example.com",
+        );
+    }
+
+    // ── pending patch confirmation ───────────────────────────
+
+    #[test]
+    fn given_pending_patch_when_exit_then_cancels_and_exits() {
+        let mut s = attached_session();
+        // Set up a pending patch by issuing patch without --force
+        s.handle_command("/policy patch --add-read /opt");
+        assert!(s.pending_patch.is_some());
+        let action = s.handle_command("/exit");
+        assert!(matches!(action, LoopAction::Exit));
+        assert!(s.pending_patch.is_none());
+    }
+
+    #[test]
+    fn given_pending_patch_when_yes_then_attempts_send() {
+        let mut s = attached_session();
+        s.handle_command("/policy patch --add-read /opt");
+        assert!(s.pending_patch.is_some());
+        // "y" will try to send_patch to the fake socket, which fails, but
+        // the code path (send + error handling) is exercised.
+        let action = s.handle_command("y");
+        assert!(matches!(action, LoopAction::Continue));
+        assert!(s.pending_patch.is_none());
+    }
+
+    // ── sessions command ─────────────────────────────────────
+
+    #[test]
+    fn given_session_when_sessions_then_continues() {
+        assert_continues(&mut session(), "/sessions");
+    }
+
+    // ── empty and whitespace input ───────────────────────────
+
+    #[test]
+    fn given_session_when_empty_line_then_continues() {
+        assert_continues(&mut session(), "");
+    }
+
+    #[test]
+    fn given_session_when_whitespace_only_then_continues() {
+        assert_continues(&mut session(), "   ");
+    }
+
+    // ── kill on unattached session ───────────────────────────
+
+    #[test]
+    fn given_unattached_session_when_kill_then_continues() {
+        assert_continues(&mut session(), "/kill");
+    }
+
+    // ── detach on unattached session ─────────────────────────
+
+    #[test]
+    fn given_unattached_session_when_detach_then_continues() {
+        assert_continues(&mut session(), "/detach");
+    }
+
+    // ── attach with missing path ─────────────────────────────
+
+    #[test]
+    fn given_session_when_attach_no_args_then_continues() {
+        assert_continues(&mut session(), "/attach");
+    }
+
+    // ── hinter ───────────────────────────────────────────────
+
+    #[test]
+    fn given_helper_when_hint_returns_none_for_empty() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let hint = Hinter::hint(helper, "", 0, &Context::new(rl.history()));
+        // HistoryHinter returns None for empty input.
+        assert!(hint.is_none());
+    }
+
+    // ── highlighter ──────────────────────────────────────────
+
+    #[test]
+    fn given_helper_with_color_when_highlighting_slash_command_then_adds_ansi() {
+        let helper = ShellHelper::new(true);
+        let highlighted = Highlighter::highlight(&helper, "/help", 0);
+        assert!(highlighted.contains("\x1b["), "should add ANSI color codes");
+    }
+
+    #[test]
+    fn given_helper_without_color_when_highlighting_then_returns_borrowed() {
+        let helper = ShellHelper::new(false);
+        let highlighted = Highlighter::highlight(&helper, "/help", 0);
+        assert_eq!(highlighted.as_ref(), "/help");
+    }
 }
