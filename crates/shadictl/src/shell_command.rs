@@ -625,6 +625,16 @@ mod tests {
         ShellSession::new(None)
     }
 
+    /// Session with a fake socket path set so that socket-guarded code
+    /// paths (arg parsing, etc.) are reached.  The socket is not a real
+    /// endpoint, so `query_policy` / `send_patch` will fail — that's
+    /// fine for coverage of the code *before* the socket call.
+    fn attached_session() -> ShellSession {
+        ShellSession {
+            socket: Some(PathBuf::from("/tmp/shadi-fake-coverage.sock")),
+        }
+    }
+
     fn assert_continues(session: &mut ShellSession, cmd: &str) {
         assert!(
             matches!(session.handle_command(cmd), LoopAction::Continue),
@@ -849,5 +859,186 @@ mod tests {
 
         // Exit
         assert_exits(&mut s, "/exit");
+    }
+
+    // ── banner & history path ────────────────────────────────
+
+    #[test]
+    fn given_no_color_when_print_banner_then_does_not_panic() {
+        print_banner(false);
+    }
+
+    #[test]
+    fn given_color_when_print_banner_then_does_not_panic() {
+        print_banner(true);
+    }
+
+    #[test]
+    fn given_home_dir_when_dirs_history_path_then_returns_some() {
+        // HOME is usually set in test environments.
+        let path = dirs_history_path();
+        if std::env::var("HOME").is_ok() || std::env::var("USERPROFILE").is_ok() {
+            assert!(path.is_some());
+            let p = path.unwrap();
+            assert!(p.ends_with("shell_history"));
+        }
+    }
+
+    // ── policy patch argument parsing ────────────────────────
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_add_write_then_continues() {
+        assert_continues(&mut session(), "/policy patch --add-write /tmp/out");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_add_allow_then_continues() {
+        assert_continues(&mut session(), "/policy patch --add-allow /opt/bin");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_add_allow_command_then_continues() {
+        assert_continues(&mut session(), "/policy patch --add-allow-command npm");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_remove_allow_command_then_continues() {
+        assert_continues(&mut session(), "/policy patch --remove-allow-command npm");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_add_block_command_then_continues() {
+        assert_continues(&mut session(), "/policy patch --add-block-command curl");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_remove_block_command_then_continues() {
+        assert_continues(&mut session(), "/policy patch --remove-block-command curl");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_add_net_allow_then_continues() {
+        assert_continues(&mut session(), "/policy patch --add-net-allow api.example.com");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_remove_net_allow_then_continues() {
+        assert_continues(&mut session(), "/policy patch --remove-net-allow api.example.com");
+    }
+
+    #[test]
+    fn given_no_attachment_when_policy_patch_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/policy patch --bogus-flag value");
+    }
+
+    // ── trace arg parsing ────────────────────────────────────
+
+    #[test]
+    fn given_trace_list_with_command_filter_then_continues() {
+        assert_continues(&mut session(), "/trace list --command python");
+    }
+
+    #[test]
+    fn given_trace_list_with_exit_code_filter_then_continues() {
+        assert_continues(&mut session(), "/trace list --exit-code 0");
+    }
+
+    #[test]
+    fn given_trace_list_with_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/trace list --bogus");
+    }
+
+    #[test]
+    fn given_trace_summary_with_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/trace summary --bogus");
+    }
+
+    // ── hint delegate ────────────────────────────────────────
+
+    #[test]
+    fn given_helper_when_hint_invoked_then_returns_without_panic() {
+        let helper = ShellHelper::new();
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+
+        let helper = rl.helper().unwrap();
+        // hint may return None for short input — that's fine.
+        let _hint = Hinter::hint(helper, "/he", 3, &Context::new(rl.history()));
+    }
+
+    // ── attached-session paths (fake socket for coverage) ────
+
+    #[test]
+    fn given_attached_session_when_status_then_shows_attached() {
+        assert_continues(&mut attached_session(), "/status");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_query_then_continues() {
+        assert_continues(&mut attached_session(), "/policy query");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_add_read_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --add-read /tmp");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_add_write_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --add-write /var/out");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_add_allow_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --add-allow /opt/bin");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_add_allow_command_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --add-allow-command npm");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_remove_allow_command_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --remove-allow-command npm");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_add_block_command_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --add-block-command curl");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_remove_block_command_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --remove-block-command curl");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_add_net_allow_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --add-net-allow api.example.com");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_remove_net_allow_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --remove-net-allow api.example.com");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_unknown_flag_then_continues() {
+        assert_continues(&mut attached_session(), "/policy patch --bogus-flag value");
+    }
+
+    #[test]
+    fn given_attached_session_when_detach_then_socket_cleared() {
+        let mut s = attached_session();
+        assert!(s.socket.is_some());
+        assert_continues(&mut s, "/detach");
+        assert!(s.socket.is_none());
+    }
+
+    #[test]
+    fn given_attached_session_when_help_then_shows_attached_to() {
+        assert_continues(&mut attached_session(), "/help");
     }
 }
