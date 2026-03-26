@@ -1,0 +1,6 @@
+{
+  "allow": ["."],
+  "read": ["/usr/local", "/usr/bin", "/usr/lib", "/bin", "/Library"],
+  "block_command": ["rm", "sudo", "curl", "wget"],
+  "net_block": true
+}

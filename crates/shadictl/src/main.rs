@@ -39,6 +39,7 @@ mod sandbox_snapshot;
 mod slim_mas_command;
 mod trace_command;
 mod trusted_secret_delivery;
+mod shell_command;
 
 use cli_types::*;
 use introspection_command::*;
@@ -50,6 +51,7 @@ use sandbox_snapshot::*;
 use slim_mas_command::*;
 use trace_command::*;
 use trusted_secret_delivery::*;
+use shell_command::*;
 
 #[cfg(test)]
 static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
@@ -187,6 +189,7 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::DeriveAgentIdentity(command) => run_derive_agent_identity_command(command),
         Commands::VerifyAgentIdentity(command) => run_verify_agent_identity_command(command),
         Commands::PutKey(command) => run_put_key_command(command),
+        Commands::Shell(args) => run_shell_command(args),
     }
 }
 

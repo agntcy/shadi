@@ -124,6 +124,9 @@ pub(crate) enum Commands {
     VerifyAgentIdentity(VerifyAgentIdentityArgs),
     #[command(name = "put-key")]
     PutKey(PutKeyArgs),
+    /// Interactive terminal for managing SHADI sandbox sessions
+    #[command(name = "shell")]
+    Shell(ShellArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -294,6 +297,14 @@ pub(crate) struct PolicyQueryArgs {
 
     #[arg(long = "format", value_enum, default_value = "json")]
     pub(crate) format: OutputFormat,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "shell", about = "Interactive terminal for managing SHADI sandbox sessions")]
+pub(crate) struct ShellArgs {
+    /// Connect to a running sandbox session by control socket path
+    #[arg(long = "socket", value_name = "PATH")]
+    pub(crate) socket: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
