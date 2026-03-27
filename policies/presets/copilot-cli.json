@@ -1,0 +1,42 @@
+{
+  "_preset": "shadi/copilot-cli-v1",
+  "_description": "Safe-launch preset for GitHub Copilot CLI. Use with: shadi --policy policies/presets/copilot-cli.json -- copilot",
+  "allow": ["."],
+  "read": [
+    "/usr/local",
+    "/usr/bin",
+    "/usr/lib",
+    "/bin",
+    "/Library",
+    "/private/etc/ssl",
+    "/private/etc/resolv.conf"
+  ],
+  "net_block": false,
+  "net_allow": [
+    "api.github.com",
+    "copilot-proxy.githubusercontent.com"
+  ],
+  "block_command": [
+    "curl",
+    "wget",
+    "nc",
+    "netcat"
+  ],
+  "process_trusted_secret": [
+    {
+      "program": "copilot",
+      "key": "github/token",
+      "name": "GH_TOKEN",
+      "fd_env": "GH_TOKEN_FD"
+    }
+  ],
+  "process_secret_policy": [
+    {
+      "program": "copilot",
+      "secret": "github/token",
+      "actions": ["disclose"],
+      "children": [],
+      "name": "GH_TOKEN"
+    }
+  ]
+}

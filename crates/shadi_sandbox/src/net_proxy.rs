@@ -439,6 +439,14 @@ fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
 // ---------------------------------------------------------------------------
 
 fn pipe_bidirectional(client: TcpStream, upstream: TcpStream) {
+    // Clear the handshake-phase timeouts before entering relay mode.
+    // Streaming responses (SSE) can be idle for arbitrarily long between
+    // tokens; a hard deadline here would kill long-running completions.
+    client.set_read_timeout(None).ok();
+    client.set_write_timeout(None).ok();
+    upstream.set_read_timeout(None).ok();
+    upstream.set_write_timeout(None).ok();
+
     // Two threads: client→upstream and upstream→client.
     let client2 = client.try_clone().unwrap_or_else(|_| return_dummy());
     let upstream2 = upstream.try_clone().unwrap_or_else(|_| return_dummy());
@@ -456,7 +464,6 @@ fn pipe_bidirectional(client: TcpStream, upstream: TcpStream) {
 fn copy_stream(mut from: TcpStream, mut to: TcpStream) {
     let mut buf = [0u8; 8192];
     loop {
-        from.set_read_timeout(Some(std::time::Duration::from_secs(120))).ok();
         match from.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
