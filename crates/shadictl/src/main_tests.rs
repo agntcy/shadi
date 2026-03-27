@@ -1590,6 +1590,7 @@ members = [{ did = "did:key:zA", role = "human" }]
                 net_block: false,
                 allow_command: Vec::new(),
                 format: OutputFormat::Json,
+                socket: None,
             }),
         }));
         assert_eq!(code, ExitCode::SUCCESS);

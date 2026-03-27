@@ -147,8 +147,6 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         // matches on the literal path seen by the caller, so cover both spellings.
         rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
         rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
-        // Allow /dev/null and other character devices needed by subprocesses (e.g. git, gh).
-        rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
         if let Ok(tmpdir) = std::env::var("TMPDIR") {
             let canonical = escape_profile_string(tmpdir.trim_end_matches('/'))?;
             rules.push(format!(
@@ -158,6 +156,12 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         // Allow Mach IPC and POSIX IPC for child processes (op daemon, system services).
         rules.push("(allow ipc-posix-shm)".to_string());
     }
+
+    // Allow /dev unconditionally (mirrors Linux behaviour). /dev/null, /dev/tty,
+    // /dev/urandom, /dev/fd/* etc. are fundamental Unix primitives that any
+    // process may need — shell redirects (2>/dev/null), curl output (-o /dev/null),
+    // random number generation, and terminal I/O all depend on this.
+    rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
 
     if compatibility_profile || policy.local_unix_sockets_allowed() {
         // Allow Unix-domain socket connections for tightly scoped brokered secret delivery
@@ -190,12 +194,18 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         ));
     }
 
-    if !policy.net_allow().is_empty() {
-        // macOS Seatbelt `(remote ip ...)` only accepts * or localhost as the
-        // host component — it cannot filter by arbitrary IP/hostname.  When
-        // net_allow destinations are specified we enable outbound networking;
-        // the destination list is authoritative for policy auditing and for
-        // platforms (e.g., Linux) that support finer-grained enforcement.
+    if let Some(proxy_port) = policy.net_proxy_port() {
+        // Proxy mode: restrict ALL outbound TCP to the loopback proxy port.
+        // macOS Seatbelt `remote tcp` only accepts `localhost` or `*` as the
+        // host component — IP literals are rejected at sandbox init time.
+        rules.push(format!(
+            "(allow network-outbound (remote tcp \"localhost:{proxy_port}\"))"
+        ));
+    } else if !policy.net_allow().is_empty() {
+        // net_allow without proxy: enable full outbound (macOS seatbelt cannot
+        // filter by arbitrary hostname/IP at spawn time; the allow list is
+        // authoritative for audit and is enforced at kernel level on Linux via
+        // Landlock ConnectTcp rules).
         rules.push("(allow network-outbound)".to_string());
     } else if !policy.net_blocked() {
         rules.push("(allow network*)".to_string());

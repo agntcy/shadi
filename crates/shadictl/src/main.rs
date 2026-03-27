@@ -22,7 +22,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT}
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use shadi_sandbox::{spawn_sandboxed, SandboxPolicy};
+use shadi_sandbox::{spawn_sandboxed, NetAllowlist, NetProxy, SandboxPolicy};
 use agent_secrets::{SecretPolicy, SecretStore};
 use shadi_memory::{MemoryEntry, SqlCipherStore};
 use slim_mas::{is_member_allowed, load_config as load_mas_config, resolve_group, resolve_group_dids};

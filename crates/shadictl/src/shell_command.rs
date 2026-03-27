@@ -796,6 +796,7 @@ impl ShellSession {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: self.socket.clone(),
         };
         run_policy_command(PolicyCli {
             command: PolicyCommand::Explain(args),

@@ -35,8 +35,8 @@ use std::os::unix::net::UnixStream;
 use uds_windows::UnixListener;
 
 use shadi_sandbox::{
-    ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
-    ProcessResources, SandboxPolicy,
+    ControlMessage, ControlResponse, NetAllowlist, PatchAxisStatus, PolicyPatch,
+    PolicyPatchResponse, ProcessResources, SandboxPolicy,
 };
 use tracing::info_span;
 
@@ -54,8 +54,9 @@ pub(crate) struct LivePolicy {
     pub(crate) staged_read: Vec<String>,
     pub(crate) staged_write: Vec<String>,
     pub(crate) staged_allow: Vec<String>,
-    /// Network destinations staged for next restart.
-    pub(crate) staged_net_allow: Vec<String>,
+    /// Live network allowlist shared with the userspace proxy.
+    /// When `Some`, network patches update this directly — no restart needed.
+    pub(crate) live_net_allowlist: Option<NetAllowlist>,
 }
 
 /// Handle to a running control listener. Dropping it removes the endpoint file.
@@ -74,6 +75,39 @@ impl Drop for ControlSocketHandle {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Strip a URL scheme and path from a net-allow entry, returning just the host.
+///
+/// Users may naturally write `http://httping.org/` but the proxy allowlist
+/// works on hostnames only.  This normalisation makes both equivalent:
+///
+/// ```
+/// // assert_eq!(extract_host("http://httping.org/ping"), "httping.org");
+/// // assert_eq!(extract_host("httping.org"),             "httping.org");
+/// // assert_eq!(extract_host("192.0.2.1"),               "192.0.2.1");  // RFC 5737 TEST-NET
+/// ```
+fn extract_host(dest: &str) -> String {
+    // Strip scheme (e.g. "http://", "https://").
+    let after_scheme = if let Some(pos) = dest.find("://") {
+        &dest[pos + 3..]
+    } else {
+        dest
+    };
+    // Strip trailing path / query / fragment — take up to the first '/'.
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // Strip port suffix (host:port) — only for non-IPv6 addresses.
+    let host = if host_port.starts_with('[') {
+        // IPv6 literal [::1]:port or [::1]
+        host_port
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or(host_port)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    host.to_ascii_lowercase()
 }
 
 /// Resolve the default control socket path for a given PID.
@@ -276,7 +310,7 @@ fn handle_query(live: &Arc<Mutex<LivePolicy>>) -> ControlResponse {
         "staged_read": guard.staged_read,
         "staged_write": guard.staged_write,
         "staged_allow": guard.staged_allow,
-        "staged_net_allow": guard.staged_net_allow,
+        "net_allow_live": guard.live_net_allowlist.as_ref().map(|al| al.snapshot()),
         "restart_requested": guard.restart_requested.load(Ordering::SeqCst),
     });
 
@@ -388,31 +422,42 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
         pending_restart.push("filesystem".to_string());
     }
 
-    // --- Network allow (kernel, staged) ---
+    // --- Network allow ---
+    // When a live proxy allowlist is present the change takes effect immediately
+    // (no restart needed).  Without the proxy the change is staged and requires a
+    // manual restart because the kernel sandbox cannot be updated in place.
     let has_net_changes = !patch.add_net_allow.is_empty() || !patch.remove_net_allow.is_empty();
 
     if has_net_changes {
-        let mut next_allow = if guard.staged_net_allow.is_empty() {
-            guard.policy.net_allow().to_vec()
-        } else {
-            guard.staged_net_allow.clone()
-        };
+        let current = guard
+            .live_net_allowlist
+            .as_ref()
+            .map(|al| al.snapshot())
+            .unwrap_or_else(|| guard.policy.net_allow().to_vec());
 
+        let mut next_allow = current;
         for dest in &patch.add_net_allow {
-            if !next_allow.contains(dest) {
-                next_allow.push(dest.clone());
+            let host = extract_host(dest);
+            if !next_allow.contains(&host) {
+                next_allow.push(host);
             }
         }
         for dest in &patch.remove_net_allow {
-            next_allow.retain(|d| d != dest);
+            let host = extract_host(dest);
+            next_allow.retain(|d| d != &host);
         }
 
-        if next_allow == guard.policy.net_allow() {
-            guard.staged_net_allow.clear();
+        if let Some(ref al) = guard.live_net_allowlist {
+            // Proxy is running: update the allowlist live — no restart needed.
+            al.update(next_allow.clone());
+            // Also keep the policy in sync so QueryPolicy reflects reality.
+            guard.policy = guard.policy.clone().with_network_destinations(next_allow);
+            net_status = PatchAxisStatus::Applied;
         } else {
-            guard.staged_net_allow = next_allow;
-            net_status = PatchAxisStatus::PendingRestart;
-            pending_restart.push("network".to_string());
+            // No proxy: network patches cannot be applied live and MUST NOT
+            // trigger a child restart (that would break the running application).
+            // Reject the change so the caller knows it cannot take effect.
+            net_status = PatchAxisStatus::Rejected;
         }
     }
 
@@ -428,7 +473,7 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
         "patch applied".to_string()
     } else {
         format!(
-            "patch accepted; restarting sandboxed process to apply {}",
+            "patch accepted; staged axes ({}) require manual process restart",
             pending_restart.join(", ")
         )
     };
@@ -457,8 +502,7 @@ pub(crate) fn apply_staged_policy_updates(live: &Arc<Mutex<LivePolicy>>) -> Resu
 
     let has_staged = !guard.staged_read.is_empty()
         || !guard.staged_write.is_empty()
-        || !guard.staged_allow.is_empty()
-        || !guard.staged_net_allow.is_empty();
+        || !guard.staged_allow.is_empty();
 
     if !has_staged {
         guard.restart_requested.store(false, Ordering::SeqCst);
@@ -474,9 +518,6 @@ pub(crate) fn apply_staged_policy_updates(live: &Arc<Mutex<LivePolicy>>) -> Resu
     }
     for path in guard.staged_allow.drain(..) {
         policy = policy.allow_read_path(&path).allow_write_path(&path);
-    }
-    if !guard.staged_net_allow.is_empty() || !guard.policy.net_allow().is_empty() {
-        policy = policy.with_network_destinations(std::mem::take(&mut guard.staged_net_allow));
     }
 
     guard.policy = policy;
@@ -571,6 +612,42 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    #[test]
+    fn extract_host_handles_bare_hostname() {
+        assert_eq!(extract_host("httping.org"), "httping.org");
+    }
+
+    #[test]
+    fn extract_host_strips_http_scheme() {
+        assert_eq!(extract_host("http://httping.org/"), "httping.org");
+    }
+
+    #[test]
+    fn extract_host_strips_https_scheme_and_path() {
+        assert_eq!(extract_host("https://httping.org/ping?v=1"), "httping.org");
+    }
+
+    #[test]
+    fn extract_host_strips_port() {
+        assert_eq!(extract_host("httping.org:80"), "httping.org");
+    }
+
+    #[test]
+    fn extract_host_bare_ip() {
+        // 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — reserved for documentation.
+        assert_eq!(extract_host("192.0.2.1"), "192.0.2.1");
+    }
+
+    #[test]
+    fn extract_host_ip_with_scheme_and_path() {
+        assert_eq!(extract_host("http://192.0.2.1/"), "192.0.2.1");
+    }
+
+    #[test]
+    fn extract_host_lowercases() {
+        assert_eq!(extract_host("HTTPing.ORG"), "httping.org");
+    }
+
     fn wait_for_socket_ready_with_timeout(sock_path: &Path, timeout: std::time::Duration) {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
@@ -630,7 +707,7 @@ mod tests {
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
-            staged_net_allow: Vec::new(),
+            live_net_allowlist: None,
         }))
     }
 
@@ -684,25 +761,28 @@ mod tests {
     }
 
     #[test]
-    fn handle_patch_stages_network_changes() {
-        let live = test_live_policy();
+    fn handle_patch_rejects_network_changes_without_proxy() {
+        let live = test_live_policy(); // live_net_allowlist: None
         let patch = PolicyPatch {
-            add_net_allow: vec!["api.github.com".to_string()],
+            add_net_allow: vec!["allowed.example.com".to_string()],  // RFC 2606
             ..Default::default()
         };
 
         let resp = handle_patch(&live, patch);
         match resp {
             ControlResponse::PatchResult(r) => {
-                assert!(r.accepted);
-                assert_eq!(r.network, PatchAxisStatus::PendingRestart);
-                assert!(r.pending_restart.contains(&"network".to_string()));
+                // Without a proxy, network patches are rejected — never staged
+                // for restart, because restarting the child breaks the application.
+                assert!(!r.accepted);
+                assert_eq!(r.network, PatchAxisStatus::Rejected);
+                assert!(r.pending_restart.is_empty());
             }
             _ => panic!("expected PatchResult"),
         }
 
+        // Policy must not be mutated on rejection.
         let guard = live.lock().unwrap();
-        assert_eq!(guard.staged_net_allow, vec!["api.github.com"]);
+        assert!(guard.policy.net_allow().is_empty());
     }
 
     #[test]
@@ -836,42 +916,46 @@ mod tests {
 
     #[test]
     fn handle_patch_removes_net_allow() {
+        // Without a proxy, both add and remove net patches are rejected.
         let live = test_live_policy();
-        // First add a network entry.
-        let patch1 = PolicyPatch {
-            add_net_allow: vec!["example.com".to_string()],
-            ..Default::default()
-        };
-        handle_patch(&live, patch1);
-        // Now remove it.
-        let patch2 = PolicyPatch {
+        let patch = PolicyPatch {
             remove_net_allow: vec!["example.com".to_string()],
             ..Default::default()
         };
-        let resp = handle_patch(&live, patch2);
+        let resp = handle_patch(&live, patch);
         match resp {
             ControlResponse::PatchResult(r) => {
-                assert!(r.accepted);
-                // Removing the only addition reverts to the base policy,
-                // so staged is cleared and status is Unchanged.
-                assert_eq!(r.network, PatchAxisStatus::Unchanged);
+                assert!(!r.accepted);
+                assert_eq!(r.network, PatchAxisStatus::Rejected);
             }
             _ => panic!("expected PatchResult"),
         }
-        let guard = live.lock().unwrap();
-        assert!(guard.staged_net_allow.is_empty());
     }
 
     #[test]
     fn handle_patch_deduplicates_net_allow() {
-        let live = test_live_policy();
+        // With a live proxy, duplicate entries in the same patch are deduplicated.
+        let al = NetAllowlist::new(vec![]);
+        let live = Arc::new(Mutex::new(LivePolicy {
+            policy: SandboxPolicy::new().block_network(true),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            live_net_allowlist: Some(al.clone()),
+        }));
         let patch = PolicyPatch {
             add_net_allow: vec!["dup.com".to_string(), "dup.com".to_string()],
             ..Default::default()
         };
         handle_patch(&live, patch);
+        assert_eq!(al.snapshot(), &["dup.com".to_string()]);
         let guard = live.lock().unwrap();
-        assert_eq!(guard.staged_net_allow, vec!["dup.com"]);
+        assert_eq!(guard.policy.net_allow(), &["dup.com".to_string()]);
     }
 
     #[test]
@@ -895,11 +979,12 @@ mod tests {
 
     #[test]
     fn handle_patch_combined_axes() {
+        // Combined patch: commands (applied live) + filesystem (staged for restart).
+        // Network without proxy is rejected but does not block the other axes.
         let live = test_live_policy();
         let patch = PolicyPatch {
             add_allow_command: vec!["npm".to_string()],
             add_read: vec!["/opt/data".to_string()],
-            add_net_allow: vec!["cdn.example.com".to_string()],
             ..Default::default()
         };
         let resp = handle_patch(&live, patch);
@@ -908,9 +993,9 @@ mod tests {
                 assert!(r.accepted);
                 assert_eq!(r.commands, PatchAxisStatus::Applied);
                 assert_eq!(r.filesystem, PatchAxisStatus::PendingRestart);
-                assert_eq!(r.network, PatchAxisStatus::PendingRestart);
-                assert_eq!(r.pending_restart.len(), 2);
-                assert!(r.message.contains("restarting sandboxed process to apply"));
+                assert_eq!(r.network, PatchAxisStatus::Unchanged);
+                assert_eq!(r.pending_restart.len(), 1);
+                assert!(r.message.contains("manual process restart"));
             }
             _ => panic!("expected PatchResult"),
         }
@@ -971,7 +1056,6 @@ mod tests {
             guard.staged_read.push("/staged/read".to_string());
             guard.staged_write.push("/staged/write".to_string());
             guard.staged_allow.push("/staged/allow".to_string());
-            guard.staged_net_allow.push("staged.example.com".to_string());
             guard.allow.insert("allowed-cmd".to_string());
         }
         let resp = handle_query(&live);
@@ -980,7 +1064,6 @@ mod tests {
                 assert_eq!(policy["staged_read"][0], "/staged/read");
                 assert_eq!(policy["staged_write"][0], "/staged/write");
                 assert_eq!(policy["staged_allow"][0], "/staged/allow");
-                assert_eq!(policy["staged_net_allow"][0], "staged.example.com");
                 let allow_cmds = policy["allow_command"].as_array().unwrap();
                 assert!(allow_cmds.iter().any(|v| v == "allowed-cmd"));
             }
@@ -1051,21 +1134,18 @@ mod tests {
 
     #[test]
     fn apply_staged_replaces_net_allow_in_live_policy() {
+        // With no proxy, network patches are rejected — the policy must not be
+        // modified.  Only filesystem staged changes are written to the policy.
         let live = test_live_policy();
-        {
-            let mut guard = live.lock().unwrap();
-            guard.staged_net_allow.push("api.github.com".to_string());
-            guard.staged_net_allow.push("1.1.1.1:80".to_string());
-        }
-        let changed = apply_staged_policy_updates(&live).expect("apply");
-        assert!(changed);
+        let patch = PolicyPatch {
+            add_net_allow: vec!["allowed.example.com".to_string(), "192.0.2.1:80".to_string()],  // RFC 2606 / RFC 5737
+            ..Default::default()
+        };
+        handle_patch(&live, patch);
 
+        // Policy net_allow must remain empty because the patch was rejected.
         let guard = live.lock().unwrap();
-        assert!(guard.staged_net_allow.is_empty());
-        assert_eq!(
-            guard.policy.net_allow(),
-            &["api.github.com".to_string(), "1.1.1.1:80".to_string()]
-        );
+        assert!(guard.policy.net_allow().is_empty());
     }
 
     #[test]
@@ -1112,16 +1192,59 @@ mod tests {
     }
 
     #[test]
-    fn handle_patch_sets_restart_flag_for_network_changes() {
-        let live = test_live_policy();
+    fn handle_patch_does_not_set_restart_flag_for_rejected_network_changes() {
+        let live = test_live_policy(); // no proxy
         let patch = PolicyPatch {
             add_net_allow: vec!["cdn.example.com".to_string()],
             ..Default::default()
         };
         handle_patch(&live, patch);
 
+        // Network rejected — must NOT set restart_requested.
         let guard = live.lock().unwrap();
-        assert!(guard.restart_requested.load(Ordering::SeqCst));
+        assert!(!guard.restart_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn handle_patch_with_live_proxy_applies_network_changes_without_restart() {
+        // When a live proxy is present, network patches take effect immediately
+        // through the shared allowlist — no child restart needed.
+        // The proxy itself can be restarted independently (it rebinds the same
+        // loopback port) without touching the kernel-sandboxed child process.
+        let al = NetAllowlist::new(vec![]);
+        let live = Arc::new(Mutex::new(LivePolicy {
+            policy: SandboxPolicy::new().block_network(true),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            live_net_allowlist: Some(al.clone()),
+        }));
+
+        let patch = PolicyPatch {
+            add_net_allow: vec!["api.example.com".to_string()],
+            ..Default::default()
+        };
+        let resp = handle_patch(&live, patch);
+
+        match resp {
+            ControlResponse::PatchResult(r) => {
+                assert!(r.accepted);
+                assert_eq!(r.network, PatchAxisStatus::Applied);
+                assert!(r.pending_restart.is_empty());
+            }
+            _ => panic!("expected PatchResult"),
+        }
+
+        // Proxy allowlist updated in-place — child not touched.
+        assert_eq!(al.snapshot(), vec!["api.example.com".to_string()]);
+        let guard = live.lock().unwrap();
+        assert!(!guard.restart_requested.load(Ordering::SeqCst));
+        assert_eq!(guard.policy.net_allow(), &["api.example.com".to_string()]);
     }
 
     #[test]
@@ -1140,16 +1263,16 @@ mod tests {
     #[test]
     fn handle_patch_message_mentions_restarting_for_staged_changes() {
         let live = test_live_policy();
+        // Only filesystem changes are staged for restart (no proxy).
         let patch = PolicyPatch {
-            add_net_allow: vec!["api.example.com".to_string()],
             add_read: vec!["/opt/data".to_string()],
+            add_write: vec!["/opt/out".to_string()],
             ..Default::default()
         };
         let resp = handle_patch(&live, patch);
         match resp {
             ControlResponse::PatchResult(r) => {
-                assert!(r.message.contains("restarting"), "message should mention restart: {}", r.message);
-                assert!(r.message.contains("network"));
+                assert!(r.message.contains("manual process restart"), "message should mention restart: {}", r.message);
                 assert!(r.message.contains("filesystem"));
             }
             _ => panic!("expected PatchResult"),
@@ -1186,7 +1309,7 @@ mod tests {
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
-            staged_net_allow: Vec::new(),
+            live_net_allowlist: None,
         }));
         let resp = handle_query(&live);
         match resp {
@@ -1199,41 +1322,55 @@ mod tests {
         }
     }
 
-    // ── net_allow staged-then-applied round-trip ────────────────────────
+    // ── net_allow proxy round-trip ───────────────────────────────────────
 
     #[test]
     fn net_allow_patch_then_apply_updates_effective_policy() {
-        let live = test_live_policy();
+        // With a live proxy, the allowlist is updated in-place immediately.
+        let al = NetAllowlist::new(vec![]);
+        let live = Arc::new(Mutex::new(LivePolicy {
+            policy: SandboxPolicy::new().block_network(true),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            live_net_allowlist: Some(al.clone()),
+        }));
 
-        // Patch adds network destinations.
         let patch = PolicyPatch {
-            add_net_allow: vec!["api.github.com".to_string(), "1.1.1.1:80".to_string()],
+            add_net_allow: vec!["allowed.example.com".to_string(), "192.0.2.1".to_string()],  // RFC 2606 / RFC 5737
             ..Default::default()
         };
         let resp = handle_patch(&live, patch);
         match &resp {
             ControlResponse::PatchResult(r) => {
                 assert!(r.accepted);
-                assert_eq!(r.network, PatchAxisStatus::PendingRestart);
+                assert_eq!(r.network, PatchAxisStatus::Applied);
+                assert!(r.pending_restart.is_empty());
             }
             _ => panic!("expected PatchResult"),
         }
 
-        // Apply staged changes.
-        let changed = apply_staged_policy_updates(&live).expect("apply");
-        assert!(changed);
-
-        // Effective policy now has the destinations.
+        // Both the proxy allowlist and the mirrored policy are updated.
+        assert_eq!(al.snapshot(), &["allowed.example.com".to_string(), "192.0.2.1".to_string()]);
         let guard = live.lock().unwrap();
         assert_eq!(
             guard.policy.net_allow(),
-            &["api.github.com".to_string(), "1.1.1.1:80".to_string()]
+            &["allowed.example.com".to_string(), "192.0.2.1".to_string()]
         );
-        assert!(!guard.restart_requested.load(Ordering::SeqCst));
     }
 
     #[test]
     fn net_allow_remove_then_apply_removes_from_effective_policy() {
+        // With a proxy: removing an entry updates the allowlist in-place.
+        let al = NetAllowlist::new(vec![
+            "keep.example.com".to_string(),
+            "remove.example.com".to_string(),
+        ]);
         let live = Arc::new(Mutex::new(LivePolicy {
             policy: SandboxPolicy::new()
                 .block_network(true)
@@ -1247,7 +1384,7 @@ mod tests {
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
-            staged_net_allow: Vec::new(),
+            live_net_allowlist: Some(al.clone()),
         }));
 
         let patch = PolicyPatch {
@@ -1256,9 +1393,7 @@ mod tests {
         };
         handle_patch(&live, patch);
 
-        let changed = apply_staged_policy_updates(&live).expect("apply");
-        assert!(changed);
-
+        assert_eq!(al.snapshot(), &["keep.example.com".to_string()]);
         let guard = live.lock().unwrap();
         assert_eq!(guard.policy.net_allow(), &["keep.example.com".to_string()]);
     }
@@ -1293,7 +1428,7 @@ mod tests {
         let result = send_patch(&sock_path, &patch).expect("send patch");
         assert!(result.accepted);
         assert_eq!(result.filesystem, PatchAxisStatus::PendingRestart);
-        assert!(result.message.contains("restarting"));
+        assert!(result.message.contains("manual process restart"));
 
         // Verify restart flag was set.
         assert!(restart_flag.load(Ordering::SeqCst));

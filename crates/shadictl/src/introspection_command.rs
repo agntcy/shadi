@@ -1,4 +1,5 @@
 use super::*;
+use crate::policy_watch::query_policy;
 
 #[derive(Serialize)]
 struct SecretBackendConfig {
@@ -178,8 +179,15 @@ fn run_policy_explain(args: PolicyExplainArgs) -> ExitCode {
         }
     };
 
+    // If a socket is provided (or auto-detectable), merge the live patched
+    // state so the user sees network policy changes applied via `policy patch`.
+    let live_state = args.socket
+        .as_ref()
+        .and_then(|sock| query_policy(sock).ok());
+
     let output = json!({
         "effective_policy": effective_policy,
+        "live_state": live_state,
         "sources": {
             "profile": {
                 "name": profile_label(args.profile),
@@ -533,6 +541,7 @@ mod tests {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: None,
         });
         assert_eq!(code, ExitCode::SUCCESS);
     }
@@ -558,6 +567,7 @@ mod tests {
             net_block: true,
             allow_command: vec!["echo".to_string()],
             format: OutputFormat::Text,
+            socket: None,
         });
 
         assert_eq!(code, ExitCode::SUCCESS);
@@ -575,6 +585,7 @@ mod tests {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: None,
         });
 
         assert_eq!(code, ExitCode::from(2));
@@ -666,6 +677,7 @@ mod tests {
                 net_block: false,
                 allow_command: Vec::new(),
                 format: OutputFormat::Json,
+                socket: None,
             }),
         });
         assert_eq!(explain, ExitCode::SUCCESS);
@@ -715,6 +727,7 @@ mod tests {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: None,
         });
         assert_eq!(code, ExitCode::from(2));
     }
@@ -788,7 +801,7 @@ mod tests {
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
-            staged_net_allow: Vec::new(),
+            live_net_allowlist: None,
         }))
     }
 

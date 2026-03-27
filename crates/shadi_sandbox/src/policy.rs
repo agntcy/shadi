@@ -17,6 +17,10 @@ pub struct SandboxPolicy {
     net_block: bool,
     platform_profile: PlatformSandboxProfile,
     allow_local_unix_sockets: bool,
+    /// When set, the kernel sandbox restricts outbound TCP to this loopback
+    /// port only (the userspace proxy port), leaving domain-level enforcement
+    /// to the proxy.
+    net_proxy_port: Option<u16>,
 }
 
 impl SandboxPolicy {
@@ -28,6 +32,7 @@ impl SandboxPolicy {
             net_block: false,
             platform_profile: PlatformSandboxProfile::Compatibility,
             allow_local_unix_sockets: false,
+            net_proxy_port: None,
         }
     }
 
@@ -88,6 +93,18 @@ impl SandboxPolicy {
 
     pub fn local_unix_sockets_allowed(&self) -> bool {
         self.allow_local_unix_sockets
+    }
+
+    /// Configure the kernel sandbox to allow outbound TCP only to
+    /// `127.0.0.1:<port>` (the userspace proxy port).
+    pub fn with_net_proxy_port(mut self, port: u16) -> Self {
+        self.net_proxy_port = Some(port);
+        self
+    }
+
+    /// Returns the proxy port if proxy-mode enforcement is active.
+    pub fn net_proxy_port(&self) -> Option<u16> {
+        self.net_proxy_port
     }
 }
 

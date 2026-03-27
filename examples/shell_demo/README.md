@@ -26,13 +26,18 @@ You should see output like:
 control socket: /tmp/shadi-ctl-12345.sock
 [demo-agent] starting — press Ctrl-C to stop
 [demo-agent] pid=12345
+[demo-agent] http probe=http://example.com/
+[demo-agent] tcp  probe=1.1.1.1:80
 [demo-agent] probe file=/private/etc/hosts
 [demo-agent] tick    1  14:30:00
-[demo-agent] network probe=tcp://1.1.1.1:80
-[demo-agent] network probe        rc=1   nc: connectx to 1.1.1.1 port 80 (tcp) failed: Operation not permitted
+[demo-agent] http probe           rc=97  (no output)
+[demo-agent] tcp probe            rc=97  tcp_rc=97
 [demo-agent] file probe           rc=1   head: /private/etc/hosts: Operation not permitted
 [demo-agent] delete probe         rc=1   rm: /tmp/shadi-demo-marker: Operation not permitted
 ```
+
+`rc=97` is `CURLE_PROXY` — the SOCKS5 proxy replied with REP=0x02 "connection not allowed",
+meaning the destination is not in the `net_allow` list.
 
 Note the **control socket** path printed to stderr — you can use it to
 attach directly, or let the shell discover it automatically.
@@ -103,30 +108,37 @@ The demo agent is intentionally noisy: every tick it tries three things:
 
 This lets you demonstrate both immediate and restart-gated policy changes.
 
-First, observe that the network probe is blocked by the sandbox's network policy and the delete probe is blocked by command policy.
+First, observe that all probes are blocked: network probes return `rc=97` (proxy denies),
+the file probe returns `Operation not permitted`, and the delete probe is blocked by command policy.
 
-Then note the network limitation for this bash demo:
+### Patch network policy without restarting the process
 
-- on macOS SHADI network enforcement is all-or-nothing for OS sandboxing
-- for this demo, the clear transition is `blocked now` vs `succeeds after restart with network enabled`
+SHADI routes all outbound TCP through a loopback SOCKS5 proxy and checks the
+hostname **before DNS resolution**. A `--add-net-allow` patch updates the
+proxy's allowlist live — the child process never restarts:
 
-So instead of patching a single hostname, restart the demo with a connected policy or with network blocking disabled.
-
-The shell will still show network patch staging, but that staging is not what makes the bash demo probe work on macOS.
-
-Example restart path:
+Allow the HTTP probe target by hostname:
 
 ```
-cargo run -p shadictl -- \
-    --profile connected \
-    --policy examples/shell_demo/policy.json \
-    --watch-policy \
-    -- bash examples/shell_demo/demo_agent.sh
+shadi(shadi-ctl-12345)> /policy patch --force --add-net-allow example.com
+{
+  "accepted": true,
+  "network": "applied",
+  "pending_restart": []
+}
 ```
 
-After restart, the network probe should report a successful TCP connect instead of `Operation not permitted`.
+After the next tick, `http probe rc=0 http_code=200` will appear — no restart.
 
-You can also show an immediate command-policy change:
+Allow the TCP probe target by IP:
+
+```
+shadi(shadi-ctl-12345)> /policy patch --force --add-net-allow 1.1.1.1
+```
+
+After the next tick, `tcp probe rc=0 tcp_rc=0` will appear — still no restart.
+
+Show an immediate command-policy change:
 
 ```
 shadi(shadi-ctl-12345)> /policy patch --force --remove-block-command rm

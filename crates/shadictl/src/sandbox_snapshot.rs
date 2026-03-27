@@ -76,6 +76,7 @@ fn prepare_sandbox_launch(
     file_policy: &PolicyFile,
     cwd: &Path,
     base_policy: &SandboxPolicy,
+    net_proxy: Option<&NetProxy>,
 ) -> Result<(Command, Option<PendingTrustedSecretDelivery>, SandboxPolicy), String> {
     let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
     let mut command = Command::new(cmd_name);
@@ -85,6 +86,24 @@ fn prepare_sandbox_launch(
     command.current_dir(cwd);
     #[cfg(test)]
     scrub_test_secret_backend_env(&mut command);
+
+    // Inject proxy environment variables so SOCKS5-aware clients in the child
+    // process route all TCP through the loopback proxy where the allowlist is
+    // enforced.  ALL_PROXY/all_proxy covers both HTTP and HTTPS (and any other
+    // TCP protocol); http_proxy/https_proxy are also set for older clients that
+    // don't honour ALL_PROXY.
+    if let Some(proxy) = net_proxy {
+        let proxy_url = proxy.proxy_url(); // socks5h://127.0.0.1:<port>
+        command.env("ALL_PROXY", &proxy_url);
+        command.env("all_proxy", &proxy_url);
+        // Curl and many HTTP libraries also check these; socks5h:// forwards
+        // the hostname to the proxy (no local DNS), which is required for
+        // hostname-based allowlist enforcement.
+        command.env("http_proxy", &proxy_url);
+        command.env("https_proxy", &proxy_url);
+        command.env("HTTP_PROXY", &proxy_url);
+        command.env("HTTPS_PROXY", &proxy_url);
+    }
 
     let secret_config = resolve_launch_secret_config(&command, cli, file_policy)?;
     let pending_trusted_secrets = PendingTrustedSecretDelivery::new(
@@ -96,6 +115,11 @@ fn prepare_sandbox_launch(
     )?;
 
     let mut runtime_policy = base_policy.clone();
+    // When a proxy is active, configure the kernel sandbox to allow outbound
+    // TCP only to the proxy's loopback port, not to arbitrary destinations.
+    if let Some(proxy) = net_proxy {
+        runtime_policy = runtime_policy.with_net_proxy_port(proxy.port());
+    }
     if let Some(pending) = pending_trusted_secrets.as_ref() {
         for path in pending.endpoint_paths() {
             runtime_policy = runtime_policy
@@ -142,9 +166,41 @@ pub(crate) fn run_sandboxed_command(
     let mut control_live = None;
     let mut terminate_requested = None;
     let mut restart_requested = None;
+    // The proxy is kept alive for the lifetime of `run_sandboxed_command`.
+    // It is restarted on the same port when the child is relaunched —
+    // required on macOS where the Seatbelt profile bakes in the proxy port,
+    // and consistent on Linux (Landlock rule also contains the port).
+    let mut net_proxy_handle: Option<NetProxy>;
     let _control_handle = if cli.watch_policy {
         let terminate_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let restart_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Start the network enforcement proxy.  The kernel sandbox
+        // (Landlock on Linux, Seatbelt on macOS) is set to allow outbound TCP
+        // only to this loopback port, so the proxy is the sole exit gate.
+        // DNS-name allowlist is enforced here; policy patches update the shared
+        // allowlist in-place without restarting the child.
+        // On Windows: kernel channel enforcement is not available without
+        // elevated privileges; proxy env vars are set but can be bypassed.
+        let (net_allowlist, proxy_opt) = {
+            let initial = resolved.policy.net_allow().to_vec();
+            let al = NetAllowlist::new(initial);
+            match NetProxy::start(al.clone()) {
+                Ok(proxy) => {
+                    eprintln!(
+                        "network proxy (DNS-name enforcement gate): 127.0.0.1:{}",
+                        proxy.port()
+                    );
+                    (Some(al), Some(proxy))
+                }
+                Err(err) => {
+                    eprintln!("warning: failed to start network enforcement proxy: {err}; network policy changes will require restart");
+                    (None, None)
+                }
+            }
+        };
+        net_proxy_handle = proxy_opt;
+
         let live = std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
             policy: resolved.policy.clone(),
             blocked: resolved.blocked.clone(),
@@ -155,7 +211,7 @@ pub(crate) fn run_sandboxed_command(
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
-            staged_net_allow: Vec::new(),
+            live_net_allowlist: net_allowlist,
         }));
         let pid = std::process::id();
         let sock_path = default_socket_path(pid);
@@ -173,6 +229,7 @@ pub(crate) fn run_sandboxed_command(
             }
         }
     } else {
+        net_proxy_handle = None;
         None
     };
 
@@ -217,6 +274,7 @@ pub(crate) fn run_sandboxed_command(
             file_policy,
             cwd,
             &base_policy,
+            net_proxy_handle.as_ref(),
         ) {
             Ok(launch) => launch,
             Err(err) => {
@@ -287,6 +345,24 @@ pub(crate) fn run_sandboxed_command(
             Ok(ChildWaitOutcome::RestartRequested) => {
                 if let Some(pending) = pending_trusted_secrets.as_mut() {
                     pending.close_parent_fds();
+                }
+                // Restart the proxy on the same port.  The new child will get a
+                // fresh kernel sandbox rule with the same port number, so the
+                // proxy must rebind there (mandatory on macOS / Seatbelt).
+                if let Some(proxy) = net_proxy_handle.take() {
+                    let allowlist = control_live
+                        .as_ref()
+                        .and_then(|live| live.lock().ok())
+                        .and_then(|guard| guard.live_net_allowlist.clone())
+                        .unwrap_or_else(|| NetAllowlist::new(vec![]));
+                    match proxy.restart(allowlist) {
+                        Ok(new_proxy) => {
+                            net_proxy_handle = Some(new_proxy);
+                        }
+                        Err(err) => {
+                            eprintln!("warning: failed to restart network proxy on same port: {err}");
+                        }
+                    }
                 }
                 if let Some(live) = control_live.as_ref() {
                     if let Err(err) = apply_staged_policy_updates(live) {
@@ -1204,7 +1280,7 @@ mod tests {
         let dir = temp_dir();
 
         let (_command, _pending, runtime_policy) =
-            prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy)
+            prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
 
         assert_eq!(runtime_policy.net_allow(), &["1.1.1.1:80".to_string()]);

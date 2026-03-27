@@ -1,10 +1,12 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod net_proxy;
 pub mod policy;
 pub mod policy_patch;
 mod platform;
 
+pub use net_proxy::{NetAllowlist, NetProxy};
 pub use policy::{PlatformSandboxProfile, SandboxPolicy};
 pub use policy_patch::{
     ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
