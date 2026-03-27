@@ -491,6 +491,8 @@ fn given_shell_when_full_walkthrough_then_output_covers_all_commands() {
          /policy diff profile:strict\n\
          /trace list\n\
          /trace summary\n\
+         /secrets backend\n\
+         /secrets rules\n\
          /detach\n\
          /clear\n\
          /exit\n",
@@ -505,7 +507,8 @@ fn given_shell_when_full_walkthrough_then_output_covers_all_commands() {
         .stdout_contains("effective_policy")
         .stdout_contains("sources")
         .stdout_contains("shadi.sandbox.spawn")
-        .stdout_contains("shadi.policy.patch");
+        .stdout_contains("shadi.policy.patch")
+        .stdout_contains("Backend:");
 }
 
 // ── attached session (mock sandbox) ──────────────────────────
@@ -656,6 +659,9 @@ fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
          /policy patch --force --add-read /opt/tools\n\
          /policy patch --force --add-net-allow api.github.com\n\
          /policy query\n\
+         /resources\n\
+         /secrets backend\n\
+         /secrets rules\n\
          /detach\n\
          /status\n\
          /exit\n",
@@ -689,6 +695,12 @@ fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
         .stdout_contains("\"accepted\": true")
         .stdout_contains("\"applied\"")
         .stdout_contains("pending_restart")
+        // resources
+        .stdout_contains("Process: PID")
+        .stdout_contains("RSS:")
+        .stdout_contains("Threads:")
+        // secrets
+        .stdout_contains("Backend:")
         // detach
         .stdout_contains("detached");
 }

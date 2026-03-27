@@ -369,4 +369,160 @@ mod tests {
         let dir = default_snapshot_dir();
         assert!(dir.to_string_lossy().contains("git-snapshots"));
     }
+
+    #[test]
+    fn snapshot_list_with_data_prints_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runs_dir = dir.path().join("runs");
+
+        // Create two snapshot entries.
+        let snap1_dir = runs_dir.join("snap-1");
+        std::fs::create_dir_all(&snap1_dir).expect("mkdir");
+        std::fs::write(
+            snap1_dir.join("snapshot.json"),
+            r#"{
+                "artifact_id": "1711000000000-111-bash",
+                "command": ["bash", "script.sh"],
+                "timestamps": { "started_at_ms": 1711000000000 },
+                "outcome": { "exit_code": 0 },
+                "git": { "any_repo_changed": false }
+            }"#,
+        )
+        .expect("write");
+
+        let snap2_dir = runs_dir.join("snap-2");
+        std::fs::create_dir_all(&snap2_dir).expect("mkdir");
+        std::fs::write(
+            snap2_dir.join("snapshot.json"),
+            r#"{
+                "artifact_id": "1711000001000-222-python3",
+                "command": ["python3", "agent.py"],
+                "timestamps": { "started_at_ms": 1711000001000 },
+                "outcome": { "exit_code": 1 },
+                "git": { "any_repo_changed": true }
+            }"#,
+        )
+        .expect("write");
+
+        // Should print the table without panicking.
+        snapshot_list(Some(&dir.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn snapshot_list_empty_runs_dir_shows_no_snapshots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runs_dir = dir.path().join("runs");
+        std::fs::create_dir_all(&runs_dir).expect("mkdir");
+        // Empty runs dir, should print "no snapshots found".
+        snapshot_list(Some(&dir.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn snapshot_show_with_valid_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let snap_dir = dir.path().join("runs").join("test-snap");
+        std::fs::create_dir_all(&snap_dir).expect("mkdir");
+        std::fs::write(
+            snap_dir.join("snapshot.json"),
+            r#"{
+                "artifact_id": "test-snap",
+                "command": ["bash", "demo.sh"],
+                "timestamps": { "started_at_ms": 1711000000000, "duration_ms": 3456 },
+                "outcome": { "exit_code": 0 },
+                "git": {
+                    "any_repo_changed": true,
+                    "changed_repositories": 1,
+                    "repositories": [{
+                        "repo_root": "/work",
+                        "relative_path": ".",
+                        "comparison": { "overall_changed": true, "head_changed": false },
+                        "diff_summary": { "added": 2, "modified": 1, "deleted": 0, "renamed": 0, "untracked": 3 }
+                    }]
+                },
+                "layout": { "snapshot_file": "/tmp/test-snap/snapshot.json" }
+            }"#,
+        )
+        .expect("write");
+        snapshot_show("test-snap", Some(&dir.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn snapshot_show_latest_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("latest.json"),
+            r#"{
+                "artifact_id": "latest-snap",
+                "command": ["echo", "hi"],
+                "timestamps": { "started_at_ms": 100 },
+                "outcome": {},
+                "git": { "any_repo_changed": false, "changed_repositories": 0 }
+            }"#,
+        )
+        .expect("write");
+        snapshot_show("latest", Some(&dir.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn snapshot_show_invalid_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let snap_dir = dir.path().join("runs").join("bad-json");
+        std::fs::create_dir_all(&snap_dir).expect("mkdir");
+        std::fs::write(snap_dir.join("snapshot.json"), "not json").expect("write");
+        snapshot_show("bad-json", Some(&dir.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn snapshot_list_with_invalid_json_entries_skips_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runs_dir = dir.path().join("runs");
+
+        // Valid entry.
+        let valid = runs_dir.join("valid");
+        std::fs::create_dir_all(&valid).expect("mkdir");
+        std::fs::write(
+            valid.join("snapshot.json"),
+            r#"{"artifact_id":"valid","command":["ls"],"timestamps":{"started_at_ms":100},"outcome":{"exit_code":0},"git":{"any_repo_changed":false}}"#,
+        )
+        .expect("write");
+
+        // Invalid entry.
+        let invalid = runs_dir.join("broken");
+        std::fs::create_dir_all(&invalid).expect("mkdir");
+        std::fs::write(invalid.join("snapshot.json"), "{{bad").expect("write");
+
+        snapshot_list(Some(&dir.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn print_snapshot_summary_with_unchanged_repository() {
+        let snapshot = json!({
+            "artifact_id": "unchanged-repo",
+            "command": ["echo"],
+            "timestamps": { "started_at_ms": 100u64, "duration_ms": 50u64 },
+            "outcome": { "exit_code": 0 },
+            "git": {
+                "any_repo_changed": true,
+                "changed_repositories": 1,
+                "repositories": [{
+                    "repo_root": "/work",
+                    "relative_path": "sub",
+                    "comparison": { "overall_changed": false, "head_changed": false },
+                }],
+            },
+        });
+        print_snapshot_summary(&snapshot);
+    }
+
+    #[test]
+    fn print_diff_summary_shows_all_fields() {
+        let diff = json!({
+            "added": 1,
+            "modified": 2,
+            "deleted": 3,
+            "renamed": 4,
+            "untracked": 5
+        });
+        print_diff_summary(&diff, "  ");
+    }
 }

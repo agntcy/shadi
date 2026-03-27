@@ -225,6 +225,32 @@ mod tests {
     }
 
     #[test]
+    fn secrets_backend_1password_variant() {
+        // Temporarily set env to exercise the 1password branch.
+        std::env::set_var("SHADI_SECRET_BACKEND", "1password");
+        std::env::set_var("SHADI_OP_VAULT", "test-vault");
+        std::env::set_var("SHADI_OP_ACCOUNT", "test-account");
+        secrets_backend();
+        std::env::remove_var("SHADI_SECRET_BACKEND");
+        std::env::remove_var("SHADI_OP_VAULT");
+        std::env::remove_var("SHADI_OP_ACCOUNT");
+    }
+
+    #[test]
+    fn secrets_backend_op_alias() {
+        std::env::set_var("SHADI_SECRET_BACKEND", "op");
+        secrets_backend();
+        std::env::remove_var("SHADI_SECRET_BACKEND");
+    }
+
+    #[test]
+    fn secrets_backend_unknown_variant() {
+        std::env::set_var("SHADI_SECRET_BACKEND", "custom-backend");
+        secrets_backend();
+        std::env::remove_var("SHADI_SECRET_BACKEND");
+    }
+
+    #[test]
     fn secrets_rules_with_process_secret_policy() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("policy.json");

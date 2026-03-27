@@ -2174,6 +2174,40 @@ mod tests {
         assert_continues(&mut session(), "/resources --help");
     }
 
+    // ── bare command --help (no subcommand) ──────────────────
+
+    #[test]
+    fn given_session_when_policy_bare_help_then_continues() {
+        assert_continues(&mut session(), "/policy --help");
+    }
+
+    #[test]
+    fn given_session_when_trace_bare_help_then_continues() {
+        assert_continues(&mut session(), "/trace --help");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_bare_help_then_continues() {
+        assert_continues(&mut session(), "/snapshot --help");
+    }
+
+    #[test]
+    fn given_session_when_secrets_bare_help_then_continues() {
+        assert_continues(&mut session(), "/secrets --help");
+    }
+
+    // ── /help with single word arg ───────────────────────────
+
+    #[test]
+    fn given_session_when_help_status_then_continues() {
+        assert_continues(&mut session(), "/help status");
+    }
+
+    #[test]
+    fn given_session_when_help_kill_then_continues() {
+        assert_continues(&mut session(), "/help kill");
+    }
+
     // ── secrets commands ─────────────────────────────────────
 
     #[test]
@@ -2237,5 +2271,146 @@ mod tests {
             candidates.iter().any(|c| c.display == "list"),
             "should complete secrets subcommands"
         );
+    }
+
+    // ── highlighter coverage ─────────────────────────────────
+
+    #[test]
+    fn given_helper_with_color_when_highlighting_alias_then_adds_ansi() {
+        let helper = ShellHelper::new(true);
+        // /h is an alias that should be highlighted.
+        let highlighted = Highlighter::highlight(&helper, "/h", 0);
+        assert!(highlighted.contains("\x1b["), "alias should get ANSI color");
+    }
+
+    #[test]
+    fn given_helper_with_color_when_highlighting_plain_text_then_returns_borrowed() {
+        let helper = ShellHelper::new(true);
+        // non-command text should be borrowed (not highlighted).
+        let highlighted = Highlighter::highlight(&helper, "hello world", 0);
+        assert_eq!(highlighted.as_ref(), "hello world");
+    }
+
+    #[test]
+    fn given_helper_with_color_when_highlight_char_then_returns_true() {
+        let helper = ShellHelper::new(true);
+        assert!(Highlighter::highlight_char(
+            &helper,
+            "",
+            0,
+            rustyline::highlight::CmdKind::Other,
+        ));
+    }
+
+    #[test]
+    fn given_helper_without_color_when_highlight_char_then_returns_false() {
+        let helper = ShellHelper::new(false);
+        assert!(!Highlighter::highlight_char(
+            &helper,
+            "",
+            0,
+            rustyline::highlight::CmdKind::Other,
+        ));
+    }
+
+    // ── attach tab completion ────────────────────────────────
+
+    #[test]
+    fn given_attach_prefix_when_completing_then_returns_offset() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, _candidates) =
+            Completer::complete(helper, "/attach ", 8, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 8);
+    }
+
+    // ── snapshot show arg parsing ────────────────────────────
+
+    #[test]
+    fn given_session_when_snapshot_show_with_dir_then_continues() {
+        assert_continues(&mut session(), "/snapshot show myid --dir /tmp/nonexistent");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot show myid --bogus");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_list_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot list --bogus");
+    }
+
+    // ── secrets arg parsing ──────────────────────────────────
+
+    #[test]
+    fn given_session_when_secrets_list_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets list --bogus");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets rules --bogus");
+    }
+
+    // ── history arg parsing ──────────────────────────────────
+
+    #[test]
+    fn given_session_when_history_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/history --bogus");
+    }
+
+    // ── help for secrets subcommands ─────────────────────────
+
+    #[test]
+    fn given_session_when_help_secrets_backend_then_continues() {
+        assert_continues(&mut session(), "/help secrets backend");
+    }
+
+    #[test]
+    fn given_session_when_help_secrets_rules_then_continues() {
+        assert_continues(&mut session(), "/help secrets rules");
+    }
+
+    #[test]
+    fn given_session_when_secrets_backend_help_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets backend --help");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_help_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets rules --help");
+    }
+
+    // ── help for snapshot subcommands ────────────────────────
+
+    #[test]
+    fn given_session_when_help_snapshot_show_then_continues() {
+        assert_continues(&mut session(), "/help snapshot show");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_list_help_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot list --help");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_help_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot show --help");
+    }
+
+    // ── help for trace subcommands ───────────────────────────
+
+    #[test]
+    fn given_session_when_help_trace_list_then_continues() {
+        assert_continues(&mut session(), "/help trace list");
+    }
+
+    #[test]
+    fn given_session_when_help_trace_summary_then_continues() {
+        assert_continues(&mut session(), "/help trace summary");
     }
 }
