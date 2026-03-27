@@ -22,6 +22,9 @@ pub(crate) struct Cli {
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
 
+    #[arg(long = "net-allow", value_name = "HOST[:PORT]", action = ArgAction::Append)]
+    pub(crate) net_allow: Vec<String>,
+
     #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) allow_command: Vec<String>,
 
@@ -214,6 +217,10 @@ pub(crate) struct PolicyExplainArgs {
     #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) allow_command: Vec<String>,
 
+    /// Connect to a running sandbox session to include live patched policy state.
+    #[arg(long = "socket", value_name = "PATH")]
+    pub(crate) socket: Option<PathBuf>,
+
     #[arg(long = "format", value_enum, default_value = "json")]
     pub(crate) format: OutputFormat,
 }
@@ -241,6 +248,9 @@ pub(crate) struct PolicyDiffArgs {
 
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
+
+    #[arg(long = "net-allow", value_name = "HOST[:PORT]", action = ArgAction::Append)]
+    pub(crate) net_allow: Vec<String>,
 
     #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) allow_command: Vec<String>,
@@ -276,10 +286,14 @@ pub(crate) struct PolicyPatchArgs {
     #[arg(long = "remove-block-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) remove_block_command: Vec<String>,
 
-    #[arg(long = "add-net-allow", value_name = "HOST", action = ArgAction::Append)]
+    /// Hostname or IP to add to the network allowlist (e.g. `httping.org` or `1.1.1.1`).
+    /// A URL scheme and path are accepted for convenience and stripped automatically,
+    /// so `http://httping.org/ping` and `httping.org` are equivalent.
+    #[arg(long = "add-net-allow", value_name = "HOST|URL", action = ArgAction::Append)]
     pub(crate) add_net_allow: Vec<String>,
 
-    #[arg(long = "remove-net-allow", value_name = "HOST", action = ArgAction::Append)]
+    /// Hostname or IP to remove from the network allowlist (same stripping as --add-net-allow).
+    #[arg(long = "remove-net-allow", value_name = "HOST|URL", action = ArgAction::Append)]
     pub(crate) remove_net_allow: Vec<String>,
 
     #[arg(long = "patch-file", value_name = "FILE")]
@@ -575,6 +589,8 @@ pub(crate) struct PolicyFile {
     pub(crate) write: Vec<String>,
     #[serde(default)]
     pub(crate) net_block: Option<bool>,
+    #[serde(default)]
+    pub(crate) net_allow: Vec<String>,
     #[serde(default)]
     pub(crate) allow_command: Vec<String>,
     #[serde(default)]

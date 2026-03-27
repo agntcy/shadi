@@ -1,4 +1,5 @@
 use super::*;
+use crate::policy_watch::query_policy;
 
 #[derive(Serialize)]
 struct SecretBackendConfig {
@@ -22,6 +23,7 @@ fn build_policy_cli(
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
     net_block: bool,
+    net_allow: Vec<String>,
     allow_command: Vec<String>,
 ) -> Cli {
     Cli {
@@ -31,6 +33,7 @@ fn build_policy_cli(
         read,
         write,
         net_block,
+        net_allow,
         allow_command,
         inject_keychain: Vec::new(),
         trusted_secret: Vec::new(),
@@ -93,6 +96,7 @@ fn run_config_show(args: ConfigShowArgs) -> ExitCode {
         args.read.clone(),
         args.write.clone(),
         args.net_block,
+        Vec::new(),
         args.allow_command.clone(),
     );
 
@@ -155,6 +159,7 @@ fn run_policy_explain(args: PolicyExplainArgs) -> ExitCode {
         args.read.clone(),
         args.write.clone(),
         args.net_block,
+        Vec::new(),
         args.allow_command.clone(),
     );
 
@@ -174,8 +179,15 @@ fn run_policy_explain(args: PolicyExplainArgs) -> ExitCode {
         }
     };
 
+    // If a socket is provided (or auto-detectable), merge the live patched
+    // state so the user sees network policy changes applied via `policy patch`.
+    let live_state = args.socket
+        .as_ref()
+        .and_then(|sock| query_policy(sock).ok());
+
     let output = json!({
         "effective_policy": effective_policy,
+        "live_state": live_state,
         "sources": {
             "profile": {
                 "name": profile_label(args.profile),
@@ -249,6 +261,7 @@ fn run_policy_diff(args: PolicyDiffArgs) -> ExitCode {
         args.read.clone(),
         args.write.clone(),
         args.net_block,
+        args.net_allow.clone(),
         args.allow_command.clone(),
     );
 
@@ -302,6 +315,7 @@ fn run_policy_diff(args: PolicyDiffArgs) -> ExitCode {
         Vec::new(),
         Vec::new(),
         false,
+        Vec::new(),
         Vec::new(),
     );
 
@@ -527,6 +541,7 @@ mod tests {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: None,
         });
         assert_eq!(code, ExitCode::SUCCESS);
     }
@@ -552,6 +567,7 @@ mod tests {
             net_block: true,
             allow_command: vec!["echo".to_string()],
             format: OutputFormat::Text,
+            socket: None,
         });
 
         assert_eq!(code, ExitCode::SUCCESS);
@@ -569,6 +585,7 @@ mod tests {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: None,
         });
 
         assert_eq!(code, ExitCode::from(2));
@@ -584,6 +601,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -604,6 +622,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -621,6 +640,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -657,6 +677,7 @@ mod tests {
                 net_block: false,
                 allow_command: Vec::new(),
                 format: OutputFormat::Json,
+                socket: None,
             }),
         });
         assert_eq!(explain, ExitCode::SUCCESS);
@@ -670,6 +691,7 @@ mod tests {
                 read: Vec::new(),
                 write: Vec::new(),
                 net_block: false,
+                net_allow: Vec::new(),
                 allow_command: Vec::new(),
                 format: OutputFormat::Json,
             }),
@@ -705,6 +727,7 @@ mod tests {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: None,
         });
         assert_eq!(code, ExitCode::from(2));
     }
@@ -719,6 +742,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -736,6 +760,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         });
@@ -764,14 +789,19 @@ mod tests {
 
     fn test_live_policy() -> std::sync::Arc<std::sync::Mutex<LivePolicy>> {
         use shadi_sandbox::SandboxPolicy;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
         std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
             policy: SandboxPolicy::new().block_network(true),
             blocked: HashSet::new(),
             allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
-            staged_net_allow: Vec::new(),
+            live_net_allowlist: None,
         }))
     }
 

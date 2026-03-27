@@ -1301,6 +1301,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             inject_keychain: Vec::new(),
             trusted_secret: Vec::new(),

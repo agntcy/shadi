@@ -1,4 +1,142 @@
 use super::*;
+use shadi_sandbox::SandboxedChild;
+
+#[cfg(all(not(test), unix))]
+fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
+        if let Err(err) = signal_hook::flag::register(signal, std::sync::Arc::clone(&interrupted)) {
+            eprintln!("warning: failed to install signal handler for {}: {}", signal, err);
+            return None;
+        }
+    }
+
+    Some(interrupted)
+}
+
+#[cfg(all(not(test), windows))]
+fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handler_flag = std::sync::Arc::clone(&interrupted);
+    if let Err(err) = ctrlc::set_handler(move || {
+        handler_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }) {
+        eprintln!("warning: failed to install signal handler: {}", err);
+        return None;
+    }
+    Some(interrupted)
+}
+
+#[cfg(test)]
+fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    None
+}
+
+#[derive(Debug)]
+enum ChildWaitOutcome {
+    Exited(std::process::ExitStatus),
+    RestartRequested,
+    Terminated(std::process::ExitStatus),
+}
+
+fn wait_for_child_or_interrupt(
+    child: &mut SandboxedChild,
+    interrupted: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    terminate_requested: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    restart_requested: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> std::io::Result<ChildWaitOutcome> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(ChildWaitOutcome::Exited(status));
+        }
+
+        if interrupted.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            || terminate_requested.is_some_and(|flag| {
+                flag.load(std::sync::atomic::Ordering::SeqCst)
+            })
+        {
+            let _ = child.kill();
+            return child.wait().map(ChildWaitOutcome::Terminated);
+        }
+
+        if restart_requested.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
+            let _ = child.kill();
+            let _ = child.wait()?;
+            return Ok(ChildWaitOutcome::RestartRequested);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn prepare_sandbox_launch(
+    cli: &Cli,
+    file_policy: &PolicyFile,
+    cwd: &Path,
+    base_policy: &SandboxPolicy,
+    net_proxy: Option<&NetProxy>,
+) -> Result<(Command, Option<PendingTrustedSecretDelivery>, SandboxPolicy), String> {
+    let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
+    let mut command = Command::new(cmd_name);
+    if cli.run_command.len() > 1 {
+        command.args(&cli.run_command[1..]);
+    }
+    command.current_dir(cwd);
+    #[cfg(test)]
+    scrub_test_secret_backend_env(&mut command);
+
+    // Inject proxy environment variables so SOCKS5-aware clients in the child
+    // process route all TCP through the loopback proxy where the allowlist is
+    // enforced.  ALL_PROXY/all_proxy covers both HTTP and HTTPS (and any other
+    // TCP protocol); http_proxy/https_proxy are also set for older clients that
+    // don't honour ALL_PROXY.
+    if let Some(proxy) = net_proxy {
+        let proxy_url = proxy.proxy_url(); // socks5h://127.0.0.1:<port>
+        command.env("ALL_PROXY", &proxy_url);
+        command.env("all_proxy", &proxy_url);
+        // Curl and many HTTP libraries also check these; socks5h:// forwards
+        // the hostname to the proxy (no local DNS), which is required for
+        // hostname-based allowlist enforcement.
+        command.env("http_proxy", &proxy_url);
+        command.env("https_proxy", &proxy_url);
+        command.env("HTTP_PROXY", &proxy_url);
+        command.env("HTTPS_PROXY", &proxy_url);
+    }
+
+    let secret_config = resolve_launch_secret_config(&command, cli, file_policy)?;
+    let pending_trusted_secrets = PendingTrustedSecretDelivery::new(
+        &mut command,
+        &secret_config.trusted_secret,
+        &secret_config.trusted_secret_exec,
+        &secret_config.trusted_secret_fd_env,
+        &secret_config.process_secret_policy,
+    )?;
+
+    let mut runtime_policy = base_policy.clone();
+    // When a proxy is active, configure the kernel sandbox to allow outbound
+    // TCP only to the proxy's loopback port, not to arbitrary destinations.
+    if let Some(proxy) = net_proxy {
+        runtime_policy = runtime_policy.with_net_proxy_port(proxy.port());
+    }
+    if let Some(pending) = pending_trusted_secrets.as_ref() {
+        for path in pending.endpoint_paths() {
+            runtime_policy = runtime_policy
+                .allow_read_path(&path)
+                .allow_write_path(&path);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if pending_trusted_secrets.is_some() {
+        runtime_policy = runtime_policy.allow_local_unix_sockets();
+    }
+
+    inject_keychain_secrets(&mut command, &secret_config.inject_keychain)?;
+
+    Ok((command, pending_trusted_secrets, runtime_policy))
+}
 
 pub(crate) fn run_sandboxed_command(
     cli: &Cli,
@@ -21,74 +159,68 @@ pub(crate) fn run_sandboxed_command(
         "allowed"
     };
 
-    let mut command = Command::new(cmd_name);
-    if cli.run_command.len() > 1 {
-        command.args(&cli.run_command[1..]);
-    }
-    command.current_dir(cwd);
-    #[cfg(test)]
-    scrub_test_secret_backend_env(&mut command);
-
-    let secret_config = match resolve_launch_secret_config(&command, cli, file_policy) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("failed to resolve launch secret policy: {}", err);
-            return ExitCode::from(2);
-        }
-    };
-
-    let mut pending_trusted_secrets = match PendingTrustedSecretDelivery::new(
-        &mut command,
-        &secret_config.trusted_secret,
-        &secret_config.trusted_secret_exec,
-        &secret_config.trusted_secret_fd_env,
-        &secret_config.process_secret_policy,
-    ) {
-        Ok(session) => session,
-        Err(err) => {
-            eprintln!("failed to configure trusted secret delivery: {}", err);
-            return ExitCode::from(2);
-        }
-    };
-
-    let mut runtime_policy = resolved.policy.clone();
-    if let Some(pending) = pending_trusted_secrets.as_ref() {
-        for path in pending.endpoint_paths() {
-            runtime_policy = runtime_policy
-                .allow_read_path(&path)
-                .allow_write_path(&path);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    if pending_trusted_secrets.is_some() {
-        runtime_policy = runtime_policy.allow_local_unix_sockets();
-    }
-
-    if let Err(err) = inject_keychain_secrets(&mut command, &secret_config.inject_keychain) {
-        eprintln!("failed to inject keychain secrets: {}", err);
-        return ExitCode::from(2);
-    }
-
     let mut snapshot = GitSnapshotSession::start(cli, resolved, cwd);
     let snapshot_enabled = snapshot.is_some();
 
     // Start the control socket for dynamic policy updates if requested.
+    let mut control_live = None;
+    let mut terminate_requested = None;
+    let mut restart_requested = None;
+    // The proxy is kept alive for the lifetime of `run_sandboxed_command`.
+    // It is restarted on the same port when the child is relaunched —
+    // required on macOS where the Seatbelt profile bakes in the proxy port,
+    // and consistent on Linux (Landlock rule also contains the port).
+    let mut net_proxy_handle: Option<NetProxy>;
     let _control_handle = if cli.watch_policy {
+        let terminate_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let restart_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Start the network enforcement proxy.  The kernel sandbox
+        // (Landlock on Linux, Seatbelt on macOS) is set to allow outbound TCP
+        // only to this loopback port, so the proxy is the sole exit gate.
+        // DNS-name allowlist is enforced here; policy patches update the shared
+        // allowlist in-place without restarting the child.
+        // On Windows: kernel channel enforcement is not available without
+        // elevated privileges; proxy env vars are set but can be bypassed.
+        let (net_allowlist, proxy_opt) = {
+            let initial = resolved.policy.net_allow().to_vec();
+            let al = NetAllowlist::new(initial);
+            match NetProxy::start(al.clone()) {
+                Ok(proxy) => {
+                    eprintln!(
+                        "network proxy (DNS-name enforcement gate): 127.0.0.1:{}",
+                        proxy.port()
+                    );
+                    (Some(al), Some(proxy))
+                }
+                Err(err) => {
+                    eprintln!("warning: failed to start network enforcement proxy: {err}; network policy changes will require restart");
+                    (None, None)
+                }
+            }
+        };
+        net_proxy_handle = proxy_opt;
+
         let live = std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
-            policy: runtime_policy.clone(),
+            policy: resolved.policy.clone(),
             blocked: resolved.blocked.clone(),
             allow: resolved.allow.clone(),
+            terminate_requested: std::sync::Arc::clone(&terminate_flag),
+            restart_requested: std::sync::Arc::clone(&restart_flag),
+            child_pid: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             staged_read: Vec::new(),
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
-            staged_net_allow: Vec::new(),
+            live_net_allowlist: net_allowlist,
         }));
         let pid = std::process::id();
         let sock_path = default_socket_path(pid);
-        match start_control_socket(&sock_path, live) {
+        match start_control_socket(&sock_path, std::sync::Arc::clone(&live)) {
             Ok(handle) => {
                 eprintln!("control socket: {}", handle.path().display());
+                control_live = Some(live);
+                restart_requested = Some(restart_flag);
+                terminate_requested = Some(terminate_flag);
                 Some(handle)
             }
             Err(err) => {
@@ -97,6 +229,7 @@ pub(crate) fn run_sandboxed_command(
             }
         }
     } else {
+        net_proxy_handle = None;
         None
     };
 
@@ -113,29 +246,142 @@ pub(crate) fn run_sandboxed_command(
     );
     let _guard = span.enter();
 
-    match spawn_sandboxed(&mut command, &runtime_policy) {
-        Ok(mut child) => {
-            if let Some(pending) = pending_trusted_secrets.as_mut() {
-                if let Err(err) = pending.deliver_after_spawn(child.id()) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    pending.close_parent_fds();
+    let interrupted = install_interrupt_flag();
+
+    loop {
+        let base_policy = match control_live.as_ref() {
+            Some(live) => match snapshot_live_policy(live) {
+                Ok(policy) => policy,
+                Err(err) => {
                     span.record("exit.code", &-1);
                     let snapshot_path = finalize_git_snapshot(
                         snapshot.as_mut(),
                         None,
-                        Some(format!("failed to deliver trusted secret: {}", err)),
+                        Some(format!("failed to read live policy: {}", err)),
                     );
                     if let Some(path) = snapshot_path {
                         span.record("snapshot.path", &path.display().to_string());
                     }
-                    eprintln!("failed to deliver trusted secret: {}", err);
+                    eprintln!("failed to read live policy: {}", err);
                     return ExitCode::from(1);
                 }
-            }
+            },
+            None => resolved.policy.clone(),
+        };
 
-            let exit = match child.wait() {
-            Ok(status) => {
+        let (mut command, mut pending_trusted_secrets, runtime_policy) = match prepare_sandbox_launch(
+            cli,
+            file_policy,
+            cwd,
+            &base_policy,
+            net_proxy_handle.as_ref(),
+        ) {
+            Ok(launch) => launch,
+            Err(err) => {
+                let exit_code = if err.starts_with("failed to inject keychain secrets")
+                    || err.starts_with("failed to resolve launch secret policy")
+                    || err.starts_with("failed to configure trusted secret delivery")
+                {
+                    2
+                } else {
+                    2
+                };
+                eprintln!("{}", err);
+                return ExitCode::from(exit_code);
+            }
+        };
+
+        let mut child = match spawn_sandboxed(&mut command, &runtime_policy) {
+            Ok(child) => child,
+            Err(err) => {
+                span.record("exit.code", &-1);
+                let snapshot_path = finalize_git_snapshot(
+                    snapshot.as_mut(),
+                    None,
+                    Some(format!("failed to start sandboxed command: {}", err)),
+                );
+                if let Some(path) = snapshot_path {
+                    span.record("snapshot.path", &path.display().to_string());
+                }
+                eprintln!("failed to start sandboxed command: {}", err);
+                return ExitCode::from(1);
+            }
+        };
+
+        // Update the child PID so the control socket can query resources.
+        if let Some(ref live) = control_live {
+            if let Ok(guard) = live.lock() {
+                guard
+                    .child_pid
+                    .store(child.id(), std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        if let Some(pending) = pending_trusted_secrets.as_mut() {
+            if let Err(err) = pending.deliver_after_spawn(child.id()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                pending.close_parent_fds();
+                span.record("exit.code", &-1);
+                let snapshot_path = finalize_git_snapshot(
+                    snapshot.as_mut(),
+                    None,
+                    Some(format!("failed to deliver trusted secret: {}", err)),
+                );
+                if let Some(path) = snapshot_path {
+                    span.record("snapshot.path", &path.display().to_string());
+                }
+                eprintln!("failed to deliver trusted secret: {}", err);
+                return ExitCode::from(1);
+            }
+        }
+
+        match wait_for_child_or_interrupt(
+            &mut child,
+            interrupted.as_ref(),
+            terminate_requested.as_ref(),
+            restart_requested.as_ref(),
+        ) {
+            Ok(ChildWaitOutcome::RestartRequested) => {
+                if let Some(pending) = pending_trusted_secrets.as_mut() {
+                    pending.close_parent_fds();
+                }
+                // Restart the proxy on the same port.  The new child will get a
+                // fresh kernel sandbox rule with the same port number, so the
+                // proxy must rebind there (mandatory on macOS / Seatbelt).
+                if let Some(proxy) = net_proxy_handle.take() {
+                    let allowlist = control_live
+                        .as_ref()
+                        .and_then(|live| live.lock().ok())
+                        .and_then(|guard| guard.live_net_allowlist.clone())
+                        .unwrap_or_else(|| NetAllowlist::new(vec![]));
+                    match proxy.restart(allowlist) {
+                        Ok(new_proxy) => {
+                            net_proxy_handle = Some(new_proxy);
+                        }
+                        Err(err) => {
+                            eprintln!("warning: failed to restart network proxy on same port: {err}");
+                        }
+                    }
+                }
+                if let Some(live) = control_live.as_ref() {
+                    if let Err(err) = apply_staged_policy_updates(live) {
+                        span.record("exit.code", &-1);
+                        let snapshot_path = finalize_git_snapshot(
+                            snapshot.as_mut(),
+                            None,
+                            Some(format!("failed to apply staged policy update: {}", err)),
+                        );
+                        if let Some(path) = snapshot_path {
+                            span.record("snapshot.path", &path.display().to_string());
+                        }
+                        eprintln!("failed to apply staged policy update: {}", err);
+                        return ExitCode::from(1);
+                    }
+                }
+                eprintln!("policy update requires sandbox relaunch; restarting process");
+            }
+            Ok(ChildWaitOutcome::Exited(status)) | Ok(ChildWaitOutcome::Terminated(status)) => {
                 let exit_code = status.code().unwrap_or(1);
                 if let Some(pending) = pending_trusted_secrets.as_mut() {
                     if let Err(err) = pending.wait_for_background_delivery() {
@@ -159,7 +405,7 @@ pub(crate) fn run_sandboxed_command(
                 if let Some(path) = snapshot_path {
                     span.record("snapshot.path", &path.display().to_string());
                 }
-                ExitCode::from(status.code().unwrap_or(1) as u8)
+                return ExitCode::from(status.code().unwrap_or(1) as u8);
             }
             Err(err) => {
                 span.record("exit.code", &-1);
@@ -172,24 +418,8 @@ pub(crate) fn run_sandboxed_command(
                     span.record("snapshot.path", &path.display().to_string());
                 }
                 eprintln!("failed to wait for child: {}", err);
-                ExitCode::from(1)
+                return ExitCode::from(1);
             }
-            };
-
-            exit
-        }
-        Err(err) => {
-            span.record("exit.code", &-1);
-            let snapshot_path = finalize_git_snapshot(
-                snapshot.as_mut(),
-                None,
-                Some(format!("failed to start sandboxed command: {}", err)),
-            );
-            if let Some(path) = snapshot_path {
-                span.record("snapshot.path", &path.display().to_string());
-            }
-            eprintln!("failed to start sandboxed command: {}", err);
-            ExitCode::from(1)
         }
     }
 }
@@ -894,6 +1124,8 @@ fn unix_timestamp_ms() -> u128 {
 mod tests {
     use super::*;
     use crate::{Cli, PolicyFile, resolve_policy};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -911,6 +1143,7 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             inject_keychain: Vec::new(),
             trusted_secret: Vec::new(),
@@ -926,6 +1159,131 @@ mod tests {
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_child_or_interrupt_kills_process_when_terminate_flag_is_set() {
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let mut child = SandboxedChild::from_std(child);
+        let terminate_requested = Arc::new(AtomicBool::new(false));
+        let signal_flag = Arc::clone(&terminate_requested);
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            signal_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let outcome = wait_for_child_or_interrupt(&mut child, None, Some(&terminate_requested), None)
+            .expect("wait for terminated child");
+        match outcome {
+            ChildWaitOutcome::Terminated(status) => assert!(!status.success()),
+            other => panic!("expected Terminated, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_child_or_interrupt_kills_process_when_interrupt_flag_is_set() {
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let mut child = SandboxedChild::from_std(child);
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let signal_flag = Arc::clone(&interrupted);
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            signal_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let outcome = wait_for_child_or_interrupt(&mut child, Some(&interrupted), None, None)
+            .expect("wait for interrupted child");
+        match outcome {
+            ChildWaitOutcome::Terminated(status) => assert!(!status.success()),
+            other => panic!("expected Terminated, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_child_or_interrupt_returns_restart_requested_when_restart_flag_is_set() {
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let mut child = SandboxedChild::from_std(child);
+        let restart_requested = Arc::new(AtomicBool::new(false));
+        let signal_flag = Arc::clone(&restart_requested);
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            signal_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let outcome = wait_for_child_or_interrupt(&mut child, None, None, Some(&restart_requested))
+            .expect("wait for restart");
+        assert!(matches!(outcome, ChildWaitOutcome::RestartRequested));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_child_or_interrupt_returns_exited_when_child_exits_normally() {
+        let child = Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawn true");
+        let mut child = SandboxedChild::from_std(child);
+
+        let outcome = wait_for_child_or_interrupt(&mut child, None, None, None)
+            .expect("wait for exit");
+        match outcome {
+            ChildWaitOutcome::Exited(status) => assert!(status.success()),
+            other => panic!("expected Exited, got {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_child_terminate_takes_priority_over_restart() {
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let mut child = SandboxedChild::from_std(child);
+        let terminate = Arc::new(AtomicBool::new(false));
+        let restart = Arc::new(AtomicBool::new(false));
+        let t = Arc::clone(&terminate);
+        let r = Arc::clone(&restart);
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Set both; terminate should win because it's checked first.
+            t.store(true, std::sync::atomic::Ordering::SeqCst);
+            r.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let outcome = wait_for_child_or_interrupt(&mut child, None, Some(&terminate), Some(&restart))
+            .expect("wait");
+        assert!(matches!(outcome, ChildWaitOutcome::Terminated(_)));
+    }
+
+    #[test]
+    fn prepare_sandbox_launch_returns_policy_with_base_net_allow() {
+        let cli = build_cli();
+        let file_policy = PolicyFile::default();
+        let base_policy = SandboxPolicy::new()
+            .allow_network_destination("1.1.1.1:80");
+        let dir = temp_dir();
+
+        let (_command, _pending, runtime_policy) =
+            prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
+                .expect("prepare launch");
+
+        assert_eq!(runtime_policy.net_allow(), &["1.1.1.1:80".to_string()]);
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

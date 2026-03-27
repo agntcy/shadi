@@ -42,6 +42,7 @@
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             inject_keychain: Vec::new(),
             trusted_secret: Vec::new(),
@@ -299,6 +300,7 @@
             write: write.iter().map(|p| p.display().to_string()).collect(),
             allow: allow.iter().map(|p| p.display().to_string()).collect(),
             net_block: Some(false),
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             block_command: Vec::new(),
             process_inject_keychain: Vec::new(),
@@ -348,6 +350,7 @@
             write: Vec::new(),
             allow: Vec::new(),
             net_block: Some(false),
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             block_command: Vec::new(),
             process_inject_keychain: Vec::new(),
@@ -416,6 +419,78 @@
         cli.profile = Some(LauncherProfile::Connected);
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
         assert!(!resolved.policy.net_blocked());
+    }
+
+    // ── net_allow policy resolution tests ──────────────────────────────
+
+    #[test]
+    fn resolve_policy_applies_cli_net_allow() {
+        let mut cli = build_cli();
+        cli.net_allow = vec!["1.1.1.1:80".to_string(), "api.github.com".to_string()];
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        assert_eq!(
+            resolved.policy.net_allow(),
+            &["1.1.1.1:80".to_string(), "api.github.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_policy_applies_file_net_allow() {
+        let cli = build_cli();
+        let policy_file = PolicyFile {
+            net_allow: vec!["cdn.example.com".to_string()],
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert_eq!(
+            resolved.policy.net_allow(),
+            &["cdn.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_policy_merges_file_and_cli_net_allow() {
+        let mut cli = build_cli();
+        cli.net_allow = vec!["cli.example.com".to_string()];
+        let policy_file = PolicyFile {
+            net_allow: vec!["file.example.com".to_string()],
+            ..PolicyFile::default()
+        };
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve");
+        assert_eq!(
+            resolved.policy.net_allow(),
+            &["file.example.com".to_string(), "cli.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_policy_net_allow_empty_by_default() {
+        let cli = build_cli();
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+        assert!(resolved.policy.net_allow().is_empty());
+    }
+
+    #[test]
+    fn policy_file_net_allow_round_trips_through_json() {
+        let json_str = r#"{"net_allow": ["1.1.1.1:80", "api.github.com"]}"#;
+        let policy: PolicyFile = serde_json::from_str(json_str).expect("deserialize");
+        assert_eq!(policy.net_allow, vec!["1.1.1.1:80", "api.github.com"]);
+
+        let back = serde_json::to_string(&policy).expect("serialize");
+        let round_trip: PolicyFile = serde_json::from_str(&back).expect("round-trip");
+        assert_eq!(round_trip.net_allow, policy.net_allow);
+    }
+
+    #[test]
+    fn format_policy_includes_net_allow() {
+        let policy = SandboxPolicy::new()
+            .allow_network_destination("10.0.0.1:443");
+        let blocked = HashSet::new();
+        let allow = HashSet::new();
+
+        let output = format_policy(&policy, &blocked, &allow).expect("format");
+        assert!(output.contains("\"net_allow\""), "output should contain net_allow: {}", output);
+        assert!(output.contains("10.0.0.1:443"));
     }
 
     #[test]
@@ -1515,6 +1590,7 @@ members = [{ did = "did:key:zA", role = "human" }]
                 net_block: false,
                 allow_command: Vec::new(),
                 format: OutputFormat::Json,
+                socket: None,
             }),
         }));
         assert_eq!(code, ExitCode::SUCCESS);
@@ -1531,6 +1607,7 @@ members = [{ did = "did:key:zA", role = "human" }]
                 read: Vec::new(),
                 write: Vec::new(),
                 net_block: false,
+                net_allow: Vec::new(),
                 allow_command: Vec::new(),
                 format: OutputFormat::Json,
             }),

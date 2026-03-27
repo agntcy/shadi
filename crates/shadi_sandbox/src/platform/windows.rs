@@ -49,6 +49,21 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     let inherited_handles = extract_inherited_handles(command).map_err(SandboxError::ApplyFailed)?;
     let profile_name = sandbox_profile_name();
 
+    // On Windows, kernel-level TCP channel enforcement (equivalent to Linux
+    // Landlock ConnectTcp or macOS Seatbelt `remote tcp`) is not available
+    // without elevated privileges (Windows Filtering Platform / WFP requires
+    // admin).  When a net proxy port is configured, the proxy env vars
+    // (http_proxy, https_proxy, …) are the only enforcement mechanism — a
+    // process that calls connect() directly can bypass them.
+    if policy.net_proxy_port().is_some() {
+        warn!(
+            target: "shadi.sandbox.windows",
+            "net proxy mode: kernel-level TCP channel enforcement is not available \
+             on Windows without elevated privileges; proxy env vars are set but a \
+             process can bypass them with direct connect() calls"
+        );
+    }
+
     match recover_windows_acl_rollbacks() {
         Ok(restored) if restored > 0 => {
             info!(

@@ -12,6 +12,7 @@ pub(crate) fn format_policy(
         read: Vec<String>,
         write: Vec<String>,
         net_block: bool,
+        net_allow: Vec<String>,
         platform_profile: String,
         allow_command: Vec<String>,
         block_command: Vec<String>,
@@ -45,6 +46,7 @@ pub(crate) fn format_policy(
         read: read_paths,
         write: write_paths,
         net_block: policy.net_blocked(),
+        net_allow: policy.net_allow().to_vec(),
         platform_profile: match policy.platform_profile() {
             PlatformSandboxProfile::Compatibility => "compatibility".to_string(),
             PlatformSandboxProfile::Minimal => "minimal".to_string(),
@@ -92,6 +94,13 @@ pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<Reso
     let mut policy = SandboxPolicy::new()
         .block_network(cli.net_block || file_policy.net_block.unwrap_or(profile_net_block));
 
+    for destination in &file_policy.net_allow {
+        policy = policy.allow_network_destination(destination.clone());
+    }
+    for destination in &cli.net_allow {
+        policy = policy.allow_network_destination(destination.clone());
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         policy = policy.use_minimal_platform_profile();
@@ -130,6 +139,7 @@ pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
             read: vec![".".to_string()],
             write: Vec::new(),
             net_block: Some(true),
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             block_command: Vec::new(),
             process_inject_keychain: Vec::new(),
@@ -144,6 +154,7 @@ pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
             read: vec!["/".to_string()],
             write: Vec::new(),
             net_block: Some(true),
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             block_command: Vec::new(),
             process_inject_keychain: Vec::new(),
@@ -158,6 +169,7 @@ pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
             read: vec!["/".to_string()],
             write: Vec::new(),
             net_block: Some(false),
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             block_command: Vec::new(),
             process_inject_keychain: Vec::new(),

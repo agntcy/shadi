@@ -18,7 +18,7 @@ use std::process::Command;
 
 use landlock::{
     Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible,
-    PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
+    NetPort, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
 use tracing::{debug, info, warn};
 
@@ -107,6 +107,10 @@ struct LandlockConfig {
     read_paths: Vec<std::path::PathBuf>,
     write_paths: Vec<std::path::PathBuf>,
     net_block: bool,
+    /// When set, restrict ALL outbound TCP to this port only (proxy mode).
+    /// `net_block` is ignored when this is `Some` — the proxy enforces the
+    /// domain-level allowlist; Landlock just funnels all TCP to it.
+    net_proxy_port: Option<u16>,
 }
 
 impl LandlockConfig {
@@ -149,12 +153,13 @@ impl LandlockConfig {
             read_paths,
             write_paths,
             net_block: policy.net_blocked(),
+            net_proxy_port: policy.net_proxy_port(),
         }
     }
 
     /// Apply the Landlock sandbox.
     fn apply(&self) -> Result<(), SandboxError> {
-        apply_landlock(self.abi, &self.read_paths, &self.write_paths, self.net_block)
+        apply_landlock(self.abi, &self.read_paths, &self.write_paths, self.net_block, self.net_proxy_port)
     }
 }
 
@@ -244,6 +249,7 @@ fn apply_landlock(
     read_paths: &[std::path::PathBuf],
     write_paths: &[std::path::PathBuf],
     net_block: bool,
+    net_proxy_port: Option<u16>,
 ) -> Result<(), SandboxError> {
     info!("Applying Landlock sandbox (ABI {})", abi_label(abi));
 
@@ -252,7 +258,7 @@ fn apply_landlock(
 
     // 2. Build the ruleset (factored out so we can test this without
     //    the irreversible restrict_self call).
-    let ruleset = build_landlock_ruleset(abi, read_paths, write_paths, net_block)?;
+    let ruleset = build_landlock_ruleset(abi, read_paths, write_paths, net_block, net_proxy_port)?;
 
     // 3. restrict_self() — irreversible.
     let status = ruleset.restrict_self().map_err(|e| {
@@ -286,6 +292,7 @@ fn build_landlock_ruleset(
     read_paths: &[std::path::PathBuf],
     write_paths: &[std::path::PathBuf],
     net_block: bool,
+    net_proxy_port: Option<u16>,
 ) -> Result<landlock::RulesetCreated, SandboxError> {
     let handled_fs = AccessFs::from_all(abi);
     debug!("Handling filesystem access: {:?}", handled_fs);
@@ -299,7 +306,7 @@ fn build_landlock_ruleset(
         .set_compatibility(CompatLevel::BestEffort);
 
     // Network isolation (ABI V4+).
-    if net_block {
+    if net_proxy_port.is_some() || net_block {
         let handled_net = AccessNet::from_all(abi);
         if !handled_net.is_empty() {
             debug!("Handling network access: {:?}", handled_net);
@@ -325,6 +332,30 @@ fn build_landlock_ruleset(
     let mut ruleset = builder.create().map_err(|e| {
         SandboxError::ApplyFailed(format!("failed to create Landlock ruleset: {}", e))
     })?;
+
+    // In proxy mode: allow outbound TCP only to the proxy port.
+    // Any connect() to any other port is denied at the kernel level,
+    // regardless of whether the client respects http_proxy env vars.
+    if let Some(port) = net_proxy_port {
+        let available_net = AccessNet::from_all(abi);
+        if available_net.contains(AccessNet::ConnectTcp) {
+            ruleset = ruleset
+                .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
+                .map_err(|e| {
+                    SandboxError::ApplyFailed(format!(
+                        "failed to add proxy ConnectTcp rule for port {port}: {e}"
+                    ))
+                })?;
+            debug!("Landlock: outbound TCP restricted to proxy port {port}");
+        } else {
+            warn!(
+                "Proxy mode requested but Landlock ABI {} does not support ConnectTcp \
+                 (requires V4+). Proxy env vars are the only enforcement mechanism.",
+                abi_label(abi),
+            );
+        }
+        // net_block is superseded by proxy mode; no further network rules needed.
+    }
 
     // Add filesystem rules.
     let read_access = read_access_flags(abi);
@@ -696,7 +727,7 @@ mod tests {
             .filter(|p| Path::new(p).exists())
             .map(|&p| p.into())
             .collect();
-        let result = build_landlock_ruleset(abi, &read, &[], false);
+        let result = build_landlock_ruleset(abi, &read, &[], false, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with default paths");
     }
 
@@ -705,7 +736,7 @@ mod tests {
         let abi = detect_abi().expect("Landlock available");
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
         let write: Vec<std::path::PathBuf> = vec!["/tmp".into()];
-        let result = build_landlock_ruleset(abi, &read, &write, false);
+        let result = build_landlock_ruleset(abi, &read, &write, false, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with write paths");
     }
 
@@ -714,7 +745,7 @@ mod tests {
         let abi = detect_abi().expect("Landlock available");
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
         // net_block=true exercises the network branch.
-        let result = build_landlock_ruleset(abi, &read, &[], true);
+        let result = build_landlock_ruleset(abi, &read, &[], true, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=true");
     }
 
@@ -722,14 +753,14 @@ mod tests {
     fn build_ruleset_without_net_block() {
         let abi = detect_abi().expect("Landlock available");
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
-        let result = build_landlock_ruleset(abi, &read, &[], false);
+        let result = build_landlock_ruleset(abi, &read, &[], false, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=false");
     }
 
     #[test]
     fn build_ruleset_empty_paths() {
         let abi = detect_abi().expect("Landlock available");
-        let result = build_landlock_ruleset(abi, &[], &[], false);
+        let result = build_landlock_ruleset(abi, &[], &[], false, None);
         assert!(result.is_ok(), "build_landlock_ruleset with no paths should still succeed");
     }
 
@@ -744,7 +775,7 @@ mod tests {
             "/tmp".into(),
             "/nonexistent-shadi-write-xyz".into(),
         ];
-        let result = build_landlock_ruleset(abi, &read, &write, false);
+        let result = build_landlock_ruleset(abi, &read, &write, false, None);
         assert!(
             result.is_ok(),
             "nonexistent paths should be skipped gracefully"
@@ -758,7 +789,7 @@ mod tests {
         for &abi in &ABI_PROBE_ORDER {
             if abi <= detected {
                 let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
-                let result = build_landlock_ruleset(abi, &read, &[], false);
+                let result = build_landlock_ruleset(abi, &read, &[], false, None);
                 assert!(
                     result.is_ok(),
                     "build_landlock_ruleset should succeed at ABI {:?}: {:?}",
@@ -773,7 +804,7 @@ mod tests {
     fn build_ruleset_net_block_at_v1_triggers_warning_path() {
         // ABI V1 does not support network filtering. net_block=true should
         // still succeed but take the "warn" branch.
-        let result = build_landlock_ruleset(ABI::V1, &["/usr".into()], &[], true);
+        let result = build_landlock_ruleset(ABI::V1, &["/usr".into()], &[], true, None);
         assert!(
             result.is_ok(),
             "net_block with V1 should succeed (warn path): {:?}",
@@ -792,6 +823,7 @@ mod tests {
                 &["/usr".into()],
                 &[],
                 true,
+                None,
             );
             assert!(
                 result.is_ok(),

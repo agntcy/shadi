@@ -1,15 +1,17 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
+use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Context, EditMode, Editor, Helper};
+use unicode_width::UnicodeWidthStr;
 
 use crate::cli_types::{
     ConfigCli, ConfigCommand, ConfigShowArgs, OutputFormat, PolicyCli, PolicyCommand,
@@ -17,14 +19,17 @@ use crate::cli_types::{
 };
 use crate::introspection_command::{run_config_command, run_policy_command};
 use crate::policy_watch;
+use crate::secrets_command;
+use crate::snapshot_command;
 use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
 use shadi_sandbox::PolicyPatch;
 
 const COMMANDS: &[(&str, &str)] = &[
-    ("/help", "Show available commands"),
-    ("/status", "Show current session status"),
+    ("/help", "Show available commands (alias: /h)"),
+    ("/status", "Show current session status (alias: /s)"),
     ("/attach", "Attach to a running sandbox session by socket path"),
     ("/detach", "Detach from the current session"),
+    ("/kill", "Terminate the attached sandboxed process"),
     ("/sessions", "Discover running SHADI sandbox control sockets"),
     ("/config", "Show effective runtime configuration"),
     ("/policy query", "Query the effective policy of the attached session"),
@@ -33,26 +38,186 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/policy diff", "Diff effective policy against a baseline profile"),
     ("/trace list", "List recent trace log entries"),
     ("/trace summary", "Summarize trace logs by span name"),
+    ("/snapshot list", "List git snapshot artifacts"),
+    ("/snapshot show", "Show details of a git snapshot"),
+    ("/resources", "Show resource usage of the sandboxed process"),
+    ("/secrets list", "List available keychain secret keys"),
+    ("/secrets rules", "Show secret delivery rules from policy"),
+    ("/secrets backend", "Show current secret backend configuration"),
+    ("/history", "Show command history"),
     ("/clear", "Clear the terminal screen"),
-    ("/exit", "Exit the interactive shell"),
-    ("/quit", "Exit the interactive shell"),
+    ("/exit", "Exit the interactive shell (alias: /q, /quit)"),
+];
+
+/// Detailed help text for commands that accept arguments.
+const COMMAND_HELP: &[(&str, &str)] = &[
+    ("/attach", "\
+Usage: /attach <socket-path>
+
+Attach to a running SHADI sandbox session via its control socket.
+
+Examples:
+  /attach /tmp/shadi-ctl-12345.sock"),
+    ("/policy query", "\
+Usage: /policy query
+
+Query the effective policy of the attached session and display it as JSON."),
+    ("/policy patch", "\
+Usage: /policy patch [options]
+
+Patch the policy of the attached session. Requires confirmation unless --force is given.
+
+Options:
+  --add-read PATH              Add a filesystem read path
+  --add-write PATH             Add a filesystem write path
+  --add-allow PATH             Add a filesystem allow (read+write) path
+  --add-allow-command CMD      Allow a command
+  --remove-allow-command CMD   Remove an allowed command
+  --add-block-command CMD      Block a command
+  --remove-block-command CMD   Remove a blocked command
+  --add-net-allow DEST         Allow a network destination
+  --remove-net-allow DEST      Remove an allowed network destination
+  --force                      Skip confirmation prompt
+  --dry-run                    Show what would change without applying
+
+Examples:
+  /policy patch --add-read /tmp --add-allow-command npm
+  /policy patch --add-net-allow api.example.com --force"),
+    ("/policy explain", "\
+Usage: /policy explain
+
+Explain the resolved policy and show source inputs as JSON."),
+    ("/policy diff", "\
+Usage: /policy diff <baseline>
+
+Diff the effective policy against a baseline profile or file.
+
+Baseline format:
+  profile:<strict|balanced|connected>
+  file:<path>
+
+Examples:
+  /policy diff profile:strict
+  /policy diff file:./my-policy.json"),
+    ("/trace list", "\
+Usage: /trace list [options]
+
+List recent trace log entries.
+
+Options:
+  --limit N          Maximum entries to show (default: 20)
+  --name SUBSTR      Filter by span name substring
+  --command SUBSTR   Filter by command substring
+  --exit-code CODE   Filter by exit code"),
+    ("/trace summary", "\
+Usage: /trace summary [--limit N]
+
+Summarize trace logs grouped by span name."),
+    ("/snapshot list", "\
+Usage: /snapshot list [--dir PATH]
+
+List all git snapshot artifacts from the snapshot directory.
+
+Options:
+  --dir PATH   Override the default snapshot directory
+
+Default directory: $SHADI_TMP_DIR/git-snapshots or .tmp/git-snapshots"),
+    ("/snapshot show", "\
+Usage: /snapshot show <artifact-id|latest> [--dir PATH]
+
+Show a detailed summary of a git snapshot artifact.
+
+Examples:
+  /snapshot show latest
+  /snapshot show 1711234567890-12345-bash"),
+    ("/resources", "\
+Usage: /resources
+
+Show resource usage (memory, CPU, threads) of the attached sandboxed process.
+Requires an attached session with --watch-policy enabled."),
+    ("/secrets list", "\
+Usage: /secrets list [--prefix PREFIX]
+
+List available keychain secret keys.
+
+Options:
+  --prefix PREFIX    Filter keys by prefix substring"),
+    ("/secrets rules", "\
+Usage: /secrets rules [--policy PATH]
+
+Show secret delivery rules from the policy file.
+
+Options:
+  --policy PATH    Path to the policy TOML file (default: sandbox.json)
+
+Displays inject_keychain, trusted_secret, and secret_policy rules with
+their associated key names, actions, and constraints."),
+    ("/secrets backend", "\
+Usage: /secrets backend
+
+Show the current secret backend configuration.
+Reads SHADI_SECRET_BACKEND, SHADI_OP_VAULT, and SHADI_OP_ACCOUNT
+environment variables."),
+    ("/history", "\
+Usage: /history [--limit N] [--grep PATTERN]
+
+Show command history from the current and previous sessions.
+
+Options:
+  --limit N          Maximum entries to show (default: 20)
+  --grep PATTERN     Filter history entries by substring"),
+        ("/kill", "\
+Usage: /kill
+
+Request termination of the attached sandboxed process.
+
+Examples:
+    /kill"),
 ];
 
 struct ShellHelper {
     hinter: HistoryHinter,
+    use_color: bool,
 }
 
 impl ShellHelper {
-    fn new() -> Self {
+    fn new(use_color: bool) -> Self {
         Self {
             hinter: HistoryHinter {},
+            use_color,
         }
     }
 }
 
 impl Helper for ShellHelper {}
 impl Validator for ShellHelper {}
-impl Highlighter for ShellHelper {}
+
+impl Highlighter for ShellHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        if !self.use_color || line.is_empty() {
+            return Cow::Borrowed(line);
+        }
+        // Highlight the command portion in yellow.
+        for &(cmd, _) in COMMANDS {
+            if line.starts_with(cmd) {
+                let rest = &line[cmd.len()..];
+                return Cow::Owned(format!("\x1b[1;33m{}\x1b[0m{}", cmd, rest));
+            }
+        }
+        // Also highlight aliases.
+        for alias in &["/h", "/s", "/q"] {
+            if line.starts_with(alias) {
+                let rest = &line[alias.len()..];
+                return Cow::Owned(format!("\x1b[1;33m{}\x1b[0m{}", alias, rest));
+            }
+        }
+        Cow::Borrowed(line)
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize, _forced: CmdKind) -> bool {
+        self.use_color
+    }
+}
 
 impl Hinter for ShellHelper {
     type Hint = String;
@@ -61,6 +226,21 @@ impl Hinter for ShellHelper {
         self.hinter.hint(line, pos, ctx)
     }
 }
+
+/// Policy patch flag names for argument completion.
+const PATCH_FLAGS: &[&str] = &[
+    "--add-read",
+    "--add-write",
+    "--add-allow",
+    "--add-allow-command",
+    "--remove-allow-command",
+    "--add-block-command",
+    "--remove-block-command",
+    "--add-net-allow",
+    "--remove-net-allow",
+    "--force",
+    "--dry-run",
+];
 
 impl Completer for ShellHelper {
     type Candidate = Pair;
@@ -74,11 +254,126 @@ impl Completer for ShellHelper {
         let input = &line[..pos];
         let mut candidates = Vec::new();
 
+        // If input starts with "/policy " or "/trace ", complete subcommands.
+        if let Some(sub_input) = input.strip_prefix("/policy ") {
+            let sub_input = sub_input.trim_start();
+            // Check if we're past the subcommand into patch flags.
+            if sub_input.starts_with("patch ") {
+                let flag_input = sub_input.strip_prefix("patch ").unwrap_or("");
+                // Find the last whitespace-delimited token being typed.
+                let last_token_start = flag_input.rfind(' ').map(|i| i + 1).unwrap_or(0);
+                let partial = &flag_input[last_token_start..];
+                if partial.starts_with('-') || partial.is_empty() {
+                    for flag in PATCH_FLAGS {
+                        if flag.starts_with(partial) {
+                            candidates.push(Pair {
+                                display: flag.to_string(),
+                                replacement: flag.to_string(),
+                            });
+                        }
+                    }
+                    // Offset from start of the last token.
+                    let offset = pos - partial.len();
+                    return Ok((offset, candidates));
+                }
+                return Ok((pos, candidates));
+            }
+            let subs = ["query", "patch", "explain", "diff"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
+        if let Some(sub_input) = input.strip_prefix("/trace ") {
+            let sub_input = sub_input.trim_start();
+            let subs = ["list", "summary"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
+        if let Some(sub_input) = input.strip_prefix("/snapshot ") {
+            let sub_input = sub_input.trim_start();
+            let subs = ["list", "show"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
+        if let Some(sub_input) = input.strip_prefix("/secrets ") {
+            let sub_input = sub_input.trim_start();
+            let subs = ["list", "rules", "backend"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
+        // Socket path completion for /attach.
+        if let Some(path_input) = input.strip_prefix("/attach ") {
+            let path_input = path_input.trim_start();
+            let tmpdir = std::env::temp_dir();
+            if let Ok(entries) = std::fs::read_dir(&tmpdir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
+                        let full = entry.path().to_string_lossy().to_string();
+                        if full.starts_with(path_input) || path_input.is_empty() {
+                            candidates.push(Pair {
+                                display: full.clone(),
+                                replacement: full,
+                            });
+                        }
+                    }
+                }
+            }
+            let offset = pos - path_input.len();
+            return Ok((offset, candidates));
+        }
+
+        // Top-level command completion.
         for &(cmd, _desc) in COMMANDS {
             if cmd.starts_with(input) {
                 candidates.push(Pair {
                     display: cmd.to_string(),
                     replacement: cmd.to_string(),
+                });
+            }
+        }
+        // Also offer aliases.
+        for &(alias, full) in &[("/h", "/help"), ("/s", "/status"), ("/q", "/quit")] {
+            if alias.starts_with(input) && !full.starts_with(input) {
+                candidates.push(Pair {
+                    display: format!("{} ({})", alias, full),
+                    replacement: alias.to_string(),
                 });
             }
         }
@@ -89,22 +384,66 @@ impl Completer for ShellHelper {
 
 struct ShellSession {
     socket: Option<PathBuf>,
+    pending_patch: Option<PendingPatch>,
+}
+
+struct PendingPatch {
+    socket: PathBuf,
+    patch: PolicyPatch,
 }
 
 impl ShellSession {
     fn new(socket: Option<PathBuf>) -> Self {
-        Self { socket }
+        Self {
+            socket,
+            pending_patch: None,
+        }
     }
 
     fn handle_command(&mut self, line: &str) -> LoopAction {
+        if self.pending_patch.is_some() {
+            return self.handle_pending_confirmation(line);
+        }
+
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
             return LoopAction::Continue;
         }
 
+        // Check for --help on any command.
+        if parts.len() >= 2 && parts.last() == Some(&"--help") {
+            let cmd_key = if parts[0] == "/policy" || parts[0] == "/trace" || parts[0] == "/snapshot" || parts[0] == "/secrets" {
+                if parts.len() >= 3 {
+                    format!("{} {}", parts[0], parts[1])
+                } else {
+                    parts[0].to_string()
+                }
+            } else {
+                parts[0].to_string()
+            };
+            return self.cmd_help_detail(&cmd_key);
+        }
+
         match parts[0] {
-            "/help" => self.cmd_help(),
-            "/status" => self.cmd_status(),
+            "/help" | "/h" => {
+                if parts.len() >= 2 {
+                    let target = if parts.len() >= 3 {
+                        format!("{} {}", parts[1], parts[2])
+                    } else {
+                        parts[1].to_string()
+                    };
+                    // Prepend / if not present.
+                    let key = if target.starts_with('/') {
+                        target
+                    } else {
+                        format!("/{}", target)
+                    };
+                    self.cmd_help_detail(&key)
+                } else {
+                    self.cmd_help()
+                }
+            }
+            "/status" | "/s" => self.cmd_status(),
             "/sessions" => self.cmd_sessions(),
             "/config" => self.cmd_config(),
             "/policy" if parts.len() >= 2 => match parts[1] {
@@ -135,6 +474,34 @@ impl ShellSession {
                 eprintln!("usage: /trace <list|summary>");
                 LoopAction::Continue
             }
+            "/snapshot" if parts.len() >= 2 => match parts[1] {
+                "list" => self.cmd_snapshot_list(&parts[2..]),
+                "show" => self.cmd_snapshot_show(&parts[2..]),
+                _ => {
+                    eprintln!("unknown snapshot subcommand: {}", parts[1]);
+                    eprintln!("  available: list, show");
+                    LoopAction::Continue
+                }
+            },
+            "/snapshot" => {
+                eprintln!("usage: /snapshot <list|show>");
+                LoopAction::Continue
+            }
+            "/resources" => self.cmd_resources(),
+            "/secrets" if parts.len() >= 2 => match parts[1] {
+                "list" => self.cmd_secrets_list(&parts[2..]),
+                "rules" => self.cmd_secrets_rules(&parts[2..]),
+                "backend" => self.cmd_secrets_backend(),
+                _ => {
+                    eprintln!("unknown secrets subcommand: {}", parts[1]);
+                    eprintln!("  available: list, rules, backend");
+                    LoopAction::Continue
+                }
+            },
+            "/secrets" => {
+                eprintln!("usage: /secrets <list|rules|backend>");
+                LoopAction::Continue
+            }
             "/attach" => {
                 if parts.len() < 2 {
                     eprintln!("usage: /attach <socket-path>");
@@ -143,21 +510,75 @@ impl ShellSession {
                 }
                 LoopAction::Continue
             }
+            "/kill" => self.cmd_kill(),
             "/detach" => {
                 self.cmd_detach();
                 LoopAction::Continue
             }
+            "/history" => self.cmd_history(&parts[1..]),
             "/clear" => {
                 print!("\x1B[2J\x1B[1;1H");
                 LoopAction::Continue
             }
-            "/exit" | "/quit" => LoopAction::Exit,
+            "/exit" | "/quit" | "/q" => LoopAction::Exit,
             _ => {
                 eprintln!("unknown command: {}", parts[0]);
                 eprintln!("type '/help' for available commands");
                 LoopAction::Continue
             }
         }
+    }
+
+    fn handle_pending_confirmation(&mut self, line: &str) -> LoopAction {
+        let answer = line.trim();
+        if matches!(answer, "/exit" | "/quit" | "/q") {
+            self.pending_patch = None;
+            return LoopAction::Exit;
+        }
+
+        let Some(pending) = self.pending_patch.take() else {
+            return LoopAction::Continue;
+        };
+
+        if !matches!(answer, "y" | "Y" | "yes" | "YES" | "Yes") {
+            println!("patch cancelled");
+            return LoopAction::Continue;
+        }
+
+        match policy_watch::send_patch(&pending.socket, &pending.patch) {
+            Ok(resp) => match serde_json::to_string_pretty(&resp) {
+                Ok(json) => println!("{}", json),
+                Err(_) => {
+                    println!("accepted: {}", resp.accepted);
+                    println!("message:  {}", resp.message);
+                }
+            },
+            Err(err) => eprintln!("error patching policy: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_help_detail(&self, cmd: &str) -> LoopAction {
+        let color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+        for &(key, text) in COMMAND_HELP {
+            if key == cmd {
+                if color {
+                    println!("\x1b[1m{}\x1b[0m\n", text);
+                } else {
+                    println!("{}\n", text);
+                }
+                return LoopAction::Continue;
+            }
+        }
+        // Fall back to the one-liner from COMMANDS.
+        for &(key, desc) in COMMANDS {
+            if key == cmd {
+                println!("{} — {}", key, desc);
+                return LoopAction::Continue;
+            }
+        }
+        eprintln!("no help available for '{}'", cmd);
+        LoopAction::Continue
     }
 
     fn cmd_help(&self) -> LoopAction {
@@ -230,13 +651,15 @@ impl ShellSession {
         LoopAction::Continue
     }
 
-    fn cmd_policy_patch(&self, args: &[&str]) -> LoopAction {
+    fn cmd_policy_patch(&mut self, args: &[&str]) -> LoopAction {
         let Some(ref sock) = self.socket else {
             eprintln!("not attached to a session; use '/attach <socket-path>' first");
             return LoopAction::Continue;
         };
 
         let mut patch = PolicyPatch::default();
+        let mut force = false;
+        let mut dry_run = false;
         let mut i = 0;
         while i < args.len() {
             match args[i] {
@@ -276,28 +699,52 @@ impl ShellSession {
                     patch.remove_net_allow.push(args[i + 1].to_string());
                     i += 2;
                 }
+                "--force" => {
+                    force = true;
+                    i += 1;
+                }
+                "--dry-run" => {
+                    dry_run = true;
+                    i += 1;
+                }
                 _ => {
                     eprintln!("unknown patch argument: {}", args[i]);
-                    eprintln!("usage: /policy patch [--add-read PATH] [--add-write PATH] [--add-allow PATH]");
-                    eprintln!("       [--add-allow-command CMD] [--remove-allow-command CMD]");
-                    eprintln!("       [--add-block-command CMD] [--remove-block-command CMD]");
-                    eprintln!("       [--add-net-allow DEST] [--remove-net-allow DEST]");
+                    eprintln!("use '/policy patch --help' for usage");
                     return LoopAction::Continue;
                 }
             }
         }
 
+        if dry_run {
+            println!("dry-run: the following patch would be applied:");
+            match serde_json::to_string_pretty(&patch) {
+                Ok(json) => println!("{}", json),
+                Err(err) => eprintln!("error formatting patch: {}", err),
+            }
+            return LoopAction::Continue;
+        }
+
+        // Confirmation prompt unless --force is given.
+        if !force {
+            match serde_json::to_string_pretty(&patch) {
+                Ok(json) => println!("patch to apply:\n{}", json),
+                Err(err) => eprintln!("error formatting patch: {}", err),
+            }
+            self.pending_patch = Some(PendingPatch {
+                socket: sock.clone(),
+                patch,
+            });
+            return LoopAction::Continue;
+        }
+
         match policy_watch::send_patch(sock, &patch) {
             Ok(resp) => {
-                println!("accepted:  {}", resp.accepted);
-                println!("filesystem: {:?}", resp.filesystem);
-                println!("commands:   {:?}", resp.commands);
-                println!("network:    {:?}", resp.network);
-                if !resp.message.is_empty() {
-                    println!("message:    {}", resp.message);
-                }
-                if !resp.pending_restart.is_empty() {
-                    println!("pending restart: {}", resp.pending_restart.join(", "));
+                match serde_json::to_string_pretty(&resp) {
+                    Ok(json) => println!("{}", json),
+                    Err(_) => {
+                        println!("accepted: {}", resp.accepted);
+                        println!("message:  {}", resp.message);
+                    }
                 }
             }
             Err(err) => eprintln!("error patching policy: {}", err),
@@ -307,23 +754,15 @@ impl ShellSession {
 
     fn cmd_sessions(&self) -> LoopAction {
         let tmpdir = std::env::temp_dir();
-        let mut found = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&tmpdir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
-                    found.push(entry.path());
-                }
-            }
-        }
-        if found.is_empty() {
+        let found = discover_control_sockets(&tmpdir);
+        let sessions = classify_and_prune_control_sockets(found);
+
+        if sessions.is_empty() {
             println!("no running SHADI sandbox sessions found in {}", tmpdir.display());
         } else {
-            println!("found {} session(s):", found.len());
-            for sock in &found {
-                let reachable = policy_watch::query_policy(sock).is_ok();
-                let marker = if reachable { "reachable" } else { "stale" };
+            println!("found {} session(s):", sessions.len());
+            for (sock, reachable) in &sessions {
+                let marker = if *reachable { "reachable" } else { "stale" };
                 println!("  {} ({})", sock.display(), marker);
             }
         }
@@ -357,6 +796,7 @@ impl ShellSession {
             net_block: false,
             allow_command: Vec::new(),
             format: OutputFormat::Json,
+            socket: self.socket.clone(),
         };
         run_policy_command(PolicyCli {
             command: PolicyCommand::Explain(args),
@@ -379,6 +819,7 @@ impl ShellSession {
             read: Vec::new(),
             write: Vec::new(),
             net_block: false,
+            net_allow: Vec::new(),
             allow_command: Vec::new(),
             format: OutputFormat::Json,
         };
@@ -478,6 +919,187 @@ impl ShellSession {
             println!("not attached to any session");
         }
     }
+
+    fn cmd_kill(&self) -> LoopAction {
+        let Some(ref sock) = self.socket else {
+            eprintln!("not attached to a session; use '/attach <socket-path>' first");
+            return LoopAction::Continue;
+        };
+
+        match policy_watch::send_terminate(sock) {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error terminating session: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_history(&self, args: &[&str]) -> LoopAction {
+        let mut limit: usize = 20;
+        let mut grep: Option<&str> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--limit" if i + 1 < args.len() => {
+                    limit = args[i + 1].parse().unwrap_or(20);
+                    i += 2;
+                }
+                "--grep" if i + 1 < args.len() => {
+                    grep = Some(args[i + 1]);
+                    i += 2;
+                }
+                _ => {
+                    eprintln!("usage: /history [--limit N] [--grep PATTERN]");
+                    return LoopAction::Continue;
+                }
+            }
+        }
+        let Some(path) = dirs_history_path() else {
+            eprintln!("history file not available");
+            return LoopAction::Continue;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let lines: Vec<&str> = contents.lines().collect();
+                let filtered: Vec<&&str> = if let Some(pat) = grep {
+                    lines.iter().filter(|l| l.contains(pat)).collect()
+                } else {
+                    lines.iter().collect()
+                };
+                let start = filtered.len().saturating_sub(limit);
+                for (idx, line) in filtered[start..].iter().enumerate() {
+                    println!("  {:>4}  {}", start + idx + 1, line);
+                }
+                if filtered.is_empty() {
+                    println!("(no matching history entries)");
+                }
+            }
+            Err(_) => println!("(no history yet)"),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_snapshot_list(&self, args: &[&str]) -> LoopAction {
+        let mut dir_override: Option<&str> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--dir" if i + 1 < args.len() => {
+                    dir_override = Some(args[i + 1]);
+                    i += 2;
+                }
+                _ => {
+                    eprintln!("usage: /snapshot list [--dir PATH]");
+                    return LoopAction::Continue;
+                }
+            }
+        }
+        snapshot_command::snapshot_list(dir_override);
+        LoopAction::Continue
+    }
+
+    fn cmd_snapshot_show(&self, args: &[&str]) -> LoopAction {
+        if args.is_empty() {
+            eprintln!("usage: /snapshot show <artifact-id|latest> [--dir PATH]");
+            return LoopAction::Continue;
+        }
+        let id = args[0];
+        let mut dir_override: Option<&str> = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i] {
+                "--dir" if i + 1 < args.len() => {
+                    dir_override = Some(args[i + 1]);
+                    i += 2;
+                }
+                _ => {
+                    eprintln!("usage: /snapshot show <artifact-id|latest> [--dir PATH]");
+                    return LoopAction::Continue;
+                }
+            }
+        }
+        snapshot_command::snapshot_show(id, dir_override);
+        LoopAction::Continue
+    }
+
+    fn cmd_resources(&self) -> LoopAction {
+        let Some(ref sock) = self.socket else {
+            eprintln!("not attached to a session; use '/attach <socket-path>' first");
+            return LoopAction::Continue;
+        };
+
+        match policy_watch::query_resources(sock) {
+            Ok(r) => {
+                println!("Process: PID {}", r.pid);
+                println!();
+                println!("Memory:");
+                if let Some(rss) = r.rss_bytes {
+                    println!(
+                        "  RSS:     {}",
+                        snapshot_command::format_bytes(rss)
+                    );
+                }
+                if let Some(virt) = r.virtual_bytes {
+                    println!(
+                        "  Virtual: {}",
+                        snapshot_command::format_bytes(virt)
+                    );
+                }
+                if r.cpu_user_ms.is_some() || r.cpu_system_ms.is_some() {
+                    println!();
+                    println!("CPU:");
+                    if let Some(user) = r.cpu_user_ms {
+                        println!("  User:    {} ms", user);
+                    }
+                    if let Some(sys) = r.cpu_system_ms {
+                        println!("  System:  {} ms", sys);
+                    }
+                }
+                if let Some(threads) = r.thread_count {
+                    println!();
+                    println!("Threads: {}", threads);
+                }
+            }
+            Err(err) => eprintln!("error querying resources: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_secrets_list(&self, args: &[&str]) -> LoopAction {
+        let mut prefix = None;
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--prefix" && i + 1 < args.len() {
+                prefix = Some(args[i + 1]);
+                i += 2;
+            } else {
+                eprintln!("unknown option: {}", args[i]);
+                return LoopAction::Continue;
+            }
+        }
+        secrets_command::secrets_list(prefix);
+        LoopAction::Continue
+    }
+
+    fn cmd_secrets_rules(&self, args: &[&str]) -> LoopAction {
+        let mut policy_path = None;
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--policy" && i + 1 < args.len() {
+                policy_path = Some(args[i + 1]);
+                i += 2;
+            } else {
+                eprintln!("unknown option: {}", args[i]);
+                return LoopAction::Continue;
+            }
+        }
+        secrets_command::secrets_rules(policy_path);
+        LoopAction::Continue
+    }
+
+    fn cmd_secrets_backend(&self) -> LoopAction {
+        secrets_command::secrets_backend();
+        LoopAction::Continue
+    }
 }
 
 enum LoopAction {
@@ -492,7 +1114,8 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         .edit_mode(EditMode::Emacs)
         .build();
 
-    let helper = ShellHelper::new();
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let helper = ShellHelper::new(use_color);
     let mut rl = match Editor::with_config(config) {
         Ok(rl) => rl,
         Err(err) => {
@@ -509,7 +1132,6 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
     }
 
     let mut session = ShellSession::new(args.socket);
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     print_banner(use_color);
     if let Some(ref sock) = session.socket {
@@ -522,15 +1144,23 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
     println!();
 
     loop {
-        let prompt = if use_color {
-            match &session.socket {
-                Some(sock) => format!("\x1b[1;36mshadi\x1b[0m(\x1b[33m{}\x1b[0m)\x1b[1;36m>\x1b[0m ", short_socket_name(sock)),
-                None => "\x1b[1;36mshadi>\x1b[0m ".to_string(),
+        let prompt = if session.pending_patch.is_some() {
+            if use_color {
+                "\x1b[1;33mapply this patch? [y/N]\x1b[0m ".to_string()
+            } else {
+                "apply this patch? [y/N] ".to_string()
             }
         } else {
-            match &session.socket {
-                Some(sock) => format!("shadi({})> ", short_socket_name(sock)),
-                None => "shadi> ".to_string(),
+            if use_color {
+                match &session.socket {
+                    Some(sock) => format!("\x1b[1;36mshadi\x1b[0m(\x1b[33m{}\x1b[0m)\x1b[1;36m>\x1b[0m ", short_socket_name(sock)),
+                    None => "\x1b[1;36mshadi>\x1b[0m ".to_string(),
+                }
+            } else {
+                match &session.socket {
+                    Some(sock) => format!("shadi({})> ", short_socket_name(sock)),
+                    None => "shadi> ".to_string(),
+                }
             }
         };
 
@@ -538,9 +1168,15 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
             Ok(line) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
+                    if session.pending_patch.is_some() {
+                        println!("patch cancelled");
+                        session.pending_patch = None;
+                    }
                     continue;
                 }
-                let _ = rl.add_history_entry(trimmed);
+                if session.pending_patch.is_none() {
+                    let _ = rl.add_history_entry(trimmed);
+                }
                 match session.handle_command(trimmed) {
                     LoopAction::Continue => {}
                     LoopAction::Exit => break,
@@ -575,6 +1211,33 @@ fn short_socket_name(path: &Path) -> String {
         .to_string()
 }
 
+fn discover_control_sockets(tmpdir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(tmpdir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
+fn classify_and_prune_control_sockets(sockets: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
+    let mut sessions = Vec::new();
+    for sock in sockets {
+        let reachable = policy_watch::query_policy(&sock).is_ok();
+        if reachable {
+            sessions.push((sock, true));
+        } else {
+            let _ = std::fs::remove_file(&sock);
+        }
+    }
+    sessions
+}
+
 fn dirs_history_path() -> Option<PathBuf> {
     let dir = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -584,34 +1247,47 @@ fn dirs_history_path() -> Option<PathBuf> {
     Some(shadi_dir.join("shell_history"))
 }
 
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn pad_display(text: &str, width: usize) -> String {
+    let padding = width.saturating_sub(display_width(text));
+    format!("{}{}", text, " ".repeat(padding))
+}
+
 fn print_banner(color: bool) {
+    let title = format!(
+        "Secure Host for Agentic AI Dynamic Instantiation  v{}",
+        env!("CARGO_PKG_VERSION")
+    );
+    let hint = "type '/help' for commands, '/exit' to quit, '<cmd> --help' for details";
+    let lines = [
+        "🔒 SHADI".to_string(),
+        String::new(),
+        title,
+        hint.to_string(),
+    ];
+    let inner_width = lines
+        .iter()
+        .map(|line| display_width(line))
+        .max()
+        .unwrap_or(0);
+    let border = format!("+{}+", "-".repeat(inner_width + 2));
+
     if color {
-        println!(
-            "\x1b[1;36m\
-  ____  _   _    _    ____ ___\n\
- / ___|| | | |  / \\  |  _ \\_ _|\n\
- \\___ \\| |_| | / _ \\ | | | | |\n\
-  ___) |  _  |/ ___ \\| |_| | |\n\
- |____/|_| |_/_/   \\_\\____/___|\x1b[0m"
-        );
-        println!();
-        println!(
-            "  \x1b[1mSandbox Hardening for AI Developer Infrastructure\x1b[0m"
-        );
-        println!(
-            "  \x1b[2mtype '/help' for available commands, '/exit' to quit\x1b[0m"
-        );
+        println!("\x1b[1;36m{}\x1b[0m", border);
+        println!("\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[0], inner_width));
+        println!("\x1b[1;36m|\x1b[0m {} \x1b[1;36m|\x1b[0m", pad_display(&lines[1], inner_width));
+        println!("\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[2], inner_width));
+        println!("\x1b[1;36m|\x1b[0m \x1b[2m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[3], inner_width));
+        println!("\x1b[1;36m{}\x1b[0m", border);
     } else {
-        println!(
-            "\
-  ____  _   _    _    ____ ___\n\
- / ___|| | | |  / \\  |  _ \\_ _|\n\
- \\___ \\| |_| | / _ \\ | | | | |\n\
-  ___) |  _  |/ ___ \\| |_| | |\n\
- |____/|_| |_/_/   \\_\\____/___|\n"
-        );
-        println!("  Sandbox Hardening for AI Developer Infrastructure");
-        println!("  type '/help' for available commands, '/exit' to quit");
+        println!("{}", border);
+        for line in &lines {
+            println!("| {} |", pad_display(line, inner_width));
+        }
+        println!("{}", border);
     }
 }
 
@@ -632,6 +1308,7 @@ mod tests {
     fn attached_session() -> ShellSession {
         ShellSession {
             socket: Some(PathBuf::from("/tmp/shadi-fake-coverage.sock")),
+            pending_patch: None,
         }
     }
 
@@ -712,6 +1389,54 @@ mod tests {
     #[test]
     fn given_no_sessions_when_sessions_then_continues() {
         assert_continues(&mut session(), "/sessions");
+    }
+
+    #[test]
+    fn given_stale_socket_when_discovering_sessions_then_it_is_pruned() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let stale_socket = tempdir.path().join("shadi-ctl-stale.sock");
+        std::fs::write(&stale_socket, b"stale").expect("create stale socket marker");
+
+        let sessions = classify_and_prune_control_sockets(discover_control_sockets(tempdir.path()));
+
+        assert!(sessions.is_empty());
+        assert!(!stale_socket.exists(), "stale socket should be removed");
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_without_force_then_confirmation_is_pending() {
+        let mut s = attached_session();
+
+        assert_continues(&mut s, "/policy patch --add-net-allow 1.1.1.1");
+
+        let pending = s.pending_patch.as_ref().expect("pending patch");
+        assert_eq!(pending.socket, PathBuf::from("/tmp/shadi-fake-coverage.sock"));
+        assert_eq!(pending.patch.add_net_allow, vec!["1.1.1.1".to_string()]);
+    }
+
+    #[test]
+    fn given_pending_patch_when_confirmation_is_blank_then_patch_is_cancelled() {
+        let mut s = attached_session();
+        assert_continues(&mut s, "/policy patch --add-net-allow 1.1.1.1");
+
+        assert_continues(&mut s, "");
+
+        assert!(s.pending_patch.is_none());
+    }
+
+    #[test]
+    fn given_pending_patch_when_confirmation_is_no_then_patch_is_cancelled() {
+        let mut s = attached_session();
+        assert_continues(&mut s, "/policy patch --add-net-allow 1.1.1.1");
+
+        assert_continues(&mut s, "n");
+
+        assert!(s.pending_patch.is_none());
+    }
+
+    #[test]
+    fn given_no_attachment_when_kill_then_continues() {
+        assert_continues(&mut session(), "/kill");
     }
 
     #[test]
@@ -806,7 +1531,7 @@ mod tests {
 
     #[test]
     fn given_slash_pol_when_completing_then_includes_policy_commands() {
-        let helper = ShellHelper::new();
+        let helper = ShellHelper::new(false);
         let rl_config = Config::builder().build();
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
@@ -823,7 +1548,7 @@ mod tests {
 
     #[test]
     fn given_slash_when_completing_then_returns_all_commands() {
-        let helper = ShellHelper::new();
+        let helper = ShellHelper::new(false);
         let rl_config = Config::builder().build();
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
@@ -957,7 +1682,7 @@ mod tests {
 
     #[test]
     fn given_helper_when_hint_invoked_then_returns_without_panic() {
-        let helper = ShellHelper::new();
+        let helper = ShellHelper::new(false);
         let rl_config = Config::builder().build();
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
@@ -981,47 +1706,47 @@ mod tests {
 
     #[test]
     fn given_attached_session_when_policy_patch_add_read_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-read /tmp");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-read /tmp");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_write_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-write /var/out");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-write /var/out");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-allow /opt/bin");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-allow /opt/bin");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_allow_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-allow-command npm");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-allow-command npm");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_allow_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --remove-allow-command npm");
+        assert_continues(&mut attached_session(), "/policy patch --force --remove-allow-command npm");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_block_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-block-command curl");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-block-command curl");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_block_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --remove-block-command curl");
+        assert_continues(&mut attached_session(), "/policy patch --force --remove-block-command curl");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_net_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --add-net-allow api.example.com");
+        assert_continues(&mut attached_session(), "/policy patch --force --add-net-allow api.example.com");
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_net_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --remove-net-allow api.example.com");
+        assert_continues(&mut attached_session(), "/policy patch --force --remove-net-allow api.example.com");
     }
 
     #[test]
@@ -1040,5 +1765,653 @@ mod tests {
     #[test]
     fn given_attached_session_when_help_then_shows_attached_to() {
         assert_continues(&mut attached_session(), "/help");
+    }
+
+    #[test]
+    fn given_attached_session_when_kill_then_continues() {
+        assert_continues(&mut attached_session(), "/kill");
+    }
+
+    // ── aliases ──────────────────────────────────────────────
+
+    #[test]
+    fn given_session_when_alias_h_then_continues() {
+        assert_continues(&mut session(), "/h");
+    }
+
+    #[test]
+    fn given_session_when_alias_s_then_continues() {
+        assert_continues(&mut session(), "/s");
+    }
+
+    #[test]
+    fn given_session_when_alias_q_then_exits() {
+        assert_exits(&mut session(), "/q");
+    }
+
+    // ── per-command help ─────────────────────────────────────
+
+    #[test]
+    fn given_session_when_help_attach_then_continues() {
+        assert_continues(&mut session(), "/help attach");
+    }
+
+    #[test]
+    fn given_session_when_help_policy_then_continues() {
+        assert_continues(&mut session(), "/help policy");
+    }
+
+    #[test]
+    fn given_session_when_help_history_then_continues() {
+        assert_continues(&mut session(), "/help history");
+    }
+
+    #[test]
+    fn given_session_when_policy_patch_help_flag_then_continues() {
+        assert_continues(&mut session(), "/policy patch --help");
+    }
+
+    // ── dry-run ──────────────────────────────────────────────
+
+    #[test]
+    fn given_session_when_policy_patch_dry_run_then_continues() {
+        // dry-run does not require an attached socket; exits before send_patch
+        assert_continues(&mut session(), "/policy patch --dry-run --add-read /tmp");
+    }
+
+    // ── history command ──────────────────────────────────────
+
+    #[test]
+    fn given_session_when_history_then_continues() {
+        assert_continues(&mut session(), "/history");
+    }
+
+    #[test]
+    fn given_session_when_history_with_limit_then_continues() {
+        assert_continues(&mut session(), "/history --limit 5");
+    }
+
+    #[test]
+    fn given_session_when_history_with_grep_then_continues() {
+        assert_continues(&mut session(), "/history --grep attach");
+    }
+
+    // ── completion: subcommands ──────────────────────────────
+
+    #[test]
+    fn given_policy_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/policy ", 8, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 8);
+        assert!(
+            candidates.iter().any(|c| c.display == "query"),
+            "should complete /policy subcommands"
+        );
+    }
+
+    #[test]
+    fn given_trace_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/trace ", 7, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 7);
+        assert!(
+            candidates.iter().any(|c| c.display == "list"),
+            "should complete /trace subcommands"
+        );
+    }
+
+    #[test]
+    fn given_policy_patch_prefix_when_completing_then_returns_flags() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/policy patch --add-r", 21, &Context::new(rl.history()))
+                .unwrap();
+        assert_eq!(start, 14);
+        assert!(
+            candidates.iter().any(|c| c.display == "--add-read"),
+            "should complete patch flags"
+        );
+    }
+
+    // ── completion: slash prefix ─────────────────────────────
+
+    #[test]
+    fn given_slash_prefix_when_completing_then_returns_matching_commands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/he", 3, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 0);
+        assert!(
+            candidates.iter().any(|c| c.display == "/help"),
+            "should complete /he → /help"
+        );
+    }
+
+    #[test]
+    fn given_empty_input_when_completing_then_returns_all_commands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (_start, candidates) =
+            Completer::complete(helper, "", 0, &Context::new(rl.history())).unwrap();
+        assert!(!candidates.is_empty(), "empty line should list all commands");
+    }
+
+    #[test]
+    fn given_policy_patch_non_flag_token_when_completing_then_returns_empty() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (_start, candidates) =
+            Completer::complete(helper, "/policy patch /tmp/foo", 22, &Context::new(rl.history()))
+                .unwrap();
+        assert!(candidates.is_empty(), "non-flag token should have no completions");
+    }
+
+    // ── help detail ──────────────────────────────────────────
+
+    #[test]
+    fn given_session_when_help_detail_for_known_command_then_continues() {
+        assert_continues(&mut session(), "/help policy patch");
+    }
+
+    #[test]
+    fn given_session_when_help_detail_for_unknown_command_then_continues() {
+        assert_continues(&mut session(), "/help nonexistent");
+    }
+
+    #[test]
+    fn given_any_command_with_help_flag_then_continues() {
+        assert_continues(&mut session(), "/status --help");
+    }
+
+    #[test]
+    fn given_policy_subcommand_with_help_flag_then_continues() {
+        assert_continues(&mut session(), "/policy patch --help");
+    }
+
+    // ── status with attached socket ──────────────────────────
+
+    #[test]
+    fn given_attached_session_when_status_then_shows_unreachable() {
+        // The fake socket is not a real endpoint so query will fail.
+        assert_continues(&mut attached_session(), "/status");
+    }
+
+    // ── policy query/patch not attached ──────────────────────
+
+    #[test]
+    fn given_unattached_session_when_policy_query_then_continues() {
+        assert_continues(&mut session(), "/policy query");
+    }
+
+    #[test]
+    fn given_unattached_session_when_policy_patch_then_continues() {
+        assert_continues(&mut session(), "/policy patch --add-read /tmp");
+    }
+
+    // ── policy patch with --force and --dry-run on attached socket ──
+
+    #[test]
+    fn given_attached_session_when_policy_patch_dry_run_with_flags_then_continues() {
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --dry-run --add-read /opt --add-net-allow 1.1.1.1",
+        );
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_force_then_continues() {
+        // --force attempts socket write which fails on fake socket, but
+        // the code path is still exercised.
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-read /opt",
+        );
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_net_allow_force_then_continues() {
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-net-allow api.example.com",
+        );
+    }
+
+    #[test]
+    fn given_attached_session_when_policy_patch_remove_net_allow_force_then_continues() {
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --remove-net-allow api.example.com",
+        );
+    }
+
+    // ── pending patch confirmation ───────────────────────────
+
+    #[test]
+    fn given_pending_patch_when_exit_then_cancels_and_exits() {
+        let mut s = attached_session();
+        // Set up a pending patch by issuing patch without --force
+        s.handle_command("/policy patch --add-read /opt");
+        assert!(s.pending_patch.is_some());
+        let action = s.handle_command("/exit");
+        assert!(matches!(action, LoopAction::Exit));
+        assert!(s.pending_patch.is_none());
+    }
+
+    #[test]
+    fn given_pending_patch_when_yes_then_attempts_send() {
+        let mut s = attached_session();
+        s.handle_command("/policy patch --add-read /opt");
+        assert!(s.pending_patch.is_some());
+        // "y" will try to send_patch to the fake socket, which fails, but
+        // the code path (send + error handling) is exercised.
+        let action = s.handle_command("y");
+        assert!(matches!(action, LoopAction::Continue));
+        assert!(s.pending_patch.is_none());
+    }
+
+    // ── sessions command ─────────────────────────────────────
+
+    #[test]
+    fn given_session_when_sessions_then_continues() {
+        assert_continues(&mut session(), "/sessions");
+    }
+
+    // ── empty and whitespace input ───────────────────────────
+
+    #[test]
+    fn given_session_when_empty_line_then_continues() {
+        assert_continues(&mut session(), "");
+    }
+
+    #[test]
+    fn given_session_when_whitespace_only_then_continues() {
+        assert_continues(&mut session(), "   ");
+    }
+
+    // ── kill on unattached session ───────────────────────────
+
+    #[test]
+    fn given_unattached_session_when_kill_then_continues() {
+        assert_continues(&mut session(), "/kill");
+    }
+
+    // ── detach on unattached session ─────────────────────────
+
+    #[test]
+    fn given_unattached_session_when_detach_then_continues() {
+        assert_continues(&mut session(), "/detach");
+    }
+
+    // ── attach with missing path ─────────────────────────────
+
+    #[test]
+    fn given_session_when_attach_no_args_then_continues() {
+        assert_continues(&mut session(), "/attach");
+    }
+
+    // ── hinter ───────────────────────────────────────────────
+
+    #[test]
+    fn given_helper_when_hint_returns_none_for_empty() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let hint = Hinter::hint(helper, "", 0, &Context::new(rl.history()));
+        // HistoryHinter returns None for empty input.
+        assert!(hint.is_none());
+    }
+
+    // ── highlighter ──────────────────────────────────────────
+
+    #[test]
+    fn given_helper_with_color_when_highlighting_slash_command_then_adds_ansi() {
+        let helper = ShellHelper::new(true);
+        let highlighted = Highlighter::highlight(&helper, "/help", 0);
+        assert!(highlighted.contains("\x1b["), "should add ANSI color codes");
+    }
+
+    #[test]
+    fn given_helper_without_color_when_highlighting_then_returns_borrowed() {
+        let helper = ShellHelper::new(false);
+        let highlighted = Highlighter::highlight(&helper, "/help", 0);
+        assert_eq!(highlighted.as_ref(), "/help");
+    }
+
+    // ── snapshot commands ────────────────────────────────────
+
+    #[test]
+    fn given_session_when_snapshot_list_then_continues() {
+        assert_continues(&mut session(), "/snapshot list");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_list_with_dir_then_continues() {
+        assert_continues(&mut session(), "/snapshot list --dir /tmp/nonexistent");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_latest_then_continues() {
+        assert_continues(&mut session(), "/snapshot show latest");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_no_args_then_continues() {
+        assert_continues(&mut session(), "/snapshot show");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_no_subcommand_then_continues() {
+        assert_continues(&mut session(), "/snapshot");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_unknown_subcommand_then_continues() {
+        assert_continues(&mut session(), "/snapshot foo");
+    }
+
+    // ── snapshot tab completion ──────────────────────────────
+
+    #[test]
+    fn given_snapshot_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/snapshot l", 11, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 10);
+        assert!(
+            candidates.iter().any(|c| c.display == "list"),
+            "should complete snapshot subcommands"
+        );
+    }
+
+    // ── resources command ────────────────────────────────────
+
+    #[test]
+    fn given_unattached_session_when_resources_then_continues() {
+        assert_continues(&mut session(), "/resources");
+    }
+
+    #[test]
+    fn given_attached_session_when_resources_then_continues() {
+        assert_continues(&mut attached_session(), "/resources");
+    }
+
+    #[test]
+    fn given_session_when_help_snapshot_list_then_continues() {
+        assert_continues(&mut session(), "/help snapshot list");
+    }
+
+    #[test]
+    fn given_session_when_resources_help_then_continues() {
+        assert_continues(&mut session(), "/resources --help");
+    }
+
+    // ── bare command --help (no subcommand) ──────────────────
+
+    #[test]
+    fn given_session_when_policy_bare_help_then_continues() {
+        assert_continues(&mut session(), "/policy --help");
+    }
+
+    #[test]
+    fn given_session_when_trace_bare_help_then_continues() {
+        assert_continues(&mut session(), "/trace --help");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_bare_help_then_continues() {
+        assert_continues(&mut session(), "/snapshot --help");
+    }
+
+    #[test]
+    fn given_session_when_secrets_bare_help_then_continues() {
+        assert_continues(&mut session(), "/secrets --help");
+    }
+
+    // ── /help with single word arg ───────────────────────────
+
+    #[test]
+    fn given_session_when_help_status_then_continues() {
+        assert_continues(&mut session(), "/help status");
+    }
+
+    #[test]
+    fn given_session_when_help_kill_then_continues() {
+        assert_continues(&mut session(), "/help kill");
+    }
+
+    // ── secrets commands ─────────────────────────────────────
+
+    #[test]
+    fn given_session_when_secrets_list_then_continues() {
+        assert_continues(&mut session(), "/secrets list");
+    }
+
+    #[test]
+    fn given_session_when_secrets_list_with_prefix_then_continues() {
+        assert_continues(&mut session(), "/secrets list --prefix SHADI_");
+    }
+
+    #[test]
+    fn given_session_when_secrets_backend_then_continues() {
+        assert_continues(&mut session(), "/secrets backend");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_then_continues() {
+        assert_continues(&mut session(), "/secrets rules");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_with_policy_then_continues() {
+        assert_continues(&mut session(), "/secrets rules --policy sandbox.json");
+    }
+
+    #[test]
+    fn given_session_when_secrets_no_subcommand_then_continues() {
+        assert_continues(&mut session(), "/secrets");
+    }
+
+    #[test]
+    fn given_session_when_secrets_unknown_subcommand_then_continues() {
+        assert_continues(&mut session(), "/secrets bogus");
+    }
+
+    #[test]
+    fn given_session_when_help_secrets_list_then_continues() {
+        assert_continues(&mut session(), "/help secrets list");
+    }
+
+    #[test]
+    fn given_session_when_secrets_list_help_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets list --help");
+    }
+
+    // ── secrets tab completion ───────────────────────────────
+
+    #[test]
+    fn given_secrets_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/secrets l", 10, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 9);
+        assert!(
+            candidates.iter().any(|c| c.display == "list"),
+            "should complete secrets subcommands"
+        );
+    }
+
+    // ── highlighter coverage ─────────────────────────────────
+
+    #[test]
+    fn given_helper_with_color_when_highlighting_alias_then_adds_ansi() {
+        let helper = ShellHelper::new(true);
+        // /h is an alias that should be highlighted.
+        let highlighted = Highlighter::highlight(&helper, "/h", 0);
+        assert!(highlighted.contains("\x1b["), "alias should get ANSI color");
+    }
+
+    #[test]
+    fn given_helper_with_color_when_highlighting_plain_text_then_returns_borrowed() {
+        let helper = ShellHelper::new(true);
+        // non-command text should be borrowed (not highlighted).
+        let highlighted = Highlighter::highlight(&helper, "hello world", 0);
+        assert_eq!(highlighted.as_ref(), "hello world");
+    }
+
+    #[test]
+    fn given_helper_with_color_when_highlight_char_then_returns_true() {
+        let helper = ShellHelper::new(true);
+        assert!(Highlighter::highlight_char(
+            &helper,
+            "",
+            0,
+            rustyline::highlight::CmdKind::Other,
+        ));
+    }
+
+    #[test]
+    fn given_helper_without_color_when_highlight_char_then_returns_false() {
+        let helper = ShellHelper::new(false);
+        assert!(!Highlighter::highlight_char(
+            &helper,
+            "",
+            0,
+            rustyline::highlight::CmdKind::Other,
+        ));
+    }
+
+    // ── attach tab completion ────────────────────────────────
+
+    #[test]
+    fn given_attach_prefix_when_completing_then_returns_offset() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, _candidates) =
+            Completer::complete(helper, "/attach ", 8, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 8);
+    }
+
+    // ── snapshot show arg parsing ────────────────────────────
+
+    #[test]
+    fn given_session_when_snapshot_show_with_dir_then_continues() {
+        assert_continues(&mut session(), "/snapshot show myid --dir /tmp/nonexistent");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot show myid --bogus");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_list_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot list --bogus");
+    }
+
+    // ── secrets arg parsing ──────────────────────────────────
+
+    #[test]
+    fn given_session_when_secrets_list_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets list --bogus");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets rules --bogus");
+    }
+
+    // ── history arg parsing ──────────────────────────────────
+
+    #[test]
+    fn given_session_when_history_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/history --bogus");
+    }
+
+    // ── help for secrets subcommands ─────────────────────────
+
+    #[test]
+    fn given_session_when_help_secrets_backend_then_continues() {
+        assert_continues(&mut session(), "/help secrets backend");
+    }
+
+    #[test]
+    fn given_session_when_help_secrets_rules_then_continues() {
+        assert_continues(&mut session(), "/help secrets rules");
+    }
+
+    #[test]
+    fn given_session_when_secrets_backend_help_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets backend --help");
+    }
+
+    #[test]
+    fn given_session_when_secrets_rules_help_flag_then_continues() {
+        assert_continues(&mut session(), "/secrets rules --help");
+    }
+
+    // ── help for snapshot subcommands ────────────────────────
+
+    #[test]
+    fn given_session_when_help_snapshot_show_then_continues() {
+        assert_continues(&mut session(), "/help snapshot show");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_list_help_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot list --help");
+    }
+
+    #[test]
+    fn given_session_when_snapshot_show_help_flag_then_continues() {
+        assert_continues(&mut session(), "/snapshot show --help");
+    }
+
+    // ── help for trace subcommands ───────────────────────────
+
+    #[test]
+    fn given_session_when_help_trace_list_then_continues() {
+        assert_continues(&mut session(), "/help trace list");
+    }
+
+    #[test]
+    fn given_session_when_help_trace_summary_then_continues() {
+        assert_continues(&mut session(), "/help trace summary");
     }
 }

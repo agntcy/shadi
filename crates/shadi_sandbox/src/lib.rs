@@ -1,13 +1,16 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod net_proxy;
 pub mod policy;
 pub mod policy_patch;
 mod platform;
 
+pub use net_proxy::{NetAllowlist, NetProxy};
 pub use policy::{PlatformSandboxProfile, SandboxPolicy};
 pub use policy_patch::{
     ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
+    ProcessResources,
 };
 use std::process::{Command, ExitStatus};
 use std::io;
@@ -79,6 +82,14 @@ impl SandboxedChild {
         }
 
         status
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        match &mut self.inner {
+            SandboxedChildInner::Std(child) => child.try_wait(),
+            #[cfg(target_os = "windows")]
+            SandboxedChildInner::Windows(child) => child.try_wait(),
+        }
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
@@ -211,6 +222,18 @@ mod tests {
             .expect("spawn");
         let mut wrapped = SandboxedChild::from_std(child);
         wrapped.kill().expect("kill");
+        let _ = wrapped.wait().expect("wait");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandboxed_child_try_wait_reports_running_then_exit() {
+        let child = Command::new("/bin/sleep")
+            .arg("1")
+            .spawn()
+            .expect("spawn");
+        let mut wrapped = SandboxedChild::from_std(child);
+        assert!(wrapped.try_wait().expect("try_wait").is_none());
         let _ = wrapped.wait().expect("wait");
     }
 
@@ -453,6 +476,30 @@ impl WindowsChild {
             }
             let _ = self.cleanup();
             Ok(ExitStatus::from_raw(code))
+        }
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        use std::os::windows::process::ExitStatusExt;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, WaitForSingleObject,
+        };
+        const WAIT_OBJECT_0: u32 = 0;
+
+        unsafe {
+            let wait = WaitForSingleObject(self.process, 0);
+            if wait == WAIT_OBJECT_0 {
+                let mut code: u32 = 1;
+                if GetExitCodeProcess(self.process, &mut code) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let _ = self.cleanup();
+                return Ok(Some(ExitStatus::from_raw(code)));
+            }
+            if wait == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(None)
         }
     }
 

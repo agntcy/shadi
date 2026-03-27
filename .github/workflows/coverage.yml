@@ -13,26 +13,26 @@ jobs:
       PYO3_PYTHON: python
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Install Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev
+        run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev libssl-dev
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
 
       - name: Install just
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@80779d0b81222e7a5d0c5751d3c2537d4a36f556 # v2
         with:
           tool: just
 
@@ -40,7 +40,7 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@80779d0b81222e7a5d0c5751d3c2537d4a36f556 # v2
         with:
           tool: cargo-llvm-cov
 
@@ -48,7 +48,7 @@ jobs:
         run: just coverage
 
       - name: Upload combined coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           files: coverage/lcov.info
           flags: rust
