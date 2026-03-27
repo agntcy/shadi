@@ -727,7 +727,7 @@ mod tests {
             .filter(|p| Path::new(p).exists())
             .map(|&p| p.into())
             .collect();
-        let result = build_landlock_ruleset(abi, &read, &[], false);
+        let result = build_landlock_ruleset(abi, &read, &[], false, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with default paths");
     }
 
@@ -736,7 +736,7 @@ mod tests {
         let abi = detect_abi().expect("Landlock available");
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
         let write: Vec<std::path::PathBuf> = vec!["/tmp".into()];
-        let result = build_landlock_ruleset(abi, &read, &write, false);
+        let result = build_landlock_ruleset(abi, &read, &write, false, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with write paths");
     }
 
@@ -745,7 +745,7 @@ mod tests {
         let abi = detect_abi().expect("Landlock available");
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
         // net_block=true exercises the network branch.
-        let result = build_landlock_ruleset(abi, &read, &[], true);
+        let result = build_landlock_ruleset(abi, &read, &[], true, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=true");
     }
 
@@ -753,14 +753,14 @@ mod tests {
     fn build_ruleset_without_net_block() {
         let abi = detect_abi().expect("Landlock available");
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
-        let result = build_landlock_ruleset(abi, &read, &[], false);
+        let result = build_landlock_ruleset(abi, &read, &[], false, None);
         assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=false");
     }
 
     #[test]
     fn build_ruleset_empty_paths() {
         let abi = detect_abi().expect("Landlock available");
-        let result = build_landlock_ruleset(abi, &[], &[], false);
+        let result = build_landlock_ruleset(abi, &[], &[], false, None);
         assert!(result.is_ok(), "build_landlock_ruleset with no paths should still succeed");
     }
 
@@ -775,7 +775,7 @@ mod tests {
             "/tmp".into(),
             "/nonexistent-shadi-write-xyz".into(),
         ];
-        let result = build_landlock_ruleset(abi, &read, &write, false);
+        let result = build_landlock_ruleset(abi, &read, &write, false, None);
         assert!(
             result.is_ok(),
             "nonexistent paths should be skipped gracefully"
@@ -789,7 +789,7 @@ mod tests {
         for &abi in &ABI_PROBE_ORDER {
             if abi <= detected {
                 let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
-                let result = build_landlock_ruleset(abi, &read, &[], false);
+                let result = build_landlock_ruleset(abi, &read, &[], false, None);
                 assert!(
                     result.is_ok(),
                     "build_landlock_ruleset should succeed at ABI {:?}: {:?}",
@@ -804,7 +804,7 @@ mod tests {
     fn build_ruleset_net_block_at_v1_triggers_warning_path() {
         // ABI V1 does not support network filtering. net_block=true should
         // still succeed but take the "warn" branch.
-        let result = build_landlock_ruleset(ABI::V1, &["/usr".into()], &[], true);
+        let result = build_landlock_ruleset(ABI::V1, &["/usr".into()], &[], true, None);
         assert!(
             result.is_ok(),
             "net_block with V1 should succeed (warn path): {:?}",
@@ -823,6 +823,7 @@ mod tests {
                 &["/usr".into()],
                 &[],
                 true,
+                None,
             );
             assert!(
                 result.is_ok(),
