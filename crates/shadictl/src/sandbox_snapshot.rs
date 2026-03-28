@@ -1292,6 +1292,95 @@ mod tests {
         assert_eq!(runtime_policy.net_allow(), &["1.1.1.1:80".to_string()]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn prepare_sandbox_launch_with_proxy_injects_all_proxy_vars() {
+        let mut cli = build_cli();
+        cli.run_command = vec!["/usr/bin/env".to_string()];
+        let file_policy = PolicyFile::default();
+        let base_policy = SandboxPolicy::new();
+        let dir = temp_dir();
+        let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
+        let expected_url = proxy.proxy_url();
+
+        let (mut command, _, _) =
+            prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
+                .expect("prepare launch");
+
+        let output = command.output().expect("run env");
+        let env_output = String::from_utf8_lossy(&output.stdout);
+        assert!(env_output.contains(&format!("ALL_PROXY={expected_url}")), "ALL_PROXY should be set");
+        assert!(env_output.contains(&format!("HTTPS_PROXY={expected_url}")), "HTTPS_PROXY should be set");
+        assert!(env_output.contains(&format!("HTTP_PROXY={expected_url}")), "HTTP_PROXY should be set");
+        assert!(env_output.contains(&format!("https_proxy={expected_url}")), "https_proxy should be set");
+        assert!(env_output.contains(&format!("http_proxy={expected_url}")), "http_proxy should be set");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_sandbox_launch_env_remove_strips_inherited_vars() {
+        // env_remove must strip env vars inherited from the parent process.
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        std::env::set_var("SHADI_TEST_SENTINEL_9f3a", "sentinel-value");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["/usr/bin/env".to_string()];
+        let file_policy = PolicyFile {
+            env_remove: vec!["SHADI_TEST_SENTINEL_9f3a".to_string()],
+            ..PolicyFile::default()
+        };
+        let base_policy = SandboxPolicy::new();
+        let dir = temp_dir();
+
+        let (mut command, _, _) =
+            prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
+                .expect("prepare launch");
+
+        let output = command.output().expect("run env");
+        std::env::remove_var("SHADI_TEST_SENTINEL_9f3a");
+        let env_output = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !env_output.contains("SHADI_TEST_SENTINEL_9f3a"),
+            "env_remove should strip the sentinel var from the child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_sandbox_launch_env_remove_strips_proxy_vars_while_keeping_all_proxy() {
+        // Core use-case: copilot-cli.json removes HTTPS_PROXY/HTTP_PROXY to avoid
+        // crashing Node.js SEA runtimes that don't support socks5h:// in those
+        // vars, while keeping ALL_PROXY for SOCKS5 enforcement.
+        let mut cli = build_cli();
+        cli.run_command = vec!["/usr/bin/env".to_string()];
+        let file_policy = PolicyFile {
+            env_remove: vec![
+                "HTTPS_PROXY".to_string(),
+                "HTTP_PROXY".to_string(),
+                "https_proxy".to_string(),
+                "http_proxy".to_string(),
+            ],
+            ..PolicyFile::default()
+        };
+        let base_policy = SandboxPolicy::new();
+        let dir = temp_dir();
+        let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
+        let expected_url = proxy.proxy_url();
+
+        let (mut command, _, _) =
+            prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
+                .expect("prepare launch");
+
+        let output = command.output().expect("run env");
+        let env_output = String::from_utf8_lossy(&output.stdout);
+        assert!(env_output.contains(&format!("ALL_PROXY={expected_url}")), "ALL_PROXY must remain for SOCKS5 enforcement");
+        assert!(env_output.contains(&format!("all_proxy={expected_url}")), "all_proxy must remain");
+        assert!(!env_output.contains("HTTPS_PROXY="), "HTTPS_PROXY must be stripped");
+        assert!(!env_output.contains("HTTP_PROXY="), "HTTP_PROXY must be stripped");
+        assert!(!env_output.contains("https_proxy="), "https_proxy must be stripped");
+        assert!(!env_output.contains("http_proxy="), "http_proxy must be stripped");
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")
