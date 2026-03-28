@@ -595,6 +595,12 @@ pub(crate) struct PolicyFile {
     pub(crate) allow_command: Vec<String>,
     #[serde(default)]
     pub(crate) block_command: Vec<String>,
+    /// Environment variables to remove from the child process after all
+    /// injections (proxy vars, secrets).  Useful for runtimes that crash on
+    /// proxy schemes they don't support (e.g. Node.js SEA with
+    /// `HTTPS_PROXY=socks5h://`).
+    #[serde(default)]
+    pub(crate) env_remove: Vec<String>,
     #[serde(default)]
     pub(crate) process_inject_keychain: Vec<ProcessInjectKeychainRule>,
     #[serde(default)]

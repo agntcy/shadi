@@ -105,6 +105,12 @@ fn prepare_sandbox_launch(
         command.env("HTTPS_PROXY", &proxy_url);
     }
 
+    // Strip any env vars the preset has explicitly opted out of (e.g. a
+    // Node.js SEA runtime that doesn't support `socks5h://` in HTTPS_PROXY).
+    for var in &file_policy.env_remove {
+        command.env_remove(var);
+    }
+
     let secret_config = resolve_launch_secret_config(&command, cli, file_policy)?;
     let pending_trusted_secrets = PendingTrustedSecretDelivery::new(
         &mut command,

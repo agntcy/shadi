@@ -1,6 +1,6 @@
 {
-  "_preset": "shadi/copilot-cli-v1",
-  "_description": "Safe-launch preset for GitHub Copilot CLI (Homebrew native binary). Use with: shadi --policy policies/presets/copilot-cli.json -- copilot",
+  "_preset": "shadi/claude-v1",
+  "_description": "Safe-launch preset for Anthropic Claude Code CLI (Bun binary). Use with: shadictl --policy policies/presets/claude.json --allow ~/.claude --allow ~/.local/bin --allow ~/.local/share/claude -- claude",
   "allow": ["."],
   "read": [
     "/usr/local",
@@ -14,8 +14,7 @@
   ],
   "net_block": false,
   "net_allow": [
-    "api.github.com",
-    "copilot-proxy.githubusercontent.com",
+    "api.anthropic.com",
     "github.com",
     "*.github.com",
     "*.githubusercontent.com"
@@ -25,11 +24,5 @@
     "wget",
     "nc",
     "netcat"
-  ],
-  "env_remove": [
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "https_proxy",
-    "http_proxy"
   ]
 }

@@ -56,13 +56,14 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
 
     unsafe {
         command.pre_exec(move || {
+            apply_profile(&profile_cstr)
+                .map_err(std::io::Error::other)?;
             // Create a new process group so the parent can kill the entire
             // tree with killpg(), mirroring the Windows Job-object pattern.
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            apply_profile(&profile_cstr)
-                .map_err(std::io::Error::other)
+            Ok(())
         });
     }
 

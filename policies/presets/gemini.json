@@ -1,6 +1,6 @@
 {
-  "_preset": "shadi/copilot-cli-v1",
-  "_description": "Safe-launch preset for GitHub Copilot CLI (Homebrew native binary). Use with: shadi --policy policies/presets/copilot-cli.json -- copilot",
+  "_preset": "shadi/gemini-v1",
+  "_description": "Safe-launch preset for Google Gemini CLI. Use with: shadictl --policy policies/presets/gemini.json --read ~/.nvm --allow ~/.gemini -- gemini",
   "allow": ["."],
   "read": [
     "/usr/local",
@@ -14,8 +14,10 @@
   ],
   "net_block": false,
   "net_allow": [
-    "api.github.com",
-    "copilot-proxy.githubusercontent.com",
+    "generativelanguage.googleapis.com",
+    "oauth2.googleapis.com",
+    "www.googleapis.com",
+    "accounts.google.com",
     "github.com",
     "*.github.com",
     "*.githubusercontent.com"
@@ -25,11 +27,5 @@
     "wget",
     "nc",
     "netcat"
-  ],
-  "env_remove": [
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "https_proxy",
-    "http_proxy"
   ]
 }
