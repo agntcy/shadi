@@ -1,6 +1,6 @@
 {
   "_preset": "shadi/openclaw-v1",
-  "_description": "Safe-launch preset for OpenClaw personal AI assistant gateway (Node 24, npm). Locks the gateway process to its own config directory and the AI model provider endpoints it needs. Use with: shadictl --policy policies/presets/openclaw.json --read ~/.nvm --allow ~/.openclaw --watch-policy -- openclaw gateway --port 18789",
+  "_description": "Safe-launch preset for OpenClaw personal AI assistant gateway (Node 24, npm). Locks the gateway process to its own config directory and the AI model provider endpoints it needs. Use with: shadictl --policy policies/presets/openclaw.json --read ~/.nvm --allow ~/.openclaw --watch-policy -- openclaw gateway --port 18789\n\nOn Windows add: --read %APPDATA%\\nvm --allow %USERPROFILE%\\.openclaw",
   "allow": ["."],
   "read": [
     "/usr/local",
@@ -10,7 +10,12 @@
     "/Library",
     "/opt/homebrew",
     "/private/etc/ssl",
-    "/private/etc/resolv.conf"
+    "/private/etc/resolv.conf",
+    "/etc/ssl/certs",
+    "/etc/resolv.conf",
+    "C:\\Windows\\System32",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)"
   ],
   "net_block": false,
   "net_allow": [

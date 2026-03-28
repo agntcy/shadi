@@ -1,6 +1,6 @@
 {
   "_preset": "shadi/cursor-agent-v1",
-  "_description": "Safe-launch preset for Cursor Agent CLI. Use with: shadictl --policy policies/presets/cursor-agent.json --allow ~/.cursor --allow ~/.local/bin --allow ~/.local/share/cursor-agent -- cursor-agent",
+  "_description": "Safe-launch preset for Cursor Agent CLI. Use with: shadictl --policy policies/presets/cursor-agent.json --allow ~/.cursor --allow ~/.local/bin --allow ~/.local/share/cursor-agent -- cursor-agent\n\nOn Windows add: --allow %APPDATA%\\Cursor",
   "allow": ["."],
   "read": [
     "/usr/local",
@@ -10,7 +10,12 @@
     "/Library",
     "/opt/homebrew",
     "/private/etc/ssl",
-    "/private/etc/resolv.conf"
+    "/private/etc/resolv.conf",
+    "/etc/ssl/certs",
+    "/etc/resolv.conf",
+    "C:\\Windows\\System32",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)"
   ],
   "net_block": false,
   "net_allow": [
