@@ -117,6 +117,58 @@ pub(crate) fn default_socket_path(pid: u32) -> PathBuf {
     PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", pid))
 }
 
+/// Resolve a named control socket path.
+///
+/// Named sockets use `$TMPDIR/shadi-ctl-<name>.sock` instead of the PID-based
+/// path, making them stable and human-addressable: any tool can connect by name
+/// without needing to discover the PID.
+///
+/// Only alphanumeric characters, hyphens, and underscores are allowed in the
+/// name; other characters are replaced with `-` to keep the filename safe.
+#[cfg(unix)]
+pub(crate) fn named_socket_path(name: &str) -> PathBuf {
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    let slug = sanitize_session_name(name);
+    PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", slug))
+}
+
+/// Resolve the control socket path for a given session name or socket path.
+///
+/// If `name_or_path` looks like a path (contains `/` or ends with `.sock`) it
+/// is used as-is; otherwise it is treated as a session name and resolved via
+/// `named_socket_path`.
+#[cfg(unix)]
+pub(crate) fn resolve_session_socket(name_or_path: &str) -> PathBuf {
+    if name_or_path.contains('/') || name_or_path.ends_with(".sock") {
+        PathBuf::from(name_or_path)
+    } else {
+        named_socket_path(name_or_path)
+    }
+}
+
+/// Extract the human-readable session name from a socket path.
+///
+/// `$TMPDIR/shadi-ctl-myagent.sock` → `"myagent"`
+/// `$TMPDIR/shadi-ctl-12345.sock`   → `"12345"` (PID-based fallback)
+pub(crate) fn session_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("shadi-ctl-"))
+        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("session"))
+        .to_string()
+}
+
+/// Sanitize a session name: keep only alphanumerics, hyphens, and underscores;
+/// replace everything else with `-`; truncate to 48 characters.
+pub(crate) fn sanitize_session_name(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    slug.chars().take(48).collect()
+}
+
 /// Resolve the default control socket path for a given PID.
 ///
 /// On Windows this is an `AF_UNIX` socket file (requires Windows 10 1803+).
@@ -124,6 +176,24 @@ pub(crate) fn default_socket_path(pid: u32) -> PathBuf {
 pub(crate) fn default_socket_path(pid: u32) -> PathBuf {
     let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", pid))
+}
+
+/// Resolve a named control socket path (Windows).
+#[cfg(windows)]
+pub(crate) fn named_socket_path(name: &str) -> PathBuf {
+    let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".to_string());
+    let slug = sanitize_session_name(name);
+    PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", slug))
+}
+
+/// Resolve the control socket path for a given session name or socket path (Windows).
+#[cfg(windows)]
+pub(crate) fn resolve_session_socket(name_or_path: &str) -> PathBuf {
+    if name_or_path.contains('\\') || name_or_path.contains('/') || name_or_path.ends_with(".sock") {
+        PathBuf::from(name_or_path)
+    } else {
+        named_socket_path(name_or_path)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,4 +1689,50 @@ mod tests {
 
         drop(handle);
     }
+
+    // ── named session helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn named_socket_path_uses_slug_not_pid() {
+        let path = named_socket_path("my-agent");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name, "shadi-ctl-my-agent.sock");
+    }
+
+    #[test]
+    fn named_socket_path_sanitizes_special_chars() {
+        let path = named_socket_path("my agent/session!");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        // spaces and slashes become hyphens; exclamation is stripped
+        assert!(name.starts_with("shadi-ctl-"));
+        assert!(name.ends_with(".sock"));
+        assert!(!name.contains(' '));
+        assert!(!name.contains('/'));
+    }
+
+    #[test]
+    fn session_name_from_path_strips_prefix_and_extension() {
+        let path = std::path::PathBuf::from("/tmp/shadi-ctl-codex-session.sock");
+        assert_eq!(session_name_from_path(&path), "codex-session");
+    }
+
+    #[test]
+    fn session_name_from_path_works_for_pid_sockets() {
+        let path = std::path::PathBuf::from("/tmp/shadi-ctl-98765.sock");
+        assert_eq!(session_name_from_path(&path), "98765");
+    }
+
+    #[test]
+    fn resolve_session_socket_accepts_name() {
+        let path = resolve_session_socket("my-agent");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name, "shadi-ctl-my-agent.sock");
+    }
+
+    #[test]
+    fn resolve_session_socket_accepts_full_path() {
+        let path = resolve_session_socket("/tmp/shadi-ctl-12345.sock");
+        assert_eq!(path, std::path::PathBuf::from("/tmp/shadi-ctl-12345.sock"));
+    }
 }
+
