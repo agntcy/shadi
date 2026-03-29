@@ -70,6 +70,15 @@ pub(crate) struct Cli {
     #[arg(long = "name", value_name = "NAME")]
     pub(crate) session_name: Option<String>,
 
+    /// OASF record reference for session provenance tracking.
+    /// When set, the record reference is printed to stderr on session start
+    /// to establish a verifiable link between this sandbox session and the
+    /// agent's published record in the AGNTCY Agent Directory.
+    /// Format: CID, name, name:version, or name:version@cid.
+    /// Example: `cisco.com/agent:v1.0.0@bafyreib...`
+    #[arg(long = "record", value_name = "REF")]
+    pub(crate) record_ref: Option<String>,
+
     #[command(subcommand)]
     pub(crate) subcommand: Option<Commands>,
 
@@ -139,6 +148,143 @@ pub(crate) enum Commands {
     /// Interactive terminal for managing SHADI sandbox sessions
     #[command(name = "shell")]
     Shell(ShellArgs),
+    /// Interact with the AGNTCY Agent Directory via dirctl
+    #[command(name = "dir")]
+    Dir(DirCli),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "dir", about = "Interact with the AGNTCY Agent Directory (requires dirctl)")]
+pub(crate) struct DirCli {
+    /// Pre-issued OIDC bearer token for authenticating to the AGNTCY Agent Directory.
+    /// For CI/GitHub Actions: pass the GitHub Actions OIDC token (`${{ steps.oidc.outputs.token }}`
+    /// with `audience: dir`).
+    /// For interactive dev use, run `dirctl auth login` once (token auto-detected by dirctl).
+    /// Using the SHADI secret store (via --token-key) is preferred over passing this flag
+    /// directly, because it keeps the token out of shell history and process listings.
+    /// Also read from $DIRECTORY_CLIENT_OIDC_TOKEN (the native dirctl env var).
+    #[arg(long = "oidc-token", value_name = "TOKEN", env = "DIRECTORY_CLIENT_OIDC_TOKEN")]
+    pub(crate) oidc_token: Option<String>,
+
+    /// SHADI secret store key that holds the directory auth token.
+    /// Populate with: `shadictl put-secret --key dir/oidc_token`
+    /// Ignored when --oidc-token / $DIRECTORY_CLIENT_OIDC_TOKEN is set.
+    #[arg(long = "token-key", value_name = "KEY", default_value = "dir/oidc_token")]
+    pub(crate) token_key: String,
+
+    #[command(subcommand)]
+    pub(crate) command: DirCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum DirCommand {
+    /// Authenticate with the Agent Directory and cache the token in the SHADI
+    /// secret store.  Run once before using pull / info / search.
+    #[command(name = "login")]
+    Login(DirLoginArgs),
+    /// Fetch an OASF agent record from the directory and cache it locally
+    #[command(name = "pull")]
+    Pull(DirPullArgs),
+    /// Display metadata about an OASF agent record
+    #[command(name = "info")]
+    Info(DirInfoArgs),
+    /// Search the directory for agent records by skill
+    #[command(name = "search")]
+    Search(DirSearchArgs),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "login",
+    about = "Authenticate with the Agent Directory and ingest the token into the SHADI secret store",
+    long_about = "Runs `dirctl auth login` (OIDC PKCE / device-code flow), then reads the resulting \
+        access token from dirctl's local cache and writes it into the SHADI secret store at \
+        --token-key (default: dir/oidc_token). Subsequent `shadictl dir` commands pick it up \
+        automatically, including in sessions where dirctl's local cache is absent (CI, remote \
+        machines).")]
+pub(crate) struct DirLoginArgs {
+    /// Show the authorization URL for manual opening instead of launching a browser.
+    /// Use this in SSH/headless environments.
+    #[arg(long = "no-browser", action = ArgAction::SetTrue)]
+    pub(crate) no_browser: bool,
+
+    /// Force re-authentication even if a valid cached token already exists.
+    #[arg(long = "force", action = ArgAction::SetTrue)]
+    pub(crate) force: bool,
+
+    /// Use machine / service-user auth (client credentials flow) instead of
+    /// the interactive PKCE flow.  Requires --oidc-machine-client-id and
+    /// one of --oidc-machine-client-secret-file / $DIRECTORY_CLIENT_OIDC_MACHINE_CLIENT_SECRET.
+    #[arg(long = "machine", action = ArgAction::SetTrue)]
+    pub(crate) machine: bool,
+
+    /// Zitadel OIDC issuer URL.
+    /// Defaults to the AGNTCY production IdP.
+    /// Also read from $DIRECTORY_CLIENT_OIDC_ISSUER.
+    #[arg(long = "oidc-issuer", value_name = "URL",
+          env = "DIRECTORY_CLIENT_OIDC_ISSUER",
+          default_value = "https://prod.idp.ads.outshift.io")]
+    pub(crate) oidc_issuer: String,
+
+    /// Zitadel native-app OAuth client ID (interactive PKCE flow).
+    /// Also read from $DIRECTORY_CLIENT_OIDC_CLIENT_ID.
+    #[arg(long = "oidc-client-id", value_name = "ID", env = "DIRECTORY_CLIENT_OIDC_CLIENT_ID")]
+    pub(crate) oidc_client_id: Option<String>,
+
+    /// Machine/service-user client ID (client credentials flow, requires --machine).
+    /// Also read from $DIRECTORY_CLIENT_OIDC_MACHINE_CLIENT_ID.
+    #[arg(long = "oidc-machine-client-id", value_name = "ID",
+          env = "DIRECTORY_CLIENT_OIDC_MACHINE_CLIENT_ID")]
+    pub(crate) oidc_machine_client_id: Option<String>,
+
+    /// Path to a file containing the machine client secret (requires --machine).
+    /// Also read from $DIRECTORY_CLIENT_OIDC_MACHINE_CLIENT_SECRET_FILE.
+    #[arg(long = "oidc-machine-client-secret-file", value_name = "FILE",
+          env = "DIRECTORY_CLIENT_OIDC_MACHINE_CLIENT_SECRET_FILE")]
+    pub(crate) oidc_machine_client_secret_file: Option<String>,
+
+    /// Comma-separated OIDC scopes for machine auth (default: openid profile email).
+    /// Also read from $DIRECTORY_CLIENT_OIDC_MACHINE_SCOPES.
+    #[arg(long = "oidc-machine-scopes", value_name = "SCOPES",
+          env = "DIRECTORY_CLIENT_OIDC_MACHINE_SCOPES",
+          default_value = "openid,profile,email")]
+    pub(crate) oidc_machine_scopes: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "pull", about = "Fetch an OASF record and cache it in ~/.shadi/records/")]
+pub(crate) struct DirPullArgs {
+    /// Record reference: CID, name, name:version, or name:version@cid
+    pub(crate) reference: String,
+    /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
+    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+          default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) server_addr: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "info", about = "Show metadata for an OASF record")]
+pub(crate) struct DirInfoArgs {
+    /// Record reference: CID, name, name:version, or name:version@cid
+    pub(crate) reference: String,
+    /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
+    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+          default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) server_addr: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "search", about = "Search the directory for agent records by skill")]
+pub(crate) struct DirSearchArgs {
+    /// OASF skill name to search for (repeatable, e.g. natural_language_processing)
+    #[arg(long = "skill", value_name = "SKILL", action = ArgAction::Append)]
+    pub(crate) skill: Vec<String>,
+    /// Maximum number of results to return
+    #[arg(long = "limit", value_name = "N", default_value = "10")]
+    pub(crate) limit: usize,
+    /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
+    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+          default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) server_addr: String,
 }
 
 #[derive(Parser, Debug)]

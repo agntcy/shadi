@@ -1315,6 +1315,7 @@ mod tests {
             git_snapshot_untracked: false,
             watch_policy: false,
             session_name: None,
+            record_ref: None,
             subcommand: None,
             run_command: vec![program.display().to_string()],
         }

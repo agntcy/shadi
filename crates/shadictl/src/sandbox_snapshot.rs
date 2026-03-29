@@ -231,6 +231,9 @@ pub(crate) fn run_sandboxed_command(
                 } else {
                     eprintln!("control socket: {}", handle.path().display());
                 }
+                if let Some(record_ref) = cli.record_ref.as_deref() {
+                    eprintln!("record: {}", record_ref);
+                }
                 control_live = Some(live);
                 restart_requested = Some(restart_flag);
                 terminate_requested = Some(terminate_flag);
@@ -1170,6 +1173,7 @@ mod tests {
             git_snapshot_untracked: false,
             watch_policy: false,
             session_name: None,
+            record_ref: None,
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }

@@ -32,6 +32,7 @@ use tracing::{field, info_span};
 mod memory_command;
 mod identity_command;
 mod cli_types;
+mod dir_command;
 mod introspection_command;
 mod policy_helpers;
 mod policy_watch;
@@ -45,6 +46,7 @@ mod trusted_secret_delivery;
 mod shell_command;
 
 use cli_types::*;
+use dir_command::*;
 use introspection_command::*;
 use identity_command::*;
 use memory_command::*;
@@ -193,6 +195,7 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::VerifyAgentIdentity(command) => run_verify_agent_identity_command(command),
         Commands::PutKey(command) => run_put_key_command(command),
         Commands::Shell(args) => run_shell_command(args),
+        Commands::Dir(command) => run_dir_command(command),
     }
 }
 
