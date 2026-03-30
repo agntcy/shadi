@@ -2427,4 +2427,99 @@ mod tests {
     fn given_session_when_help_trace_summary_then_continues() {
         assert_continues(&mut session(), "/help trace summary");
     }
+
+    // ── cmd_attach coverage ──────────────────────────────────
+
+    /// Exercises the `Err` branch of `cmd_attach`: the path exists (it is a
+    /// plain file, not a socket) so `sock.exists()` is `true`, but
+    /// `query_policy` fails because the file is not a Unix-domain socket.
+    #[test]
+    fn given_non_socket_file_when_attach_then_stays_detached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shadi-ctl-not-a-socket.sock");
+        std::fs::write(&path, b"not a socket").expect("write");
+
+        let mut s = session();
+        assert_continues(&mut s, &format!("/attach {}", path.display()));
+        assert!(s.socket.is_none(), "socket should remain unset after failed query");
+    }
+
+    /// Exercises the `Ok` branch of `cmd_attach`: the path is a live control
+    /// socket that responds to a policy query, so `self.socket` is set.
+    #[test]
+    fn given_live_socket_when_attach_then_sets_socket() {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        use std::sync::{Arc, Mutex};
+        use shadi_sandbox::SandboxPolicy;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("shadi-ctl-attach-success.sock");
+
+        let live = Arc::new(Mutex::new(policy_watch::LivePolicy {
+            policy: SandboxPolicy::new(),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            live_net_allowlist: None,
+        }));
+
+        let _handle = policy_watch::start_control_socket(&sock_path, live)
+            .expect("start control socket");
+
+        // Poll until the socket is ready (up to 2 s).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if sock_path.exists() && policy_watch::query_policy(&sock_path).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control socket did not become ready: {}",
+                sock_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let mut s = session();
+        assert_continues(&mut s, &format!("/attach {}", sock_path.display()));
+        assert!(s.socket.is_some(), "socket should be set after successful attach");
+    }
+
+    // ── /attach completion session listing ───────────────────
+
+    /// Exercises the inner loop of the `/attach` tab-completion handler: when a
+    /// `shadi-ctl-*.sock` marker file is present in `temp_dir()`, the session
+    /// name appears in the completion candidates.
+    #[test]
+    fn given_session_file_in_tmpdir_when_completing_attach_then_returns_session_name() {
+        let tmpdir = std::env::temp_dir();
+        let sock_path = tmpdir.join("shadi-ctl-coverage-completion-test.sock");
+        std::fs::write(&sock_path, b"").expect("create test marker");
+
+        let result = std::panic::catch_unwind(|| {
+            let helper = ShellHelper::new(false);
+            let rl_config = Config::builder().build();
+            let mut rl = Editor::with_config(rl_config).unwrap();
+            rl.set_helper(Some(helper));
+            let helper = rl.helper().unwrap();
+            let (_start, candidates) =
+                Completer::complete(helper, "/attach ", 8, &Context::new(rl.history())).unwrap();
+            candidates
+                .iter()
+                .any(|c| c.display == "coverage-completion-test")
+        });
+
+        let _ = std::fs::remove_file(&sock_path);
+
+        assert!(
+            result.expect("completion did not panic"),
+            "session name should appear in /attach completions"
+        );
+    }
 }
