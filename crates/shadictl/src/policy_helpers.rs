@@ -110,9 +110,9 @@ pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<Reso
     policy = apply_string_paths(policy, &profile.write, PathMode::Write)?;
     policy = apply_string_paths(policy, &profile.allow, PathMode::Allow)?;
 
-    policy = apply_string_paths(policy, &file_policy.read, PathMode::Read)?;
-    policy = apply_string_paths(policy, &file_policy.write, PathMode::Write)?;
-    policy = apply_string_paths(policy, &file_policy.allow, PathMode::Allow)?;
+    policy = apply_preset_paths(policy, &file_policy.read, PathMode::Read)?;
+    policy = apply_preset_paths(policy, &file_policy.write, PathMode::Write)?;
+    policy = apply_preset_paths(policy, &file_policy.allow, PathMode::Allow)?;
 
     policy = apply_paths(policy, &cli.read, PathMode::Read)?;
     policy = apply_paths(policy, &cli.write, PathMode::Write)?;
@@ -205,6 +205,30 @@ fn apply_string_paths(
         let path = canonicalize_string_path(path)
             .map_err(|err| format!("invalid {} path {}: {}", mode.label(), path, err))?;
         policy = apply_path(policy, &path, &mode);
+    }
+    Ok(policy)
+}
+
+/// Like `apply_string_paths` but silently skips paths that do not exist on
+/// the current operating system.  Used for policy-file `read`/`allow`/`write`
+/// lists so that cross-platform presets (which list paths for all three
+/// platforms) work correctly on every OS without failure.
+fn apply_preset_paths(
+    mut policy: SandboxPolicy,
+    paths: &[String],
+    mode: PathMode,
+) -> Result<SandboxPolicy, String> {
+    for path in paths.iter() {
+        match canonicalize_string_path(path) {
+            Ok(canonical) => {
+                policy = apply_path(policy, &canonical, &mode);
+            }
+            Err(_) => {
+                // Path does not exist on this OS — silently skip.
+                // This is expected for cross-platform presets that list paths
+                // for macOS, Linux, and Windows simultaneously.
+            }
+        }
     }
     Ok(policy)
 }

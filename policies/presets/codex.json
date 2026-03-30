@@ -1,6 +1,6 @@
 {
   "_preset": "shadi/codex-v1",
-  "_description": "Safe-launch preset for OpenAI Codex CLI. Codex authenticates via browser OAuth — no secret injection needed. Use with: shadi --policy policies/presets/codex.json --read ~/.nvm -- codex",
+  "_description": "Safe-launch preset for OpenAI Codex CLI. Codex authenticates via browser OAuth — no secret injection needed. Use with: shadictl --policy policies/presets/codex.json --read ~/.nvm -- codex\n\nOn Windows add: --read %APPDATA%\\nvm",
   "allow": ["."],
   "read": [
     "/usr/local",
@@ -9,7 +9,12 @@
     "/bin",
     "/Library",
     "/private/etc/ssl",
-    "/private/etc/resolv.conf"
+    "/private/etc/resolv.conf",
+    "/etc/ssl/certs",
+    "/etc/resolv.conf",
+    "C:\\Windows\\System32",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)"
   ],
   "net_block": false,
   "net_allow": [

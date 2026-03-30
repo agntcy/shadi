@@ -345,7 +345,10 @@
     }
 
     #[test]
-    fn resolve_policy_rejects_missing_paths() {
+    fn resolve_policy_skips_missing_preset_paths() {
+        // Paths in a policy file that don't exist on the current OS are
+        // silently skipped.  This allows cross-platform presets to list paths
+        // for macOS, Linux, and Windows simultaneously.
         let cli = build_cli();
         let policy_file = PolicyFile {
             read: vec!["/path/does/not/exist".to_string()],
@@ -361,8 +364,13 @@
             process_secret_policy: Vec::new(),
         };
 
-        let err = resolve_policy(&cli, &policy_file).unwrap_err();
-        assert!(err.contains("invalid read path"));
+        // Should succeed — the missing path is skipped, not an error.
+        let resolved = resolve_policy(&cli, &policy_file).expect("resolve should succeed with missing preset paths");
+        // The nonexistent path must not appear in the resolved policy.
+        assert!(
+            !resolved.policy.allow_read().iter().any(|p| p.to_string_lossy().contains("does/not/exist")),
+            "nonexistent path must not be included in allow_read"
+        );
     }
 
     #[test]
