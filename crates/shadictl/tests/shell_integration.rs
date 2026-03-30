@@ -410,7 +410,15 @@ fn given_shell_when_detach_not_attached_then_shows_not_attached() {
 fn given_shell_when_attach_nonexistent_then_stderr_shows_error() {
     run_shell("/attach /tmp/nonexistent-shadi-bdd.sock\n/exit\n")
         .assert_success()
-        .stderr_contains("does not exist");
+        .stderr_contains("session not found");
+}
+
+#[test]
+fn given_shell_when_attach_nonexistent_name_then_stderr_shows_error() {
+    // Named session that doesn't exist should also surface a friendly message.
+    run_shell("/attach no-such-session-bdd\n/exit\n")
+        .assert_success()
+        .stderr_contains("session not found");
 }
 
 #[test]

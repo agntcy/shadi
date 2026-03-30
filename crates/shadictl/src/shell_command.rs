@@ -27,7 +27,7 @@ use shadi_sandbox::PolicyPatch;
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show available commands (alias: /h)"),
     ("/status", "Show current session status (alias: /s)"),
-    ("/attach", "Attach to a running sandbox session by socket path"),
+    ("/attach", "Attach to a running sandbox session by name or socket path"),
     ("/detach", "Detach from the current session"),
     ("/kill", "Terminate the attached sandboxed process"),
     ("/sessions", "Discover running SHADI sandbox control sockets"),
@@ -52,11 +52,13 @@ const COMMANDS: &[(&str, &str)] = &[
 /// Detailed help text for commands that accept arguments.
 const COMMAND_HELP: &[(&str, &str)] = &[
     ("/attach", "\
-Usage: /attach <socket-path>
+Usage: /attach <name-or-path>
 
-Attach to a running SHADI sandbox session via its control socket.
+Attach to a running SHADI sandbox session by its human-readable name or full
+control socket path.
 
 Examples:
+  /attach my-codex-session
   /attach /tmp/shadi-ctl-12345.sock"),
     ("/policy query", "\
 Usage: /policy query
@@ -336,26 +338,26 @@ impl Completer for ShellHelper {
             return Ok((offset, candidates));
         }
 
-        // Socket path completion for /attach.
-        if let Some(path_input) = input.strip_prefix("/attach ") {
-            let path_input = path_input.trim_start();
+        // Name/path completion for /attach — show human-readable session names.
+        if let Some(name_input) = input.strip_prefix("/attach ") {
+            let name_input = name_input.trim_start();
             let tmpdir = std::env::temp_dir();
             if let Ok(entries) = std::fs::read_dir(&tmpdir) {
                 for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
-                        let full = entry.path().to_string_lossy().to_string();
-                        if full.starts_with(path_input) || path_input.is_empty() {
+                    let fname = entry.file_name();
+                    let fname_str = fname.to_string_lossy();
+                    if fname_str.starts_with("shadi-ctl-") && fname_str.ends_with(".sock") {
+                        let session_name = policy_watch::session_name_from_path(&entry.path());
+                        if session_name.starts_with(name_input) || name_input.is_empty() {
                             candidates.push(Pair {
-                                display: full.clone(),
-                                replacement: full,
+                                display: session_name.clone(),
+                                replacement: session_name,
                             });
                         }
                     }
                 }
             }
-            let offset = pos - path_input.len();
+            let offset = pos - name_input.len();
             return Ok((offset, candidates));
         }
 
@@ -504,7 +506,7 @@ impl ShellSession {
             }
             "/attach" => {
                 if parts.len() < 2 {
-                    eprintln!("usage: /attach <socket-path>");
+                    eprintln!("usage: /attach <name-or-path>");
                 } else {
                     self.cmd_attach(parts[1]);
                 }
@@ -762,8 +764,9 @@ impl ShellSession {
         } else {
             println!("found {} session(s):", sessions.len());
             for (sock, reachable) in &sessions {
+                let name = policy_watch::session_name_from_path(sock);
                 let marker = if *reachable { "reachable" } else { "stale" };
-                println!("  {} ({})", sock.display(), marker);
+                println!("  {} ({})", name, marker);
             }
         }
         LoopAction::Continue
@@ -894,19 +897,20 @@ impl ShellSession {
         LoopAction::Continue
     }
 
-    fn cmd_attach(&mut self, path: &str) {
-        let sock = PathBuf::from(path);
+    fn cmd_attach(&mut self, name_or_path: &str) {
+        let sock = policy_watch::resolve_session_socket(name_or_path);
         if !sock.exists() {
-            eprintln!("socket path does not exist: {}", path);
+            eprintln!("session not found: {}", name_or_path);
             return;
         }
         match policy_watch::query_policy(&sock) {
             Ok(_) => {
-                println!("attached to {}", path);
+                let display = policy_watch::session_name_from_path(&sock);
+                println!("attached to {}", display);
                 self.socket = Some(sock);
             }
             Err(err) => {
-                eprintln!("failed to connect to {}: {}", path, err);
+                eprintln!("failed to connect to {}: {}", name_or_path, err);
             }
         }
     }
@@ -1131,14 +1135,20 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         let _ = rl.load_history(path);
     }
 
-    let mut session = ShellSession::new(args.socket);
+    let initial_socket = args.socket.clone().or_else(|| {
+        args.attach
+            .as_deref()
+            .map(policy_watch::resolve_session_socket)
+    });
+    let mut session = ShellSession::new(initial_socket);
 
     print_banner(use_color);
     if let Some(ref sock) = session.socket {
+        let display_name = policy_watch::session_name_from_path(sock);
         if use_color {
-            println!("  \x1b[32m attached to: {}\x1b[0m", sock.display());
+            println!("  \x1b[32m attached to: {}\x1b[0m", display_name);
         } else {
-            println!("  attached to: {}", sock.display());
+            println!("  attached to: {}", display_name);
         }
     }
     println!();
@@ -1205,10 +1215,7 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
 }
 
 fn short_socket_name(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("session")
-        .to_string()
+    policy_watch::session_name_from_path(path)
 }
 
 fn discover_control_sockets(tmpdir: &Path) -> Vec<PathBuf> {
@@ -1331,7 +1338,13 @@ mod tests {
     #[test]
     fn given_socket_path_when_extracting_name_then_returns_stem() {
         let path = PathBuf::from("/tmp/shadi-ctl-12345.sock");
-        assert_eq!(short_socket_name(&path), "shadi-ctl-12345");
+        assert_eq!(short_socket_name(&path), "12345");
+    }
+
+    #[test]
+    fn given_named_socket_when_extracting_name_then_strips_prefix() {
+        let path = PathBuf::from("/tmp/shadi-ctl-my-agent.sock");
+        assert_eq!(short_socket_name(&path), "my-agent");
     }
 
     #[test]
@@ -2413,5 +2426,100 @@ mod tests {
     #[test]
     fn given_session_when_help_trace_summary_then_continues() {
         assert_continues(&mut session(), "/help trace summary");
+    }
+
+    // ── cmd_attach coverage ──────────────────────────────────
+
+    /// Exercises the `Err` branch of `cmd_attach`: the path exists (it is a
+    /// plain file, not a socket) so `sock.exists()` is `true`, but
+    /// `query_policy` fails because the file is not a Unix-domain socket.
+    #[test]
+    fn given_non_socket_file_when_attach_then_stays_detached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shadi-ctl-not-a-socket.sock");
+        std::fs::write(&path, b"not a socket").expect("write");
+
+        let mut s = session();
+        assert_continues(&mut s, &format!("/attach {}", path.display()));
+        assert!(s.socket.is_none(), "socket should remain unset after failed query");
+    }
+
+    /// Exercises the `Ok` branch of `cmd_attach`: the path is a live control
+    /// socket that responds to a policy query, so `self.socket` is set.
+    #[test]
+    fn given_live_socket_when_attach_then_sets_socket() {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        use std::sync::{Arc, Mutex};
+        use shadi_sandbox::SandboxPolicy;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("shadi-ctl-attach-success.sock");
+
+        let live = Arc::new(Mutex::new(policy_watch::LivePolicy {
+            policy: SandboxPolicy::new(),
+            blocked: HashSet::new(),
+            allow: HashSet::new(),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            staged_read: Vec::new(),
+            staged_write: Vec::new(),
+            staged_allow: Vec::new(),
+            live_net_allowlist: None,
+        }));
+
+        let _handle = policy_watch::start_control_socket(&sock_path, live)
+            .expect("start control socket");
+
+        // Poll until the socket is ready (up to 2 s).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if sock_path.exists() && policy_watch::query_policy(&sock_path).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control socket did not become ready: {}",
+                sock_path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let mut s = session();
+        assert_continues(&mut s, &format!("/attach {}", sock_path.display()));
+        assert!(s.socket.is_some(), "socket should be set after successful attach");
+    }
+
+    // ── /attach completion session listing ───────────────────
+
+    /// Exercises the inner loop of the `/attach` tab-completion handler: when a
+    /// `shadi-ctl-*.sock` marker file is present in `temp_dir()`, the session
+    /// name appears in the completion candidates.
+    #[test]
+    fn given_session_file_in_tmpdir_when_completing_attach_then_returns_session_name() {
+        let tmpdir = std::env::temp_dir();
+        let sock_path = tmpdir.join("shadi-ctl-coverage-completion-test.sock");
+        std::fs::write(&sock_path, b"").expect("create test marker");
+
+        let result = std::panic::catch_unwind(|| {
+            let helper = ShellHelper::new(false);
+            let rl_config = Config::builder().build();
+            let mut rl = Editor::with_config(rl_config).unwrap();
+            rl.set_helper(Some(helper));
+            let helper = rl.helper().unwrap();
+            let (_start, candidates) =
+                Completer::complete(helper, "/attach ", 8, &Context::new(rl.history())).unwrap();
+            candidates
+                .iter()
+                .any(|c| c.display == "coverage-completion-test")
+        });
+
+        let _ = std::fs::remove_file(&sock_path);
+
+        assert!(
+            result.expect("completion did not panic"),
+            "session name should appear in /attach completions"
+        );
     }
 }

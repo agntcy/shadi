@@ -61,6 +61,15 @@ pub(crate) struct Cli {
     #[arg(long = "watch-policy", action = ArgAction::SetTrue)]
     pub(crate) watch_policy: bool,
 
+    /// Human-readable name for this sandbox session.
+    /// When set, the control socket is created at
+    /// `$TMPDIR/shadi-ctl-<name>.sock` instead of
+    /// `$TMPDIR/shadi-ctl-<pid>.sock`, making it easy to
+    /// attach by name: `/attach <name>`.
+    /// Allowed characters: letters, digits, hyphens, underscores.
+    #[arg(long = "name", value_name = "NAME")]
+    pub(crate) session_name: Option<String>,
+
     #[command(subcommand)]
     pub(crate) subcommand: Option<Commands>,
 
@@ -319,6 +328,12 @@ pub(crate) struct ShellArgs {
     /// Connect to a running sandbox session by control socket path
     #[arg(long = "socket", value_name = "PATH")]
     pub(crate) socket: Option<PathBuf>,
+
+    /// Connect to a running sandbox session by its human-readable name
+    /// (as given by --name when launching shadictl).
+    /// Equivalent to --socket $TMPDIR/shadi-ctl-<name>.sock.
+    #[arg(long = "attach", value_name = "NAME", conflicts_with = "socket")]
+    pub(crate) attach: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

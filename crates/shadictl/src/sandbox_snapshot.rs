@@ -220,10 +220,17 @@ pub(crate) fn run_sandboxed_command(
             live_net_allowlist: net_allowlist,
         }));
         let pid = std::process::id();
-        let sock_path = default_socket_path(pid);
+        let sock_path = match cli.session_name.as_deref() {
+            Some(name) => policy_watch::named_socket_path(name),
+            None => default_socket_path(pid),
+        };
         match start_control_socket(&sock_path, std::sync::Arc::clone(&live)) {
             Ok(handle) => {
-                eprintln!("control socket: {}", handle.path().display());
+                if let Some(name) = cli.session_name.as_deref() {
+                    eprintln!("session name: {}", name);
+                } else {
+                    eprintln!("control socket: {}", handle.path().display());
+                }
                 control_live = Some(live);
                 restart_requested = Some(restart_flag);
                 terminate_requested = Some(terminate_flag);
@@ -1162,6 +1169,7 @@ mod tests {
             git_snapshot_dir: None,
             git_snapshot_untracked: false,
             watch_policy: false,
+            session_name: None,
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }
