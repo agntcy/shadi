@@ -41,6 +41,12 @@ const ESSENTIAL_MACH_SERVICES: &[&str] = &[
     // CF preferences (many binaries read defaults)
     "com.apple.cfprefsd.daemon",
     "com.apple.cfprefsd.agent",
+    // System Configuration framework (SCDynamicStore / configd).
+    // Node.js and other runtimes call SCDynamicStoreCreate for network
+    // interface enumeration; without this the call returns NULL and the
+    // process panics on startup.
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.SystemConfiguration.SCNetworkReachability",
 ];
 
 #[cfg(not(any(test, feature = "coverage")))]
@@ -50,13 +56,14 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
 
     unsafe {
         command.pre_exec(move || {
+            apply_profile(&profile_cstr)
+                .map_err(std::io::Error::other)?;
             // Create a new process group so the parent can kill the entire
             // tree with killpg(), mirroring the Windows Job-object pattern.
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            apply_profile(&profile_cstr)
-                .map_err(std::io::Error::other)
+            Ok(())
         });
     }
 
@@ -143,16 +150,6 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
                 home
             ));
         }
-        // Allow /var/folders (op daemon temp dir). /var → /private/var but Seatbelt
-        // matches on the literal path seen by the caller, so cover both spellings.
-        rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
-        rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
-        if let Ok(tmpdir) = std::env::var("TMPDIR") {
-            let canonical = escape_profile_string(tmpdir.trim_end_matches('/'))?;
-            rules.push(format!(
-                "(allow file-read* file-write* (subpath \"{canonical}\"))"
-            ));
-        }
         // Allow Mach IPC and POSIX IPC for child processes (op daemon, system services).
         rules.push("(allow ipc-posix-shm)".to_string());
     }
@@ -162,6 +159,34 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     // process may need — shell redirects (2>/dev/null), curl output (-o /dev/null),
     // random number generation, and terminal I/O all depend on this.
     rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
+
+    // Allow the per-user TMPDIR unconditionally.  On macOS this is a path
+    // under /var/folders/… and is required by virtually every runtime
+    // (Node.js, Python, Rust stdlib) for temp file creation, sqlite WAL
+    // locks, and IPC sockets.  Restricting it breaks normal process startup
+    // without meaningfully improving containment since the path is already
+    // per-user and session-scoped.
+    rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
+    rules.push("(allow file-read* file-write* (subpath \"/private/var/folders\"))".to_string());
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        let canonical = escape_profile_string(tmpdir.trim_end_matches('/'))?;
+        rules.push(format!(
+            "(allow file-read* file-write* (subpath \"{canonical}\"))"
+        ));
+    }
+    // /private/var/select contains the `sh` symlink consulted when spawning
+    // subprocesses via /bin/sh (e.g. child_process.execSync in Node.js).
+    // Without this, any sandboxed process that forks a shell child fails
+    // with EPERM trying to resolve /private/var/select/sh.
+    rules.push("(allow file-read* (subpath \"/private/var/select\"))".to_string());
+    rules.push("(allow file-read* (subpath \"/var/select\"))".to_string());
+
+    // Allow terminal/pty control ioctls (TIOCGETA, TIOCSETA, etc.).
+    // Without this any process that enters raw/cbreak mode (TUI apps, REPLs,
+    // readline) fails with EPERM on setRawMode.  The file-read*/file-write*
+    // rule for /dev covers the file path, but Seatbelt gates ioctl separately
+    // via the `file-ioctl` operation class.
+    rules.push("(allow file-ioctl (subpath \"/dev\"))".to_string());
 
     if compatibility_profile || policy.local_unix_sockets_allowed() {
         // Allow Unix-domain socket connections for tightly scoped brokered secret delivery
@@ -180,6 +205,23 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
             "(allow file-read* file-map-executable (subpath \"{}\"))",
             s
         ));
+        // Emit metadata-only (stat/lstat) access for every ancestor of this
+        // read path.  Without this, runtimes that call realpathSync or
+        // equivalent (Node.js, Python, Go) fail with EPERM when trying to
+        // stat parent directories such as /Users that are not themselves in
+        // the read list.  file-read-metadata does not grant access to file
+        // contents or directory listings, only stat/lstat/getxattr on the
+        // literal entry.
+        let mut ancestor = abs.parent();
+        while let Some(p) = ancestor {
+            if p == std::path::Path::new("/") {
+                break; // literal "/" is already covered unconditionally above
+            }
+            let Some(ps) = p.to_str() else { break; };
+            let ps = escape_profile_string(ps)?;
+            rules.push(format!("(allow file-read-metadata (literal \"{ps}\"))"));
+            ancestor = p.parent();
+        }
     }
 
     for path in policy.allow_write() {

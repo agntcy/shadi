@@ -303,6 +303,7 @@
             net_allow: Vec::new(),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            env_remove: Vec::new(),
             process_inject_keychain: Vec::new(),
             process_trusted_secret: Vec::new(),
             process_secret_policy: Vec::new(),
@@ -353,6 +354,7 @@
             net_allow: Vec::new(),
             allow_command: Vec::new(),
             block_command: Vec::new(),
+            env_remove: Vec::new(),
             process_inject_keychain: Vec::new(),
             process_trusted_secret: Vec::new(),
             process_secret_policy: Vec::new(),
@@ -479,6 +481,23 @@
         let back = serde_json::to_string(&policy).expect("serialize");
         let round_trip: PolicyFile = serde_json::from_str(&back).expect("round-trip");
         assert_eq!(round_trip.net_allow, policy.net_allow);
+    }
+
+    #[test]
+    fn policy_file_env_remove_defaults_to_empty() {
+        let policy = PolicyFile::default();
+        assert!(policy.env_remove.is_empty());
+    }
+
+    #[test]
+    fn policy_file_env_remove_round_trips_through_json() {
+        let json_str = r#"{"env_remove": ["HTTPS_PROXY", "HTTP_PROXY"]}"#;
+        let policy: PolicyFile = serde_json::from_str(json_str).expect("deserialize");
+        assert_eq!(policy.env_remove, vec!["HTTPS_PROXY", "HTTP_PROXY"]);
+
+        let back = serde_json::to_string(&policy).expect("serialize");
+        let round_trip: PolicyFile = serde_json::from_str(&back).expect("round-trip");
+        assert_eq!(round_trip.env_remove, policy.env_remove);
     }
 
     #[test]
