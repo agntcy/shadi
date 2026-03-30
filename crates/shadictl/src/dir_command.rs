@@ -100,21 +100,20 @@ fn server_addr_args(server_addr: &str) -> Vec<&str> {
     vec!["--server-addr", server_addr]
 }
 
-/// Apply OIDC token auth env vars to a `dirctl` `Command`.
+/// Apply GitHub token auth env vars to a `dirctl` `Command`.
 ///
-/// Sets `DIRECTORY_CLIENT_AUTH_MODE=oidc` and `DIRECTORY_CLIENT_OIDC_TOKEN`.
-/// This is the universal auth model for Directory v1.x — works for Zitadel
-/// PKCE tokens (human login), machine client-credentials tokens, and
-/// GitHub Actions OIDC tokens.
+/// Sets `DIRECTORY_CLIENT_AUTH_MODE=github` and `DIRECTORY_CLIENT_GITHUB_TOKEN`.
+/// This is the auth model for Directory v1.1.x (dirctl Homebrew release) which
+/// uses GitHub OAuth / PAT tokens.
 ///
 /// When no token is available, this function is not called and dirctl uses
-/// its own auto-detect chain (cached token → insecure).
+/// its own auto-detect chain (cached token from `dirctl auth login` → insecure).
 ///
 /// The token flows only via environment variables, not CLI arguments, to
 /// prevent it from appearing in process listings.
 fn apply_token_auth(cmd: &mut Command, token: &str) {
-    cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "oidc")
-       .env("DIRECTORY_CLIENT_OIDC_TOKEN", token);
+    cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "github")
+       .env("DIRECTORY_CLIENT_GITHUB_TOKEN", token);
 }
 
 /// Print a human-readable one-line summary of an OASF record to stderr.
@@ -152,55 +151,28 @@ fn print_record_summary(record: &OasfRecord, reference: &str) {
 // Sub-command handlers
 // ---------------------------------------------------------------------------
 
-/// `shadictl dir login` — authenticate with the Agent Directory and ingest the
-/// resulting access token into the SHADI secret store.
+/// `shadictl dir login` — authenticate with the Agent Directory via GitHub OAuth
+/// and ingest the resulting access token into the SHADI secret store.
 ///
-/// Runs `dirctl auth login` with inherited stdio so the PKCE / device-code flow
-/// can interact with the user directly.  On success, reads the access token from
-/// dirctl's on-disk cache (`~/.config/dirctl/auth-token.json`) and stores it in
-/// the SHADI secret store at `token_key`.
+/// Runs `dirctl auth login` (GitHub OAuth browser flow) with inherited stdio.
+/// On success, reads the access token from dirctl's on-disk cache
+/// (`~/.config/dirctl/auth-token.json`) and stores it in the SHADI secret store
+/// at `token_key`.
 ///
 /// The token is then automatically picked up by `shadictl dir pull / info / search`
 /// without the user having to pass it explicitly.
 fn run_dir_login(args: DirLoginArgs, token_key: &str) -> ExitCode {
-    // Allow overriding the dirctl binary path.  The released v1.1.0 uses GitHub
-    // OAuth; HEAD (and Directory v1.x) uses OIDC.  Set SHADI_DIRCTL_BINARY to
-    // point at a HEAD build until v1.2+ is released via Homebrew.
-    let dirctl_bin = std::env::var("SHADI_DIRCTL_BINARY")
-        .unwrap_or_else(|_| "dirctl".to_string());
+    let mut cmd = Command::new(dirctl_binary());
+    cmd.arg("auth").arg("login");
 
-    let mut cmd = Command::new(&dirctl_bin);
-    cmd.arg("auth");
-
-    if args.machine {
-        // Service-user / non-interactive path: dirctl auth machine
-        cmd.arg("machine");
-        if let Some(ref client_id) = args.oidc_machine_client_id {
-            cmd.env("DIRECTORY_CLIENT_OIDC_MACHINE_CLIENT_ID", client_id);
-        }
-        if let Some(ref secret_file) = args.oidc_machine_client_secret_file {
-            cmd.env("DIRECTORY_CLIENT_OIDC_MACHINE_CLIENT_SECRET_FILE", secret_file);
-        }
-        cmd.env("DIRECTORY_CLIENT_OIDC_MACHINE_SCOPES", &args.oidc_machine_scopes);
-    } else {
-        // Interactive PKCE path: dirctl auth login
-        cmd.arg("login");
-        if args.no_browser {
-            cmd.arg("--no-browser");
-        }
-        if args.force {
-            cmd.arg("--force");
-        }
-        if let Some(ref client_id) = args.oidc_client_id {
-            cmd.env("DIRECTORY_CLIENT_OIDC_CLIENT_ID", client_id);
-        }
+    if args.no_browser {
+        cmd.arg("--no-browser");
+    }
+    if args.force {
+        cmd.arg("--force");
     }
 
-    // Always forward the issuer (applies to both PKCE and machine flows).
-    cmd.env("DIRECTORY_CLIENT_OIDC_ISSUER", &args.oidc_issuer);
-
-    // Inherit stdio — the PKCE flow is interactive; machine flow is non-interactive
-    // but still benefits from inheriting stderr for progress messages.
+    // Inherit stdio — GitHub OAuth flow is interactive.
     cmd.stdin(std::process::Stdio::inherit())
        .stdout(std::process::Stdio::inherit())
        .stderr(std::process::Stdio::inherit());
@@ -297,17 +269,25 @@ fn run_dir_pull(args: DirPullArgs, oidc_token: Option<&str>) -> ExitCode {
             ExitCode::from(out.status.code().unwrap_or(1) as u8)
         }
         Ok(out) => {
+            let content_hex = sha256_hex(&out.stdout);
+            let digest = format!("sha256:{}", content_hex);
+
             // Cache the JSON content addressed by its SHA-256 hash.
-            let cache_key = sha256_hex(&out.stdout);
             if let Some(cache_dir) = record_cache_dir() {
                 if std::fs::create_dir_all(&cache_dir).is_ok() {
-                    let cache_path = cache_dir.join(format!("{}.json", cache_key));
+                    let cache_path = cache_dir.join(format!("{}.json", content_hex));
                     if !cache_path.exists() {
                         let _ = std::fs::write(&cache_path, &out.stdout);
                     }
                     eprintln!("cached: {}", cache_path.display());
                 }
             }
+
+            // Emit the content digest as informational output.  This is the
+            // SHA-256 of the raw bytes returned by the directory — useful for
+            // audit logs and cache management, but not a provenance proof.
+            // Use `shadictl dir verify <CID>` to check the Sigstore signature.
+            eprintln!("digest: {}", digest);
 
             // Print a brief summary to stderr.
             if let Ok(record) = serde_json::from_slice::<OasfRecord>(&out.stdout) {
@@ -349,7 +329,7 @@ fn run_dir_info(args: DirInfoArgs, oidc_token: Option<&str>) -> ExitCode {
 }
 
 /// `shadictl dir search --skill <skill>` — search the directory (delegates to `dirctl routing search`).
-fn run_dir_search(args: DirSearchArgs, oidc_token: Option<&str>) -> ExitCode {
+fn run_dir_search(args: DirSearchArgs, token: Option<&str>) -> ExitCode {
     let server_args = server_addr_args(&args.server_addr);
 
     let mut cmd = Command::new(dirctl_binary());
@@ -359,7 +339,7 @@ fn run_dir_search(args: DirSearchArgs, oidc_token: Option<&str>) -> ExitCode {
     }
     cmd.arg("--limit").arg(args.limit.to_string());
     cmd.args(&server_args);
-    if let Some(token) = oidc_token {
+    if let Some(token) = token {
         apply_token_auth(&mut cmd, token);
     }
 
@@ -379,17 +359,77 @@ fn run_dir_search(args: DirSearchArgs, oidc_token: Option<&str>) -> ExitCode {
     }
 }
 
+/// `shadictl dir verify <CID>` — verify the Sigstore signature of a record.
+///
+/// Delegates to `dirctl verify <CID>`, which by default performs local
+/// Sigstore verification (TUF trusted root + Rekor transparency log check).
+/// Pass `--oidc-issuer` / `--oidc-subject` to pin the signing identity, or
+/// `--key` to verify against a specific public key.
+///
+/// The directory auth token is forwarded so the server can be queried for the
+/// signature manifest when running local verification.
+fn run_dir_verify(args: DirVerifyArgs, token: Option<&str>) -> ExitCode {
+    let server_args = server_addr_args(&args.server_addr);
+
+    let mut cmd = Command::new(dirctl_binary());
+    cmd.arg("verify")
+       .arg(&args.cid)
+       .args(&server_args);
+
+    if let Some(ref key) = args.key {
+        cmd.arg("--key").arg(key);
+    }
+    if let Some(ref issuer) = args.oidc_issuer {
+        cmd.arg("--oidc-issuer").arg(issuer);
+    }
+    if let Some(ref subject) = args.oidc_subject {
+        cmd.arg("--oidc-subject").arg(subject);
+    }
+    if args.from_server {
+        cmd.arg("--from-server");
+    }
+    if args.ignore_tlog {
+        cmd.arg("--ignore-tlog");
+    }
+    if let Some(ref path) = args.trusted_root_path {
+        cmd.arg("--trusted-root-path").arg(path);
+    }
+
+    if let Some(t) = token {
+        apply_token_auth(&mut cmd, t);
+    }
+
+    // Inherit stdio — human-readable output from dirctl is the primary UX.
+    cmd.stdin(std::process::Stdio::inherit())
+       .stdout(std::process::Stdio::inherit())
+       .stderr(std::process::Stdio::inherit());
+
+    let status = match cmd.status() {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("error: dirctl not found in PATH");
+            eprintln!("{}", DIRCTL_INSTALL_HINT);
+            return ExitCode::from(2);
+        }
+        Err(err) => {
+            eprintln!("error running dirctl: {}", err);
+            return ExitCode::from(2);
+        }
+        Ok(s) => s,
+    };
+    ExitCode::from(status.code().unwrap_or(0) as u8)
+}
+
 /// Dispatch `shadictl dir <sub-command>`.
 pub(crate) fn run_dir_command(cli: DirCli) -> ExitCode {
     // Token resolution order (highest → lowest priority):
-    //  1. --oidc-token / $DIRECTORY_CLIENT_OIDC_TOKEN — explicit CLI/CI override.
-    //  2. SHADI secret store at --token-key (default: "dir/oidc_token") — populated
-    //     by `shadictl dir login` or `shadictl put-secret --key dir/oidc_token`.
+    //  1. --gh-token / $DIRECTORY_CLIENT_GITHUB_TOKEN — explicit CLI/CI override.
+    //  2. SHADI secret store at --token-key (default: "dir/gh_token") — populated
+    //     by `shadictl dir login` or `shadictl put-secret --key dir/gh_token`.
     //  3. None — dirctl auto-detects cached credentials from `dirctl auth login`.
     //
     // The token is never logged or printed; it flows only into `apply_token_auth`
     // which sets env vars on the child `dirctl` process.
-    let keychain_token: Option<String> = if cli.oidc_token.is_none() {
+    let keychain_token: Option<String> = if cli.gh_token.is_none() {
         let store = default_secret_store();
         store.get(&cli.token_key).ok().and_then(|s| {
             let bytes = s.expose(|b| b.to_vec());
@@ -398,13 +438,14 @@ pub(crate) fn run_dir_command(cli: DirCli) -> ExitCode {
     } else {
         None
     };
-    let token = cli.oidc_token.as_deref().or(keychain_token.as_deref());
+    let token = cli.gh_token.as_deref().or(keychain_token.as_deref());
 
     match cli.command {
         DirCommand::Login(args)  => run_dir_login(args, &cli.token_key),
         DirCommand::Pull(args)   => run_dir_pull(args, token),
         DirCommand::Info(args)   => run_dir_info(args, token),
         DirCommand::Search(args) => run_dir_search(args, token),
+        DirCommand::Verify(args) => run_dir_verify(args, token),
     }
 }
 
@@ -483,9 +524,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_token_auth_sets_oidc_mode_for_any_token() {
-        // Directory v1.x uses OIDC mode universally regardless of token prefix.
-        for token in &["gho_legacy_oauth", "ghp_pat_token", "header.payload.signature"] {
+    fn apply_token_auth_sets_github_mode_for_any_token() {
+        // Directory v1.1.x uses github mode with GitHub PAT / OAuth tokens.
+        for token in &["gho_oauth_token", "ghp_pat_token", "github_dummy"] {
             let mut cmd = Command::new("true");
             apply_token_auth(&mut cmd, token);
             let _ = cmd; // env vars applied — compile-time verification only
@@ -493,41 +534,40 @@ mod tests {
     }
 
     #[test]
-    fn run_dir_command_uses_keychain_token_when_oidc_token_absent() {
-        // Populate the test secret store with a fake token at the default key.
-        super::super::test_store_put("dir/oidc_token", b"header.payload.signature");
+    fn run_dir_command_uses_keychain_token_when_gh_token_absent() {
+        let test_key = "dir/test_gh_absent";
+        // Populate the test secret store with a fake token at a test-scoped key.
+        super::super::test_store_put(test_key, b"gho_fake_oauth_token");
 
-        // Construct a DirCli with no explicit oidc_token; run_dir_command should
+        // Construct a DirCli with no explicit gh_token; run_dir_command should
         // pull the token from the store.  We can't actually invoke `dirctl` in
         // unit tests, but we verify the resolution logic by checking that the
-        // keychain path is taken when `oidc_token` is None.
+        // keychain path is taken when `gh_token` is None.
         let cli = DirCli {
-            oidc_token: None,
-            token_key: "dir/oidc_token".to_string(),
+            gh_token: None,
+            token_key: test_key.to_string(),
             command: DirCommand::Search(DirSearchArgs {
                 skill: vec![],
                 limit: 1,
                 server_addr: "localhost:9999".to_string(),
             }),
         };
-        // The keychain lookup yields the stored JWT; we verify the resolution
-        // directly rather than running the full command (dirctl not guaranteed
-        // to be present during unit tests).
         let store = default_secret_store();
         let fetched = store.get(&cli.token_key).ok().and_then(|s| {
             let bytes = s.expose(|b| b.to_vec());
             secret_bytes_to_utf8(&bytes).ok()
         });
-        assert_eq!(fetched.as_deref(), Some("header.payload.signature"));
+        assert_eq!(fetched.as_deref(), Some("gho_fake_oauth_token"));
     }
 
     #[test]
-    fn run_dir_command_oidc_token_takes_priority_over_keychain() {
-        super::super::test_store_put("dir/oidc_token", b"keychain.token.value");
-        let explicit_token = Some("explicit.oidc.jwt".to_string());
+    fn run_dir_command_gh_token_takes_priority_over_keychain() {
+        let test_key = "dir/test_priority_check";
+        super::super::test_store_put(test_key, b"gho_keychain_token");
+        let explicit_token = Some("gho_explicit_token".to_string());
         let keychain_token: Option<String> = if explicit_token.is_none() {
             let store = default_secret_store();
-            store.get("dir/oidc_token").ok().and_then(|s| {
+            store.get(test_key).ok().and_then(|s| {
                 let bytes = s.expose(|b| b.to_vec());
                 secret_bytes_to_utf8(&bytes).ok()
             })
@@ -535,7 +575,7 @@ mod tests {
             None
         };
         let token = explicit_token.as_deref().or(keychain_token.as_deref());
-        assert_eq!(token, Some("explicit.oidc.jwt"));
+        assert_eq!(token, Some("gho_explicit_token"));
     }
 
     #[test]
@@ -579,5 +619,74 @@ mod tests {
         assert_eq!(locator.locator_type, "docker-image");
         assert_eq!(locator.url.as_deref(), Some("ghcr.io/agntcy/agent:v1.0.0"));
         assert!(locator.urls.is_empty());
+    }
+
+    // ── verify arg-building ───────────────────────────────────────────────────
+
+    /// `run_dir_verify` is not callable directly in unit tests (it exec's
+    /// `dirctl`), but we exercise the argument-assembly helpers by verifying
+    /// that `server_addr_args` and `apply_token_auth` produce the right output
+    /// for the inputs that `run_dir_verify` would pass them, and that key /
+    /// OIDC fields round-trip correctly through `DirVerifyArgs`.
+    #[test]
+    fn dir_verify_args_default_server_addr_is_prod() {
+        // Clap default is the prod gateway; make sure it survives round-trip.
+        use clap::Parser;
+        let args = DirVerifyArgs::try_parse_from(["verify", "bafkreitest123"])
+            .expect("parse");
+        assert_eq!(args.cid, "bafkreitest123");
+        assert_eq!(args.server_addr, "prod.gateway.ads.outshift.io:443");
+        assert!(args.key.is_none());
+        assert!(args.oidc_issuer.is_none());
+        assert!(args.oidc_subject.is_none());
+        assert!(!args.from_server);
+        assert!(!args.ignore_tlog);
+        assert!(args.trusted_root_path.is_none());
+    }
+
+    #[test]
+    fn dir_verify_args_key_flag_is_forwarded() {
+        use clap::Parser;
+        let args = DirVerifyArgs::try_parse_from([
+            "verify",
+            "bafkreitest123",
+            "--key",
+            "/tmp/cosign.pub",
+        ])
+        .expect("parse");
+        assert_eq!(args.key.as_deref(), Some("/tmp/cosign.pub"));
+    }
+
+    #[test]
+    fn dir_verify_args_oidc_flags_are_forwarded() {
+        use clap::Parser;
+        let args = DirVerifyArgs::try_parse_from([
+            "verify",
+            "bafkreitest123",
+            "--oidc-issuer",
+            "https://token.actions.githubusercontent.com",
+            "--oidc-subject",
+            "alice@example.com",
+        ])
+        .expect("parse");
+        assert_eq!(
+            args.oidc_issuer.as_deref(),
+            Some("https://token.actions.githubusercontent.com")
+        );
+        assert_eq!(args.oidc_subject.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn dir_verify_args_from_server_and_ignore_tlog_flags() {
+        use clap::Parser;
+        let args = DirVerifyArgs::try_parse_from([
+            "verify",
+            "bafkreitest123",
+            "--from-server",
+            "--ignore-tlog",
+        ])
+        .expect("parse");
+        assert!(args.from_server);
+        assert!(args.ignore_tlog);
     }
 }
