@@ -689,4 +689,806 @@ mod tests {
         assert!(args.from_server);
         assert!(args.ignore_tlog);
     }
+
+    // ── env-var manipulation lock ─────────────────────────────────────────────
+    // Env-var mutations (SHADI_DIRCTL_BINARY, XDG_CONFIG_HOME) must be
+    // serialised across threads because std::env::set_var is not thread-safe.
+
+    use std::sync::{Mutex, OnceLock};
+
+    static DIRCTL_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn dirctl_env_lock() -> &'static Mutex<()> {
+        DIRCTL_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    // ── dirctl_binary ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn dirctl_binary_defaults_to_dirctl_when_env_absent() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(dirctl_binary(), "dirctl");
+    }
+
+    #[test]
+    fn dirctl_binary_uses_override_from_env() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/opt/custom/dirctl");
+        let binary = dirctl_binary();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(binary, "/opt/custom/dirctl");
+    }
+
+    // ── dirctl_token_cache_path ───────────────────────────────────────────────
+
+    #[test]
+    fn dirctl_token_cache_path_uses_xdg_config_home_when_set() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("XDG_CONFIG_HOME", "/custom/xdg/config");
+        let path = dirctl_token_cache_path();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let path = path.expect("path should resolve");
+        let s = path.to_str().unwrap_or("");
+        assert!(s.contains("/custom/xdg/config"), "expected XDG path, got: {}", s);
+        assert!(s.ends_with("auth-token.json"), "expected auth-token.json suffix, got: {}", s);
+        assert!(s.contains("dirctl"), "expected dirctl component, got: {}", s);
+    }
+
+    // ── ingest_dirctl_token error paths ───────────────────────────────────────
+
+    #[test]
+    fn ingest_dirctl_token_returns_error_for_missing_file() {
+        let result = ingest_dirctl_token(
+            &PathBuf::from("/nonexistent/shadi_test/auth-token.json"),
+            "dir/test_missing_file",
+        );
+        assert!(result.is_err(), "should fail on missing file");
+        let err = result.unwrap_err();
+        assert!(err.contains("read"), "error should mention 'read', got: {}", err);
+    }
+
+    #[test]
+    fn ingest_dirctl_token_returns_error_for_invalid_json() {
+        let tmp = std::env::temp_dir().join("shadi_test_bad_json_ingest.txt");
+        std::fs::write(&tmp, b"this is not valid json").expect("write temp file");
+        let result = ingest_dirctl_token(&tmp, "dir/test_invalid_json");
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result.is_err(), "should fail on invalid JSON");
+        let err = result.unwrap_err();
+        assert!(err.contains("parse"), "error should mention 'parse', got: {}", err);
+    }
+
+    // ── print_record_summary ──────────────────────────────────────────────────
+
+    #[test]
+    fn print_record_summary_with_none_name_and_version() {
+        // Exercises the "(unnamed)" and "?" fallback branches.
+        let record = OasfRecord {
+            name: None,
+            version: None,
+            description: None,
+            skills: vec![],
+            domains: vec![],
+            locators: vec![],
+        };
+        // Should not panic; output goes to stderr.
+        print_record_summary(&record, "unnamed-ref");
+    }
+
+    #[test]
+    fn print_record_summary_with_long_description_is_truncated() {
+        // Exercises the >120 character truncation branch.
+        let long_line = "x".repeat(200);
+        let record = OasfRecord {
+            name: Some("TruncAgent".to_string()),
+            version: Some("1.0.0".to_string()),
+            description: Some(long_line),
+            skills: vec![],
+            domains: vec![],
+            locators: vec![],
+        };
+        print_record_summary(&record, "trunc-ref");
+    }
+
+    #[test]
+    fn print_record_summary_with_multiline_description_uses_first_line() {
+        let record = OasfRecord {
+            name: Some("Agent".to_string()),
+            version: Some("2.0.0".to_string()),
+            description: Some("First line.\nSecond line that should not appear.".to_string()),
+            skills: vec![],
+            domains: vec![],
+            locators: vec![],
+        };
+        print_record_summary(&record, "multiline-ref");
+    }
+
+    #[test]
+    fn print_record_summary_with_skills_domains_and_locators() {
+        // Exercises skills list, domains list, and locator with urls vec.
+        let record = OasfRecord {
+            name: Some("Full Agent".to_string()),
+            version: Some("3.0.0".to_string()),
+            description: Some("A short description.".to_string()),
+            skills: vec![
+                OasfClassRef { name: "nlp/translation".to_string() },
+                OasfClassRef { name: "agent_orchestration/task_decomposition".to_string() },
+            ],
+            domains: vec![OasfClassRef { name: "hospitality/tourism".to_string() }],
+            locators: vec![OasfLocator {
+                locator_type: "source_code".to_string(),
+                url: None,
+                urls: vec![
+                    "https://github.com/example/agent".to_string(),
+                    "https://mirror.example.com/agent".to_string(),
+                ],
+            }],
+        };
+        print_record_summary(&record, "full-ref");
+    }
+
+    #[test]
+    fn print_record_summary_with_url_field_locator() {
+        // Exercises the `url` (singular) field path in locator rendering.
+        let record = OasfRecord {
+            name: Some("Docker Agent".to_string()),
+            version: Some("1.0.0".to_string()),
+            description: None,
+            skills: vec![],
+            domains: vec![],
+            locators: vec![OasfLocator {
+                locator_type: "docker_image".to_string(),
+                url: Some("ghcr.io/example/agent:v1.0.0".to_string()),
+                urls: vec![],
+            }],
+        };
+        print_record_summary(&record, "docker-ref");
+    }
+
+    // ── CLI arg parsing ───────────────────────────────────────────────────────
+
+    #[test]
+    fn dir_pull_args_default_server_addr_is_prod() {
+        use clap::Parser;
+        let args = DirPullArgs::try_parse_from(["pull", "my-agent:v1.0.0"]).expect("parse");
+        assert_eq!(args.reference, "my-agent:v1.0.0");
+        assert_eq!(args.server_addr, "prod.gateway.ads.outshift.io:443");
+    }
+
+    #[test]
+    fn dir_info_args_default_server_addr_is_prod() {
+        use clap::Parser;
+        let args = DirInfoArgs::try_parse_from(["info", "my-agent"]).expect("parse");
+        assert_eq!(args.reference, "my-agent");
+        assert_eq!(args.server_addr, "prod.gateway.ads.outshift.io:443");
+    }
+
+    #[test]
+    fn dir_search_args_defaults() {
+        use clap::Parser;
+        let args = DirSearchArgs::try_parse_from(["search"]).expect("parse");
+        assert!(args.skill.is_empty());
+        assert_eq!(args.limit, 10);
+        assert_eq!(args.server_addr, "prod.gateway.ads.outshift.io:443");
+    }
+
+    #[test]
+    fn dir_search_args_with_skills_and_limit() {
+        use clap::Parser;
+        let args = DirSearchArgs::try_parse_from([
+            "search", "--skill", "nlp", "--skill", "code_generation", "--limit", "25",
+        ])
+        .expect("parse");
+        assert_eq!(args.skill, vec!["nlp", "code_generation"]);
+        assert_eq!(args.limit, 25);
+    }
+
+    #[test]
+    fn dir_login_args_defaults_are_false() {
+        use clap::Parser;
+        let args = DirLoginArgs::try_parse_from(["login"]).expect("parse");
+        assert!(!args.no_browser);
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn dir_login_args_flags_set() {
+        use clap::Parser;
+        let args =
+            DirLoginArgs::try_parse_from(["login", "--no-browser", "--force"]).expect("parse");
+        assert!(args.no_browser);
+        assert!(args.force);
+    }
+
+    #[test]
+    fn dir_verify_args_trusted_root_path_flag() {
+        use clap::Parser;
+        let args = DirVerifyArgs::try_parse_from([
+            "verify",
+            "bafkreitest999",
+            "--trusted-root-path",
+            "/etc/sigstore/trusted-root.json",
+        ])
+        .expect("parse");
+        assert_eq!(
+            args.trusted_root_path.as_deref(),
+            Some(std::path::Path::new("/etc/sigstore/trusted-root.json"))
+        );
+    }
+
+    // ── run_dir_login ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_dir_login_returns_exit_code_2_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_login(DirLoginArgs { no_browser: false, force: false }, "dir/test_login_nf");
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_dir_login_with_no_browser_and_force_flags_not_found() {
+        // Ensures both optional flag branches are exercised in run_dir_login
+        // even when the binary is missing.
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_login(DirLoginArgs { no_browser: true, force: true }, "dir/test_login_flags");
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_login_returns_zero_when_binary_succeeds_but_cache_missing() {
+        // Use /usr/bin/true as the fake dirctl — it exits 0 immediately.
+        // The auth-token.json cache won't exist → ingestion warns but still returns 0.
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
+        let code = run_dir_login(
+            DirLoginArgs { no_browser: false, force: false },
+            "dir/test_login_success_warn",
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    // ── run_dir_pull ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_dir_pull_returns_exit_code_2_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_pull(
+            DirPullArgs {
+                reference: "test-ref".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_pull_returns_nonzero_on_process_failure() {
+        // /usr/bin/false exits with code 1 — exercises the !out.status.success() branch.
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/false");
+        let code = run_dir_pull(
+            DirPullArgs {
+                reference: "test-ref".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_ne!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_pull_success_path_computes_digest_and_returns_zero() {
+        // /usr/bin/true exits 0 with no stdout — exercises the full success branch:
+        // sha256_hex, record_cache_dir, digest print, stdout write.
+        // JSON parse of empty bytes fails silently (if let Ok skipped).
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
+        let code = run_dir_pull(
+            DirPullArgs {
+                reference: "agent:v1.0".to_string(),
+                server_addr: "test.server:443".to_string(),
+            },
+            Some("gho_fake_token"),
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    // ── run_dir_info ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_dir_info_returns_exit_code_2_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_info(
+            DirInfoArgs {
+                reference: "test/agent".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_info_returns_zero_when_binary_succeeds() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
+        let code = run_dir_info(
+            DirInfoArgs {
+                reference: "test/agent".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            Some("gho_token"),
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    // ── run_dir_search ────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_dir_search_returns_exit_code_2_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_search(
+            DirSearchArgs {
+                skill: vec!["nlp".to_string()],
+                limit: 5,
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_search_returns_zero_when_binary_succeeds() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
+        let code = run_dir_search(
+            DirSearchArgs {
+                skill: vec![],
+                limit: 10,
+                server_addr: "localhost:9999".to_string(),
+            },
+            Some("gho_token"),
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    // ── run_dir_verify ────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_dir_verify_returns_exit_code_2_when_dirctl_not_found() {
+        // Exercises all optional flag branches in run_dir_verify argument assembly.
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_verify(
+            DirVerifyArgs {
+                cid: "bafkreitest999".to_string(),
+                key: Some("/tmp/cosign.pub".to_string()),
+                oidc_issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+                oidc_subject: Some("alice@example.com".to_string()),
+                from_server: true,
+                ignore_tlog: true,
+                trusted_root_path: Some(PathBuf::from("/tmp/trusted-root.json")),
+                server_addr: "localhost:9999".to_string(),
+            },
+            Some("gho_token"),
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_dir_verify_returns_exit_code_2_minimal_args_not_found() {
+        // Exercises the None-arm branches for all optional fields.
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_verify(
+            DirVerifyArgs {
+                cid: "bafkrei_minimal".to_string(),
+                key: None,
+                oidc_issuer: None,
+                oidc_subject: None,
+                from_server: false,
+                ignore_tlog: false,
+                trusted_root_path: None,
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_verify_returns_zero_when_binary_succeeds() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
+        let code = run_dir_verify(
+            DirVerifyArgs {
+                cid: "bafkrei_success".to_string(),
+                key: None,
+                oidc_issuer: None,
+                oidc_subject: None,
+                from_server: false,
+                ignore_tlog: false,
+                trusted_root_path: None,
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    // ── run_dir_command dispatch ──────────────────────────────────────────────
+
+    #[test]
+    fn run_dir_command_dispatches_login_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_command(DirCli {
+            gh_token: None,
+            token_key: "dir/dispatch_login".to_string(),
+            command: DirCommand::Login(DirLoginArgs { no_browser: false, force: false }),
+        });
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_dir_command_dispatches_pull_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_command(DirCli {
+            gh_token: Some("gho_explicit".to_string()),
+            token_key: "dir/dispatch_pull".to_string(),
+            command: DirCommand::Pull(DirPullArgs {
+                reference: "test/agent:v1".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            }),
+        });
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_dir_command_dispatches_info_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_command(DirCli {
+            gh_token: None,
+            token_key: "dir/dispatch_info_no_key".to_string(),
+            command: DirCommand::Info(DirInfoArgs {
+                reference: "test/agent".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            }),
+        });
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_dir_command_dispatches_search_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        // Pre-populate keychain so the keychain_token fallback path is exercised.
+        super::super::test_store_put("dir/dispatch_search_key", b"gho_keychain_token");
+        let code = run_dir_command(DirCli {
+            gh_token: None,
+            token_key: "dir/dispatch_search_key".to_string(),
+            command: DirCommand::Search(DirSearchArgs {
+                skill: vec!["nlp".to_string()],
+                limit: 5,
+                server_addr: "localhost:9999".to_string(),
+            }),
+        });
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn run_dir_command_dispatches_verify_when_dirctl_not_found() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
+        let code = run_dir_command(DirCli {
+            gh_token: None,
+            token_key: "dir/dispatch_verify_nokey".to_string(),
+            command: DirCommand::Verify(DirVerifyArgs {
+                cid: "bafkreidispatch".to_string(),
+                key: None,
+                oidc_issuer: None,
+                oidc_subject: None,
+                from_server: false,
+                ignore_tlog: false,
+                trusted_root_path: None,
+                server_addr: "localhost:9999".to_string(),
+            }),
+        });
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    // ── generic Err (non-ENOENT) branches ────────────────────────────────────
+    // Use a non-executable temp file so cmd.status() / cmd.output() returns
+    // Err(e) with e.kind() == PermissionDenied, which falls through to the
+    // catch-all Err(err) arm in each run_dir_* function.
+
+    #[cfg(unix)]
+    fn make_non_executable_binary() -> (std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nonexec_bin");
+        std::fs::write(&path, b"").expect("write temp file");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        (path, dir)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_login_generic_err_returns_exit_code_2() {
+        let (path, _dir) = make_non_executable_binary();
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+        let code = run_dir_login(
+            DirLoginArgs { no_browser: false, force: false },
+            "dir/test_login_perm",
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_pull_generic_err_returns_exit_code_2() {
+        let (path, _dir) = make_non_executable_binary();
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+        let code = run_dir_pull(
+            DirPullArgs {
+                reference: "test-ref".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_info_generic_err_returns_exit_code_2() {
+        let (path, _dir) = make_non_executable_binary();
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+        let code = run_dir_info(
+            DirInfoArgs {
+                reference: "test/agent".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_search_generic_err_returns_exit_code_2() {
+        let (path, _dir) = make_non_executable_binary();
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+        let code = run_dir_search(
+            DirSearchArgs {
+                skill: vec![],
+                limit: 10,
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_verify_generic_err_returns_exit_code_2() {
+        let (path, _dir) = make_non_executable_binary();
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+        let code = run_dir_verify(
+            DirVerifyArgs {
+                cid: "bafkreiperm".to_string(),
+                key: None,
+                oidc_issuer: None,
+                oidc_subject: None,
+                from_server: false,
+                ignore_tlog: false,
+                trusted_root_path: None,
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    // ── run_dir_login ingestion warning path ──────────────────────────────────
+    // When dirctl exits 0 but the auth-token.json contains invalid JSON, or
+    // when ingest_dirctl_token fails, run_dir_login warns and still returns 0.
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_login_ingest_error_warns_and_returns_zero() {
+        // Write an invalid auth-token.json under a controlled XDG_CONFIG_HOME so
+        // dirctl_token_cache_path() resolves to our temp file and ingest fails.
+        let tmp_cfg = std::env::temp_dir().join("shadi_test_xdg_cfg_login_ingest");
+        let dirctl_dir = tmp_cfg.join("dirctl");
+        std::fs::create_dir_all(&dirctl_dir).expect("create dirctl dir");
+        std::fs::write(dirctl_dir.join("auth-token.json"), b"not-valid-json")
+            .expect("write bad json");
+
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
+        std::env::set_var("XDG_CONFIG_HOME", &tmp_cfg);
+        let code = run_dir_login(
+            DirLoginArgs { no_browser: false, force: false },
+            "dir/test_ingest_err",
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&tmp_cfg);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    // ── run_dir_pull success with JSON output (print_record_summary + cache) ──
+
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_pull_success_with_valid_json_prints_summary_and_caches() {
+        // Create a temp script that echoes a valid OASF JSON record.
+        let oasf_json = r#"{"name":"Test Agent","version":"1.0.0","description":"A test agent","skills":[],"domains":[],"locators":[]}"#;
+        let script_path = std::env::temp_dir().join("shadi_test_pull_json_script.sh");
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/sh\necho '{}'\n", oasf_json).as_bytes(),
+        ).expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 755");
+
+        // Use a fresh temp dir as HOME so record_cache_dir() always resolves to
+        // an empty directory — guaranteeing the cache-write branch (L280) is hit.
+        let fake_home = tempfile::tempdir().expect("tempdir");
+
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        let saved_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script_path);
+        let code = run_dir_pull(
+            DirPullArgs {
+                reference: "test-agent:v1.0.0".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            Some("gho_fake_token"),
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        match saved_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_file(&script_path);
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    /// Covers lines 203-204: the `None =>` arm of `dirctl_token_cache_path()`
+    /// inside `run_dir_login` — reached when HOME, USERPROFILE, and
+    /// XDG_CONFIG_HOME are all unset.
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_login_warns_and_returns_zero_when_cache_path_unavailable() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
+
+        // Stash and remove all env vars that dirctl_token_cache_path() consults.
+        let xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let home = std::env::var("HOME").ok();
+        let userprofile = std::env::var("USERPROFILE").ok();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+
+        let code = run_dir_login(
+            DirLoginArgs { no_browser: false, force: false },
+            "dir/test_no_cache_path",
+        );
+
+        // Restore env vars.
+        match xdg { Some(v) => std::env::set_var("XDG_CONFIG_HOME", v), None => {} }
+        match home { Some(v) => std::env::set_var("HOME", v), None => {} }
+        match userprofile { Some(v) => std::env::set_var("USERPROFILE", v), None => {} }
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    /// Covers line 194: `return ExitCode::from(status.code()...)` in `run_dir_login`
+    /// — reached when the dirctl binary runs but exits non-zero.
+    #[test]
+    fn run_dir_login_returns_nonzero_when_binary_exits_nonzero() {
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/false");
+        let code = run_dir_login(
+            DirLoginArgs { no_browser: false, force: false },
+            "dir/test_login_nonzero",
+        );
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert_ne!(code, ExitCode::from(0));
+    }
+
+    /// Covers lines 283-284: the implicit `else` branch of
+    /// `if std::fs::create_dir_all(&cache_dir).is_ok()` inside `run_dir_pull`.
+    /// We make HOME point to a regular file so `create_dir_all` fails with ENOTDIR.
+    #[test]
+    #[cfg(unix)]
+    fn run_dir_pull_skips_cache_when_dir_creation_fails() {
+        let oasf_json = r#"{"name":"CacheFail Agent","version":"0.1","description":"","skills":[],"domains":[],"locators":[]}"#;
+        let script_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = script_dir.path().join("pull_script.sh");
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/sh\necho '{}'\n", oasf_json).as_bytes(),
+        ).expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 755");
+
+        // Create a temp *file* (not a directory) and use it as HOME.
+        // record_cache_dir() returns Some("$HOME/.shadi/records"), and
+        // create_dir_all("a-file/.shadi/records") fails with ENOTDIR,
+        // so is_ok() == false → the cache block is skipped (covers L283-284).
+        let fake_home_file = tempfile::NamedTempFile::new().expect("named tempfile");
+
+        let _guard = dirctl_env_lock().lock().expect("lock");
+        let saved_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home_file.path());
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script_path);
+
+        let code = run_dir_pull(
+            DirPullArgs {
+                reference: "test/cachefail:v1.0".to_string(),
+                server_addr: "localhost:9999".to_string(),
+            },
+            None,
+        );
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        match saved_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(code, ExitCode::from(0));
+    }
 }
