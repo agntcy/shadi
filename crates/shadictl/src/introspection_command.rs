@@ -47,6 +47,7 @@ fn build_policy_cli(
         git_snapshot_untracked: false,
         watch_policy: false,
         session_name: None,
+        record_ref: None,
         subcommand: None,
         run_command: Vec::new(),
     }

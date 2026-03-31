@@ -70,6 +70,15 @@ pub(crate) struct Cli {
     #[arg(long = "name", value_name = "NAME")]
     pub(crate) session_name: Option<String>,
 
+    /// OASF record reference for session provenance tracking.
+    /// When set, the record reference is printed to stderr on session start
+    /// to establish a verifiable link between this sandbox session and the
+    /// agent's published record in the AGNTCY Agent Directory.
+    /// Format: CID, name, name:version, or name:version@cid.
+    /// Example: `cisco.com/agent:v1.0.0@bafyreib...`
+    #[arg(long = "record", value_name = "REF")]
+    pub(crate) record_ref: Option<String>,
+
     #[command(subcommand)]
     pub(crate) subcommand: Option<Commands>,
 
@@ -139,6 +148,157 @@ pub(crate) enum Commands {
     /// Interactive terminal for managing SHADI sandbox sessions
     #[command(name = "shell")]
     Shell(ShellArgs),
+    /// Interact with the AGNTCY Agent Directory via dirctl
+    #[command(name = "dir")]
+    Dir(DirCli),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "dir", about = "Interact with the AGNTCY Agent Directory (requires dirctl)")]
+pub(crate) struct DirCli {
+    /// GitHub token (PAT or OAuth) for authenticating to the AGNTCY Agent Directory.
+    /// For CI: pass a PAT or the GitHub Actions token.
+    /// For interactive dev use, run `shadictl dir login` once (token cached by dirctl).
+    /// Using the SHADI secret store (via --token-key) is preferred over passing this flag
+    /// directly, because it keeps the token out of shell history and process listings.
+    /// Also read from $DIRECTORY_CLIENT_GITHUB_TOKEN (the native dirctl env var).
+    #[arg(long = "gh-token", value_name = "TOKEN", env = "DIRECTORY_CLIENT_GITHUB_TOKEN")]
+    pub(crate) gh_token: Option<String>,
+
+    /// SHADI secret store key that holds the directory auth token.
+    /// Populate with: `shadictl dir login` or `shadictl put-secret --key dir/gh_token`
+    /// Ignored when --gh-token / $DIRECTORY_CLIENT_GITHUB_TOKEN is set.
+    #[arg(long = "token-key", value_name = "KEY", default_value = "dir/gh_token")]
+    pub(crate) token_key: String,
+
+    #[command(subcommand)]
+    pub(crate) command: DirCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum DirCommand {
+    /// Authenticate with the Agent Directory and cache the token in the SHADI
+    /// secret store.  Run once before using pull / info / search.
+    #[command(name = "login")]
+    Login(DirLoginArgs),
+    /// Fetch an OASF agent record from the directory and cache it locally
+    #[command(name = "pull")]
+    Pull(DirPullArgs),
+    /// Display metadata about an OASF agent record
+    #[command(name = "info")]
+    Info(DirInfoArgs),
+    /// Search the directory for agent records by skill
+    #[command(name = "search")]
+    Search(DirSearchArgs),
+    /// Verify the Sigstore signature of a record already in the directory
+    #[command(name = "verify")]
+    Verify(DirVerifyArgs),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "login",
+    about = "Authenticate with the Agent Directory via GitHub OAuth and ingest the token into the SHADI secret store",
+    long_about = "Runs `dirctl auth login` (GitHub OAuth browser flow), then reads the resulting \
+        access token from dirctl's local cache and writes it into the SHADI secret store at \
+        --token-key (default: dir/gh_token). Subsequent `shadictl dir` commands pick it up \
+        automatically.")]
+pub(crate) struct DirLoginArgs {
+    /// Show the authorization URL for manual opening instead of launching a browser.
+    /// Use this in SSH/headless environments.
+    #[arg(long = "no-browser", action = ArgAction::SetTrue)]
+    pub(crate) no_browser: bool,
+
+    /// Force re-authentication even if a valid cached token already exists.
+    #[arg(long = "force", action = ArgAction::SetTrue)]
+    pub(crate) force: bool,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "pull", about = "Fetch an OASF record and cache it in ~/.shadi/records/")]
+pub(crate) struct DirPullArgs {
+    /// Record reference: CID, name, name:version, or name:version@cid
+    pub(crate) reference: String,
+    /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
+    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+          default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) server_addr: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "verify",
+    about = "Verify the Sigstore signature of a record (delegates to dirctl verify)",
+    long_about = "Calls `dirctl verify <CID>` to verify the Sigstore/cosign signature of an \n\
+        OASF record already present in the directory.  Verification is performed locally \n\
+        by default (sigstore TUF root + Rekor transparency log).  Use --oidc-issuer / \n\
+        --oidc-subject to pin the signing identity, or --key to verify against a specific \n\
+        public key.  Use --from-server to rely on the server's cached result instead.")]
+pub(crate) struct DirVerifyArgs {
+    /// Record CID to verify (e.g. bafkrei...).
+    /// Obtain this from `dirctl pull <ref> --output json` or from the `dirctl search` output.
+    pub(crate) cid: String,
+
+    /// Public key to verify against (PEM file path, HTTPS URL, or KMS URI).
+    /// When omitted, any valid Sigstore OIDC-based signature is accepted.
+    #[arg(long = "key", value_name = "KEY")]
+    pub(crate) key: Option<String>,
+
+    /// OIDC issuer URL the signing identity must have been issued by.
+    /// Accepts a literal URL or a regexp (cosign-compatible).
+    /// Example: `https://token.actions.githubusercontent.com`
+    #[arg(long = "oidc-issuer", value_name = "URL")]
+    pub(crate) oidc_issuer: Option<String>,
+
+    /// OIDC subject (identity) the signature must have been created with.
+    /// Accepts a literal email/identity or a regexp.
+    /// Example: `alice@example.com`
+    #[arg(long = "oidc-subject", value_name = "IDENTITY")]
+    pub(crate) oidc_subject: Option<String>,
+
+    /// Use the server's cached verification result instead of performing local
+    /// Sigstore verification.  Faster but trusts the directory server's judgement.
+    #[arg(long = "from-server", action = ArgAction::SetTrue)]
+    pub(crate) from_server: bool,
+
+    /// Skip Rekor transparency log verification (useful in air-gapped environments).
+    #[arg(long = "ignore-tlog", action = ArgAction::SetTrue)]
+    pub(crate) ignore_tlog: bool,
+
+    /// Path to a Sigstore TrustedRoot JSON file for fully offline verification.
+    #[arg(long = "trusted-root-path", value_name = "FILE")]
+    pub(crate) trusted_root_path: Option<PathBuf>,
+
+    /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS).
+    /// Needed to fetch the signature manifest from the directory.
+    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+          default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) server_addr: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "info", about = "Show metadata for an OASF record")]
+pub(crate) struct DirInfoArgs {
+    /// Record reference: CID, name, name:version, or name:version@cid
+    pub(crate) reference: String,
+    /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
+    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+          default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) server_addr: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "search", about = "Search the directory for agent records by skill")]
+pub(crate) struct DirSearchArgs {
+    /// OASF skill name to search for (repeatable, e.g. natural_language_processing)
+    #[arg(long = "skill", value_name = "SKILL", action = ArgAction::Append)]
+    pub(crate) skill: Vec<String>,
+    /// Maximum number of results to return
+    #[arg(long = "limit", value_name = "N", default_value = "10")]
+    pub(crate) limit: usize,
+    /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
+    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+          default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) server_addr: String,
 }
 
 #[derive(Parser, Debug)]

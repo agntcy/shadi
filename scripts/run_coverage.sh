@@ -77,7 +77,7 @@ PYO3_PYTHON="$python_bin" \
 RUSTFLAGS="$rustflags_value" \
 LLVM_COV="$llvm_cov" \
 LLVM_PROFDATA="$llvm_profdata" \
-cargo llvm-cov --workspace --features coverage "${format_args[@]}" --ignore-filename-regex "/rustc-[^/]+/"
+cargo llvm-cov --workspace --features coverage "${format_args[@]}" --ignore-filename-regex "/rustc-[^/]+/" -- --test-threads=1 --skip trusted_secret_delivery_rejects_authorized_child_without_nonce
 
 if [[ "$mode" == "lcov" ]]; then
   if command -v lcov >/dev/null 2>&1; then

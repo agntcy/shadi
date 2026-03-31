@@ -231,6 +231,9 @@ pub(crate) fn run_sandboxed_command(
                 } else {
                     eprintln!("control socket: {}", handle.path().display());
                 }
+                if let Some(record_ref) = cli.record_ref.as_deref() {
+                    eprintln!("record: {}", record_ref);
+                }
                 control_live = Some(live);
                 restart_requested = Some(restart_flag);
                 terminate_requested = Some(terminate_flag);
@@ -1170,6 +1173,7 @@ mod tests {
             git_snapshot_untracked: false,
             watch_policy: false,
             session_name: None,
+            record_ref: None,
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }
@@ -1705,4 +1709,50 @@ mod tests {
         let err = session.finish(Some(0), None).unwrap_err();
         assert!(err.contains("failed to write"));
     }
+
+    /// Exercises the three new lines added by the dir-integration PR:
+    /// `if let Some(record_ref) = cli.record_ref.as_deref() { eprintln!(...) }`
+    /// inside the `watch_policy` → control-socket success path.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn run_sandboxed_command_prints_record_ref_with_watch_policy() {
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+
+        let mut cli = build_cli();
+        cli.watch_policy = true;
+        cli.record_ref = Some("test/agent:v1.0@bafkreitest".to_string());
+        cli.run_command = vec!["/usr/bin/true".to_string()];
+        cli.allow.push(std::path::PathBuf::from("/usr/bin"));
+        // Unique session name to avoid socket-path collision across parallel tests.
+        cli.session_name = Some(format!("shadi-test-recref-{}", std::process::id()));
+
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &cwd);
+
+        assert_eq!(exit, ExitCode::from(0));
+    }
+
+    /// Exercises the `else` branch of `if let Some(name) = cli.session_name` (line 232),
+    /// which prints the control socket path when no session name is provided.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn run_sandboxed_command_prints_control_socket_path_without_session_name() {
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+
+        let mut cli = build_cli();
+        cli.watch_policy = true;
+        // session_name left as None → triggers the else branch (prints socket path)
+        cli.run_command = vec!["/usr/bin/true".to_string()];
+        cli.allow.push(std::path::PathBuf::from("/usr/bin"));
+
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &cwd);
+
+        assert_eq!(exit, ExitCode::from(0));
+    }
 }
+
