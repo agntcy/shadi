@@ -102,10 +102,15 @@ fn mock_accept_loop(listener: &UnixListener, state: &Arc<Mutex<MockState>>, sock
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
-                mock_handle_stream(stream, state);
+                // Spawn a thread per connection so the listener is never
+                // blocked while handling a client; this prevents the race
+                // where a short-lived probe connect holds the accept loop
+                // while the real shell attach arrives.
+                let state_clone = Arc::clone(state);
+                thread::spawn(move || mock_handle_stream(stream, &state_clone));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(5));
                 if !sock_path.exists() {
                     break;
                 }
