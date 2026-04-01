@@ -611,11 +611,10 @@ fn given_attached_session_when_detach_then_status_shows_not_attached() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mock = MockSandbox::start(dir.path());
 
-    let input = format!(
-        "/attach {}\n/detach\n/status\n/exit\n",
-        mock.socket_path()
+    let out = run_shell_with_args(
+        "/detach\n/status\n/exit\n",
+        &["--socket", mock.socket_path()],
     );
-    let out = run_shell(&input);
 
     out.assert_success()
         .stdout_contains("detached")
