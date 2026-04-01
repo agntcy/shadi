@@ -135,7 +135,8 @@ The system can be read as four presentation layers:
 - **Verified sessions**: Messages are only sent/received after DID/VC checks.
 
 #### Key modules
-- `crates/agent_transport_slim/src/lib.rs`: transport adapter and verifier gating.
+- `crates/agent_transport_slim/src/lib.rs`: transport adapter, verifier gating, and native SLIM session bootstrap.
+- `crates/agent_transport_slim/src/bin/slim-stdio-bridge.rs`: stdio-to-SLIM publishing bridge for SHADI-managed sessions.
 
 ### 5) Secret delivery and policy framework
 

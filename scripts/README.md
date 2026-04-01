@@ -8,6 +8,25 @@ Start the SLIM message bus:
 ./scripts/launch_slim.sh
 ```
 
+Start a local native SLIM shell demo on macOS:
+
+```bash
+./scripts/demo_slim_shell.sh
+```
+
+Print the manual demo commands without opening Terminal windows:
+
+```bash
+./scripts/demo_slim_shell.sh --print-only
+```
+
+Run the ignored live smoke test that exercises create/invite/join against local
+mTLS assets and secret access:
+
+```bash
+./scripts/demo_slim_shell.sh --smoke-test
+```
+
 On Windows PowerShell:
 
 ```powershell

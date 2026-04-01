@@ -28,7 +28,7 @@ SHADI is designed for environments where agents are long-lived, hold real creden
 - `crates/agent_secrets`: keychain-backed secret storage + verification-gated access.
 - `crates/shadi_memory`: SQLCipher memory library (accessed via `shadictl memory`).
 - `crates/shadi_py`: Python extension module `shadi`.
-- `crates/agent_transport_slim` + `crates/slim_mas`: secure transport and moderation helpers (with `shadictl slim-mas`).
+- `crates/agent_transport_slim` + `crates/slim_mas`: secure transport, stdio bridge, and moderation helpers (with `shadictl slim-mas`).
 - `docs`: architecture, security, CLI, and integration docs.
 - `scripts`: local launch helpers for SLIM.
 - `examples/shell_demo`: interactive shell demo walkthrough.
@@ -89,6 +89,18 @@ just lint
 ```
 
 Use `just --list` or `just --groups` to browse tasks by area.
+
+## SLIM stdio bridge
+
+When SHADI owns node startup, channel creation, and participant invites, a sandboxed workload can still publish into a real SLIM session by piping stdout into the Rust bridge:
+
+```bash
+shadictl --policy ./sandbox.json -- /path/to/agent \
+	| cargo run -p agent_transport_slim --bin slim-stdio-bridge -- \
+			--channel agntcy/shadi/secops-room
+```
+
+Group mode waits for SHADI to invite the bridge into the named channel session; point-to-point mode is also available with `--destination organization/namespace/application`. The bridge reads UTF-8 lines from stdin and publishes each line as one SLIM message.
 
 ## Core CLI workflows
 
