@@ -1,18 +1,25 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(not(windows))]
 use std::collections::HashMap;
 use std::fs;
+#[cfg(not(windows))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(windows))]
 use std::sync::mpsc;
+#[cfg(not(windows))]
 use std::thread;
+#[cfg(not(windows))]
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(not(windows))]
 const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
 
+#[cfg(not(windows))]
 #[derive(Clone)]
 struct TlsMaterial {
     cert: PathBuf,
@@ -53,6 +60,7 @@ fn bridge_bin() -> &'static str {
     env!("CARGO_BIN_EXE_slim-stdio-bridge")
 }
 
+#[cfg(not(windows))]
 fn generate_test_tls_dir(base_dir: &Path) -> PathBuf {
     let tls_dir = base_dir.join("shadi-slim-mtls");
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -75,6 +83,7 @@ fn generate_test_tls_dir(base_dir: &Path) -> PathBuf {
     tls_dir
 }
 
+#[cfg(not(windows))]
 fn client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
     TlsMaterial {
         cert: base_dir.join(format!("client-{agent_id}.crt")),
@@ -83,6 +92,7 @@ fn client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
     }
 }
 
+#[cfg(not(windows))]
 fn server_tls_material(base_dir: &Path) -> TlsMaterial {
     TlsMaterial {
         cert: base_dir.join("server.crt"),
@@ -91,6 +101,7 @@ fn server_tls_material(base_dir: &Path) -> TlsMaterial {
     }
 }
 
+#[cfg(not(windows))]
 fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::ClientConfig {
     let mut config = slim_bindings::ClientConfig::default();
     config.endpoint = format!("https://{endpoint}");
@@ -110,6 +121,7 @@ fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::Clie
     config
 }
 
+#[cfg(not(windows))]
 fn build_server_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::ServerConfig {
     let mut config = slim_bindings::ServerConfig::default();
     config.endpoint = endpoint.to_string();
@@ -129,6 +141,7 @@ fn build_server_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::Serv
     config
 }
 
+#[cfg(not(windows))]
 fn reserve_test_endpoint() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let endpoint = listener.local_addr().expect("local addr").to_string();
@@ -136,6 +149,7 @@ fn reserve_test_endpoint() -> String {
     endpoint
 }
 
+#[cfg(not(windows))]
 fn format_slim_error(err: slim_bindings::SlimError) -> String {
     err.to_string()
 }
@@ -185,6 +199,7 @@ fn given_missing_runtime_material_when_bridge_bin_runs_then_runtime_error_is_rep
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn given_generated_assets_when_bridge_bin_runs_then_stdio_bridge_completes_successfully() {
     let dir = TestDir::new("bridge-bin-success");
