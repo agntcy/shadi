@@ -1767,6 +1767,18 @@ mod tests {
     }
 
     #[test]
+    fn given_session_with_slim_runtime_state_when_status_then_continues() {
+        let mut shell = session();
+        shell.slim.set_test_runtime_state(
+            Some(17),
+            Some("agntcy/shadi/secops-room".to_string()),
+            true,
+        );
+
+        assert_continues(&mut shell, "/slim status");
+    }
+
+    #[test]
     fn given_session_when_slim_create_then_continues() {
         assert_continues(&mut session(), "/slim create agntcy/shadi/secops-room");
     }
@@ -1812,6 +1824,11 @@ mod tests {
     #[test]
     fn given_session_when_slim_join_with_invalid_timeout_then_continues() {
         assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout nope");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_zero_timeout_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout 0");
     }
 
     #[test]

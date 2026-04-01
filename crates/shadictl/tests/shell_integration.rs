@@ -650,7 +650,7 @@ fn given_attached_session_when_kill_then_termination_is_requested() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mock = MockSandbox::start(dir.path());
 
-    let out = run_shell_with_args("/kill\n/exit\n", &["--socket", mock.socket_path()]);
+    let out = run_shell_with_args("/kill\n", &["--socket", mock.socket_path()]);
 
     out.assert_success()
         .stdout_contains("termination requested");

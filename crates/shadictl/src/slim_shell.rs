@@ -59,6 +59,18 @@ impl SlimShellState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_runtime_state(
+        &mut self,
+        connection_id: Option<u64>,
+        active_channel: Option<String>,
+        node_started: bool,
+    ) {
+        self.connection_id = connection_id;
+        self.active_channel = active_channel;
+        self.node_started = node_started;
+    }
+
     pub(crate) fn status(&self) -> Result<SlimStatus, String> {
         let active_session_id = self
             .active_session
