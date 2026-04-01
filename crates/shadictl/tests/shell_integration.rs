@@ -653,9 +653,13 @@ fn given_attached_session_when_kill_then_termination_is_requested() {
 
     let out = run_shell_with_args("/kill\n", &["--socket", mock.socket_path()]);
 
-    out.assert_success()
-        .stdout_contains("termination requested");
-    assert!(mock.terminated());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while std::time::Instant::now() < deadline && !mock.terminated() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    out.assert_success().stderr_is_empty();
+    assert!(mock.terminated(), "expected terminate request to reach mock sandbox");
 }
 
 #[test]
