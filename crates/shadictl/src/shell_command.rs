@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -1312,29 +1313,23 @@ enum LoopAction {
     Exit,
 }
 
-pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
-    let config = Config::builder()
-        .history_ignore_space(true)
-        .completion_type(CompletionType::List)
-        .edit_mode(EditMode::Emacs)
-        .build();
-
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let helper = ShellHelper::new(use_color);
-    let mut rl = match Editor::with_config(config) {
-        Ok(rl) => rl,
-        Err(err) => {
-            eprintln!("failed to initialize interactive shell: {}", err);
-            return ExitCode::FAILURE;
+fn handle_shell_line(session: &mut ShellSession, line: &str) -> Option<LoopAction> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        if session.pending_patch.is_some() {
+            println!("patch cancelled");
+            session.pending_patch = None;
         }
-    };
-    rl.set_helper(Some(helper));
-
-    // Load history from a well-known path.
-    let history_path = dirs_history_path();
-    if let Some(ref path) = history_path {
-        let _ = rl.load_history(path);
+        return None;
     }
+
+    Some(session.handle_command(trimmed))
+}
+
+pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let stdin = io::stdin();
+    let stdin_is_terminal = std::io::IsTerminal::is_terminal(&stdin);
 
     let initial_socket = args.socket.clone().or_else(|| {
         args.attach
@@ -1353,6 +1348,48 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         }
     }
     println!();
+
+    if !stdin_is_terminal {
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    eprintln!("error: {}", err);
+                    break;
+                }
+            };
+
+            match handle_shell_line(&mut session, &line) {
+                Some(LoopAction::Continue) | None => {}
+                Some(LoopAction::Exit) => break,
+            }
+        }
+
+        session.slim.shutdown();
+        return ExitCode::SUCCESS;
+    }
+
+    let config = Config::builder()
+        .history_ignore_space(true)
+        .completion_type(CompletionType::List)
+        .edit_mode(EditMode::Emacs)
+        .build();
+
+    let helper = ShellHelper::new(use_color);
+    let mut rl = match Editor::with_config(config) {
+        Ok(rl) => rl,
+        Err(err) => {
+            eprintln!("failed to initialize interactive shell: {}", err);
+            return ExitCode::FAILURE;
+        }
+    };
+    rl.set_helper(Some(helper));
+
+    // Load history from a well-known path.
+    let history_path = dirs_history_path();
+    if let Some(ref path) = history_path {
+        let _ = rl.load_history(path);
+    }
 
     loop {
         let prompt = if session.pending_patch.is_some() {
@@ -1378,19 +1415,12 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         match rl.readline(&prompt) {
             Ok(line) => {
                 let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    if session.pending_patch.is_some() {
-                        println!("patch cancelled");
-                        session.pending_patch = None;
-                    }
-                    continue;
-                }
-                if session.pending_patch.is_none() {
+                if !trimmed.is_empty() && session.pending_patch.is_none() {
                     let _ = rl.add_history_entry(trimmed);
                 }
-                match session.handle_command(trimmed) {
-                    LoopAction::Continue => {}
-                    LoopAction::Exit => break,
+                match handle_shell_line(&mut session, &line) {
+                    Some(LoopAction::Continue) | None => {}
+                    Some(LoopAction::Exit) => break,
                 }
             }
             Err(ReadlineError::Interrupted) => {
