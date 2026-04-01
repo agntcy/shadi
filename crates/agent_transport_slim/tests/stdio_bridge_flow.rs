@@ -1,6 +1,8 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+#![cfg(not(windows))]
+
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Cursor, Write};
