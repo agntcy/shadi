@@ -1596,6 +1596,50 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_named_command_dispatches_slim_variant() {
+        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let dir = temp_dir();
+        let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
+        let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+
+        std::env::set_var("SHADI_TMP_DIR", dir.path());
+        std::env::set_var("SLIM_ENDPOINT", "127.0.0.1:65535");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        let code = run_named_command(Commands::Slim(SlimCli {
+            command: SlimCommand::StartNode,
+        }));
+
+        match previous_tmp_dir {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        match previous_endpoint {
+            Some(value) => std::env::set_var("SLIM_ENDPOINT", value),
+            None => std::env::remove_var("SLIM_ENDPOINT"),
+        }
+        match previous_cert {
+            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
+            None => std::env::remove_var("SLIM_TLS_CERT"),
+        }
+        match previous_key {
+            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
+            None => std::env::remove_var("SLIM_TLS_KEY"),
+        }
+        match previous_ca {
+            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
+            None => std::env::remove_var("SLIM_TLS_CA"),
+        }
+
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
     fn run_named_command_dispatches_config_variant() {
         let code = run_named_command(Commands::Config(ConfigCli {
             command: ConfigCommand::Show(ConfigShowArgs {

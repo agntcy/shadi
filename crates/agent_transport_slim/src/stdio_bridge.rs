@@ -310,9 +310,25 @@ fn io_error(err: io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{self, BufRead, Cursor, Read};
 
     use super::*;
+
+    struct ReadErrorReader;
+
+    impl Read for ReadErrorReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("read failure"))
+        }
+    }
+
+    impl BufRead for ReadErrorReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            Err(io::Error::other("read failure"))
+        }
+
+        fn consume(&mut self, _amt: usize) {}
+    }
 
     #[test]
     fn given_channel_args_when_parsed_then_group_mode_is_selected() {
@@ -373,6 +389,88 @@ mod tests {
     }
 
     #[test]
+    fn given_timeout_with_destination_when_parsed_then_it_is_rejected() {
+        let args = vec![
+            "--destination".to_string(),
+            "agntcy/shadi/avatar".to_string(),
+            "--timeout".to_string(),
+            "30".to_string(),
+        ];
+
+        let err = parse_bridge_args(&args).expect_err("timeout conflict");
+        assert!(err.contains("only valid with --channel"));
+    }
+
+    #[test]
+    fn given_missing_target_when_parsed_then_it_is_rejected() {
+        let err = parse_bridge_args(&[]).expect_err("missing target");
+
+        assert!(err.contains("required"));
+    }
+
+    #[test]
+    fn given_unknown_argument_when_parsed_then_it_is_rejected() {
+        let args = vec!["--bogus".to_string()];
+
+        let err = parse_bridge_args(&args).expect_err("unknown arg");
+        assert!(err.contains("unknown argument"));
+    }
+
+    #[test]
+    fn given_missing_channel_value_when_parsed_then_it_is_rejected() {
+        let args = vec!["--channel".to_string()];
+
+        let err = parse_bridge_args(&args).expect_err("missing channel value");
+        assert!(err.contains("requires a value"));
+    }
+
+    #[test]
+    fn given_missing_timeout_value_when_parsed_then_it_is_rejected() {
+        let args = vec![
+            "--channel".to_string(),
+            "agntcy/shadi/secops-room".to_string(),
+            "--timeout".to_string(),
+        ];
+
+        let err = parse_bridge_args(&args).expect_err("missing timeout value");
+        assert!(err.contains("requires a value"));
+    }
+
+    #[test]
+    fn given_invalid_timeout_value_when_parsed_then_it_is_rejected() {
+        let args = vec![
+            "--channel".to_string(),
+            "agntcy/shadi/secops-room".to_string(),
+            "--timeout".to_string(),
+            "abc".to_string(),
+        ];
+
+        let err = parse_bridge_args(&args).expect_err("invalid timeout");
+        assert!(err.contains("invalid timeout value"));
+    }
+
+    #[test]
+    fn given_destination_args_with_options_when_parsed_then_payload_and_empty_flags_are_kept() {
+        let args = vec![
+            "--destination".to_string(),
+            "agntcy/shadi/avatar".to_string(),
+            "--payload-type".to_string(),
+            "text/plain".to_string(),
+            "--allow-empty".to_string(),
+        ];
+
+        let parsed = parse_bridge_args(&args).expect("parse args");
+        match parsed.bootstrap {
+            NativeSlimBootstrap::PointToPoint { destination } => {
+                assert_eq!(destination, "agntcy/shadi/avatar");
+            }
+            other => panic!("unexpected bootstrap: {:?}", other),
+        }
+        assert_eq!(parsed.payload_type.as_deref(), Some("text/plain"));
+        assert!(parsed.allow_empty);
+    }
+
+    #[test]
     fn given_reader_with_blank_lines_when_pumping_then_empty_lines_are_skipped_by_default() {
         let reader = Cursor::new("alpha\n\n beta\n");
         let mut published = Vec::new();
@@ -403,11 +501,58 @@ mod tests {
     }
 
     #[test]
+    fn given_publish_error_when_pumping_reader_then_it_is_returned() {
+        let reader = Cursor::new("alpha\n");
+
+        let err = pump_reader(reader, false, |_| Err("publish failure".to_string()))
+            .expect_err("publish error");
+
+        assert_eq!(err, "publish failure");
+    }
+
+    #[test]
+    fn given_reader_error_when_pumping_reader_then_it_is_returned() {
+        let err = pump_reader(ReadErrorReader, false, |_| Ok(())).expect_err("read error");
+
+        assert_eq!(err, "read failure");
+    }
+
+    #[test]
     fn given_payload_without_newline_when_written_then_bridge_adds_delimiter() {
         let mut output = Vec::new();
 
         write_message_line(&mut output, b"reply").expect("write payload");
 
         assert_eq!(output, b"reply\n");
+    }
+
+    #[test]
+    fn given_payload_with_newline_when_written_then_bridge_preserves_it() {
+        let mut output = Vec::new();
+
+        write_message_line(&mut output, b"reply\n").expect("write payload");
+
+        assert_eq!(output, b"reply\n");
+    }
+
+    #[test]
+    fn given_worker_error_when_joining_then_it_is_returned() {
+        let handle = thread::spawn(|| Err("worker failure".to_string()));
+
+        let err = join_bridge_worker(handle, "publish").expect_err("worker error");
+
+        assert_eq!(err, "worker failure");
+    }
+
+    #[test]
+    fn given_panicking_worker_when_joining_then_panicked_error_is_reported() {
+        let handle = thread::spawn(|| -> Result<usize, String> {
+            panic!("boom");
+        });
+
+        let err = join_bridge_worker(handle, "receive").expect_err("panic error");
+
+        assert!(err.contains("panicked"));
+        assert!(err.contains("receive"));
     }
 }

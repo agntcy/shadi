@@ -266,6 +266,7 @@ mod tests {
     fn sandboxed_child_exposes_piped_stdio_handles() {
         let child = Command::new("/bin/cat")
             .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn");
@@ -273,6 +274,7 @@ mod tests {
 
         assert!(wrapped.take_stdin().is_some());
         assert!(wrapped.take_stdout().is_some());
+        assert!(wrapped.take_stderr().is_some());
 
         wrapped.kill().expect("kill");
         let _ = wrapped.wait().expect("wait");

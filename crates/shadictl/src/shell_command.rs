@@ -1761,6 +1761,74 @@ mod tests {
         assert_continues(&mut session(), "/slim start");
     }
 
+    #[test]
+    fn given_session_when_slim_start_node_then_continues() {
+        assert_continues(&mut session(), "/slim start node");
+    }
+
+    #[test]
+    fn given_session_when_slim_create_then_continues() {
+        assert_continues(&mut session(), "/slim create agntcy/shadi/secops-room");
+    }
+
+    #[test]
+    fn given_session_when_slim_create_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim create");
+    }
+
+    #[test]
+    fn given_session_when_slim_create_with_extra_args_then_continues() {
+        assert_continues(
+            &mut session(),
+            "/slim create agntcy/shadi/secops-room extra",
+        );
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_then_continues() {
+        assert_continues(&mut session(), "/slim invite agntcy/shadi/avatar");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim invite");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_with_extra_args_then_continues() {
+        assert_continues(&mut session(), "/slim invite agntcy/shadi/avatar extra");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout 5");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim join");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_invalid_timeout_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout nope");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_timeout_but_without_channel_then_continues() {
+        assert_continues(&mut session(), "/slim join --timeout 5");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --bogus");
+    }
+
+    #[test]
+    fn given_unknown_subcommand_when_slim_then_continues() {
+        assert_continues(&mut session(), "/slim bogus");
+    }
+
     // ── tab completion ───────────────────────────────────────
 
     #[test]

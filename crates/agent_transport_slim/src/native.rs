@@ -409,7 +409,161 @@ fn format_slim_error(err: slim_bindings::SlimError) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
+    use std::fs;
+    use std::net::TcpListener;
+    #[cfg(not(windows))]
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
+
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "shadi-agent-transport-slim-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_test_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dir");
+        }
+        fs::write(path, b"test").expect("write test file");
+    }
+
+    #[cfg(not(windows))]
+    fn generate_test_tls_dir(base_dir: &Path) -> PathBuf {
+        let tls_dir = base_dir.join("shadi-slim-mtls");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tools")
+            .join("generate_slim_mtls_certs.sh");
+        let output = Command::new("bash")
+            .arg(&script)
+            .arg(&tls_dir)
+            .output()
+            .expect("run SLIM cert generator");
+
+        assert!(
+            output.status.success(),
+            "failed to generate SLIM test certs: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        tls_dir
+    }
+
+    #[cfg(not(windows))]
+    fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
+        let (cert, key) = client_identity_candidates(base_dir, Some(agent_id))
+            .into_iter()
+            .find(|(cert, key)| cert.is_file() && key.is_file())
+            .unwrap_or_else(|| panic!("missing client TLS material for {}", agent_id));
+
+        TlsMaterial {
+            cert,
+            key,
+            ca: base_dir.join("ca.crt"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn test_server_tls_material(base_dir: &Path) -> TlsMaterial {
+        TlsMaterial {
+            cert: base_dir.join("server.crt"),
+            key: base_dir.join("server.key"),
+            ca: base_dir.join("ca.crt"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn build_test_server_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::ServerConfig {
+        let mut config = slim_bindings::ServerConfig::default();
+        config.endpoint = endpoint.to_string();
+        config.tls = slim_bindings::TlsServerConfig {
+            insecure: false,
+            source: TlsSource::File {
+                cert: tls.cert.display().to_string(),
+                key: tls.key.display().to_string(),
+            },
+            client_ca: CaSource::File {
+                path: tls.ca.display().to_string(),
+            },
+            include_system_ca_certs_pool: Some(true),
+            tls_version: Some("tls1.3".to_string()),
+            reload_client_ca_file: Some(false),
+        };
+        config
+    }
+
+    #[cfg(not(windows))]
+    fn reserve_test_endpoint() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let endpoint = listener.local_addr().expect("local addr").to_string();
+        drop(listener);
+        endpoint
+    }
 
     #[test]
     fn given_custom_local_name_when_resolving_then_it_is_used_verbatim() {
@@ -476,6 +630,14 @@ mod tests {
     }
 
     #[test]
+    fn given_empty_custom_local_name_when_resolving_then_it_is_rejected() {
+        let err = resolve_local_name_value(Some("   "), Some("avatar"))
+            .expect_err("empty local name");
+
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
     fn given_group_bootstrap_when_describing_then_it_reports_group_mode() {
         let bootstrap = NativeSlimBootstrap::GroupJoin {
             channel: "agntcy/shadi/secops-room".to_string(),
@@ -489,5 +651,321 @@ mod tests {
             }
             other => panic!("unexpected bootstrap: {:?}", other),
         }
+    }
+
+    #[test]
+    fn given_point_to_point_bootstrap_when_describing_then_it_reports_point_to_point_mode() {
+        let bootstrap = NativeSlimBootstrap::PointToPoint {
+            destination: "agntcy/shadi/avatar".to_string(),
+        };
+
+        assert_eq!(bootstrap.description(), "point-to-point");
+    }
+
+    #[test]
+    fn given_client_service_name_when_generated_then_it_uses_expected_prefix() {
+        let service_name = client_service_name();
+
+        assert!(service_name.starts_with("shadi-slim-bridge-"));
+    }
+
+    #[test]
+    fn given_point_to_point_session_config_when_built_then_defaults_are_expected() {
+        let config = point_to_point_session_config();
+
+        assert_eq!(config.session_type, SessionType::PointToPoint);
+        assert!(config.enable_mls);
+        assert_eq!(config.max_retries, Some(5));
+        assert_eq!(config.interval, Some(Duration::from_secs(5)));
+        assert!(config.metadata.is_empty());
+    }
+
+    #[test]
+    fn given_endpoint_and_tls_when_building_client_config_then_paths_are_embedded() {
+        let tls = TlsMaterial {
+            cert: PathBuf::from("/tmp/client.crt"),
+            key: PathBuf::from("/tmp/client.key"),
+            ca: PathBuf::from("/tmp/ca.crt"),
+        };
+
+        let config = build_client_config_for_endpoint("127.0.0.1:47357", &tls);
+
+        assert_eq!(config.endpoint, "https://127.0.0.1:47357");
+        match config.tls.source {
+            TlsSource::File { cert, key } => {
+                assert_eq!(cert, "/tmp/client.crt");
+                assert_eq!(key, "/tmp/client.key");
+            }
+            other => panic!("unexpected TLS source: {:?}", other),
+        }
+        match config.tls.ca_source {
+            CaSource::File { path } => assert_eq!(path, "/tmp/ca.crt"),
+            other => panic!("unexpected CA source: {:?}", other),
+        }
+        assert!(config.tls.include_system_ca_certs_pool);
+        assert_eq!(config.tls.tls_version, "tls1.3");
+    }
+
+    #[test]
+    fn given_endpoint_env_when_resolving_then_override_is_used() {
+        let _guard = env_lock().lock().expect("env lock");
+        let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", "10.0.0.8:7744");
+
+        assert_eq!(resolve_endpoint(), "10.0.0.8:7744");
+    }
+
+    #[test]
+    fn given_shared_secret_env_when_resolving_then_override_is_used() {
+        let _guard = env_lock().lock().expect("env lock");
+        let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shared-secret");
+
+        assert_eq!(resolve_shared_secret().expect("shared secret"), "shared-secret");
+    }
+
+    #[test]
+    fn given_tmp_dir_override_when_resolving_tls_dir_then_custom_base_is_used() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("native-tmp-dir");
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+
+        assert_eq!(slim_tls_dir(), dir.path().join("shadi-slim-mtls"));
+    }
+
+    #[test]
+    fn given_present_file_when_ensuring_then_it_succeeds() {
+        let dir = TestDir::new("native-existing-file");
+        let file = dir.path().join("present.txt");
+        write_test_file(&file);
+
+        ensure_file_exists(&file, "present file").expect("existing file");
+    }
+
+    #[test]
+    fn given_missing_file_when_ensuring_then_error_mentions_label_and_path() {
+        let dir = TestDir::new("native-missing-file");
+        let file = dir.path().join("missing.txt");
+
+        let err = ensure_file_exists(&file, "missing file").expect_err("missing file");
+
+        assert!(err.contains("missing file"));
+        assert!(err.contains(&file.display().to_string()));
+    }
+
+    #[test]
+    fn given_only_cert_override_when_resolving_tls_then_it_is_rejected() {
+        let _guard = env_lock().lock().expect("env lock");
+        let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", "/tmp/client.crt");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+
+        let err = match resolve_client_tls_material() {
+            Ok(_) => panic!("expected missing key override to fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("must be set together"));
+    }
+
+    #[test]
+    fn given_only_key_override_when_resolving_tls_then_it_is_rejected() {
+        let _guard = env_lock().lock().expect("env lock");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::set("SLIM_TLS_KEY", "/tmp/client.key");
+
+        let err = match resolve_client_tls_material() {
+            Ok(_) => panic!("expected missing cert override to fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("must be set together"));
+    }
+
+    #[test]
+    fn given_explicit_tls_overrides_when_resolving_then_they_are_used() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("native-explicit-tls");
+        let cert = dir.path().join("client.crt");
+        let key = dir.path().join("client.key");
+        let ca = dir.path().join("ca.crt");
+        write_test_file(&cert);
+        write_test_file(&key);
+        write_test_file(&ca);
+
+        let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", cert.as_os_str());
+        let _key = ScopedEnvVar::set("SLIM_TLS_KEY", key.as_os_str());
+        let _ca = ScopedEnvVar::set("SLIM_TLS_CA", ca.as_os_str());
+        let _tmp_dir = ScopedEnvVar::unset("SHADI_TMP_DIR");
+        let _agent_id = ScopedEnvVar::unset("SHADI_AGENT_ID");
+
+        let tls = resolve_client_tls_material().expect("tls material");
+
+        assert_eq!(tls.cert, cert);
+        assert_eq!(tls.key, key);
+        assert_eq!(tls.ca, ca);
+    }
+
+    #[test]
+    fn given_missing_tls_material_when_resolving_then_candidates_are_reported() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("native-missing-tls");
+        fs::create_dir_all(dir.path().join("shadi-slim-mtls")).expect("create tls dir");
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+
+        let err = match resolve_client_tls_material() {
+            Ok(_) => panic!("expected missing tls material to fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("no SLIM client certificate found"));
+        assert!(err.contains("client-avatar.crt"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn given_generated_assets_when_point_to_point_session_exchanges_messages_then_native_session_works() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("native-point-to-point");
+        let tls_dir = generate_test_tls_dir(dir.path());
+        let endpoint = reserve_test_endpoint();
+        let participant_tls = test_client_tls_material(&tls_dir, "secops-a");
+        let server_tls = test_server_tls_material(&tls_dir);
+        let participant_name = Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
+
+        let node_service = Service::new(format!("agent-transport-native-node-{}", std::process::id()));
+        node_service
+            .run_server(build_test_server_config(&endpoint, &server_tls))
+            .expect("start local SLIM node");
+        std::thread::sleep(Duration::from_millis(250));
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let endpoint_for_participant = endpoint.clone();
+        let participant_name_for_thread = participant_name.clone();
+        let participant_handle = std::thread::spawn(move || -> Result<(u32, Vec<u8>), String> {
+            let participant_service =
+                Service::new(format!("agent-transport-native-participant-{}", std::process::id()));
+            let connection_id = participant_service
+                .connect(build_client_config_for_endpoint(
+                    &endpoint_for_participant,
+                    &participant_tls,
+                ))
+                .map_err(format_slim_error)?;
+            let participant_app = participant_service
+                .create_app_with_secret(
+                    participant_name_for_thread.clone(),
+                    TEST_SHARED_SECRET.to_string(),
+                )
+                .map_err(format_slim_error)?;
+
+            participant_app
+                .subscribe(participant_name_for_thread, Some(connection_id))
+                .map_err(format_slim_error)?;
+            std::thread::sleep(Duration::from_millis(200));
+            ready_tx.send(()).map_err(|err| err.to_string())?;
+
+            let session = participant_app
+                .listen_for_session(Some(Duration::from_secs(20)))
+                .map_err(format_slim_error)?;
+            let session_id = session.session_id().map_err(format_slim_error)?;
+            let payload = session
+                .get_message(Some(Duration::from_secs(20)))
+                .map_err(format_slim_error)?
+                .payload;
+            session
+                .publish_and_wait(b"reply".to_vec(), None, Some(HashMap::new()))
+                .map_err(format_slim_error)?;
+
+            let _ = participant_app.delete_session_and_wait(session);
+            participant_service
+                .disconnect(connection_id)
+                .map_err(format_slim_error)?;
+            participant_service.shutdown().map_err(format_slim_error)?;
+            Ok((session_id, payload))
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("participant ready");
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", &endpoint);
+        let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", TEST_SHARED_SECRET);
+        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
+        let _local_name = ScopedEnvVar::unset("SHADI_SLIM_LOCAL_NAME");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+
+        let session = NativeSlimSession::from_env(NativeSlimBootstrap::PointToPoint {
+            destination: "agntcy/shadi/secops-a".to_string(),
+        })
+        .expect("native point-to-point session");
+        let session_id = session.session_id().expect("native session id");
+
+        crate::SlimSession::send(&session, b"hello").expect("send payload");
+        let reply = crate::SlimSession::recv(&session).expect("receive reply");
+
+        let (participant_session_id, participant_payload) = participant_handle
+            .join()
+            .expect("participant thread panicked")
+            .expect("participant session result");
+
+        assert_eq!(session.local_name(), "agntcy/shadi/avatar");
+        assert_eq!(reply, b"reply".to_vec());
+        assert_eq!(participant_payload, b"hello".to_vec());
+        assert_eq!(session_id, participant_session_id);
+
+        drop(session);
+        node_service
+            .stop_server(endpoint.clone())
+            .expect("stop node server");
+        node_service.shutdown().expect("shutdown node service");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn given_generated_assets_when_group_join_times_out_then_native_session_returns_error() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("native-group-timeout");
+        let tls_dir = generate_test_tls_dir(dir.path());
+        let endpoint = reserve_test_endpoint();
+        let server_tls = test_server_tls_material(&tls_dir);
+
+        let node_service = Service::new(format!("agent-transport-native-node-timeout-{}", std::process::id()));
+        node_service
+            .run_server(build_test_server_config(&endpoint, &server_tls))
+            .expect("start local SLIM node");
+        std::thread::sleep(Duration::from_millis(250));
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", &endpoint);
+        let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", TEST_SHARED_SECRET);
+        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "secops-a");
+        let _local_name = ScopedEnvVar::unset("SHADI_SLIM_LOCAL_NAME");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+
+        let err = match NativeSlimSession::from_env(NativeSlimBootstrap::GroupJoin {
+            channel: "agntcy/shadi/secops-room".to_string(),
+            timeout: Some(Duration::from_millis(250)),
+        }) {
+            Ok(_) => panic!("expected group join timeout"),
+            Err(err) => err,
+        };
+
+        let err_lower = err.to_lowercase();
+        assert!(
+            err_lower.contains("timeout") || err_lower.contains("timed out"),
+            "unexpected error: {err}"
+        );
+
+        node_service
+            .stop_server(endpoint.clone())
+            .expect("stop node server");
+        node_service.shutdown().expect("shutdown node service");
     }
 }

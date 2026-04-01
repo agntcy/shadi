@@ -585,11 +585,111 @@ fn format_slim_error(err: slim_bindings::SlimError) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
+    use std::fs;
     use std::net::TcpListener;
+    #[cfg(not(windows))]
+    use std::process::Command;
     use std::sync::mpsc;
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
+
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "shadi-slim-shell-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_test_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dir");
+        }
+        fs::write(path, b"test").expect("write test file");
+    }
+
+    #[cfg(not(windows))]
+    fn generate_test_tls_dir(base_dir: &Path) -> PathBuf {
+        let tls_dir = base_dir.join("shadi-slim-mtls");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tools")
+            .join("generate_slim_mtls_certs.sh");
+        let output = Command::new("bash")
+            .arg(&script)
+            .arg(&tls_dir)
+            .output()
+            .expect("run SLIM cert generator");
+
+        assert!(
+            output.status.success(),
+            "failed to generate SLIM test certs: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        tls_dir
+    }
 
     #[test]
     fn given_custom_local_name_when_resolving_then_it_is_used_verbatim() {
@@ -656,43 +756,382 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires local SLIM mTLS assets and secret access"]
-    fn live_group_session_flow_works_with_local_assets() {
-        let tls_dir = default_tmp_dir().join("shadi-slim-mtls");
-        let ca = tls_dir.join("ca.crt");
-        ensure_file_exists(&ca, "SLIM client CA").expect("local SLIM CA");
+    fn given_empty_custom_local_name_when_resolving_then_it_is_rejected() {
+        let err = resolve_local_name_value(Some("  "), Some("avatar"))
+            .expect_err("empty local name");
 
-        let server_tls = TlsMaterial {
-            cert: tls_dir.join("server.crt"),
-            key: tls_dir.join("server.key"),
-            ca: ca.clone(),
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn given_status_when_state_has_values_then_it_reports_them() {
+        let _guard = env_lock().lock().expect("env lock");
+        let _local_name = ScopedEnvVar::set("SHADI_SLIM_LOCAL_NAME", "agntcy/shadi/custom");
+        let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", "10.0.0.9:8855");
+
+        let mut state = SlimShellState::new();
+        state.connection_id = Some(17);
+        state.active_channel = Some("agntcy/shadi/secops-room".to_string());
+        state.node_started = true;
+
+        let status = state.status().expect("status");
+
+        assert_eq!(status.local_name, "agntcy/shadi/custom");
+        assert_eq!(status.endpoint, "10.0.0.9:8855");
+        assert!(status.node_started);
+        assert_eq!(status.connection_id, Some(17));
+        assert_eq!(
+            status.active_channel.as_deref(),
+            Some("agntcy/shadi/secops-room")
+        );
+        assert_eq!(status.active_session_id, None);
+    }
+
+    #[test]
+    fn given_started_node_when_starting_again_then_existing_message_is_returned() {
+        let mut state = SlimShellState::new();
+        state.node_started = true;
+
+        let message = state.start_node().expect("already started message");
+
+        assert!(message.contains("already running"));
+    }
+
+    #[test]
+    fn given_state_when_shutting_down_then_runtime_fields_are_cleared() {
+        let mut state = SlimShellState::new();
+        state.connection_id = Some(5);
+        state.local_name = Some(Arc::new(parse_name("agntcy/shadi/avatar").expect("name")));
+        state.shared_secret = Some("shared-secret".to_string());
+        state.active_channel = Some("agntcy/shadi/secops-room".to_string());
+        state.subscribed_channel = Some("agntcy/shadi/secops-room".to_string());
+        state.node_started = true;
+
+        state.shutdown();
+
+        assert!(state.connection_id.is_none());
+        assert!(state.local_name.is_none());
+        assert!(state.shared_secret.is_none());
+        assert!(state.active_channel.is_none());
+        assert!(state.subscribed_channel.is_none());
+        assert!(!state.node_started);
+    }
+
+    #[test]
+    fn given_existing_channel_subscription_when_ensuring_then_it_is_a_noop() {
+        let mut state = SlimShellState::new();
+        state.subscribed_channel = Some("agntcy/shadi/secops-room".to_string());
+
+        state
+            .ensure_channel_subscription("agntcy/shadi/secops-room")
+            .expect("same subscription");
+    }
+
+    #[test]
+    fn given_existing_connection_id_when_ensuring_then_it_is_reused() {
+        let mut state = SlimShellState::new();
+        state.connection_id = Some(23);
+
+        assert_eq!(state.ensure_connection().expect("existing connection"), 23);
+    }
+
+    #[test]
+    fn given_cached_local_name_when_loading_then_it_is_reused() {
+        let mut state = SlimShellState::new();
+        state.local_name = Some(Arc::new(parse_name("agntcy/shadi/avatar").expect("name")));
+
+        assert_eq!(
+            state.local_name().expect("local name").to_string(),
+            parse_name("agntcy/shadi/avatar")
+                .expect("expected name")
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn given_cached_local_name_when_stringifying_then_it_is_returned() {
+        let mut state = SlimShellState::new();
+        state.local_name = Some(Arc::new(parse_name("agntcy/shadi/avatar").expect("name")));
+
+        assert_eq!(
+            state.local_name_string().expect("local name string"),
+            parse_name("agntcy/shadi/avatar")
+                .expect("expected name")
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn given_cached_shared_secret_when_loading_then_it_is_reused() {
+        let mut state = SlimShellState::new();
+        state.shared_secret = Some("cached-secret".to_string());
+
+        assert_eq!(state.shared_secret().expect("shared secret"), "cached-secret");
+    }
+
+    #[test]
+    fn given_default_group_session_config_when_built_then_defaults_are_expected() {
+        let config = default_group_session_config();
+
+        assert_eq!(config.session_type, SessionType::Group);
+        assert!(config.enable_mls);
+        assert_eq!(config.max_retries, Some(5));
+        assert_eq!(config.interval, Some(Duration::from_secs(5)));
+        assert!(config.metadata.is_empty());
+    }
+
+    #[test]
+    fn given_node_and_client_service_names_when_generated_then_prefixes_match() {
+        assert!(node_service_name().starts_with("shadictl-node-"));
+        assert!(client_service_name().starts_with("shadictl-client-"));
+    }
+
+    #[test]
+    fn given_endpoint_and_tls_when_building_client_config_then_paths_are_embedded() {
+        let tls = TlsMaterial {
+            cert: PathBuf::from("/tmp/client.crt"),
+            key: PathBuf::from("/tmp/client.key"),
+            ca: PathBuf::from("/tmp/ca.crt"),
         };
-        ensure_file_exists(&server_tls.cert, "SLIM server certificate").expect("server cert");
-        ensure_file_exists(&server_tls.key, "SLIM server key").expect("server key");
 
-        let moderator_tls = live_client_tls_material(&tls_dir, "avatar");
-        let participant_tls = live_client_tls_material(&tls_dir, "secops-a");
-        let shared_secret = load_live_shared_secret().expect("live shared secret");
+        let config = build_client_config_for_endpoint("127.0.0.1:47357", &tls);
+
+        assert_eq!(config.endpoint, "https://127.0.0.1:47357");
+        match config.tls.source {
+            TlsSource::File { cert, key } => {
+                assert_eq!(cert, "/tmp/client.crt");
+                assert_eq!(key, "/tmp/client.key");
+            }
+            other => panic!("unexpected TLS source: {:?}", other),
+        }
+        match config.tls.ca_source {
+            CaSource::File { path } => assert_eq!(path, "/tmp/ca.crt"),
+            other => panic!("unexpected CA source: {:?}", other),
+        }
+        assert!(config.tls.include_system_ca_certs_pool);
+        assert_eq!(config.tls.tls_version, "tls1.3");
+    }
+
+    #[test]
+    fn given_endpoint_and_tls_when_building_server_config_then_paths_are_embedded() {
+        let tls = TlsMaterial {
+            cert: PathBuf::from("/tmp/server.crt"),
+            key: PathBuf::from("/tmp/server.key"),
+            ca: PathBuf::from("/tmp/ca.crt"),
+        };
+
+        let config = build_server_config_for_endpoint("127.0.0.1:47357", &tls);
+
+        assert_eq!(config.endpoint, "127.0.0.1:47357");
+        match config.tls.source {
+            TlsSource::File { cert, key } => {
+                assert_eq!(cert, "/tmp/server.crt");
+                assert_eq!(key, "/tmp/server.key");
+            }
+            other => panic!("unexpected TLS source: {:?}", other),
+        }
+        match config.tls.client_ca {
+            CaSource::File { path } => assert_eq!(path, "/tmp/ca.crt"),
+            other => panic!("unexpected client CA source: {:?}", other),
+        }
+        assert_eq!(config.tls.include_system_ca_certs_pool, Some(true));
+        assert_eq!(config.tls.tls_version.as_deref(), Some("tls1.3"));
+        assert_eq!(config.tls.reload_client_ca_file, Some(false));
+    }
+
+    #[test]
+    fn given_only_cert_override_when_resolving_client_tls_then_it_is_rejected() {
+        let _guard = env_lock().lock().expect("env lock");
+        let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", "/tmp/client.crt");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+
+        let err = match resolve_client_tls_material() {
+            Ok(_) => panic!("expected missing key override to fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("must be set together"));
+    }
+
+    #[test]
+    fn given_explicit_tls_overrides_when_resolving_client_tls_then_they_are_used() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("shell-explicit-tls");
+        let cert = dir.path().join("client.crt");
+        let key = dir.path().join("client.key");
+        let ca = dir.path().join("ca.crt");
+        write_test_file(&cert);
+        write_test_file(&key);
+        write_test_file(&ca);
+
+        let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", cert.as_os_str());
+        let _key = ScopedEnvVar::set("SLIM_TLS_KEY", key.as_os_str());
+        let _ca = ScopedEnvVar::set("SLIM_TLS_CA", ca.as_os_str());
+        let _agent_id = ScopedEnvVar::unset("SHADI_AGENT_ID");
+
+        let tls = resolve_client_tls_material().expect("tls material");
+
+        assert_eq!(tls.cert, cert);
+        assert_eq!(tls.key, key);
+        assert_eq!(tls.ca, ca);
+    }
+
+    #[test]
+    fn given_shared_secret_env_when_loading_then_override_is_used() {
+        let _guard = env_lock().lock().expect("env lock");
+        let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shared-secret");
+
+        assert_eq!(SlimShellState::new().shared_secret().expect("shared secret"), "shared-secret");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn given_generated_assets_when_inviting_without_active_session_then_error_is_returned() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("shell-invite-without-session");
         let endpoint = reserve_test_endpoint();
 
-        let node_service = Service::new(format!("shadictl-live-node-{}", std::process::id()));
-        node_service
-            .run_server(build_server_config_for_endpoint(&endpoint, &server_tls))
-            .expect("start local SLIM node");
+        generate_test_tls_dir(dir.path());
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", &endpoint);
+        let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", TEST_SHARED_SECRET);
+        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
+        let _local_name = ScopedEnvVar::unset("SHADI_SLIM_LOCAL_NAME");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+
+        let mut state = SlimShellState::new();
+        let start_message = state.start_node().expect("start node");
+        assert!(start_message.contains("started SLIM node on"));
         thread::sleep(Duration::from_millis(250));
 
-        let participant_name = Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
-        let moderator_name = Arc::new(parse_name("agntcy/shadi/avatar").expect("moderator name"));
-        let channel_name = Arc::new(parse_name("agntcy/shadi/secops-room").expect("channel name"));
+        let err = state
+            .invite_participant("agntcy/shadi/secops-a")
+            .expect_err("invite without active session");
+
+        assert!(err.contains("no active SLIM session"));
+        state.shutdown();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn given_generated_assets_when_joining_group_session_then_state_is_updated() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("shell-join-group-flow");
+        let tls_dir = generate_test_tls_dir(dir.path());
+        let endpoint = reserve_test_endpoint();
+        let moderator_tls = test_client_tls_material(&tls_dir, "avatar");
+        let participant_name =
+            Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
+        let channel_name =
+            Arc::new(parse_name("agntcy/shadi/secops-room").expect("channel name"));
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", &endpoint);
+        let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", TEST_SHARED_SECRET);
+        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "secops-a");
+        let _local_name = ScopedEnvVar::unset("SHADI_SLIM_LOCAL_NAME");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+
+        let mut state = SlimShellState::new();
+        let start_message = state.start_node().expect("start node");
+        assert!(start_message.contains("started SLIM node on"));
+        thread::sleep(Duration::from_millis(250));
+
+        let (start_tx, start_rx) = mpsc::channel();
+        let endpoint_for_moderator = endpoint.clone();
+        let participant_name_for_thread = participant_name.clone();
+        let channel_name_for_thread = channel_name.clone();
+        let moderator_handle = thread::spawn(move || -> Result<u32, String> {
+            let moderator_service =
+                Service::new(format!("shadictl-test-moderator-{}", std::process::id()));
+            let moderator_name = Arc::new(parse_name("agntcy/shadi/avatar").expect("moderator name"));
+            let connection_id = moderator_service
+                .connect(build_client_config_for_endpoint(
+                    &endpoint_for_moderator,
+                    &moderator_tls,
+                ))
+                .map_err(format_slim_error)?;
+            let moderator_app = moderator_service
+                .create_app_with_secret(moderator_name.clone(), TEST_SHARED_SECRET.to_string())
+                .map_err(format_slim_error)?;
+
+            moderator_app
+                .subscribe(moderator_name, Some(connection_id))
+                .map_err(format_slim_error)?;
+            start_rx.recv().map_err(|err| err.to_string())?;
+            thread::sleep(Duration::from_millis(300));
+
+            let session = moderator_app
+                .create_session_and_wait(default_group_session_config(), channel_name_for_thread)
+                .map_err(format_slim_error)?;
+            let session_id = session.session_id().map_err(format_slim_error)?;
+            moderator_app
+                .set_route(participant_name_for_thread.clone(), connection_id)
+                .map_err(format_slim_error)?;
+            session
+                .invite_and_wait(participant_name_for_thread)
+                .map_err(format_slim_error)?;
+
+            let _ = moderator_app.delete_session_and_wait(session);
+            moderator_service
+                .disconnect(connection_id)
+                .map_err(format_slim_error)?;
+            moderator_service.shutdown().map_err(format_slim_error)?;
+            Ok(session_id)
+        });
+
+        start_tx.send(()).expect("start moderator flow");
+
+        let join_message = state
+            .join_group_session("agntcy/shadi/secops-room", Some(Duration::from_secs(20)))
+            .expect("join group session");
+        assert!(join_message.contains("joined group session"));
+
+        let status = state.status().expect("status after join");
+        let joined_session_id = status.active_session_id.expect("joined session id");
+        let moderator_session_id = moderator_handle
+            .join()
+            .expect("moderator thread panicked")
+            .expect("moderator session id");
+
+        assert_eq!(joined_session_id, moderator_session_id);
+        state.shutdown();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn given_generated_assets_when_group_session_is_created_then_state_methods_succeed() {
+        let _guard = env_lock().lock().expect("env lock");
+        let dir = TestDir::new("shell-generated-group-flow");
+        let tls_dir = generate_test_tls_dir(dir.path());
+        let participant_tls = test_client_tls_material(&tls_dir, "secops-a");
+        let endpoint = reserve_test_endpoint();
+        let participant_name =
+            Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
+        let channel_name =
+            Arc::new(parse_name("agntcy/shadi/secops-room").expect("channel name"));
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", &endpoint);
+        let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", TEST_SHARED_SECRET);
+        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
+        let _local_name = ScopedEnvVar::unset("SHADI_SLIM_LOCAL_NAME");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
 
         let (ready_tx, ready_rx) = mpsc::channel();
         let endpoint_for_participant = endpoint.clone();
         let participant_name_for_thread = participant_name.clone();
         let channel_name_for_thread = channel_name.clone();
-        let participant_secret = shared_secret.clone();
         let participant_handle = thread::spawn(move || -> Result<u32, String> {
             let participant_service =
-                Service::new(format!("shadictl-live-participant-{}", std::process::id()));
+                Service::new(format!("shadictl-test-participant-{}", std::process::id()));
             let connection_id = participant_service
                 .connect(build_client_config_for_endpoint(
                     &endpoint_for_participant,
@@ -700,7 +1139,10 @@ mod tests {
                 ))
                 .map_err(format_slim_error)?;
             let participant_app = participant_service
-                .create_app_with_secret(participant_name_for_thread.clone(), participant_secret)
+                .create_app_with_secret(
+                    participant_name_for_thread.clone(),
+                    TEST_SHARED_SECRET.to_string(),
+                )
                 .map_err(format_slim_error)?;
 
             participant_app
@@ -732,56 +1174,55 @@ mod tests {
             Ok(session_id)
         });
 
+        let mut state = SlimShellState::new();
+        let start_message = state.start_node().expect("start node");
+        assert!(start_message.contains("started SLIM node on"));
+        thread::sleep(Duration::from_millis(250));
+
         ready_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("participant ready");
 
-        let moderator_service = Service::new(format!("shadictl-live-moderator-{}", std::process::id()));
-        let moderator_connection = moderator_service
-            .connect(build_client_config_for_endpoint(&endpoint, &moderator_tls))
-            .expect("moderator connection");
-        let moderator_app = moderator_service
-            .create_app_with_secret(moderator_name.clone(), shared_secret)
-            .expect("moderator app");
-
-        moderator_app
-            .subscribe(moderator_name, Some(moderator_connection))
-            .expect("moderator subscribe local name");
-        thread::sleep(Duration::from_millis(200));
-
-        let session = moderator_app
-            .create_session_and_wait(default_group_session_config(), channel_name)
+        let create_message = state
+            .create_group_session("agntcy/shadi/secops-room")
             .expect("create group session");
-        let moderator_session_id = session.session_id().expect("moderator session id");
-        moderator_app
-            .set_route(participant_name.clone(), moderator_connection)
-            .expect("set participant route");
-        session
-            .invite_and_wait(participant_name)
+        assert!(create_message.contains("created group session"));
+
+        let created_status = state.status().expect("status after create");
+        assert!(created_status.node_started);
+        assert_eq!(
+            created_status.active_channel.as_deref(),
+            Some(
+                parse_name("agntcy/shadi/secops-room")
+                    .expect("expected channel name")
+                    .to_string()
+                    .as_str(),
+            )
+        );
+        let session_id = created_status.active_session_id.expect("active session id");
+
+        let invite_message = state
+            .invite_participant("agntcy/shadi/secops-a")
             .expect("invite participant");
+        assert!(invite_message.contains("invited"));
+        assert!(invite_message.contains("agntcy/shadi/secops-a"));
 
         let joined_session_id = participant_handle
             .join()
             .expect("participant thread panicked")
             .expect("participant joined session");
-        assert_eq!(
-            moderator_session_id,
-            joined_session_id,
-            "moderator and participant should observe the same session id"
-        );
+        assert_eq!(session_id, joined_session_id);
 
-        let _ = moderator_app.delete_session_and_wait(session);
-        moderator_service
-            .disconnect(moderator_connection)
-            .expect("disconnect moderator client");
-        moderator_service.shutdown().expect("shutdown moderator service");
-        node_service
-            .stop_server(endpoint.clone())
-            .expect("stop node server");
-        node_service.shutdown().expect("shutdown node service");
+        state.shutdown();
+
+        let shutdown_status = state.status().expect("status after shutdown");
+        assert!(!shutdown_status.node_started);
+        assert!(shutdown_status.active_channel.is_none());
+        assert!(shutdown_status.active_session_id.is_none());
+        assert!(shutdown_status.connection_id.is_none());
     }
 
-    fn live_client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
+    fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
         let (cert, key) = client_identity_candidates(base_dir, Some(agent_id))
             .into_iter()
             .find(|(cert, key)| cert.is_file() && key.is_file())
@@ -792,25 +1233,6 @@ mod tests {
             key,
             ca: base_dir.join("ca.crt"),
         }
-    }
-
-    fn load_live_shared_secret() -> Result<String, String> {
-        if let Ok(shared_secret) = std::env::var("SLIM_SHARED_SECRET") {
-            if !shared_secret.trim().is_empty() {
-                return Ok(shared_secret);
-            }
-        }
-
-        let store = agent_secrets::default_store();
-        let secret = store.get(DEFAULT_SHARED_SECRET_KEY).map_err(|err| {
-            format!(
-                "failed to load {} from the default secret store: {}",
-                DEFAULT_SHARED_SECRET_KEY, err
-            )
-        })?;
-        let bytes = secret.expose(|data| data.to_vec());
-        String::from_utf8(bytes)
-            .map_err(|_| format!("{} is not valid UTF-8", DEFAULT_SHARED_SECRET_KEY))
     }
 
     fn reserve_test_endpoint() -> String {
