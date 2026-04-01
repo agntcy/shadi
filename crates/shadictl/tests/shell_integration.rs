@@ -64,17 +64,18 @@ impl MockSandbox {
             mock_accept_loop(&listener, &state_for_thread, &path_clone);
         });
 
-        // Wait until the socket is ready.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // Wait until the socket can complete a real request/response round-trip.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut ready = false;
         while std::time::Instant::now() < deadline {
-            if sock_path.exists() {
-                // Try a probe connect.
-                if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
-                    break;
-                }
+            if sock_path.exists() && probe_mock_socket(&sock_path).is_ok() {
+                ready = true;
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+
+        assert!(ready, "mock sandbox socket did not become ready in time");
 
         MockSandbox {
             sock_path,
@@ -181,6 +182,29 @@ fn write_mock_response(
     writer.write_all(json.as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()
+}
+
+fn probe_mock_socket(sock_path: &Path) -> std::io::Result<()> {
+    let mut stream = std::os::unix::net::UnixStream::connect(sock_path)?;
+    let message = serde_json::to_string(&ControlMessage::QueryPolicy)
+        .map_err(std::io::Error::other)?;
+    stream.write_all(message.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    if line.trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "mock sandbox probe received empty response",
+        ));
+    }
+
+    let _response: ControlResponse = serde_json::from_str(&line).map_err(std::io::Error::other)?;
+    Ok(())
 }
 
 fn mock_query(state: &Arc<Mutex<MockState>>) -> ControlResponse {
