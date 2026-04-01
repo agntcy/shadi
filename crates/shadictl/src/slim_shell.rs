@@ -410,7 +410,7 @@ fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Client
         ca_source: CaSource::File {
             path: tls.ca.display().to_string(),
         },
-        include_system_ca_certs_pool: true,
+        include_system_ca_certs_pool: false,
         tls_version: "tls1.3".to_string(),
     };
     config
@@ -443,7 +443,7 @@ fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Server
         client_ca: CaSource::File {
             path: tls.ca.display().to_string(),
         },
-        include_system_ca_certs_pool: Some(true),
+        include_system_ca_certs_pool: Some(false),
         tls_version: Some("tls1.3".to_string()),
         reload_client_ca_file: Some(false),
     };
@@ -591,17 +591,16 @@ mod tests {
     #[cfg(not(windows))]
     use std::process::Command;
     use std::sync::mpsc;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::MutexGuard;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
 
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    fn lock_env() -> MutexGuard<'static, ()> {
+        crate::lock_test_env()
     }
 
     struct ScopedEnvVar {
@@ -765,7 +764,7 @@ mod tests {
 
     #[test]
     fn given_status_when_state_has_values_then_it_reports_them() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let _local_name = ScopedEnvVar::set("SHADI_SLIM_LOCAL_NAME", "agntcy/shadi/custom");
         let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", "10.0.0.9:8855");
 
@@ -908,7 +907,7 @@ mod tests {
             CaSource::File { path } => assert_eq!(path, "/tmp/ca.crt"),
             other => panic!("unexpected CA source: {:?}", other),
         }
-        assert!(config.tls.include_system_ca_certs_pool);
+        assert!(!config.tls.include_system_ca_certs_pool);
         assert_eq!(config.tls.tls_version, "tls1.3");
     }
 
@@ -934,14 +933,14 @@ mod tests {
             CaSource::File { path } => assert_eq!(path, "/tmp/ca.crt"),
             other => panic!("unexpected client CA source: {:?}", other),
         }
-        assert_eq!(config.tls.include_system_ca_certs_pool, Some(true));
+        assert_eq!(config.tls.include_system_ca_certs_pool, Some(false));
         assert_eq!(config.tls.tls_version.as_deref(), Some("tls1.3"));
         assert_eq!(config.tls.reload_client_ca_file, Some(false));
     }
 
     #[test]
     fn given_only_cert_override_when_resolving_client_tls_then_it_is_rejected() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", "/tmp/client.crt");
         let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
 
@@ -955,7 +954,7 @@ mod tests {
 
     #[test]
     fn given_explicit_tls_overrides_when_resolving_client_tls_then_they_are_used() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("shell-explicit-tls");
         let cert = dir.path().join("client.crt");
         let key = dir.path().join("client.key");
@@ -978,7 +977,7 @@ mod tests {
 
     #[test]
     fn given_shared_secret_env_when_loading_then_override_is_used() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shared-secret");
 
         assert_eq!(SlimShellState::new().shared_secret().expect("shared secret"), "shared-secret");
@@ -987,7 +986,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn given_generated_assets_when_inviting_without_active_session_then_error_is_returned() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("shell-invite-without-session");
         let endpoint = reserve_test_endpoint();
 
@@ -1018,7 +1017,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn given_generated_assets_when_joining_group_session_then_state_is_updated() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("shell-join-group-flow");
         let tls_dir = generate_test_tls_dir(dir.path());
         let endpoint = reserve_test_endpoint();
@@ -1106,7 +1105,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn given_generated_assets_when_group_session_is_created_then_state_methods_succeed() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("shell-generated-group-flow");
         let tls_dir = generate_test_tls_dir(dir.path());
         let participant_tls = test_client_tls_material(&tls_dir, "secops-a");

@@ -160,7 +160,7 @@ fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::Clie
         ca_source: CaSource::File {
             path: tls.ca.display().to_string(),
         },
-        include_system_ca_certs_pool: true,
+        include_system_ca_certs_pool: false,
         tls_version: "tls1.3".to_string(),
     };
     config
@@ -178,7 +178,7 @@ fn build_server_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::Serv
         client_ca: CaSource::File {
             path: tls.ca.display().to_string(),
         },
-        include_system_ca_certs_pool: Some(true),
+        include_system_ca_certs_pool: Some(false),
         tls_version: Some("tls1.3".to_string()),
         reload_client_ca_file: Some(false),
     };

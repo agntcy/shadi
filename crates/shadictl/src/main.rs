@@ -66,6 +66,9 @@ static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::
 static TEST_SECRET_STORE_PUT_FAILURES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[cfg(test)]
+static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
 fn test_secret_store_map() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     TEST_SECRET_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -73,6 +76,18 @@ fn test_secret_store_map() -> &'static Mutex<HashMap<String, Vec<u8>>> {
 #[cfg(test)]
 fn test_secret_store_put_failures() -> &'static Mutex<HashSet<String>> {
     TEST_SECRET_STORE_PUT_FAILURES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(test)]
+fn test_env_lock() -> &'static Mutex<()> {
+    TEST_ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

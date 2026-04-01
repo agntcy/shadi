@@ -1321,11 +1321,13 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        crate::lock_test_env()
+    }
 
     #[derive(Clone)]
     struct TestTlsMaterial {
@@ -1422,7 +1424,7 @@ mod tests {
             ca_source: slim_bindings::CaSource::File {
                 path: tls.ca.display().to_string(),
             },
-            include_system_ca_certs_pool: true,
+            include_system_ca_certs_pool: false,
             tls_version: "tls1.3".to_string(),
         };
         config
@@ -1440,7 +1442,7 @@ mod tests {
             client_ca: slim_bindings::CaSource::File {
                 path: tls.ca.display().to_string(),
             },
-            include_system_ca_certs_pool: Some(true),
+            include_system_ca_certs_pool: Some(false),
             tls_version: Some("tls1.3".to_string()),
             reload_client_ca_file: Some(false),
         };
@@ -1611,7 +1613,7 @@ mod tests {
     #[test]
     fn prepare_sandbox_launch_env_remove_strips_inherited_vars() {
         // env_remove must strip env vars inherited from the parent process.
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_env();
         std::env::set_var("SHADI_TEST_SENTINEL_9f3a", "sentinel-value");
 
         let mut cli = build_cli();
@@ -1770,7 +1772,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn run_sandboxed_command_returns_error_when_internal_slim_bridge_cannot_start() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_env();
         let cwd_root = temp_dir();
         let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
         let tmp_root = temp_dir();
@@ -1828,7 +1830,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn run_sandboxed_command_with_internal_slim_bridge_forwards_child_stdout() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_env();
         let cwd_root = temp_dir();
         let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
         let tls_root = temp_dir();
@@ -2058,7 +2060,7 @@ mod tests {
 
     #[test]
     fn default_git_snapshot_dir_falls_back_without_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_env();
         let previous = std::env::var_os("SHADI_TMP_DIR");
         std::env::remove_var("SHADI_TMP_DIR");
 

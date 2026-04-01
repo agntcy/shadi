@@ -251,7 +251,7 @@ fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Client
         ca_source: CaSource::File {
             path: tls.ca.display().to_string(),
         },
-        include_system_ca_certs_pool: true,
+        include_system_ca_certs_pool: false,
         tls_version: "tls1.3".to_string(),
     };
     config
@@ -427,6 +427,12 @@ mod tests {
         ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     struct ScopedEnvVar {
         name: &'static str,
         previous: Option<OsString>,
@@ -550,7 +556,7 @@ mod tests {
             client_ca: CaSource::File {
                 path: tls.ca.display().to_string(),
             },
-            include_system_ca_certs_pool: Some(true),
+            include_system_ca_certs_pool: Some(false),
             tls_version: Some("tls1.3".to_string()),
             reload_client_ca_file: Some(false),
         };
@@ -702,13 +708,13 @@ mod tests {
             CaSource::File { path } => assert_eq!(path, "/tmp/ca.crt"),
             other => panic!("unexpected CA source: {:?}", other),
         }
-        assert!(config.tls.include_system_ca_certs_pool);
+        assert!(!config.tls.include_system_ca_certs_pool);
         assert_eq!(config.tls.tls_version, "tls1.3");
     }
 
     #[test]
     fn given_endpoint_env_when_resolving_then_override_is_used() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", "10.0.0.8:7744");
 
         assert_eq!(resolve_endpoint(), "10.0.0.8:7744");
@@ -716,7 +722,7 @@ mod tests {
 
     #[test]
     fn given_shared_secret_env_when_resolving_then_override_is_used() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shared-secret");
 
         assert_eq!(resolve_shared_secret().expect("shared secret"), "shared-secret");
@@ -724,7 +730,7 @@ mod tests {
 
     #[test]
     fn given_tmp_dir_override_when_resolving_tls_dir_then_custom_base_is_used() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("native-tmp-dir");
         let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
 
@@ -753,7 +759,7 @@ mod tests {
 
     #[test]
     fn given_only_cert_override_when_resolving_tls_then_it_is_rejected() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", "/tmp/client.crt");
         let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
 
@@ -767,7 +773,7 @@ mod tests {
 
     #[test]
     fn given_only_key_override_when_resolving_tls_then_it_is_rejected() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
         let _key = ScopedEnvVar::set("SLIM_TLS_KEY", "/tmp/client.key");
 
@@ -781,7 +787,7 @@ mod tests {
 
     #[test]
     fn given_explicit_tls_overrides_when_resolving_then_they_are_used() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("native-explicit-tls");
         let cert = dir.path().join("client.crt");
         let key = dir.path().join("client.key");
@@ -805,7 +811,7 @@ mod tests {
 
     #[test]
     fn given_missing_tls_material_when_resolving_then_candidates_are_reported() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("native-missing-tls");
         fs::create_dir_all(dir.path().join("shadi-slim-mtls")).expect("create tls dir");
 
@@ -827,7 +833,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn given_generated_assets_when_point_to_point_session_exchanges_messages_then_native_session_works() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("native-point-to-point");
         let tls_dir = generate_test_tls_dir(dir.path());
         let endpoint = reserve_test_endpoint();
@@ -928,7 +934,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn given_generated_assets_when_group_join_times_out_then_native_session_returns_error() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = lock_env();
         let dir = TestDir::new("native-group-timeout");
         let tls_dir = generate_test_tls_dir(dir.path());
         let endpoint = reserve_test_endpoint();

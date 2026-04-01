@@ -8,12 +8,11 @@
     use agent_secrets::memory::SecretBytes;
     use agent_secrets::policy::SecretPolicy;
 
-    static TRACE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static GITHUB_PAYLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static STORE_FAILURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn trace_env_lock() -> &'static Mutex<()> {
-        TRACE_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    fn trace_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::lock_test_env()
     }
 
     fn github_payload_lock() -> &'static Mutex<()> {
@@ -1597,7 +1596,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_named_command_dispatches_slim_variant() {
-        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let _guard = trace_env_lock();
         let dir = temp_dir();
         let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
         let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
@@ -3409,7 +3408,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn resolve_trace_file_prefers_cli_path() {
-        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let _guard = trace_env_lock();
         let dir = temp_dir();
         let cli_path = dir.path().join("trace.jsonl");
         let resolved = resolve_trace_file(Some(cli_path.clone()));
@@ -3420,7 +3419,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn resolve_trace_file_uses_env_var() {
-        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let _guard = trace_env_lock();
         let dir = temp_dir();
         let env_path = dir.path().join("env-trace.jsonl");
         std::env::set_var("SHADI_OTEL_FILE", env_path.to_string_lossy().to_string());
@@ -3495,7 +3494,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn resolve_trace_file_defaults_when_unset() {
-        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let _guard = trace_env_lock();
         std::env::remove_var("SHADI_OTEL_FILE");
         let resolved = resolve_trace_file(None);
         assert_eq!(resolved, PathBuf::from(".shadi/traces.jsonl"));
