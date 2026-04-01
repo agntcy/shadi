@@ -327,8 +327,9 @@ fn run_shell_with_env(
 
     {
         use std::io::Write;
-        let stdin = child.stdin.as_mut().unwrap();
+        let mut stdin = child.stdin.take().expect("child stdin available");
         stdin.write_all(input.as_bytes()).unwrap();
+        stdin.flush().unwrap();
     }
 
     let output = child.wait_with_output().expect("failed to wait on shadictl");
