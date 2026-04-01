@@ -872,11 +872,11 @@ fn deliver_secret_to_process(
 ) -> Result<(), String> {
     let payload = broker
         .payload
-        .as_ref()
+        .take()
         .ok_or_else(|| format!("trusted secret '{}' payload is unavailable", broker.name))?;
     let listener = broker
         .listener
-        .as_ref()
+        .take()
         .ok_or_else(|| format!("trusted secret '{}' broker listener is unavailable", broker.name))?;
     let deadline = Instant::now() + TRUSTED_SECRET_DELIVERY_TIMEOUT;
     while Instant::now() < deadline {
@@ -906,6 +906,9 @@ fn deliver_secret_to_process(
                         broker.name
                     ));
                 }
+
+                let _ = std::fs::remove_file(&broker.socket_path);
+                drop(listener);
 
                 payload
                     .expose(|bytes| stream.write_all(bytes))
