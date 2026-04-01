@@ -28,7 +28,7 @@ SHADI is designed for environments where agents are long-lived, hold real creden
 - `crates/agent_secrets`: keychain-backed secret storage + verification-gated access.
 - `crates/shadi_memory`: SQLCipher memory library (accessed via `shadictl memory`).
 - `crates/shadi_py`: Python extension module `shadi`.
-- `crates/agent_transport_slim` + `crates/slim_mas`: secure transport and moderation helpers (with `shadictl slim-mas`).
+- `crates/agent_transport_slim` + `crates/slim_mas`: secure transport, stdio bridge, and moderation helpers (with `shadictl slim-mas`).
 - `docs`: architecture, security, CLI, and integration docs.
 - `scripts`: local launch helpers for SLIM.
 - `examples/shell_demo`: interactive shell demo walkthrough.
@@ -89,6 +89,19 @@ just lint
 ```
 
 Use `just --list` or `just --groups` to browse tasks by area.
+
+## SLIM stdio bridge
+
+SHADI can now own the bridge directly. When you pass a SLIM target on the shadictl launch itself, the sandboxed app's stdout is published into the session and received SLIM messages are forwarded back to the app's stdin:
+
+```bash
+cargo run -p shadictl -- \
+	--policy ./sandbox.json \
+	--slim-channel agntcy/shadi/secops-room \
+	-- /path/to/agent
+```
+
+For point-to-point sessions, replace `--slim-channel ...` with `--slim-destination organization/namespace/application`. Use `--slim-timeout` with group mode, `--slim-payload-type` to attach a payload type to outbound lines, and `--slim-allow-empty` if blank lines should be forwarded instead of skipped.
 
 ## Core CLI workflows
 

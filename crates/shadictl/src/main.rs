@@ -39,6 +39,7 @@ mod policy_watch;
 mod resource_info;
 mod sandbox_snapshot;
 mod secrets_command;
+mod slim_shell;
 mod slim_mas_command;
 mod snapshot_command;
 mod trace_command;
@@ -65,6 +66,9 @@ static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::
 static TEST_SECRET_STORE_PUT_FAILURES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[cfg(test)]
+static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
 fn test_secret_store_map() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     TEST_SECRET_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -72,6 +76,18 @@ fn test_secret_store_map() -> &'static Mutex<HashMap<String, Vec<u8>>> {
 #[cfg(test)]
 fn test_secret_store_put_failures() -> &'static Mutex<HashSet<String>> {
     TEST_SECRET_STORE_PUT_FAILURES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(test)]
+fn test_env_lock() -> &'static Mutex<()> {
+    TEST_ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -194,8 +210,21 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::DeriveAgentIdentity(command) => run_derive_agent_identity_command(command),
         Commands::VerifyAgentIdentity(command) => run_verify_agent_identity_command(command),
         Commands::PutKey(command) => run_put_key_command(command),
+        Commands::Slim(command) => run_slim_command(command),
         Commands::Shell(args) => run_shell_command(args),
         Commands::Dir(command) => run_dir_command(command),
+    }
+}
+
+fn run_slim_command(command: SlimCli) -> ExitCode {
+    match command.command {
+        SlimCommand::StartNode => match slim_shell::run_foreground_node() {
+            Ok(()) => ExitCode::from(0),
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
     }
 }
 

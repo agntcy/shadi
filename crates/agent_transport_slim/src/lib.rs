@@ -1,7 +1,16 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+mod native;
+mod stdio_bridge;
+
 use agent_secrets::{AgentVerifier, SecretResult, SecretStore, SessionContext};
+
+pub use native::{NativeSlimBootstrap, NativeSlimSession};
+pub use stdio_bridge::{
+    bridge_usage, parse_bridge_args, run_stdio_bridge, start_bridge_with_io, BridgeArgs,
+    BridgeReport, BridgeSessionInfo, RunningBridge,
+};
 
 pub trait SlimSession: Send + Sync {
     fn send(&self, message: &[u8]) -> SecretResult<()>;

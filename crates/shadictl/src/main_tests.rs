@@ -8,12 +8,11 @@
     use agent_secrets::memory::SecretBytes;
     use agent_secrets::policy::SecretPolicy;
 
-    static TRACE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static GITHUB_PAYLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static STORE_FAILURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn trace_env_lock() -> &'static Mutex<()> {
-        TRACE_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    fn trace_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::lock_test_env()
     }
 
     fn github_payload_lock() -> &'static Mutex<()> {
@@ -55,6 +54,11 @@
             git_snapshot_dir: None,
             git_snapshot_untracked: false,
             watch_policy: false,
+            slim_channel: None,
+            slim_destination: None,
+            slim_timeout: None,
+            slim_payload_type: None,
+            slim_allow_empty: false,
             session_name: None,
             record_ref: None,
             subcommand: None,
@@ -1588,6 +1592,50 @@ members = [{ did = "did:key:zA", role = "human" }]
             command: SlimMasCommand::Validate,
         }));
         assert_eq!(code, ExitCode::from(0));
+    }
+
+    #[test]
+    fn run_named_command_dispatches_slim_variant() {
+        let _guard = trace_env_lock();
+        let dir = temp_dir();
+        let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
+        let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+
+        std::env::set_var("SHADI_TMP_DIR", dir.path());
+        std::env::set_var("SLIM_ENDPOINT", "127.0.0.1:65535");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        let code = run_named_command(Commands::Slim(SlimCli {
+            command: SlimCommand::StartNode,
+        }));
+
+        match previous_tmp_dir {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        match previous_endpoint {
+            Some(value) => std::env::set_var("SLIM_ENDPOINT", value),
+            None => std::env::remove_var("SLIM_ENDPOINT"),
+        }
+        match previous_cert {
+            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
+            None => std::env::remove_var("SLIM_TLS_CERT"),
+        }
+        match previous_key {
+            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
+            None => std::env::remove_var("SLIM_TLS_KEY"),
+        }
+        match previous_ca {
+            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
+            None => std::env::remove_var("SLIM_TLS_CA"),
+        }
+
+        assert_eq!(code, ExitCode::from(1));
     }
 
     #[test]
@@ -3360,7 +3408,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn resolve_trace_file_prefers_cli_path() {
-        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let _guard = trace_env_lock();
         let dir = temp_dir();
         let cli_path = dir.path().join("trace.jsonl");
         let resolved = resolve_trace_file(Some(cli_path.clone()));
@@ -3371,7 +3419,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn resolve_trace_file_uses_env_var() {
-        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let _guard = trace_env_lock();
         let dir = temp_dir();
         let env_path = dir.path().join("env-trace.jsonl");
         std::env::set_var("SHADI_OTEL_FILE", env_path.to_string_lossy().to_string());
@@ -3446,7 +3494,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn resolve_trace_file_defaults_when_unset() {
-        let _guard = trace_env_lock().lock().expect("trace env lock");
+        let _guard = trace_env_lock();
         std::env::remove_var("SHADI_OTEL_FILE");
         let resolved = resolve_trace_file(None);
         assert_eq!(resolved, PathBuf::from(".shadi/traces.jsonl"));

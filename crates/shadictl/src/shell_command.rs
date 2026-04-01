@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -20,6 +22,7 @@ use crate::cli_types::{
 use crate::introspection_command::{run_config_command, run_policy_command};
 use crate::policy_watch;
 use crate::secrets_command;
+use crate::slim_shell::SlimShellState;
 use crate::snapshot_command;
 use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
 use shadi_sandbox::PolicyPatch;
@@ -38,6 +41,11 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/policy diff", "Diff effective policy against a baseline profile"),
     ("/trace list", "List recent trace log entries"),
     ("/trace summary", "Summarize trace logs by span name"),
+    ("/slim status", "Show native SLIM shell status"),
+    ("/slim start node", "Start a local native SLIM node with SHADI mTLS defaults"),
+    ("/slim create", "Create a SLIM group session for a channel name"),
+    ("/slim invite", "Invite a participant into the active SLIM group session"),
+    ("/slim join", "Wait for and join an invited SLIM group session"),
     ("/snapshot list", "List git snapshot artifacts"),
     ("/snapshot show", "Show details of a git snapshot"),
     ("/resources", "Show resource usage of the sandboxed process"),
@@ -115,6 +123,47 @@ Options:
 Usage: /trace summary [--limit N]
 
 Summarize trace logs grouped by span name."),
+        ("/slim status", "\
+Usage: /slim status
+
+Show the native SLIM shell state, including the canonical local name,
+configured endpoint, current connection, and active group session."),
+        ("/slim start node", "\
+Usage: /slim start node
+
+Start a local SLIM dataplane node inside the interactive shell using SHADI's
+managed mTLS files under .tmp/shadi-slim-mtls.
+
+Environment:
+    SLIM_ENDPOINT            Override the local endpoint (default: 127.0.0.1:47357)
+    SHADI_TMP_DIR            Override the base temp directory that contains shadi-slim-mtls"),
+        ("/slim create", "\
+Usage: /slim create <organization/namespace/application>
+
+Create a native SLIM group session for the given channel name and make it the
+active shell session.
+
+Examples:
+    /slim create agntcy/shadi/secops-room
+    /slim create acme/ops/incidents"),
+        ("/slim invite", "\
+Usage: /slim invite <organization/namespace/application>
+
+Invite a participant into the active SLIM group session.
+
+Examples:
+    /slim invite agntcy/shadi/avatar
+    /slim invite acme/ops/oncall-bot"),
+        ("/slim join", "\
+Usage: /slim join <organization/namespace/application> [--timeout SECONDS]
+
+Wait for an invitation to the named SLIM channel and activate the resulting
+group session. By default the shell waits for 30 seconds. Use --timeout 0 to
+wait indefinitely.
+
+Examples:
+    /slim join agntcy/shadi/secops-room
+    /slim join acme/ops/incidents --timeout 60"),
     ("/snapshot list", "\
 Usage: /snapshot list [--dir PATH]
 
@@ -308,6 +357,35 @@ impl Completer for ShellHelper {
             return Ok((offset, candidates));
         }
 
+        if let Some(sub_input) = input.strip_prefix("/slim ") {
+            let sub_input = sub_input.trim_start();
+            if let Some(start_input) = sub_input.strip_prefix("start ") {
+                let start_input = start_input.trim_start();
+                for sub in ["node"] {
+                    if sub.starts_with(start_input) {
+                        candidates.push(Pair {
+                            display: sub.to_string(),
+                            replacement: sub.to_string(),
+                        });
+                    }
+                }
+                let offset = pos - start_input.len();
+                return Ok((offset, candidates));
+            }
+
+            let subs = ["status", "start", "create", "invite", "join"];
+            for sub in subs {
+                if sub.starts_with(sub_input) {
+                    candidates.push(Pair {
+                        display: sub.to_string(),
+                        replacement: sub.to_string(),
+                    });
+                }
+            }
+            let offset = pos - sub_input.len();
+            return Ok((offset, candidates));
+        }
+
         if let Some(sub_input) = input.strip_prefix("/snapshot ") {
             let sub_input = sub_input.trim_start();
             let subs = ["list", "show"];
@@ -387,6 +465,7 @@ impl Completer for ShellHelper {
 struct ShellSession {
     socket: Option<PathBuf>,
     pending_patch: Option<PendingPatch>,
+    slim: SlimShellState,
 }
 
 struct PendingPatch {
@@ -399,6 +478,7 @@ impl ShellSession {
         Self {
             socket,
             pending_patch: None,
+            slim: SlimShellState::new(),
         }
     }
 
@@ -414,26 +494,14 @@ impl ShellSession {
 
         // Check for --help on any command.
         if parts.len() >= 2 && parts.last() == Some(&"--help") {
-            let cmd_key = if parts[0] == "/policy" || parts[0] == "/trace" || parts[0] == "/snapshot" || parts[0] == "/secrets" {
-                if parts.len() >= 3 {
-                    format!("{} {}", parts[0], parts[1])
-                } else {
-                    parts[0].to_string()
-                }
-            } else {
-                parts[0].to_string()
-            };
+            let cmd_key = parts[..parts.len() - 1].join(" ");
             return self.cmd_help_detail(&cmd_key);
         }
 
         match parts[0] {
             "/help" | "/h" => {
                 if parts.len() >= 2 {
-                    let target = if parts.len() >= 3 {
-                        format!("{} {}", parts[1], parts[2])
-                    } else {
-                        parts[1].to_string()
-                    };
+                    let target = parts[1..].join(" ");
                     // Prepend / if not present.
                     let key = if target.starts_with('/') {
                         target
@@ -474,6 +542,26 @@ impl ShellSession {
             },
             "/trace" => {
                 eprintln!("usage: /trace <list|summary>");
+                LoopAction::Continue
+            }
+            "/slim" if parts.len() >= 2 => match parts[1] {
+                "status" => self.cmd_slim_status(),
+                "start" if parts.len() >= 3 && parts[2] == "node" => self.cmd_slim_start_node(),
+                "start" => {
+                    eprintln!("usage: /slim start node");
+                    LoopAction::Continue
+                }
+                "create" => self.cmd_slim_create(&parts[2..]),
+                "invite" => self.cmd_slim_invite(&parts[2..]),
+                "join" => self.cmd_slim_join(&parts[2..]),
+                _ => {
+                    eprintln!("unknown slim subcommand: {}", parts[1]);
+                    eprintln!("  available: status, start node, create, invite, join");
+                    LoopAction::Continue
+                }
+            },
+            "/slim" => {
+                eprintln!("usage: /slim <status|start node|create|invite|join>");
                 LoopAction::Continue
             }
             "/snapshot" if parts.len() >= 2 => match parts[1] {
@@ -897,6 +985,120 @@ impl ShellSession {
         LoopAction::Continue
     }
 
+    fn cmd_slim_status(&self) -> LoopAction {
+        match self.slim.status() {
+            Ok(status) => {
+                println!("SLIM local name: {}", status.local_name);
+                println!("SLIM endpoint:   {}", status.endpoint);
+                println!(
+                    "SLIM node:       {}",
+                    if status.node_started {
+                        "running in this shell"
+                    } else {
+                        "not started in this shell"
+                    }
+                );
+                match status.connection_id {
+                    Some(connection_id) => println!("SLIM connection: {}", connection_id),
+                    None => println!("SLIM connection: not established"),
+                }
+                match status.active_channel {
+                    Some(channel) => println!("SLIM channel:    {}", channel),
+                    None => println!("SLIM channel:    none"),
+                }
+                match status.active_session_id {
+                    Some(session_id) => println!("SLIM session id: {}", session_id),
+                    None => println!("SLIM session id: none"),
+                }
+            }
+            Err(err) => eprintln!("error reading SLIM status: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_start_node(&mut self) -> LoopAction {
+        match self.slim.start_node() {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error starting SLIM node: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_create(&mut self, args: &[&str]) -> LoopAction {
+        if args.len() != 1 {
+            eprintln!("usage: /slim create <organization/namespace/application>");
+            return LoopAction::Continue;
+        }
+
+        match self.slim.create_group_session(args[0]) {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error creating SLIM group session: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_invite(&mut self, args: &[&str]) -> LoopAction {
+        if args.len() != 1 {
+            eprintln!("usage: /slim invite <organization/namespace/application>");
+            return LoopAction::Continue;
+        }
+
+        match self.slim.invite_participant(args[0]) {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error inviting SLIM participant: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_join(&mut self, args: &[&str]) -> LoopAction {
+        if args.is_empty() {
+            eprintln!("usage: /slim join <organization/namespace/application> [--timeout SECONDS]");
+            return LoopAction::Continue;
+        }
+
+        let mut channel = None;
+        let mut timeout = Some(Duration::from_secs(30));
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--timeout" if i + 1 < args.len() => {
+                    let seconds = match args[i + 1].parse::<u64>() {
+                        Ok(seconds) => seconds,
+                        Err(_) => {
+                            eprintln!("invalid timeout value: {}", args[i + 1]);
+                            return LoopAction::Continue;
+                        }
+                    };
+                    timeout = if seconds == 0 {
+                        None
+                    } else {
+                        Some(Duration::from_secs(seconds))
+                    };
+                    i += 2;
+                }
+                value if !value.starts_with('-') && channel.is_none() => {
+                    channel = Some(value);
+                    i += 1;
+                }
+                _ => {
+                    eprintln!("usage: /slim join <organization/namespace/application> [--timeout SECONDS]");
+                    return LoopAction::Continue;
+                }
+            }
+        }
+
+        let Some(channel) = channel else {
+            eprintln!("usage: /slim join <organization/namespace/application> [--timeout SECONDS]");
+            return LoopAction::Continue;
+        };
+
+        match self.slim.join_group_session(channel, timeout) {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error joining SLIM group session: {}", err),
+        }
+        LoopAction::Continue
+    }
+
     fn cmd_attach(&mut self, name_or_path: &str) {
         let sock = policy_watch::resolve_session_socket(name_or_path);
         if !sock.exists() {
@@ -1111,29 +1313,23 @@ enum LoopAction {
     Exit,
 }
 
-pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
-    let config = Config::builder()
-        .history_ignore_space(true)
-        .completion_type(CompletionType::List)
-        .edit_mode(EditMode::Emacs)
-        .build();
-
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let helper = ShellHelper::new(use_color);
-    let mut rl = match Editor::with_config(config) {
-        Ok(rl) => rl,
-        Err(err) => {
-            eprintln!("failed to initialize interactive shell: {}", err);
-            return ExitCode::FAILURE;
+fn handle_shell_line(session: &mut ShellSession, line: &str) -> Option<LoopAction> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        if session.pending_patch.is_some() {
+            println!("patch cancelled");
+            session.pending_patch = None;
         }
-    };
-    rl.set_helper(Some(helper));
-
-    // Load history from a well-known path.
-    let history_path = dirs_history_path();
-    if let Some(ref path) = history_path {
-        let _ = rl.load_history(path);
+        return None;
     }
+
+    Some(session.handle_command(trimmed))
+}
+
+pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let stdin = io::stdin();
+    let stdin_is_terminal = std::io::IsTerminal::is_terminal(&stdin);
 
     let initial_socket = args.socket.clone().or_else(|| {
         args.attach
@@ -1152,6 +1348,48 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         }
     }
     println!();
+
+    if !stdin_is_terminal {
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    eprintln!("error: {}", err);
+                    break;
+                }
+            };
+
+            match handle_shell_line(&mut session, &line) {
+                Some(LoopAction::Continue) | None => {}
+                Some(LoopAction::Exit) => break,
+            }
+        }
+
+        session.slim.shutdown();
+        return ExitCode::SUCCESS;
+    }
+
+    let config = Config::builder()
+        .history_ignore_space(true)
+        .completion_type(CompletionType::List)
+        .edit_mode(EditMode::Emacs)
+        .build();
+
+    let helper = ShellHelper::new(use_color);
+    let mut rl = match Editor::with_config(config) {
+        Ok(rl) => rl,
+        Err(err) => {
+            eprintln!("failed to initialize interactive shell: {}", err);
+            return ExitCode::FAILURE;
+        }
+    };
+    rl.set_helper(Some(helper));
+
+    // Load history from a well-known path.
+    let history_path = dirs_history_path();
+    if let Some(ref path) = history_path {
+        let _ = rl.load_history(path);
+    }
 
     loop {
         let prompt = if session.pending_patch.is_some() {
@@ -1177,19 +1415,12 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         match rl.readline(&prompt) {
             Ok(line) => {
                 let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    if session.pending_patch.is_some() {
-                        println!("patch cancelled");
-                        session.pending_patch = None;
-                    }
-                    continue;
-                }
-                if session.pending_patch.is_none() {
+                if !trimmed.is_empty() && session.pending_patch.is_none() {
                     let _ = rl.add_history_entry(trimmed);
                 }
-                match session.handle_command(trimmed) {
-                    LoopAction::Continue => {}
-                    LoopAction::Exit => break,
+                match handle_shell_line(&mut session, &line) {
+                    Some(LoopAction::Continue) | None => {}
+                    Some(LoopAction::Exit) => break,
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -1206,6 +1437,8 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
             }
         }
     }
+
+    session.slim.shutdown();
 
     if let Some(ref path) = history_path {
         let _ = rl.save_history(path);
@@ -1316,6 +1549,7 @@ mod tests {
         ShellSession {
             socket: Some(PathBuf::from("/tmp/shadi-fake-coverage.sock")),
             pending_patch: None,
+            slim: SlimShellState::new(),
         }
     }
 
@@ -1538,6 +1772,108 @@ mod tests {
     #[test]
     fn given_bare_trace_when_invoked_then_shows_usage() {
         assert_continues(&mut session(), "/trace");
+    }
+
+    // ── slim commands ────────────────────────────────────────
+
+    #[test]
+    fn given_session_when_slim_status_then_continues() {
+        assert_continues(&mut session(), "/slim status");
+    }
+
+    #[test]
+    fn given_session_when_slim_bare_then_continues() {
+        assert_continues(&mut session(), "/slim");
+    }
+
+    #[test]
+    fn given_session_when_slim_start_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim start");
+    }
+
+    #[test]
+    fn given_session_when_slim_start_node_then_continues() {
+        assert_continues(&mut session(), "/slim start node");
+    }
+
+    #[test]
+    fn given_session_with_slim_runtime_state_when_status_then_continues() {
+        let mut shell = session();
+        shell.slim.set_test_runtime_state(
+            Some(17),
+            Some("agntcy/shadi/secops-room".to_string()),
+            true,
+        );
+
+        assert_continues(&mut shell, "/slim status");
+    }
+
+    #[test]
+    fn given_session_when_slim_create_then_continues() {
+        assert_continues(&mut session(), "/slim create agntcy/shadi/secops-room");
+    }
+
+    #[test]
+    fn given_session_when_slim_create_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim create");
+    }
+
+    #[test]
+    fn given_session_when_slim_create_with_extra_args_then_continues() {
+        assert_continues(
+            &mut session(),
+            "/slim create agntcy/shadi/secops-room extra",
+        );
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_then_continues() {
+        assert_continues(&mut session(), "/slim invite agntcy/shadi/avatar");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim invite");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_with_extra_args_then_continues() {
+        assert_continues(&mut session(), "/slim invite agntcy/shadi/avatar extra");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout 5");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim join");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_invalid_timeout_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout nope");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_zero_timeout_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout 0");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_timeout_but_without_channel_then_continues() {
+        assert_continues(&mut session(), "/slim join --timeout 5");
+    }
+
+    #[test]
+    fn given_session_when_slim_join_with_unknown_flag_then_continues() {
+        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --bogus");
+    }
+
+    #[test]
+    fn given_unknown_subcommand_when_slim_then_continues() {
+        assert_continues(&mut session(), "/slim bogus");
     }
 
     // ── tab completion ───────────────────────────────────────
@@ -1820,6 +2156,11 @@ mod tests {
     }
 
     #[test]
+    fn given_session_when_help_slim_start_node_then_continues() {
+        assert_continues(&mut session(), "/help slim start node");
+    }
+
+    #[test]
     fn given_session_when_policy_patch_help_flag_then_continues() {
         assert_continues(&mut session(), "/policy patch --help");
     }
@@ -1880,6 +2221,43 @@ mod tests {
         assert!(
             candidates.iter().any(|c| c.display == "list"),
             "should complete /trace subcommands"
+        );
+    }
+
+    #[test]
+    fn given_slim_prefix_when_completing_then_returns_subcommands() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/slim ", 6, &Context::new(rl.history())).unwrap();
+        assert_eq!(start, 6);
+        assert!(
+            candidates.iter().any(|c| c.display == "status"),
+            "should complete /slim subcommands"
+        );
+    }
+
+    #[test]
+    fn given_slim_start_prefix_when_completing_then_returns_node() {
+        let helper = ShellHelper::new(false);
+        let rl_config = Config::builder().build();
+        let mut rl = Editor::with_config(rl_config).unwrap();
+        rl.set_helper(Some(helper));
+        let helper = rl.helper().unwrap();
+        let (start, candidates) = Completer::complete(
+            helper,
+            "/slim start ",
+            12,
+            &Context::new(rl.history()),
+        )
+        .unwrap();
+        assert_eq!(start, 12);
+        assert!(
+            candidates.iter().any(|c| c.display == "node"),
+            "should complete /slim start target"
         );
     }
 

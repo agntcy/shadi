@@ -1,4 +1,8 @@
 use super::*;
+use agent_transport_slim::{
+    start_bridge_with_io, BridgeArgs as SlimBridgeArgs, BridgeReport as SlimBridgeReport,
+    NativeSlimBootstrap, RunningBridge,
+};
 use shadi_sandbox::SandboxedChild;
 
 #[cfg(all(not(test), unix))]
@@ -77,13 +81,26 @@ fn prepare_sandbox_launch(
     cwd: &Path,
     base_policy: &SandboxPolicy,
     net_proxy: Option<&NetProxy>,
-) -> Result<(Command, Option<PendingTrustedSecretDelivery>, SandboxPolicy), String> {
+) -> Result<
+    (
+        Command,
+        Option<PendingTrustedSecretDelivery>,
+        SandboxPolicy,
+        Option<SlimBridgeArgs>,
+    ),
+    String,
+> {
+    let slim_bridge = resolve_internal_slim_bridge_args(cli)?;
     let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
     let mut command = Command::new(cmd_name);
     if cli.run_command.len() > 1 {
         command.args(&cli.run_command[1..]);
     }
     command.current_dir(cwd);
+    if slim_bridge.is_some() {
+        command.stdin(std::process::Stdio::piped());
+        command.stdout(std::process::Stdio::piped());
+    }
     #[cfg(test)]
     scrub_test_secret_backend_env(&mut command);
 
@@ -141,7 +158,7 @@ fn prepare_sandbox_launch(
 
     inject_keychain_secrets(&mut command, &secret_config.inject_keychain)?;
 
-    Ok((command, pending_trusted_secrets, runtime_policy))
+    Ok((command, pending_trusted_secrets, runtime_policy, slim_bridge))
 }
 
 pub(crate) fn run_sandboxed_command(
@@ -285,7 +302,7 @@ pub(crate) fn run_sandboxed_command(
             None => resolved.policy.clone(),
         };
 
-        let (mut command, mut pending_trusted_secrets, runtime_policy) = match prepare_sandbox_launch(
+        let (mut command, mut pending_trusted_secrets, runtime_policy, slim_bridge_args) = match prepare_sandbox_launch(
             cli,
             file_policy,
             cwd,
@@ -352,6 +369,38 @@ pub(crate) fn run_sandboxed_command(
             }
         }
 
+        let mut slim_bridge = match slim_bridge_args {
+            Some(args) => match start_internal_slim_bridge(&mut child, args) {
+                Ok(bridge) => {
+                    let info = bridge.session_info().clone();
+                    eprintln!(
+                        "connected internal SLIM bridge as {} to {} {} session {}",
+                        info.local_name, info.mode, info.target, info.session_id
+                    );
+                    Some(bridge)
+                }
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(pending) = pending_trusted_secrets.as_mut() {
+                        pending.close_parent_fds();
+                    }
+                    span.record("exit.code", &-1);
+                    let snapshot_path = finalize_git_snapshot(
+                        snapshot.as_mut(),
+                        None,
+                        Some(format!("failed to start internal SLIM bridge: {}", err)),
+                    );
+                    if let Some(path) = snapshot_path {
+                        span.record("snapshot.path", &path.display().to_string());
+                    }
+                    eprintln!("failed to start internal SLIM bridge: {}", err);
+                    return ExitCode::from(1);
+                }
+            },
+            None => None,
+        };
+
         match wait_for_child_or_interrupt(
             &mut child,
             interrupted.as_ref(),
@@ -359,6 +408,28 @@ pub(crate) fn run_sandboxed_command(
             restart_requested.as_ref(),
         ) {
             Ok(ChildWaitOutcome::RestartRequested) => {
+                let bridge_report = match stop_internal_slim_bridge(slim_bridge.take()) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        if let Some(pending) = pending_trusted_secrets.as_mut() {
+                            pending.close_parent_fds();
+                        }
+                        span.record("exit.code", &-1);
+                        let snapshot_path = finalize_git_snapshot(
+                            snapshot.as_mut(),
+                            None,
+                            Some(format!("failed to stop internal SLIM bridge: {}", err)),
+                        );
+                        if let Some(path) = snapshot_path {
+                            span.record("snapshot.path", &path.display().to_string());
+                        }
+                        eprintln!("failed to stop internal SLIM bridge: {}", err);
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Some(report) = bridge_report.as_ref() {
+                    print_internal_slim_bridge_summary(report);
+                }
                 if let Some(pending) = pending_trusted_secrets.as_mut() {
                     pending.close_parent_fds();
                 }
@@ -399,6 +470,25 @@ pub(crate) fn run_sandboxed_command(
             }
             Ok(ChildWaitOutcome::Exited(status)) | Ok(ChildWaitOutcome::Terminated(status)) => {
                 let exit_code = status.code().unwrap_or(1);
+                let bridge_report = match stop_internal_slim_bridge(slim_bridge.take()) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        span.record("exit.code", &-1);
+                        let snapshot_path = finalize_git_snapshot(
+                            snapshot.as_mut(),
+                            None,
+                            Some(format!("failed to stop internal SLIM bridge: {}", err)),
+                        );
+                        if let Some(path) = snapshot_path {
+                            span.record("snapshot.path", &path.display().to_string());
+                        }
+                        eprintln!("failed to stop internal SLIM bridge: {}", err);
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Some(report) = bridge_report.as_ref() {
+                    print_internal_slim_bridge_summary(report);
+                }
                 if let Some(pending) = pending_trusted_secrets.as_mut() {
                     if let Err(err) = pending.wait_for_background_delivery() {
                         span.record("exit.code", &-1);
@@ -424,6 +514,10 @@ pub(crate) fn run_sandboxed_command(
                 return ExitCode::from(status.code().unwrap_or(1) as u8);
             }
             Err(err) => {
+                if let Some(bridge) = slim_bridge.take() {
+                    bridge.request_stop();
+                    let _ = bridge.wait();
+                }
                 span.record("exit.code", &-1);
                 let snapshot_path = finalize_git_snapshot(
                     snapshot.as_mut(),
@@ -438,6 +532,90 @@ pub(crate) fn run_sandboxed_command(
             }
         }
     }
+}
+
+fn resolve_internal_slim_bridge_args(cli: &Cli) -> Result<Option<SlimBridgeArgs>, String> {
+    let timeout = match cli.slim_timeout {
+        Some(0) => None,
+        Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        None => Some(std::time::Duration::from_secs(30)),
+    };
+
+    match (&cli.slim_channel, &cli.slim_destination) {
+        (Some(_), Some(_)) => {
+            Err("use either --slim-channel or --slim-destination, not both".to_string())
+        }
+        (Some(channel), None) => Ok(Some(SlimBridgeArgs {
+            bootstrap: NativeSlimBootstrap::GroupJoin {
+                channel: channel.clone(),
+                timeout,
+            },
+            payload_type: cli.slim_payload_type.clone(),
+            allow_empty: cli.slim_allow_empty,
+        })),
+        (None, Some(destination)) => {
+            if cli.slim_timeout.is_some() {
+                return Err("--slim-timeout is only valid with --slim-channel".to_string());
+            }
+            Ok(Some(SlimBridgeArgs {
+                bootstrap: NativeSlimBootstrap::PointToPoint {
+                    destination: destination.clone(),
+                },
+                payload_type: cli.slim_payload_type.clone(),
+                allow_empty: cli.slim_allow_empty,
+            }))
+        }
+        (None, None) => {
+            if cli.slim_timeout.is_some() {
+                return Err("--slim-timeout requires --slim-channel".to_string());
+            }
+            if cli.slim_payload_type.is_some() {
+                return Err(
+                    "--slim-payload-type requires --slim-channel or --slim-destination"
+                        .to_string(),
+                );
+            }
+            if cli.slim_allow_empty {
+                return Err(
+                    "--slim-allow-empty requires --slim-channel or --slim-destination"
+                        .to_string(),
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn start_internal_slim_bridge(
+    child: &mut SandboxedChild,
+    args: SlimBridgeArgs,
+) -> Result<RunningBridge, String> {
+    let child_stdout = child
+        .take_stdout()
+        .ok_or_else(|| "internal SLIM bridge requires piped child stdout".to_string())?;
+    let child_stdin = child
+        .take_stdin()
+        .ok_or_else(|| "internal SLIM bridge requires piped child stdin".to_string())?;
+    start_bridge_with_io(args, child_stdout, child_stdin, None)
+}
+
+fn stop_internal_slim_bridge(
+    bridge: Option<RunningBridge>,
+) -> Result<Option<SlimBridgeReport>, String> {
+    match bridge {
+        Some(bridge) => {
+            bridge.request_stop();
+            bridge.wait().map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+fn print_internal_slim_bridge_summary(report: &SlimBridgeReport) {
+    eprintln!(
+        "internal SLIM bridge published {} SLIM messages and received {} SLIM messages",
+        report.published, report.received
+    );
 }
 
 pub(crate) fn finalize_git_snapshot(
@@ -1140,12 +1318,23 @@ fn unix_timestamp_ms() -> u128 {
 mod tests {
     use super::*;
     use crate::{Cli, PolicyFile, resolve_policy};
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        crate::lock_test_env()
+    }
+
+    #[derive(Clone)]
+    struct TestTlsMaterial {
+        cert: PathBuf,
+        key: PathBuf,
+        ca: PathBuf,
+    }
 
     fn temp_dir() -> TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -1172,11 +1361,103 @@ mod tests {
             git_snapshot_dir: None,
             git_snapshot_untracked: false,
             watch_policy: false,
+            slim_channel: None,
+            slim_destination: None,
+            slim_timeout: None,
+            slim_payload_type: None,
+            slim_allow_empty: false,
             session_name: None,
             record_ref: None,
             subcommand: None,
             run_command: vec!["echo".to_string(), "ok".to_string()],
         }
+    }
+
+    fn generate_test_tls_dir(base_dir: &Path) -> PathBuf {
+        let tls_dir = base_dir.join("shadi-slim-mtls");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tools")
+            .join("generate_slim_mtls_certs.sh");
+        let output = Command::new("bash")
+            .arg(&script)
+            .arg(&tls_dir)
+            .output()
+            .expect("run SLIM cert generator");
+
+        assert!(
+            output.status.success(),
+            "failed to generate SLIM test certs: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        tls_dir
+    }
+
+    fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> TestTlsMaterial {
+        TestTlsMaterial {
+            cert: base_dir.join(format!("client-{agent_id}.crt")),
+            key: base_dir.join(format!("client-{agent_id}.key")),
+            ca: base_dir.join("ca.crt"),
+        }
+    }
+
+    fn test_server_tls_material(base_dir: &Path) -> TestTlsMaterial {
+        TestTlsMaterial {
+            cert: base_dir.join("server.crt"),
+            key: base_dir.join("server.key"),
+            ca: base_dir.join("ca.crt"),
+        }
+    }
+
+    fn build_test_client_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ClientConfig {
+        let mut config = slim_bindings::ClientConfig::default();
+        config.endpoint = format!("https://{endpoint}");
+        config.tls = slim_bindings::TlsClientConfig {
+            insecure: false,
+            insecure_skip_verify: false,
+            source: slim_bindings::TlsSource::File {
+                cert: tls.cert.display().to_string(),
+                key: tls.key.display().to_string(),
+            },
+            ca_source: slim_bindings::CaSource::File {
+                path: tls.ca.display().to_string(),
+            },
+            include_system_ca_certs_pool: false,
+            tls_version: "tls1.3".to_string(),
+        };
+        config
+    }
+
+    fn build_test_server_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ServerConfig {
+        let mut config = slim_bindings::ServerConfig::default();
+        config.endpoint = endpoint.to_string();
+        config.tls = slim_bindings::TlsServerConfig {
+            insecure: false,
+            source: slim_bindings::TlsSource::File {
+                cert: tls.cert.display().to_string(),
+                key: tls.key.display().to_string(),
+            },
+            client_ca: slim_bindings::CaSource::File {
+                path: tls.ca.display().to_string(),
+            },
+            include_system_ca_certs_pool: Some(false),
+            tls_version: Some("tls1.3".to_string()),
+            reload_client_ca_file: Some(false),
+        };
+        config
+    }
+
+    fn reserve_test_endpoint() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let endpoint = listener.local_addr().expect("local addr").to_string();
+        drop(listener);
+        endpoint
+    }
+
+    fn format_slim_error(err: slim_bindings::SlimError) -> String {
+        err.to_string()
     }
 
     #[cfg(unix)]
@@ -1297,7 +1578,7 @@ mod tests {
             .allow_network_destination("1.1.1.1:80");
         let dir = temp_dir();
 
-        let (_command, _pending, runtime_policy) =
+        let (_command, _pending, runtime_policy, _bridge) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
 
@@ -1315,7 +1596,7 @@ mod tests {
         let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
         let expected_url = proxy.proxy_url();
 
-        let (mut command, _, _) =
+        let (mut command, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
                 .expect("prepare launch");
 
@@ -1332,7 +1613,7 @@ mod tests {
     #[test]
     fn prepare_sandbox_launch_env_remove_strips_inherited_vars() {
         // env_remove must strip env vars inherited from the parent process.
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_env();
         std::env::set_var("SHADI_TEST_SENTINEL_9f3a", "sentinel-value");
 
         let mut cli = build_cli();
@@ -1344,7 +1625,7 @@ mod tests {
         let base_policy = SandboxPolicy::new();
         let dir = temp_dir();
 
-        let (mut command, _, _) =
+        let (mut command, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
 
@@ -1379,7 +1660,7 @@ mod tests {
         let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
         let expected_url = proxy.proxy_url();
 
-        let (mut command, _, _) =
+        let (mut command, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
                 .expect("prepare launch");
 
@@ -1391,6 +1672,291 @@ mod tests {
         assert!(!env_output.contains("HTTP_PROXY="), "HTTP_PROXY must be stripped");
         assert!(!env_output.contains("https_proxy="), "https_proxy must be stripped");
         assert!(!env_output.contains("http_proxy="), "http_proxy must be stripped");
+    }
+
+    #[test]
+    fn given_slim_channel_when_resolving_internal_bridge_then_group_join_is_selected() {
+        let mut cli = build_cli();
+        cli.slim_channel = Some("agntcy/shadi/secops-room".to_string());
+        cli.slim_timeout = Some(0);
+        cli.slim_payload_type = Some("text/plain".to_string());
+        cli.slim_allow_empty = true;
+
+        let bridge = resolve_internal_slim_bridge_args(&cli)
+            .expect("resolve bridge")
+            .expect("bridge args");
+
+        match bridge.bootstrap {
+            NativeSlimBootstrap::GroupJoin { channel, timeout } => {
+                assert_eq!(channel, "agntcy/shadi/secops-room");
+                assert_eq!(timeout, None);
+            }
+            other => panic!("unexpected bootstrap: {:?}", other),
+        }
+        assert_eq!(bridge.payload_type.as_deref(), Some("text/plain"));
+        assert!(bridge.allow_empty);
+    }
+
+    #[test]
+    fn given_slim_destination_when_resolving_internal_bridge_then_point_to_point_is_selected() {
+        let mut cli = build_cli();
+        cli.slim_destination = Some("agntcy/shadi/secops-a".to_string());
+        cli.slim_payload_type = Some("application/json".to_string());
+
+        let bridge = resolve_internal_slim_bridge_args(&cli)
+            .expect("resolve bridge")
+            .expect("bridge args");
+
+        match bridge.bootstrap {
+            NativeSlimBootstrap::PointToPoint { destination } => {
+                assert_eq!(destination, "agntcy/shadi/secops-a");
+            }
+            other => panic!("unexpected bootstrap: {:?}", other),
+        }
+        assert_eq!(bridge.payload_type.as_deref(), Some("application/json"));
+        assert!(!bridge.allow_empty);
+    }
+
+    #[test]
+    fn given_slim_timeout_without_channel_when_resolving_internal_bridge_then_it_is_rejected() {
+        let mut cli = build_cli();
+        cli.slim_timeout = Some(5);
+
+        let err = resolve_internal_slim_bridge_args(&cli).expect_err("timeout rejected");
+        assert!(err.contains("--slim-timeout requires --slim-channel"));
+    }
+
+    #[test]
+    fn given_slim_payload_without_target_when_resolving_internal_bridge_then_it_is_rejected() {
+        let mut cli = build_cli();
+        cli.slim_payload_type = Some("text/plain".to_string());
+
+        let err = resolve_internal_slim_bridge_args(&cli).expect_err("payload rejected");
+
+        assert!(err.contains("--slim-payload-type requires --slim-channel or --slim-destination"));
+    }
+
+    #[test]
+    fn given_slim_allow_empty_without_target_when_resolving_internal_bridge_then_it_is_rejected() {
+        let mut cli = build_cli();
+        cli.slim_allow_empty = true;
+
+        let err = resolve_internal_slim_bridge_args(&cli).expect_err("allow-empty rejected");
+
+        assert!(err.contains("--slim-allow-empty requires --slim-channel or --slim-destination"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_sandbox_launch_with_internal_slim_bridge_pipes_child_stdio() {
+        let mut cli = build_cli();
+        cli.run_command = vec!["/bin/cat".to_string()];
+        cli.slim_destination = Some("agntcy/shadi/secops-a".to_string());
+        let file_policy = PolicyFile::default();
+        let base_policy = SandboxPolicy::new();
+        let dir = temp_dir();
+
+        let (mut command, _pending, _runtime_policy, bridge) =
+            prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
+                .expect("prepare launch");
+        let mut child = command.spawn().expect("spawn cat");
+
+        assert!(bridge.is_some());
+        assert!(child.stdin.take().is_some(), "internal bridge requires piped stdin");
+        assert!(child.stdout.take().is_some(), "internal bridge requires piped stdout");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn run_sandboxed_command_returns_error_when_internal_slim_bridge_cannot_start() {
+        let _guard = lock_env();
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+        let tmp_root = temp_dir();
+        let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
+        let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
+        let previous_secret = std::env::var_os("SLIM_SHARED_SECRET");
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+
+        std::env::set_var("SHADI_TMP_DIR", tmp_root.path());
+        std::env::set_var("SLIM_ENDPOINT", "127.0.0.1:65535");
+        std::env::set_var("SLIM_SHARED_SECRET", "my_shared_secret_for_testing_purposes_only");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["/bin/cat".to_string()];
+        cli.allow.push(PathBuf::from("/bin"));
+        cli.slim_destination = Some("agntcy/shadi/secops-a".to_string());
+
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &cwd);
+
+        match previous_tmp_dir {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        match previous_endpoint {
+            Some(value) => std::env::set_var("SLIM_ENDPOINT", value),
+            None => std::env::remove_var("SLIM_ENDPOINT"),
+        }
+        match previous_secret {
+            Some(value) => std::env::set_var("SLIM_SHARED_SECRET", value),
+            None => std::env::remove_var("SLIM_SHARED_SECRET"),
+        }
+        match previous_cert {
+            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
+            None => std::env::remove_var("SLIM_TLS_CERT"),
+        }
+        match previous_key {
+            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
+            None => std::env::remove_var("SLIM_TLS_KEY"),
+        }
+        match previous_ca {
+            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
+            None => std::env::remove_var("SLIM_TLS_CA"),
+        }
+
+        assert_eq!(exit, ExitCode::from(1));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn run_sandboxed_command_with_internal_slim_bridge_forwards_child_stdout() {
+        let _guard = lock_env();
+        let cwd_root = temp_dir();
+        let cwd = cwd_root.path().canonicalize().expect("canonical cwd");
+        let tls_root = temp_dir();
+        let tls_dir = generate_test_tls_dir(tls_root.path());
+        let endpoint = reserve_test_endpoint();
+        let server_tls = test_server_tls_material(&tls_dir);
+        let participant_tls = test_client_tls_material(&tls_dir, "secops-a");
+        let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
+        let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
+        let previous_secret = std::env::var_os("SLIM_SHARED_SECRET");
+        let previous_agent_id = std::env::var_os("SHADI_AGENT_ID");
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+
+        let node_service = slim_bindings::Service::new(format!(
+            "sandbox-snapshot-test-node-{}",
+            std::process::id()
+        ));
+        node_service
+            .run_server(build_test_server_config(&endpoint, &server_tls))
+            .expect("start local SLIM node");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let endpoint_for_participant = endpoint.clone();
+        let participant_handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            let participant_service = slim_bindings::Service::new(format!(
+                "sandbox-snapshot-test-participant-{}",
+                std::process::id()
+            ));
+            let participant_name = slim_bindings::Name::from_string(
+                "agntcy/shadi/secops-a".to_string(),
+            )
+            .map_err(format_slim_error)?;
+            let connection_id = participant_service
+                .connect(build_test_client_config(&endpoint_for_participant, &participant_tls))
+                .map_err(format_slim_error)?;
+            let participant_app = participant_service
+                .create_app_with_secret(Arc::new(participant_name.clone()), TEST_SHARED_SECRET.to_string())
+                .map_err(format_slim_error)?;
+
+            participant_app
+                .subscribe(Arc::new(participant_name), Some(connection_id))
+                .map_err(format_slim_error)?;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            ready_tx.send(()).map_err(|err| err.to_string())?;
+
+            let session = participant_app
+                .listen_for_session(Some(std::time::Duration::from_secs(20)))
+                .map_err(format_slim_error)?;
+            let payload = session
+                .get_message(Some(std::time::Duration::from_secs(20)))
+                .map_err(format_slim_error)?
+                .payload;
+
+            let _ = participant_app.delete_session_and_wait(session);
+            participant_service
+                .disconnect(connection_id)
+                .map_err(format_slim_error)?;
+            participant_service.shutdown().map_err(format_slim_error)?;
+            Ok(payload)
+        });
+
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("participant ready");
+
+        std::env::set_var("SHADI_TMP_DIR", tls_root.path());
+        std::env::set_var("SLIM_ENDPOINT", &endpoint);
+        std::env::set_var("SLIM_SHARED_SECRET", TEST_SHARED_SECRET);
+        std::env::set_var("SHADI_AGENT_ID", "avatar");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["/bin/echo".to_string(), "hello".to_string()];
+        cli.allow.push(PathBuf::from("/bin"));
+        cli.slim_destination = Some("agntcy/shadi/secops-a".to_string());
+
+        let file_policy = PolicyFile::default();
+        let resolved = resolve_policy(&cli, &file_policy).expect("resolve policy");
+        let exit = run_sandboxed_command(&cli, &resolved, &file_policy, &cwd);
+
+        match previous_tmp_dir {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        match previous_endpoint {
+            Some(value) => std::env::set_var("SLIM_ENDPOINT", value),
+            None => std::env::remove_var("SLIM_ENDPOINT"),
+        }
+        match previous_secret {
+            Some(value) => std::env::set_var("SLIM_SHARED_SECRET", value),
+            None => std::env::remove_var("SLIM_SHARED_SECRET"),
+        }
+        match previous_agent_id {
+            Some(value) => std::env::set_var("SHADI_AGENT_ID", value),
+            None => std::env::remove_var("SHADI_AGENT_ID"),
+        }
+        match previous_cert {
+            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
+            None => std::env::remove_var("SLIM_TLS_CERT"),
+        }
+        match previous_key {
+            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
+            None => std::env::remove_var("SLIM_TLS_KEY"),
+        }
+        match previous_ca {
+            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
+            None => std::env::remove_var("SLIM_TLS_CA"),
+        }
+
+        let payload = participant_handle
+            .join()
+            .expect("participant thread panicked")
+            .expect("participant payload");
+
+        node_service
+            .stop_server(endpoint.clone())
+            .expect("stop node server");
+        node_service.shutdown().expect("shutdown node service");
+
+        assert_eq!(exit, ExitCode::from(0));
+        assert_eq!(payload, b"hello".to_vec());
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -1494,7 +2060,7 @@ mod tests {
 
     #[test]
     fn default_git_snapshot_dir_falls_back_without_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_env();
         let previous = std::env::var_os("SHADI_TMP_DIR");
         std::env::remove_var("SHADI_TMP_DIR");
 
