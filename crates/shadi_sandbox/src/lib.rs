@@ -131,6 +131,30 @@ impl SandboxedChild {
             SandboxedChildInner::Windows(child) => child.id(),
         }
     }
+
+    pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        match &mut self.inner {
+            SandboxedChildInner::Std(child) => child.stdin.take(),
+            #[cfg(target_os = "windows")]
+            SandboxedChildInner::Windows(_) => None,
+        }
+    }
+
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        match &mut self.inner {
+            SandboxedChildInner::Std(child) => child.stdout.take(),
+            #[cfg(target_os = "windows")]
+            SandboxedChildInner::Windows(_) => None,
+        }
+    }
+
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        match &mut self.inner {
+            SandboxedChildInner::Std(child) => child.stderr.take(),
+            #[cfg(target_os = "windows")]
+            SandboxedChildInner::Windows(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -234,6 +258,23 @@ mod tests {
             .expect("spawn");
         let mut wrapped = SandboxedChild::from_std(child);
         assert!(wrapped.try_wait().expect("try_wait").is_none());
+        let _ = wrapped.wait().expect("wait");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandboxed_child_exposes_piped_stdio_handles() {
+        let child = Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        let mut wrapped = SandboxedChild::from_std(child);
+
+        assert!(wrapped.take_stdin().is_some());
+        assert!(wrapped.take_stdout().is_some());
+
+        wrapped.kill().expect("kill");
         let _ = wrapped.wait().expect("wait");
     }
 

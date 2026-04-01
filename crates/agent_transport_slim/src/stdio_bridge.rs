@@ -1,12 +1,18 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
+
+use slim_bindings::SlimError;
 
 use crate::{NativeSlimBootstrap, NativeSlimSession};
 
 const DEFAULT_GROUP_TIMEOUT: Duration = Duration::from_secs(30);
+const RECEIVE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeArgs {
@@ -15,8 +21,33 @@ pub struct BridgeArgs {
     pub allow_empty: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BridgeSessionInfo {
+    pub local_name: String,
+    pub target: String,
+    pub mode: String,
+    pub session_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BridgeReport {
+    pub local_name: String,
+    pub target: String,
+    pub mode: String,
+    pub session_id: u32,
+    pub published: usize,
+    pub received: usize,
+}
+
+pub struct RunningBridge {
+    info: BridgeSessionInfo,
+    stop_requested: Arc<AtomicBool>,
+    publish_handle: thread::JoinHandle<Result<usize, String>>,
+    receive_handle: thread::JoinHandle<Result<usize, String>>,
+}
+
 pub fn bridge_usage() -> &'static str {
-    "Usage: slim-stdio-bridge (--channel NAME | --destination NAME) [--timeout SECONDS] [--payload-type TYPE] [--allow-empty]\n\nReads UTF-8 lines from stdin and publishes each line as one SLIM message.\n\nModes:\n  --channel NAME        Wait for SHADI to invite this bridge into the named group session.\n  --destination NAME    Create a point-to-point session to the named destination.\n\nOptions:\n  --timeout SECONDS     Group join timeout in seconds. Use 0 to wait indefinitely.\n  --payload-type TYPE   Optional SLIM payload type attached to every published line.\n  --allow-empty         Forward empty input lines instead of skipping them.\n\nEnvironment:\n  SLIM_ENDPOINT, SLIM_SHARED_SECRET, SHADI_SLIM_SHARED_SECRET_KEY\n  SHADI_SLIM_LOCAL_NAME, SHADI_AGENT_ID\n  SLIM_TLS_CERT, SLIM_TLS_KEY, SLIM_TLS_CA, SHADI_TMP_DIR"
+    "Usage: slim-stdio-bridge (--channel NAME | --destination NAME) [--timeout SECONDS] [--payload-type TYPE] [--allow-empty]\n\nReads UTF-8 lines from stdin and publishes each line as one SLIM message. Received SLIM messages are written to stdout as newline-delimited payloads.\n\nModes:\n  --channel NAME        Wait for SHADI to invite this bridge into the named group session.\n  --destination NAME    Create a point-to-point session to the named destination.\n\nOptions:\n  --timeout SECONDS     Group join timeout in seconds. Use 0 to wait indefinitely.\n  --payload-type TYPE   Optional SLIM payload type attached to every published line.\n  --allow-empty         Forward empty input lines instead of skipping them.\n\nEnvironment:\n  SLIM_ENDPOINT, SLIM_SHARED_SECRET, SHADI_SLIM_SHARED_SECRET_KEY\n  SHADI_SLIM_LOCAL_NAME, SHADI_AGENT_ID\n  SLIM_TLS_CERT, SLIM_TLS_KEY, SLIM_TLS_CA, SHADI_TMP_DIR"
 }
 
 pub fn parse_bridge_args(args: &[String]) -> Result<BridgeArgs, String> {
@@ -98,26 +129,97 @@ pub fn parse_bridge_args(args: &[String]) -> Result<BridgeArgs, String> {
 }
 
 pub fn run_stdio_bridge(args: BridgeArgs) -> Result<(), String> {
-    let session = NativeSlimSession::from_env(args.bootstrap.clone())?;
-    let session_id = session.session_id()?;
+    let bridge = start_bridge_with_io(args, io::stdin(), io::stdout(), None)?;
+    let info = bridge.session_info().clone();
 
     let mut stderr = io::stderr().lock();
     writeln!(
         stderr,
         "connected SLIM stdio bridge as {} to {} {} session {}",
-        session.local_name(),
-        args.bootstrap.description(),
-        session.target(),
-        session_id
+        info.local_name,
+        info.mode,
+        info.target,
+        info.session_id
     )
     .map_err(io_error)?;
 
-    let published = pump_reader(io::stdin().lock(), args.allow_empty, |line| {
-        session.publish_bytes(line.into_bytes(), args.payload_type.clone())
-    })?;
+    let report = bridge.wait()?;
 
-    writeln!(stderr, "published {} SLIM messages", published).map_err(io_error)?;
+    writeln!(
+        stderr,
+        "published {} SLIM messages and received {} SLIM messages",
+        report.published,
+        report.received
+    )
+    .map_err(io_error)?;
     Ok(())
+}
+
+pub fn start_bridge_with_io<R, W>(
+    args: BridgeArgs,
+    reader: R,
+    writer: W,
+    stop_requested: Option<Arc<AtomicBool>>,
+) -> Result<RunningBridge, String>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let session = Arc::new(NativeSlimSession::from_env(args.bootstrap.clone())?);
+    let info = BridgeSessionInfo {
+        local_name: session.local_name().to_string(),
+        target: session.target().to_string(),
+        mode: args.bootstrap.description().to_string(),
+        session_id: session.session_id()?,
+    };
+    let stop_requested = stop_requested.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+    let publish_stop = Arc::clone(&stop_requested);
+    let publish_session = Arc::clone(&session);
+    let publish_payload_type = args.payload_type.clone();
+    let allow_empty = args.allow_empty;
+    let publish_handle = thread::spawn(move || {
+        let result = pump_reader(BufReader::new(reader), allow_empty, |line| {
+            publish_session.publish_bytes(line.into_bytes(), publish_payload_type.clone())
+        });
+        publish_stop.store(true, Ordering::SeqCst);
+        result
+    });
+
+    let receive_stop = Arc::clone(&stop_requested);
+    let receive_handle = thread::spawn(move || pump_messages(writer, receive_stop, session));
+
+    Ok(RunningBridge {
+        info,
+        stop_requested,
+        publish_handle,
+        receive_handle,
+    })
+}
+
+impl RunningBridge {
+    pub fn session_info(&self) -> &BridgeSessionInfo {
+        &self.info
+    }
+
+    pub fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::SeqCst);
+    }
+
+    pub fn wait(self) -> Result<BridgeReport, String> {
+        let published = join_bridge_worker(self.publish_handle, "publish")?;
+        self.stop_requested.store(true, Ordering::SeqCst);
+        let received = join_bridge_worker(self.receive_handle, "receive")?;
+
+        Ok(BridgeReport {
+            local_name: self.info.local_name,
+            target: self.info.target,
+            mode: self.info.mode,
+            session_id: self.info.session_id,
+            published,
+            received,
+        })
+    }
 }
 
 fn pump_reader<R, F>(mut reader: R, allow_empty: bool, mut publish: F) -> Result<usize, String>
@@ -144,6 +246,61 @@ where
 
         publish(line.clone())?;
         published += 1;
+    }
+}
+
+fn pump_messages<W>(
+    mut writer: W,
+    stop_requested: Arc<AtomicBool>,
+    session: Arc<NativeSlimSession>,
+) -> Result<usize, String>
+where
+    W: Write,
+{
+    let mut received = 0_usize;
+    loop {
+        if stop_requested.load(Ordering::SeqCst) {
+            return Ok(received);
+        }
+
+        match session.receive_bytes_raw(Some(RECEIVE_POLL_INTERVAL)) {
+            Ok(payload) => match write_message_line(&mut writer, &payload) {
+                Ok(()) => {
+                    received += 1;
+                }
+                Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+                    return Ok(received);
+                }
+                Err(err) => return Err(io_error(err)),
+            },
+            Err(SlimError::Timeout) => continue,
+            Err(err) if stop_requested.load(Ordering::SeqCst) => {
+                let _ = err;
+                return Ok(received);
+            }
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+}
+
+fn write_message_line<W>(writer: &mut W, payload: &[u8]) -> io::Result<()>
+where
+    W: Write,
+{
+    writer.write_all(payload)?;
+    if !payload.ends_with(b"\n") {
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()
+}
+
+fn join_bridge_worker(
+    handle: thread::JoinHandle<Result<usize, String>>,
+    label: &str,
+) -> Result<usize, String> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(format!("SLIM bridge {} worker panicked", label)),
     }
 }
 
@@ -243,5 +400,14 @@ mod tests {
 
         assert_eq!(count, 2);
         assert_eq!(published, vec!["alpha".to_string(), "".to_string()]);
+    }
+
+    #[test]
+    fn given_payload_without_newline_when_written_then_bridge_adds_delimiter() {
+        let mut output = Vec::new();
+
+        write_message_line(&mut output, b"reply").expect("write payload");
+
+        assert_eq!(output, b"reply\n");
     }
 }

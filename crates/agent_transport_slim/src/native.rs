@@ -9,6 +9,7 @@ use std::time::Duration;
 use agent_secrets::{SecretError, SecretResult};
 use slim_bindings::{
     App, CaSource, ClientConfig, Name, Service, Session, SessionConfig, SessionType,
+    SlimError,
     TlsClientConfig, TlsSource,
 };
 
@@ -178,10 +179,11 @@ impl NativeSlimSession {
     }
 
     pub fn receive_bytes(&self, timeout: Option<Duration>) -> Result<Vec<u8>, String> {
-        self.session
-            .get_message(timeout)
-            .map(|message| message.payload)
-            .map_err(format_slim_error)
+        self.receive_bytes_raw(timeout).map_err(format_slim_error)
+    }
+
+    pub fn receive_bytes_raw(&self, timeout: Option<Duration>) -> Result<Vec<u8>, SlimError> {
+        self.session.get_message(timeout).map(|message| message.payload)
     }
 }
 

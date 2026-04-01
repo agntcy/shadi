@@ -195,8 +195,21 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::DeriveAgentIdentity(command) => run_derive_agent_identity_command(command),
         Commands::VerifyAgentIdentity(command) => run_verify_agent_identity_command(command),
         Commands::PutKey(command) => run_put_key_command(command),
+        Commands::Slim(command) => run_slim_command(command),
         Commands::Shell(args) => run_shell_command(args),
         Commands::Dir(command) => run_dir_command(command),
+    }
+}
+
+fn run_slim_command(command: SlimCli) -> ExitCode {
+    match command.command {
+        SlimCommand::StartNode => match slim_shell::run_foreground_node() {
+            Ok(()) => ExitCode::from(0),
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
     }
 }
 

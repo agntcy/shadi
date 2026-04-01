@@ -4844,6 +4844,7 @@ name = "shadictl"
 version = "0.1.0"
 dependencies = [
  "agent_secrets",
+ "agent_transport_slim",
  "agntcy-slim-bindings",
  "base64",
  "bs58",

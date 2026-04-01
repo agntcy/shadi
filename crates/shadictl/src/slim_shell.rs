@@ -324,12 +324,62 @@ impl SlimShellState {
     }
 }
 
+pub(crate) fn run_foreground_node() -> Result<(), String> {
+    let endpoint = resolve_endpoint();
+    let server_config = build_server_config()?;
+    let service = Service::new(node_service_name());
+    service.run_server(server_config).map_err(format_slim_error)?;
+    eprintln!("started SLIM node on {}", endpoint);
+
+    wait_for_shutdown_signal()?;
+
+    service.shutdown().map_err(format_slim_error)?;
+    eprintln!("stopped SLIM node on {}", endpoint);
+    Ok(())
+}
+
 fn node_service_name() -> String {
     format!("shadictl-node-{}", std::process::id())
 }
 
 fn client_service_name() -> String {
     format!("shadictl-client-{}", std::process::id())
+}
+
+#[cfg(unix)]
+fn wait_for_shutdown_signal() -> Result<(), String> {
+    use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let interrupted = Arc::new(AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
+        signal_hook::flag::register(signal, Arc::clone(&interrupted))
+            .map_err(|err| format!("failed to install signal handler for {}: {}", signal, err))?;
+    }
+
+    while !interrupted.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wait_for_shutdown_signal() -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let handler_flag = Arc::clone(&interrupted);
+    ctrlc::set_handler(move || {
+        handler_flag.store(true, Ordering::SeqCst);
+    })
+    .map_err(|err| format!("failed to install signal handler: {}", err))?;
+
+    while !interrupted.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Ok(())
 }
 
 fn default_group_session_config() -> SessionConfig {

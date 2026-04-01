@@ -1,4 +1,8 @@
 use super::*;
+use agent_transport_slim::{
+    start_bridge_with_io, BridgeArgs as SlimBridgeArgs, BridgeReport as SlimBridgeReport,
+    NativeSlimBootstrap, RunningBridge,
+};
 use shadi_sandbox::SandboxedChild;
 
 #[cfg(all(not(test), unix))]
@@ -77,13 +81,26 @@ fn prepare_sandbox_launch(
     cwd: &Path,
     base_policy: &SandboxPolicy,
     net_proxy: Option<&NetProxy>,
-) -> Result<(Command, Option<PendingTrustedSecretDelivery>, SandboxPolicy), String> {
+) -> Result<
+    (
+        Command,
+        Option<PendingTrustedSecretDelivery>,
+        SandboxPolicy,
+        Option<SlimBridgeArgs>,
+    ),
+    String,
+> {
+    let slim_bridge = resolve_internal_slim_bridge_args(cli)?;
     let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
     let mut command = Command::new(cmd_name);
     if cli.run_command.len() > 1 {
         command.args(&cli.run_command[1..]);
     }
     command.current_dir(cwd);
+    if slim_bridge.is_some() {
+        command.stdin(std::process::Stdio::piped());
+        command.stdout(std::process::Stdio::piped());
+    }
     #[cfg(test)]
     scrub_test_secret_backend_env(&mut command);
 
@@ -141,7 +158,7 @@ fn prepare_sandbox_launch(
 
     inject_keychain_secrets(&mut command, &secret_config.inject_keychain)?;
 
-    Ok((command, pending_trusted_secrets, runtime_policy))
+    Ok((command, pending_trusted_secrets, runtime_policy, slim_bridge))
 }
 
 pub(crate) fn run_sandboxed_command(
@@ -285,7 +302,7 @@ pub(crate) fn run_sandboxed_command(
             None => resolved.policy.clone(),
         };
 
-        let (mut command, mut pending_trusted_secrets, runtime_policy) = match prepare_sandbox_launch(
+        let (mut command, mut pending_trusted_secrets, runtime_policy, slim_bridge_args) = match prepare_sandbox_launch(
             cli,
             file_policy,
             cwd,
@@ -352,6 +369,38 @@ pub(crate) fn run_sandboxed_command(
             }
         }
 
+        let mut slim_bridge = match slim_bridge_args {
+            Some(args) => match start_internal_slim_bridge(&mut child, args) {
+                Ok(bridge) => {
+                    let info = bridge.session_info().clone();
+                    eprintln!(
+                        "connected internal SLIM bridge as {} to {} {} session {}",
+                        info.local_name, info.mode, info.target, info.session_id
+                    );
+                    Some(bridge)
+                }
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(pending) = pending_trusted_secrets.as_mut() {
+                        pending.close_parent_fds();
+                    }
+                    span.record("exit.code", &-1);
+                    let snapshot_path = finalize_git_snapshot(
+                        snapshot.as_mut(),
+                        None,
+                        Some(format!("failed to start internal SLIM bridge: {}", err)),
+                    );
+                    if let Some(path) = snapshot_path {
+                        span.record("snapshot.path", &path.display().to_string());
+                    }
+                    eprintln!("failed to start internal SLIM bridge: {}", err);
+                    return ExitCode::from(1);
+                }
+            },
+            None => None,
+        };
+
         match wait_for_child_or_interrupt(
             &mut child,
             interrupted.as_ref(),
@@ -359,6 +408,28 @@ pub(crate) fn run_sandboxed_command(
             restart_requested.as_ref(),
         ) {
             Ok(ChildWaitOutcome::RestartRequested) => {
+                let bridge_report = match stop_internal_slim_bridge(slim_bridge.take()) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        if let Some(pending) = pending_trusted_secrets.as_mut() {
+                            pending.close_parent_fds();
+                        }
+                        span.record("exit.code", &-1);
+                        let snapshot_path = finalize_git_snapshot(
+                            snapshot.as_mut(),
+                            None,
+                            Some(format!("failed to stop internal SLIM bridge: {}", err)),
+                        );
+                        if let Some(path) = snapshot_path {
+                            span.record("snapshot.path", &path.display().to_string());
+                        }
+                        eprintln!("failed to stop internal SLIM bridge: {}", err);
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Some(report) = bridge_report.as_ref() {
+                    print_internal_slim_bridge_summary(report);
+                }
                 if let Some(pending) = pending_trusted_secrets.as_mut() {
                     pending.close_parent_fds();
                 }
@@ -399,6 +470,25 @@ pub(crate) fn run_sandboxed_command(
             }
             Ok(ChildWaitOutcome::Exited(status)) | Ok(ChildWaitOutcome::Terminated(status)) => {
                 let exit_code = status.code().unwrap_or(1);
+                let bridge_report = match stop_internal_slim_bridge(slim_bridge.take()) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        span.record("exit.code", &-1);
+                        let snapshot_path = finalize_git_snapshot(
+                            snapshot.as_mut(),
+                            None,
+                            Some(format!("failed to stop internal SLIM bridge: {}", err)),
+                        );
+                        if let Some(path) = snapshot_path {
+                            span.record("snapshot.path", &path.display().to_string());
+                        }
+                        eprintln!("failed to stop internal SLIM bridge: {}", err);
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Some(report) = bridge_report.as_ref() {
+                    print_internal_slim_bridge_summary(report);
+                }
                 if let Some(pending) = pending_trusted_secrets.as_mut() {
                     if let Err(err) = pending.wait_for_background_delivery() {
                         span.record("exit.code", &-1);
@@ -424,6 +514,10 @@ pub(crate) fn run_sandboxed_command(
                 return ExitCode::from(status.code().unwrap_or(1) as u8);
             }
             Err(err) => {
+                if let Some(bridge) = slim_bridge.take() {
+                    bridge.request_stop();
+                    let _ = bridge.wait();
+                }
                 span.record("exit.code", &-1);
                 let snapshot_path = finalize_git_snapshot(
                     snapshot.as_mut(),
@@ -438,6 +532,90 @@ pub(crate) fn run_sandboxed_command(
             }
         }
     }
+}
+
+fn resolve_internal_slim_bridge_args(cli: &Cli) -> Result<Option<SlimBridgeArgs>, String> {
+    let timeout = match cli.slim_timeout {
+        Some(0) => None,
+        Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        None => Some(std::time::Duration::from_secs(30)),
+    };
+
+    match (&cli.slim_channel, &cli.slim_destination) {
+        (Some(_), Some(_)) => {
+            Err("use either --slim-channel or --slim-destination, not both".to_string())
+        }
+        (Some(channel), None) => Ok(Some(SlimBridgeArgs {
+            bootstrap: NativeSlimBootstrap::GroupJoin {
+                channel: channel.clone(),
+                timeout,
+            },
+            payload_type: cli.slim_payload_type.clone(),
+            allow_empty: cli.slim_allow_empty,
+        })),
+        (None, Some(destination)) => {
+            if cli.slim_timeout.is_some() {
+                return Err("--slim-timeout is only valid with --slim-channel".to_string());
+            }
+            Ok(Some(SlimBridgeArgs {
+                bootstrap: NativeSlimBootstrap::PointToPoint {
+                    destination: destination.clone(),
+                },
+                payload_type: cli.slim_payload_type.clone(),
+                allow_empty: cli.slim_allow_empty,
+            }))
+        }
+        (None, None) => {
+            if cli.slim_timeout.is_some() {
+                return Err("--slim-timeout requires --slim-channel".to_string());
+            }
+            if cli.slim_payload_type.is_some() {
+                return Err(
+                    "--slim-payload-type requires --slim-channel or --slim-destination"
+                        .to_string(),
+                );
+            }
+            if cli.slim_allow_empty {
+                return Err(
+                    "--slim-allow-empty requires --slim-channel or --slim-destination"
+                        .to_string(),
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn start_internal_slim_bridge(
+    child: &mut SandboxedChild,
+    args: SlimBridgeArgs,
+) -> Result<RunningBridge, String> {
+    let child_stdout = child
+        .take_stdout()
+        .ok_or_else(|| "internal SLIM bridge requires piped child stdout".to_string())?;
+    let child_stdin = child
+        .take_stdin()
+        .ok_or_else(|| "internal SLIM bridge requires piped child stdin".to_string())?;
+    start_bridge_with_io(args, child_stdout, child_stdin, None)
+}
+
+fn stop_internal_slim_bridge(
+    bridge: Option<RunningBridge>,
+) -> Result<Option<SlimBridgeReport>, String> {
+    match bridge {
+        Some(bridge) => {
+            bridge.request_stop();
+            bridge.wait().map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+fn print_internal_slim_bridge_summary(report: &SlimBridgeReport) {
+    eprintln!(
+        "internal SLIM bridge published {} SLIM messages and received {} SLIM messages",
+        report.published, report.received
+    );
 }
 
 pub(crate) fn finalize_git_snapshot(
@@ -1172,6 +1350,11 @@ mod tests {
             git_snapshot_dir: None,
             git_snapshot_untracked: false,
             watch_policy: false,
+            slim_channel: None,
+            slim_destination: None,
+            slim_timeout: None,
+            slim_payload_type: None,
+            slim_allow_empty: false,
             session_name: None,
             record_ref: None,
             subcommand: None,
@@ -1297,7 +1480,7 @@ mod tests {
             .allow_network_destination("1.1.1.1:80");
         let dir = temp_dir();
 
-        let (_command, _pending, runtime_policy) =
+        let (_command, _pending, runtime_policy, _bridge) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
 
@@ -1315,7 +1498,7 @@ mod tests {
         let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
         let expected_url = proxy.proxy_url();
 
-        let (mut command, _, _) =
+        let (mut command, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
                 .expect("prepare launch");
 
@@ -1344,7 +1527,7 @@ mod tests {
         let base_policy = SandboxPolicy::new();
         let dir = temp_dir();
 
-        let (mut command, _, _) =
+        let (mut command, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
 
@@ -1379,7 +1562,7 @@ mod tests {
         let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
         let expected_url = proxy.proxy_url();
 
-        let (mut command, _, _) =
+        let (mut command, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
                 .expect("prepare launch");
 
@@ -1391,6 +1574,38 @@ mod tests {
         assert!(!env_output.contains("HTTP_PROXY="), "HTTP_PROXY must be stripped");
         assert!(!env_output.contains("https_proxy="), "https_proxy must be stripped");
         assert!(!env_output.contains("http_proxy="), "http_proxy must be stripped");
+    }
+
+    #[test]
+    fn given_slim_channel_when_resolving_internal_bridge_then_group_join_is_selected() {
+        let mut cli = build_cli();
+        cli.slim_channel = Some("agntcy/shadi/secops-room".to_string());
+        cli.slim_timeout = Some(0);
+        cli.slim_payload_type = Some("text/plain".to_string());
+        cli.slim_allow_empty = true;
+
+        let bridge = resolve_internal_slim_bridge_args(&cli)
+            .expect("resolve bridge")
+            .expect("bridge args");
+
+        match bridge.bootstrap {
+            NativeSlimBootstrap::GroupJoin { channel, timeout } => {
+                assert_eq!(channel, "agntcy/shadi/secops-room");
+                assert_eq!(timeout, None);
+            }
+            other => panic!("unexpected bootstrap: {:?}", other),
+        }
+        assert_eq!(bridge.payload_type.as_deref(), Some("text/plain"));
+        assert!(bridge.allow_empty);
+    }
+
+    #[test]
+    fn given_slim_timeout_without_channel_when_resolving_internal_bridge_then_it_is_rejected() {
+        let mut cli = build_cli();
+        cli.slim_timeout = Some(5);
+
+        let err = resolve_internal_slim_bridge_args(&cli).expect_err("timeout rejected");
+        assert!(err.contains("--slim-timeout requires --slim-channel"));
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

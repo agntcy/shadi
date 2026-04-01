@@ -61,6 +61,21 @@ pub(crate) struct Cli {
     #[arg(long = "watch-policy", action = ArgAction::SetTrue)]
     pub(crate) watch_policy: bool,
 
+    #[arg(long = "slim-channel", value_name = "NAME")]
+    pub(crate) slim_channel: Option<String>,
+
+    #[arg(long = "slim-destination", value_name = "NAME")]
+    pub(crate) slim_destination: Option<String>,
+
+    #[arg(long = "slim-timeout", value_name = "SECONDS")]
+    pub(crate) slim_timeout: Option<u64>,
+
+    #[arg(long = "slim-payload-type", value_name = "TYPE")]
+    pub(crate) slim_payload_type: Option<String>,
+
+    #[arg(long = "slim-allow-empty", action = ArgAction::SetTrue)]
+    pub(crate) slim_allow_empty: bool,
+
     /// Human-readable name for this sandbox session.
     /// When set, the control socket is created at
     /// `$TMPDIR/shadi-ctl-<name>.sock` instead of
@@ -145,6 +160,8 @@ pub(crate) enum Commands {
     VerifyAgentIdentity(VerifyAgentIdentityArgs),
     #[command(name = "put-key")]
     PutKey(PutKeyArgs),
+    #[command(name = "slim")]
+    Slim(SlimCli),
     /// Interactive terminal for managing SHADI sandbox sessions
     #[command(name = "shell")]
     Shell(ShellArgs),
@@ -173,6 +190,19 @@ pub(crate) struct DirCli {
 
     #[command(subcommand)]
     pub(crate) command: DirCommand,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "slim", about = "Native SLIM operations managed by SHADI")]
+pub(crate) struct SlimCli {
+    #[command(subcommand)]
+    pub(crate) command: SlimCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum SlimCommand {
+    #[command(name = "start-node", about = "Run the local native SLIM node until interrupted")]
+    StartNode,
 }
 
 #[derive(Subcommand, Debug)]

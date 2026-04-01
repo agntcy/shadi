@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
 shadi_sandbox = { path = "../shadi_sandbox" }
+agent_transport_slim = { path = "../agent_transport_slim" }
 agent_secrets = { path = "../agent_secrets", features = ["onepassword"] }
 shadi_memory = { path = "../shadi_memory" }
 shadi_telemetry = { path = "../shadi_telemetry" }
