@@ -21,12 +21,12 @@ SHADI is for teams that want agents to work with real tools and real credentials
 
 ## What You Get
 
-- `shadictl`: the main CLI for policy, sandbox execution, identity, secrets, memory, and shell control.
-- `shadi_sandbox`: OS-enforced sandbox policy.
-- `agent_secrets`: keychain-backed secret storage and verification gates.
-- `shadi_memory`: SQLCipher-backed local memory.
-- `agent_transport_slim`: secure transport and stdio bridge support.
-- `examples/shadi_demo_bot`: a Rust demo bot that exercises the main SHADI features, including SLIM messaging.
+- [`shadictl`](docs/cli.md#shadictl-shadi): the main CLI for policy, sandbox execution, identity, secrets, memory, and shell control.
+- [`shadi_sandbox`](docs/architecture.md#2-sandbox-layer): OS-enforced sandbox policy.
+- [`agent_secrets`](docs/architecture.md#1-secrets-layer): keychain-backed secret storage and verification gates.
+- [`shadi_memory`](docs/architecture.md#3-memory-layer): SQLCipher-backed local memory.
+- [`agent_transport_slim`](docs/architecture.md#4-transport-layer): secure transport and stdio bridge support.
+- [`examples/shadi_demo_bot`](examples/shadi_demo_bot/README.md): a Rust demo bot that exercises the main SHADI features, including SLIM messaging.
 
 ## Quick Start
 
@@ -40,17 +40,17 @@ The demo bot runs a compact end-to-end check across secrets, memory, sandboxing,
 
 ## Learn More
 
-- Start here: `docs/getting_started.md`
-- System model: `docs/architecture.md`
-- Security model: `docs/security.md`
-- CLI reference: `docs/cli.md`
-- Sandbox and policy details: `docs/sandbox.md`
-- Shell and demo workflows: `examples/shell_demo/README.md` and `examples/shadi_demo_bot/README.md`
+- Start here: [docs/getting_started.md](docs/getting_started.md)
+- System model: [docs/architecture.md](docs/architecture.md)
+- Security model: [docs/security.md](docs/security.md)
+- CLI reference: [docs/cli.md](docs/cli.md)
+- Sandbox and policy details: [docs/sandbox.md](docs/sandbox.md)
+- Shell and demo workflows: [examples/shell_demo/README.md](examples/shell_demo/README.md) and [examples/shadi_demo_bot/README.md](examples/shadi_demo_bot/README.md)
 
 ## Contributing
 
-See `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `SECURITY.md`.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md).
 
 ## License
 
-See `LICENSE.md`.
+See [LICENSE.md](LICENSE.md).
