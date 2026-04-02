@@ -69,7 +69,7 @@ struct FeatureBotArgs {
     slim_destination: Option<String>,
 
     #[arg(long, default_value = DEFAULT_SHARED_SECRET)]
-        slim_shared_secret: String,
+    slim_shared_secret: String,
 
     #[arg(long, default_value_t = 20)]
     slim_timeout_seconds: u64,
@@ -150,25 +150,37 @@ struct InMemorySecretStore {
 
 impl SecretStore for InMemorySecretStore {
     fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
-        let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+        let mut guard = self
+            .entries
+            .lock()
+            .map_err(|_| SecretError::StorageFailure)?;
         guard.insert(key.to_string(), secret.to_vec());
         Ok(())
     }
 
     fn get(&self, key: &str) -> SecretResult<SecretBytes> {
-        let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+        let guard = self
+            .entries
+            .lock()
+            .map_err(|_| SecretError::StorageFailure)?;
         let value = guard.get(key).ok_or(SecretError::InvalidInput)?.clone();
         Ok(SecretBytes::new(value))
     }
 
     fn delete(&self, key: &str) -> SecretResult<()> {
-        let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+        let mut guard = self
+            .entries
+            .lock()
+            .map_err(|_| SecretError::StorageFailure)?;
         guard.remove(key);
         Ok(())
     }
 
     fn list_keys(&self) -> SecretResult<Vec<String>> {
-        let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+        let guard = self
+            .entries
+            .lock()
+            .map_err(|_| SecretError::StorageFailure)?;
         Ok(guard.keys().cloned().collect())
     }
 }
@@ -345,19 +357,35 @@ fn run_feature_bot(args: FeatureBotArgs) -> Result<(), String> {
     let mut report = DemoReport::default();
     run_secret_checks(&mut report);
     run_memory_checks(&mut report, &memory_db, &args.memory_key);
-    run_sandbox_checks(&mut report, &current_exe, &repo_root, &tmp_dir);
-    run_slim_checks(
-        &mut report,
-        &current_exe,
-        &tmp_dir,
-        &slim_endpoint,
-        &args.slim_bot_agent_id,
-        &args.slim_peer_agent_id,
-        &slim_destination,
-        &args.slim_shared_secret,
-        args.slim_timeout_seconds,
-        args.no_slim,
-    );
+    if sandbox_checks_should_run_last() {
+        run_slim_checks(
+            &mut report,
+            &current_exe,
+            &tmp_dir,
+            &slim_endpoint,
+            &args.slim_bot_agent_id,
+            &args.slim_peer_agent_id,
+            &slim_destination,
+            &args.slim_shared_secret,
+            args.slim_timeout_seconds,
+            args.no_slim,
+        );
+        run_sandbox_checks(&mut report, &current_exe, &repo_root, &tmp_dir);
+    } else {
+        run_sandbox_checks(&mut report, &current_exe, &repo_root, &tmp_dir);
+        run_slim_checks(
+            &mut report,
+            &current_exe,
+            &tmp_dir,
+            &slim_endpoint,
+            &args.slim_bot_agent_id,
+            &args.slim_peer_agent_id,
+            &slim_destination,
+            &args.slim_shared_secret,
+            args.slim_timeout_seconds,
+            args.no_slim,
+        );
+    }
 
     report.print();
     if report.has_failures() {
@@ -375,10 +403,10 @@ fn run_secret_checks(report: &mut DemoReport) {
     record_unverified_secret_access(
         report,
         access.put_for_session(
-        &unverified,
-        "demo/api-token",
-        b"demo-token",
-        SecretPolicy::default(),
+            &unverified,
+            "demo/api-token",
+            b"demo-token",
+            SecretPolicy::default(),
         ),
     );
 
@@ -630,7 +658,10 @@ fn record_sandbox_outcome(report: &mut DemoReport, outcome: Result<SandboxProbeR
                 report.push(
                     DemoStatus::Fail,
                     "sandbox blocked read",
-                    format!("blocked path unexpectedly succeeded: {}", result.blocked_read.detail),
+                    format!(
+                        "blocked path unexpectedly succeeded: {}",
+                        result.blocked_read.detail
+                    ),
                 );
             } else {
                 report.push(
@@ -644,7 +675,10 @@ fn record_sandbox_outcome(report: &mut DemoReport, outcome: Result<SandboxProbeR
                 report.push(
                     DemoStatus::Fail,
                     "sandbox blocked network",
-                    format!("network connect unexpectedly succeeded: {}", result.network_connect.detail),
+                    format!(
+                        "network connect unexpectedly succeeded: {}",
+                        result.network_connect.detail
+                    ),
                 );
             } else {
                 report.push(
@@ -676,17 +710,22 @@ fn run_slim_checks(
     no_slim: bool,
 ) {
     if no_slim {
-        report.push(
-            DemoStatus::Skip,
-            "SLIM messaging",
-            "skipped by --no-slim",
-        );
+        report.push(DemoStatus::Skip, "SLIM messaging", "skipped by --no-slim");
         return;
     }
 
     #[cfg(windows)]
     {
-        let _ = (current_exe, tmp_dir, slim_endpoint, bot_agent_id, peer_agent_id, destination, shared_secret, timeout_seconds);
+        let _ = (
+            current_exe,
+            tmp_dir,
+            slim_endpoint,
+            bot_agent_id,
+            peer_agent_id,
+            destination,
+            shared_secret,
+            timeout_seconds,
+        );
         report.push(
             DemoStatus::Skip,
             "SLIM messaging",
@@ -803,11 +842,7 @@ fn run_shell_ticker(args: ShellTickerArgs) -> Result<(), String> {
     let mut tick = 0_u64;
     while !shutdown.load(Ordering::SeqCst) {
         tick += 1;
-        println!(
-            "[demo-agent] tick {:>4}  {}",
-            tick,
-            clock_time_string()
-        );
+        println!("[demo-agent] tick {:>4}  {}", tick, clock_time_string());
         let sleep_until = Instant::now() + Duration::from_secs(args.tick_seconds);
         while Instant::now() < sleep_until {
             if shutdown.load(Ordering::SeqCst) {
@@ -916,6 +951,10 @@ fn repo_root() -> Result<PathBuf, String> {
 fn blocked_probe_path() -> PathBuf {
     if cfg!(target_os = "macos") {
         PathBuf::from("/private/etc/hosts")
+    } else if cfg!(target_os = "linux") {
+        PathBuf::from("/proc/version")
+    } else if cfg!(target_os = "windows") {
+        PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
     } else {
         PathBuf::from("/etc/hosts")
     }
@@ -927,6 +966,10 @@ fn demo_sandbox_policy(repo_root: &Path, tmp_dir: &Path) -> SandboxPolicy {
         .allow_read_path(tmp_dir)
         .allow_write_path(tmp_dir)
         .block_network(true);
+
+    if let Some(profile_dir) = llvm_profile_output_dir() {
+        policy = policy.allow_write_path(profile_dir);
+    }
 
     for path in default_system_read_paths() {
         policy = policy.allow_read_path(path);
@@ -948,6 +991,25 @@ fn default_system_read_paths() -> Vec<&'static str> {
         paths.extend(["/lib", "/lib64", "/etc/ssl"]);
     }
     paths
+}
+
+fn sandbox_checks_should_run_last() -> bool {
+    cfg!(target_os = "linux") && llvm_profile_output_dir().is_some()
+}
+
+fn llvm_profile_output_dir() -> Option<PathBuf> {
+    let profile = std::env::var_os("LLVM_PROFILE_FILE")?;
+    let path = PathBuf::from(profile);
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+
+    if parent.is_absolute() {
+        Some(parent.to_path_buf())
+    } else {
+        std::env::current_dir().ok().map(|cwd| cwd.join(parent))
+    }
 }
 
 fn attempt_allowed_read(path: &Path) -> ProbeAttempt {
@@ -980,7 +1042,11 @@ fn attempt_blocked_read(path: &Path) -> ProbeAttempt {
     match fs::read_to_string(path) {
         Ok(content) => ProbeAttempt {
             success: true,
-            detail: format!("unexpectedly read {} bytes from {}", content.len(), path.display()),
+            detail: format!(
+                "unexpectedly read {} bytes from {}",
+                content.len(),
+                path.display()
+            ),
         },
         Err(err) => ProbeAttempt {
             success: false,
@@ -1037,7 +1103,10 @@ fn wait_for_file(path: &Path, timeout: Duration) -> Result<(), String> {
     Ok(())
 }
 
-fn wait_for_child_output(mut child: Child, timeout: Duration) -> Result<std::process::Output, String> {
+fn wait_for_child_output(
+    mut child: Child,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -1340,7 +1409,10 @@ mod tests {
         run_secret_checks(&mut report);
 
         assert_eq!(report.checks.len(), 2);
-        assert!(report.checks.iter().all(|check| check.status == DemoStatus::Pass));
+        assert!(report
+            .checks
+            .iter()
+            .all(|check| check.status == DemoStatus::Pass));
         assert!(!report.has_failures());
     }
 
@@ -1353,7 +1425,9 @@ mod tests {
         let mut report = DemoReport::default();
         record_unverified_secret_access(&mut report, Err(SecretError::StorageFailure));
         assert_eq!(report.checks[0].status, DemoStatus::Fail);
-        assert!(report.checks[0].detail.contains("unexpected verifier error"));
+        assert!(report.checks[0]
+            .detail
+            .contains("unexpected verifier error"));
 
         let mut report = DemoReport::default();
         record_unverified_secret_access(&mut report, Ok(()));
@@ -1370,16 +1444,16 @@ mod tests {
         assert!(validate_secret_roundtrip("wrong", &expected_keys, &empty)
             .expect_err("wrong payload should fail")
             .contains("unexpected secret payload"));
-        assert!(validate_secret_roundtrip("demo-token", &["wrong".to_string()], &empty)
-            .expect_err("wrong key should fail")
-            .contains("unexpected key listing"));
-        assert!(validate_secret_roundtrip(
-            "demo-token",
-            &expected_keys,
-            &["leftover".to_string()],
-        )
-        .expect_err("leftover keys should fail")
-        .contains("secret delete left keys behind"));
+        assert!(
+            validate_secret_roundtrip("demo-token", &["wrong".to_string()], &empty)
+                .expect_err("wrong key should fail")
+                .contains("unexpected key listing")
+        );
+        assert!(
+            validate_secret_roundtrip("demo-token", &expected_keys, &["leftover".to_string()],)
+                .expect_err("leftover keys should fail")
+                .contains("secret delete left keys behind")
+        );
     }
 
     #[test]
@@ -1420,18 +1494,46 @@ mod tests {
             1,
         )
         .is_ok());
-        assert!(validate_memory_roundtrip(&memory_db, "wrong", 1, Some("status"), Some("status"), 1)
-            .expect_err("wrong payload should fail")
-            .contains("unexpected latest payload"));
-        assert!(validate_memory_roundtrip(&memory_db, "all systems nominal", 2, Some("status"), Some("status"), 1)
-            .expect_err("wrong search len should fail")
-            .contains("unexpected search results"));
-        assert!(validate_memory_roundtrip(&memory_db, "all systems nominal", 1, Some("status"), None, 1)
-            .expect_err("missing list key should fail")
-            .contains("unexpected list results"));
-        assert!(validate_memory_roundtrip(&memory_db, "all systems nominal", 1, Some("status"), Some("status"), 0)
-            .expect_err("wrong delete count should fail")
-            .contains("unexpected delete count"));
+        assert!(validate_memory_roundtrip(
+            &memory_db,
+            "wrong",
+            1,
+            Some("status"),
+            Some("status"),
+            1
+        )
+        .expect_err("wrong payload should fail")
+        .contains("unexpected latest payload"));
+        assert!(validate_memory_roundtrip(
+            &memory_db,
+            "all systems nominal",
+            2,
+            Some("status"),
+            Some("status"),
+            1
+        )
+        .expect_err("wrong search len should fail")
+        .contains("unexpected search results"));
+        assert!(validate_memory_roundtrip(
+            &memory_db,
+            "all systems nominal",
+            1,
+            Some("status"),
+            None,
+            1
+        )
+        .expect_err("missing list key should fail")
+        .contains("unexpected list results"));
+        assert!(validate_memory_roundtrip(
+            &memory_db,
+            "all systems nominal",
+            1,
+            Some("status"),
+            Some("status"),
+            0
+        )
+        .expect_err("wrong delete count should fail")
+        .contains("unexpected delete count"));
     }
 
     #[test]
@@ -1474,8 +1576,27 @@ mod tests {
         let blocked = blocked_probe_path();
         #[cfg(target_os = "macos")]
         assert_eq!(blocked, PathBuf::from("/private/etc/hosts"));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        assert_eq!(blocked, PathBuf::from("/proc/version"));
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            blocked,
+            PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         assert_eq!(blocked, PathBuf::from("/etc/hosts"));
+    }
+
+    #[test]
+    fn llvm_profile_output_dir_reads_parent_directory_from_env() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let profile = temp_dir.path().join("demo-%p.profraw");
+        let _profile = ScopedEnvVar::set("LLVM_PROFILE_FILE", profile.as_os_str());
+
+        assert_eq!(
+            llvm_profile_output_dir(),
+            Some(temp_dir.path().to_path_buf())
+        );
     }
 
     #[test]
@@ -1600,8 +1721,8 @@ mod tests {
             read_optional_stream(Some(Cursor::new(b"demo".to_vec()))).expect("cursor output");
         assert_eq!(some_output, "demo");
 
-        let err = read_optional_stream(Some(FailingReader))
-            .expect_err("failing reader should error");
+        let err =
+            read_optional_stream(Some(FailingReader)).expect_err("failing reader should error");
         assert!(err.contains("failed to read child output"));
     }
 
@@ -1616,7 +1737,10 @@ mod tests {
         assert!(parse_name(&canonical_name("bot")).is_ok());
         assert!(parse_name("").is_err());
 
-        assert_eq!(secret_err_to_string(SecretError::InvalidInput), "invalid input");
+        assert_eq!(
+            secret_err_to_string(SecretError::InvalidInput),
+            "invalid input"
+        );
     }
 
     #[test]
@@ -1645,7 +1769,10 @@ mod tests {
         assert_eq!(client_config.endpoint, "https://127.0.0.1:4444");
         match client_config.tls.source {
             TlsSource::File { cert, key } => {
-                assert_eq!(cert, tls_dir.join("client-avatar.crt").display().to_string());
+                assert_eq!(
+                    cert,
+                    tls_dir.join("client-avatar.crt").display().to_string()
+                );
                 assert_eq!(key, tls_dir.join("client-avatar.key").display().to_string());
             }
             other => panic!("unexpected client tls source: {other:?}"),
@@ -1717,7 +1844,10 @@ mod tests {
                 },
             }),
         );
-        assert!(report.checks.iter().all(|check| check.status == DemoStatus::Pass));
+        assert!(report
+            .checks
+            .iter()
+            .all(|check| check.status == DemoStatus::Pass));
 
         let mut report = DemoReport::default();
         record_sandbox_outcome(
@@ -1741,7 +1871,10 @@ mod tests {
                 },
             }),
         );
-        assert!(report.checks.iter().all(|check| check.status == DemoStatus::Fail));
+        assert!(report
+            .checks
+            .iter()
+            .all(|check| check.status == DemoStatus::Fail));
 
         let mut report = DemoReport::default();
         record_sandbox_outcome(
