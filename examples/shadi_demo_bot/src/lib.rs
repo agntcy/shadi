@@ -990,6 +990,7 @@ fn default_system_read_paths() -> Vec<&'static str> {
     if cfg!(target_os = "linux") {
         paths.extend(["/lib", "/lib64", "/etc/ssl"]);
     }
+    paths.retain(|path| Path::new(path).exists());
     paths
 }
 
@@ -1602,9 +1603,20 @@ mod tests {
     #[test]
     fn default_system_read_paths_include_expected_entries() {
         let paths = default_system_read_paths();
-        assert!(paths.contains(&"/usr/bin"));
-        assert!(paths.contains(&"/usr/lib"));
-        assert!(paths.contains(&"/bin"));
+
+        for path in &paths {
+            assert!(Path::new(path).exists(), "missing system read path: {path}");
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(paths.contains(&"/usr/bin"));
+            assert!(paths.contains(&"/usr/lib"));
+            assert!(paths.contains(&"/bin"));
+        }
+
+        #[cfg(target_os = "windows")]
+        assert!(paths.is_empty());
 
         #[cfg(target_os = "macos")]
         assert!(paths.contains(&"/Library"));
