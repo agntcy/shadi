@@ -1946,6 +1946,32 @@ mod tests {
         assert!(std::fs::read(&output_path).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn trusted_secret_connection_error_classifies_expected_errors() {
+        for err in [
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"),
+            std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted"),
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"),
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "not connected"),
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof"),
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"),
+            std::io::Error::from_raw_os_error(libc::EPIPE),
+            std::io::Error::from_raw_os_error(libc::ECONNABORTED),
+            std::io::Error::from_raw_os_error(libc::ECONNRESET),
+            std::io::Error::from_raw_os_error(libc::ENOTCONN),
+        ] {
+            assert!(
+                is_trusted_secret_connection_error(&err),
+                "unexpected classification for {err}"
+            );
+        }
+
+        let unrelated = std::io::Error::from_raw_os_error(libc::EINVAL);
+        assert!(!is_trusted_secret_connection_error(&unrelated));
+    }
+
     #[test]
     fn parse_name_mappings_rejects_duplicates() {
         let err = parse_name_mappings(

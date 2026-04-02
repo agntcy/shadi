@@ -4797,6 +4797,7 @@ dependencies = [
  "shadi_memory",
  "shadi_sandbox",
  "signal-hook",
+ "tempfile",
 ]
 
 [[package]]
