@@ -7,6 +7,13 @@ manage a sandboxed agent process in real time.
 
 ```bash
 cargo build -p shadictl
+cargo build -p shadi_demo_bot
+```
+
+Rust shell ticker:
+
+```bash
+cargo run -p shadi_demo_bot -- shell-ticker
 ```
 
 ## Step 1 — Launch a demo agent in the sandbox
@@ -305,5 +312,5 @@ Type `<cmd> --help` for per-command usage, e.g. `/policy patch --help`.
 | File | Purpose |
 |------|---------|
 | `demo_agent.sh` | Bash demo agent with blocked command, network, and file probes |
-| `demo_agent.py` | Python ticker (needs `--read ~/.pyenv` on macOS with pyenv) |
+| `../shadi_demo_bot` | Rust shell ticker plus a full SHADI feature bot with sandbox, memory, secrets, and SLIM checks |
 | `policy.json` | Demo policy: read-only /usr, network blocked, dangerous commands blocked |

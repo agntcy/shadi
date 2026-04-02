@@ -2,6 +2,7 @@
 members = [
   "crates/agent_secrets",
   "crates/agent_transport_slim",
+  "examples/shadi_demo_bot",
   "crates/slim_mas",
   "crates/shadi_memory",
   "crates/shadi_py",

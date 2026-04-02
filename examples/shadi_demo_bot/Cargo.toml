@@ -1,0 +1,20 @@
+[package]
+name = "shadi_demo_bot"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+agent_secrets = { path = "../../crates/agent_secrets" }
+agent_transport_slim = { path = "../../crates/agent_transport_slim" }
+shadi_memory = { path = "../../crates/shadi_memory" }
+shadi_sandbox = { path = "../../crates/shadi_sandbox" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "1.3.0" }
+clap = { version = "4.5", features = ["derive", "env"] }
+ctrlc = "3.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+signal-hook = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

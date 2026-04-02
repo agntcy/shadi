@@ -840,6 +840,27 @@ fn read_secret_nonce(stream: &mut UnixStream) -> Result<String, String> {
 }
 
 #[cfg(unix)]
+fn is_trusted_secret_connection_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::WouldBlock
+    ) || matches!(
+        err.raw_os_error(),
+        Some(code)
+            if code == libc::EPIPE
+                || code == libc::ECONNABORTED
+                || code == libc::ECONNRESET
+                || code == libc::ENOTCONN
+    )
+}
+
+#[cfg(unix)]
 fn create_secret_endpoint_dir() -> Result<PathBuf, String> {
     let root = Path::new(TRUSTED_SECRET_ENDPOINT_ROOT);
     for attempt in 0..32_u32 {
@@ -882,7 +903,20 @@ fn deliver_secret_to_process(
     while Instant::now() < deadline {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                let peer_pid = get_peer_pid(&stream)?;
+                let peer_pid = match get_peer_pid(&stream) {
+                    Ok(peer_pid) => peer_pid,
+                    Err(err) if is_trusted_secret_connection_error(&err) => {
+                        if !process_is_alive(child_pid) {
+                            return Err(format!(
+                                "trusted secret '{}' fetch disconnected before verification",
+                                broker.name
+                            ));
+                        }
+                        thread::sleep(TRUSTED_SECRET_DELIVERY_POLL_INTERVAL);
+                        continue;
+                    }
+                    Err(err) => return Err(err.to_string()),
+                };
                 if peer_pid != child_pid {
                     return Err(format!(
                         "trusted secret '{}' fetch came from unexpected pid {}",
@@ -890,7 +924,16 @@ fn deliver_secret_to_process(
                     ));
                 }
 
-                let peer_program = get_process_executable(peer_pid)?;
+                let peer_program = match get_process_executable(peer_pid) {
+                    Ok(peer_program) => peer_program,
+                    Err(err) if !process_is_alive(peer_pid) => {
+                        return Err(format!(
+                            "trusted secret '{}' fetch disconnected before verification",
+                            broker.name
+                        ));
+                    }
+                    Err(err) => return Err(err.to_string()),
+                };
                 if peer_program != expected_program {
                     return Err(format!(
                         "trusted secret '{}' fetch came from unexpected executable {}",
@@ -899,7 +942,12 @@ fn deliver_secret_to_process(
                     ));
                 }
 
-                let presented_nonce = read_secret_nonce(&mut stream)?;
+                let presented_nonce = read_secret_nonce(&mut stream).map_err(|_| {
+                    format!(
+                        "trusted secret '{}' fetch did not present a valid nonce",
+                        broker.name
+                    )
+                })?;
                 if presented_nonce != broker.nonce {
                     return Err(format!(
                         "trusted secret '{}' fetch presented an invalid nonce",
@@ -956,7 +1004,22 @@ fn start_delegated_secret_delivery(
         while process_is_alive(parent_pid) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let peer_pid = get_peer_pid(&stream)?;
+                    let peer_pid = match get_peer_pid(&stream) {
+                        Ok(peer_pid) => peer_pid,
+                        Err(err) if is_trusted_secret_connection_error(&err) => {
+                            last_rejection = Some(format!(
+                                "trusted secret '{}' delegated fetch disconnected before verification",
+                                name
+                            ));
+                            continue;
+                        }
+                        Err(err) => {
+                            return Err(format!(
+                                "trusted secret '{}' delegated delivery failed: {}",
+                                name, err
+                            ));
+                        }
+                    };
                     let peer_program = match get_process_executable(peer_pid) {
                         Ok(program) => program,
                         Err(err) => {
@@ -1070,7 +1133,7 @@ fn process_is_alive(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn get_peer_pid(stream: &UnixStream) -> Result<u32, String> {
+fn get_peer_pid(stream: &UnixStream) -> std::io::Result<u32> {
     use std::mem::size_of_val;
     use std::os::fd::AsRawFd;
 
@@ -1086,13 +1149,13 @@ fn get_peer_pid(stream: &UnixStream) -> Result<u32, String> {
         )
     };
     if rc != 0 {
-        return Err(std::io::Error::last_os_error().to_string());
+        return Err(std::io::Error::last_os_error());
     }
     Ok(peer_pid as u32)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn get_peer_pid(stream: &UnixStream) -> Result<u32, String> {
+fn get_peer_pid(stream: &UnixStream) -> std::io::Result<u32> {
     use std::mem::size_of;
     use std::os::fd::AsRawFd;
 
@@ -1108,13 +1171,13 @@ fn get_peer_pid(stream: &UnixStream) -> Result<u32, String> {
         )
     };
     if rc != 0 {
-        return Err(std::io::Error::last_os_error().to_string());
+        return Err(std::io::Error::last_os_error());
     }
     Ok(peer_cred.pid as u32)
 }
 
 #[cfg(target_os = "macos")]
-fn get_process_executable(pid: u32) -> Result<PathBuf, String> {
+fn get_process_executable(pid: u32) -> std::io::Result<PathBuf> {
     const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
 
     #[link(name = "proc")]
@@ -1131,13 +1194,13 @@ fn get_process_executable(pid: u32) -> Result<PathBuf, String> {
         )
     };
     if rc <= 0 {
-        return Err(std::io::Error::last_os_error().to_string());
+        return Err(std::io::Error::last_os_error());
     }
     let path = std::ffi::CStr::from_bytes_until_nul(&buffer)
-        .map_err(|err| err.to_string())?
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?
         .to_string_lossy()
         .into_owned();
-    std::fs::canonicalize(path).map_err(|err| err.to_string())
+    std::fs::canonicalize(path)
 }
 
 #[cfg(target_os = "macos")]
@@ -1167,8 +1230,8 @@ fn get_process_parent_pid(pid: u32) -> Result<u32, String> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn get_process_executable(pid: u32) -> Result<PathBuf, String> {
-    std::fs::canonicalize(format!("/proc/{}/exe", pid)).map_err(|err| err.to_string())
+fn get_process_executable(pid: u32) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(format!("/proc/{}/exe", pid))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -1881,6 +1944,32 @@ mod tests {
         assert!(err.contains("trusted secret 'token'"), "unexpected error: {err}");
         pending.close_parent_fds();
         assert!(std::fs::read(&output_path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_secret_connection_error_classifies_expected_errors() {
+        for err in [
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"),
+            std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted"),
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"),
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "not connected"),
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof"),
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"),
+            std::io::Error::from_raw_os_error(libc::EPIPE),
+            std::io::Error::from_raw_os_error(libc::ECONNABORTED),
+            std::io::Error::from_raw_os_error(libc::ECONNRESET),
+            std::io::Error::from_raw_os_error(libc::ENOTCONN),
+        ] {
+            assert!(
+                is_trusted_secret_connection_error(&err),
+                "unexpected classification for {err}"
+            );
+        }
+
+        let unrelated = std::io::Error::from_raw_os_error(libc::EINVAL);
+        assert!(!is_trusted_secret_connection_error(&unrelated));
     }
 
     #[test]
