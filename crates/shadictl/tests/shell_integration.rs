@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use shadi_sandbox::{
@@ -309,6 +309,16 @@ fn run_shell_with_env(
     extra_args: &[&str],
     env_vars: &[(&str, &str)],
 ) -> ShellOutput {
+    // These tests drive the compiled shell through piped stdin while also
+    // standing up per-test Unix socket servers. Running multiple shell
+    // subprocesses in parallel is flaky on macOS CI, so keep the harness
+    // single-file deterministic.
+    static SHELL_SUBPROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = SHELL_SUBPROCESS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock shell integration subprocesses");
+
     let bin = env!("CARGO_BIN_EXE_shadictl");
     let mut cmd = Command::new(bin);
     cmd.arg("shell");
@@ -350,8 +360,9 @@ impl ShellOutput {
     fn stdout_contains(&self, needle: &str) -> &Self {
         assert!(
             self.stdout.contains(needle),
-            "expected stdout to contain {needle:?}, got:\n{}",
-            self.stdout
+            "expected stdout to contain {needle:?}, got stdout:\n{}\n--- stderr ---\n{}",
+            self.stdout,
+            self.stderr
         );
         self
     }
@@ -366,7 +377,12 @@ impl ShellOutput {
     }
 
     fn assert_success(&self) -> &Self {
-        assert!(self.success, "expected exit code 0");
+        assert!(
+            self.success,
+            "expected exit code 0, got stdout:\n{}\n--- stderr ---\n{}",
+            self.stdout,
+            self.stderr
+        );
         self
     }
 
