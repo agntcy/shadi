@@ -113,6 +113,9 @@ struct SandboxProbeArgs {
     blocked_read: PathBuf,
 
     #[arg(long)]
+    result_file: Option<PathBuf>,
+
+    #[arg(long)]
     network_host: String,
 
     #[arg(long)]
@@ -583,8 +586,10 @@ fn run_sandbox_checks(
 ) {
     let allowed_read = repo_root.join("README.md");
     let allowed_write = tmp_dir.join("sandbox-probe-output.txt");
-    let blocked_read = blocked_probe_path();
+    let blocked_read = blocked_probe_path(repo_root);
+    let result_file = tmp_dir.join("sandbox-probe-result.json");
     let _ = fs::remove_file(&allowed_write);
+    let _ = fs::remove_file(&result_file);
 
     let outcome = (|| -> Result<SandboxProbeResult, String> {
         let mut command = Command::new(current_exe);
@@ -596,6 +601,8 @@ fn run_sandbox_checks(
             .arg(&allowed_write)
             .arg("--blocked-read")
             .arg(&blocked_read)
+            .arg("--result-file")
+            .arg(&result_file)
             .arg("--network-host")
             .arg("1.1.1.1")
             .arg("--network-port")
@@ -603,7 +610,7 @@ fn run_sandbox_checks(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let policy = demo_sandbox_policy(repo_root, tmp_dir);
+        let policy = demo_sandbox_policy(repo_root, tmp_dir, &allowed_read);
         let mut child = match spawn_sandboxed(&mut command, &policy) {
             Ok(child) => child,
             Err(SandboxError::NotSupported) => {
@@ -619,18 +626,22 @@ fn run_sandbox_checks(
             .map_err(|err| format!("failed to wait for sandbox probe: {}", err))?;
 
         if !status.success() {
+            let result = read_sandbox_probe_output(&result_file, &stdout).unwrap_or_default();
             return Err(format!(
-                "sandbox probe exited with {} and stderr: {}",
+                "sandbox probe exited with {} stdout={} stderr={}",
                 status.code().unwrap_or(-1),
+                result.trim(),
                 stderr.trim()
             ));
         }
 
-        serde_json::from_str(stdout.trim()).map_err(|err| {
+        let result = read_sandbox_probe_output(&result_file, &stdout)?;
+
+        serde_json::from_str(result.trim()).map_err(|err| {
             format!(
                 "failed to parse sandbox probe output: {} (stdout: {} stderr: {})",
                 err,
-                stdout.trim(),
+                result.trim(),
                 stderr.trim()
             )
         })
@@ -867,6 +878,16 @@ fn run_sandbox_probe(args: SandboxProbeArgs) -> Result<(), String> {
 
     let output = serde_json::to_string(&result)
         .map_err(|err| format!("failed to serialize sandbox probe output: {}", err))?;
+
+    if let Some(result_file) = &args.result_file {
+        if let Some(parent) = result_file.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create {}: {}", parent.display(), err))?;
+        }
+        fs::write(result_file, output.as_bytes())
+            .map_err(|err| format!("failed to write {}: {}", result_file.display(), err))?;
+    }
+
     println!("{}", output);
     Ok(())
 }
@@ -948,24 +969,28 @@ fn repo_root() -> Result<PathBuf, String> {
         .map_err(|err| format!("failed to resolve repository root: {}", err))
 }
 
-fn blocked_probe_path() -> PathBuf {
+fn blocked_probe_path(repo_root: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         PathBuf::from("/private/etc/hosts")
     } else if cfg!(target_os = "linux") {
         PathBuf::from("/proc/version")
     } else if cfg!(target_os = "windows") {
-        PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
+        repo_root.join("Cargo.toml")
     } else {
         PathBuf::from("/etc/hosts")
     }
 }
 
-fn demo_sandbox_policy(repo_root: &Path, tmp_dir: &Path) -> SandboxPolicy {
+fn demo_sandbox_policy(repo_root: &Path, tmp_dir: &Path, allowed_read: &Path) -> SandboxPolicy {
     let mut policy = SandboxPolicy::new()
         .allow_read_path(repo_root)
         .allow_read_path(tmp_dir)
         .allow_write_path(tmp_dir)
         .block_network(true);
+
+    if cfg!(target_os = "windows") {
+        policy = policy.allow_read_path(allowed_read);
+    }
 
     if let Some(profile_dir) = llvm_profile_output_dir() {
         policy = policy.allow_write_path(profile_dir);
@@ -1011,6 +1036,23 @@ fn llvm_profile_output_dir() -> Option<PathBuf> {
     } else {
         std::env::current_dir().ok().map(|cwd| cwd.join(parent))
     }
+}
+
+fn read_sandbox_probe_output(result_file: &Path, stdout: &str) -> Result<String, String> {
+    if let Ok(output) = fs::read_to_string(result_file) {
+        if !output.trim().is_empty() {
+            return Ok(output);
+        }
+    }
+
+    if !stdout.trim().is_empty() {
+        return Ok(stdout.to_string());
+    }
+
+    Err(format!(
+        "sandbox probe produced no output in {} or stdout",
+        result_file.display()
+    ))
 }
 
 fn attempt_allowed_read(path: &Path) -> ProbeAttempt {
@@ -1574,16 +1616,13 @@ mod tests {
         let root = repo_root().expect("repo root");
         assert!(root.join("Cargo.toml").is_file());
 
-        let blocked = blocked_probe_path();
+        let blocked = blocked_probe_path(&root);
         #[cfg(target_os = "macos")]
         assert_eq!(blocked, PathBuf::from("/private/etc/hosts"));
         #[cfg(target_os = "linux")]
         assert_eq!(blocked, PathBuf::from("/proc/version"));
         #[cfg(target_os = "windows")]
-        assert_eq!(
-            blocked,
-            PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
-        );
+        assert_eq!(blocked, root.join("Cargo.toml"));
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         assert_eq!(blocked, PathBuf::from("/etc/hosts"));
     }
@@ -1907,6 +1946,7 @@ mod tests {
         let allowed_read = dir.path().join("allowed.txt");
         let allowed_write = dir.path().join("allowed-write.txt");
         let blocked_read = dir.path().join("blocked.txt");
+        let result_file = dir.path().join("probe-result.json");
         fs::write(&allowed_read, "hello").expect("write allowed read");
         fs::write(&blocked_read, "secret").expect("write blocked read");
 
@@ -1915,11 +1955,13 @@ mod tests {
             allowed_read,
             allowed_write: allowed_write.clone(),
             blocked_read,
+            result_file: Some(result_file.clone()),
             network_host: "127.0.0.1".to_string(),
             network_port: listener.local_addr().expect("listener addr").port(),
         };
 
         run_sandbox_probe(args).expect("sandbox probe run");
         assert!(allowed_write.exists());
+        assert!(result_file.exists());
     }
 }
