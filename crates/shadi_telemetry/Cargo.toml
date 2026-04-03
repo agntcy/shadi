@@ -2,6 +2,9 @@
 name = "shadi_telemetry"
 version = "0.1.0"
 edition = "2021"
+description = "OpenTelemetry initialization and tracing sinks for SHADI runtimes and tools."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 opentelemetry = "0.24"

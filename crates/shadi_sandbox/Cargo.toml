@@ -2,6 +2,9 @@
 name = "shadi_sandbox"
 version = "0.1.0"
 edition = "2021"
+description = "OS-level sandbox policy and process launching for SHADI."
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = []

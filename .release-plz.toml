@@ -1,0 +1,47 @@
+[workspace]
+release = false
+release_always = false
+semver_check = false
+changelog_update = false
+pr_labels = ["release"]
+repo_url = "https://github.com/agntcy/shadi"
+
+[[package]]
+name = "agent_secrets"
+publish = true
+release = true
+
+[[package]]
+name = "agent_transport_slim"
+publish = true
+release = true
+
+[[package]]
+name = "shadi_memory"
+publish = true
+release = true
+
+[[package]]
+name = "shadi_sandbox"
+publish = true
+release = true
+
+[[package]]
+name = "shadi_telemetry"
+publish = true
+release = true
+
+[[package]]
+name = "shadi_py"
+publish = true
+release = true
+
+[[package]]
+name = "shadictl"
+publish = true
+release = true
+
+[[package]]
+name = "slim_mas"
+publish = true
+release = true
