@@ -658,12 +658,10 @@ fn send_message(socket_path: &Path, msg: &ControlMessage) -> Result<ControlRespo
 
     let json =
         serde_json::to_string(msg).map_err(|e| format!("failed to serialize message: {}", e))?;
+    let payload = format!("{}\n", json);
     stream
-        .write_all(json.as_bytes())
+        .write_all(payload.as_bytes())
         .map_err(|e| format!("failed to write: {}", e))?;
-    stream
-        .write_all(b"\n")
-        .map_err(|e| format!("failed to write newline: {}", e))?;
     stream
         .flush()
         .map_err(|e| format!("failed to flush: {}", e))?;
