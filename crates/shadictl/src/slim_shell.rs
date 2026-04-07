@@ -37,10 +37,10 @@ pub(crate) struct SlimStatus {
 }
 
 #[derive(Clone)]
-struct TlsMaterial {
-    cert: PathBuf,
-    key: PathBuf,
-    ca: PathBuf,
+pub(crate) struct TlsMaterial {
+    pub(crate) cert: PathBuf,
+    pub(crate) key: PathBuf,
+    pub(crate) ca: PathBuf,
 }
 
 impl SlimShellState {
@@ -301,26 +301,7 @@ impl SlimShellState {
             return Ok(shared_secret.clone());
         }
 
-        if let Ok(shared_secret) = std::env::var("SLIM_SHARED_SECRET") {
-            if !shared_secret.trim().is_empty() {
-                self.shared_secret = Some(shared_secret.clone());
-                return Ok(shared_secret);
-            }
-        }
-
-        let key_name = std::env::var("SHADI_SLIM_SHARED_SECRET_KEY")
-            .unwrap_or_else(|_| DEFAULT_SHARED_SECRET_KEY.to_string());
-        let store = crate::default_secret_store();
-        let secret = store.get(&key_name).map_err(|err| {
-            format!(
-                "failed to read SLIM shared secret from {}: {}",
-                key_name, err
-            )
-        })?;
-        let bytes = secret.expose(|data| data.to_vec());
-        let shared_secret = String::from_utf8(bytes)
-            .map_err(|_| format!("SLIM shared secret {} is not valid UTF-8", key_name))?;
-
+        let shared_secret = resolve_default_shared_secret()?;
         self.shared_secret = Some(shared_secret.clone());
         Ok(shared_secret)
     }
@@ -405,11 +386,11 @@ fn default_group_session_config() -> SessionConfig {
 }
 
 fn build_client_config() -> Result<ClientConfig, String> {
-    let tls = resolve_client_tls_material()?;
+    let tls = resolve_client_tls_material_for_agent(None)?;
     Ok(build_client_config_for_endpoint(&resolve_endpoint(), &tls))
 }
 
-fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
+pub(crate) fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     let mut config = ClientConfig::default();
     config.endpoint = resolve_client_endpoint_value(endpoint);
     config.tls = TlsClientConfig {
@@ -429,21 +410,11 @@ fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Client
 }
 
 fn build_server_config() -> Result<ServerConfig, String> {
-    let cert_dir = slim_tls_dir();
-    let tls = TlsMaterial {
-        cert: cert_dir.join("server.crt"),
-        key: cert_dir.join("server.key"),
-        ca: cert_dir.join("ca.crt"),
-    };
-
-    ensure_file_exists(&tls.cert, "SLIM server certificate")?;
-    ensure_file_exists(&tls.key, "SLIM server key")?;
-    ensure_file_exists(&tls.ca, "SLIM client CA")?;
-
+    let tls = resolve_server_tls_material()?;
     Ok(build_server_config_for_endpoint(&resolve_endpoint(), &tls))
 }
 
-fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ServerConfig {
+pub(crate) fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ServerConfig {
     let mut config = ServerConfig::default();
     config.endpoint = endpoint.to_string();
     config.tls = TlsServerConfig {
@@ -462,12 +433,43 @@ fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Server
     config
 }
 
+pub(crate) fn resolve_server_tls_material() -> Result<TlsMaterial, String> {
+    let cert_dir = slim_tls_dir();
+    let tls = TlsMaterial {
+        cert: cert_dir.join("server.crt"),
+        key: cert_dir.join("server.key"),
+        ca: cert_dir.join("ca.crt"),
+    };
+
+    ensure_file_exists(&tls.cert, "SLIM server certificate")?;
+    ensure_file_exists(&tls.key, "SLIM server key")?;
+    ensure_file_exists(&tls.ca, "SLIM client CA")?;
+
+    Ok(tls)
+}
+
+#[cfg(test)]
 fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
+    resolve_client_tls_material_for_agent(None)
+}
+
+pub(crate) fn resolve_client_tls_material_for_agent(
+    agent_id_override: Option<&str>,
+) -> Result<TlsMaterial, String> {
     let cert_override = std::env::var_os("SLIM_TLS_CERT").map(PathBuf::from);
     let key_override = std::env::var_os("SLIM_TLS_KEY").map(PathBuf::from);
     let ca = std::env::var_os("SLIM_TLS_CA")
         .map(PathBuf::from)
         .unwrap_or_else(|| slim_tls_dir().join("ca.crt"));
+    let agent_id = agent_id_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var("SHADI_AGENT_ID")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
 
     let (cert, key) = match (cert_override, key_override) {
         (Some(cert), Some(key)) => (cert, key),
@@ -476,9 +478,6 @@ fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
         }
         (None, None) => {
             let base_dir = slim_tls_dir();
-            let agent_id = std::env::var("SHADI_AGENT_ID")
-                .ok()
-                .filter(|value| !value.trim().is_empty());
             client_identity_candidates(&base_dir, agent_id.as_deref())
                 .into_iter()
                 .find(|(cert, key)| cert.is_file() && key.is_file())
@@ -501,6 +500,27 @@ fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
     ensure_file_exists(&ca, "SLIM client CA")?;
 
     Ok(TlsMaterial { cert, key, ca })
+}
+
+pub(crate) fn resolve_default_shared_secret() -> Result<String, String> {
+    if let Ok(shared_secret) = std::env::var("SLIM_SHARED_SECRET") {
+        if !shared_secret.trim().is_empty() {
+            return Ok(shared_secret);
+        }
+    }
+
+    let key_name = std::env::var("SHADI_SLIM_SHARED_SECRET_KEY")
+        .unwrap_or_else(|_| DEFAULT_SHARED_SECRET_KEY.to_string());
+    let store = crate::default_secret_store();
+    let secret = store.get(&key_name).map_err(|err| {
+        format!(
+            "failed to read SLIM shared secret from {}: {}",
+            key_name, err
+        )
+    })?;
+    let bytes = secret.expose(|data| data.to_vec());
+    String::from_utf8(bytes)
+        .map_err(|_| format!("SLIM shared secret {} is not valid UTF-8", key_name))
 }
 
 fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(PathBuf, PathBuf)> {
@@ -561,7 +581,7 @@ fn resolve_local_name_value(
     ))
 }
 
-fn parse_name(raw: &str) -> Result<Name, String> {
+pub(crate) fn parse_name(raw: &str) -> Result<Name, String> {
     Name::from_string(raw.to_string()).map_err(|err| {
         format!(
             "invalid SLIM name {}: {} (expected organization/namespace/application)",
@@ -591,7 +611,7 @@ fn ensure_file_exists(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
-fn format_slim_error(err: slim_bindings::SlimError) -> String {
+pub(crate) fn format_slim_error(err: slim_bindings::SlimError) -> String {
     err.to_string()
 }
 

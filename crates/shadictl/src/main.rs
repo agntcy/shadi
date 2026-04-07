@@ -40,6 +40,7 @@ mod resource_info;
 mod sandbox_snapshot;
 mod secrets_command;
 mod slim_shell;
+mod slim_a2a;
 mod slim_mas_command;
 mod snapshot_command;
 mod trace_command;
@@ -219,6 +220,20 @@ fn run_named_command(command: Commands) -> ExitCode {
 fn run_slim_command(command: SlimCli) -> ExitCode {
     match command.command {
         SlimCommand::StartNode => match slim_shell::run_foreground_node() {
+            Ok(()) => ExitCode::from(0),
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
+        SlimCommand::A2AEchoPeer(args) => match slim_a2a::run_a2a_echo_peer(args) {
+            Ok(()) => ExitCode::from(0),
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
+        SlimCommand::A2ASend(args) => match slim_a2a::run_a2a_send(args) {
             Ok(()) => ExitCode::from(0),
             Err(err) => {
                 eprintln!("{}", err);

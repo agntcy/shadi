@@ -526,6 +526,59 @@ cargo run -p agntcy-shadi-cli -- memory delete \
   --scope app --entry-key state
 ```
 
+## shadictl slim (`shadictl slim`)
+
+`shadictl slim` exposes native SLIM helpers and an A2A-over-SLIMRPC demo surface.
+
+The A2A commands reuse the same SLIM mTLS assets as the rest of the native SLIM path:
+
+- Client certs from `SLIM_TLS_CERT` and `SLIM_TLS_KEY`, or the default `.tmp/shadi-slim-mtls/client[-$SHADI_AGENT_ID].crt|key` lookup.
+- Server certs from the default `.tmp/shadi-slim-mtls/server.crt|server.key|ca.crt` when `--start-local-node` is used.
+- Shared secret from `SLIM_SHARED_SECRET`, or from the SHADI secret store key `secops/slim_shared_secret` by default. Override the key name with `SHADI_SLIM_SHARED_SECRET_KEY`.
+
+### Commands
+
+Run the local native SLIM node until interrupted:
+
+```bash
+cargo run -p agntcy-shadi-cli -- slim start-node
+```
+
+Serve a task-backed A2A peer over SLIMRPC until one request arrives or the timeout elapses:
+
+```bash
+cargo run -p agntcy-shadi-cli -- slim a2a-echo-peer \
+  --agent-id secops-a \
+  --listen-timeout-seconds 20
+```
+
+Start a temporary local SLIM node for that peer in the same process:
+
+```bash
+cargo run -p agntcy-shadi-cli -- slim a2a-echo-peer \
+  --agent-id secops-a \
+  --start-local-node
+```
+
+Send a unary A2A request over SLIMRPC:
+
+```bash
+cargo run -p agntcy-shadi-cli -- slim a2a-send \
+  --agent-id avatar \
+  --peer-agent-id secops-a \
+  --message "hello from avatar"
+```
+
+Send a streaming A2A request over SLIMRPC:
+
+```bash
+cargo run -p agntcy-shadi-cli -- slim a2a-send \
+  --agent-id avatar \
+  --peer-agent-id secops-a \
+  --message "hello from avatar" \
+  --stream
+```
+
 ## shadictl slim-mas (`shadictl slim-mas`)
 
 `shadictl slim-mas` evaluates SLIM multi-agent membership rules from a TOML config.

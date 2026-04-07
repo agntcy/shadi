@@ -10,19 +10,30 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use a2a::*;
+use a2a_client::A2AClient;
+use a2a_server::{
+    AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
+    ServiceParams as A2AServiceParams,
+};
 use agent_secrets::{
     AgentSecretAccess, AgentVerifier, SecretBytes, SecretError, SecretPolicy, SecretResult,
     SecretStore, SessionContext,
 };
 use agent_transport_slim::{NativeSlimBootstrap, NativeSlimSession, SecureAgentChannel};
+use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
+use shadi_a2a::{A2AChannelBuilder, SlimRpcHandler};
 use shadi_memory::SqlCipherStore;
 use shadi_sandbox::{spawn_sandboxed, SandboxError, SandboxPolicy};
 use slim_bindings::{
-    CaSource, ClientConfig, Name, ServerConfig, Service, TlsClientConfig, TlsServerConfig,
-    TlsSource,
+    CaSource, ClientConfig, Name, Server, ServerConfig, Service, TlsClientConfig,
+    TlsServerConfig, TlsSource,
 };
+use tokio::runtime::Builder as TokioRuntimeBuilder;
+use tokio::sync::Notify;
 
 const DEFAULT_TICK_SECONDS: u64 = 3;
 const DEFAULT_MEMORY_KEY: &str = "shadi-demo-memory-key";
@@ -43,6 +54,8 @@ enum Commands {
     ShellTicker(ShellTickerArgs),
     SandboxProbe(SandboxProbeArgs),
     SlimEchoPeer(SlimEchoPeerArgs),
+    A2AEchoPeer(A2AEchoPeerArgs),
+    A2ASend(A2ASendArgs),
 }
 
 #[derive(Args, Clone)]
@@ -146,6 +159,60 @@ struct SlimEchoPeerArgs {
     start_local_node: bool,
 }
 
+#[derive(Args)]
+struct A2AEchoPeerArgs {
+    #[arg(long, env = "SHADI_TMP_DIR")]
+    shadi_tmp_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    endpoint: String,
+
+    #[arg(long, default_value = DEFAULT_PEER_AGENT_ID)]
+    agent_id: String,
+
+    #[arg(long, default_value = DEFAULT_SHARED_SECRET)]
+    shared_secret: String,
+
+    #[arg(long, default_value_t = 20)]
+    listen_timeout_seconds: u64,
+
+    #[arg(long)]
+    ready_file: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    start_local_node: bool,
+}
+
+#[derive(Args, Clone)]
+struct A2ASendArgs {
+    #[arg(long, env = "SHADI_TMP_DIR")]
+    shadi_tmp_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    endpoint: String,
+
+    #[arg(long, default_value = DEFAULT_BOT_AGENT_ID)]
+    agent_id: String,
+
+    #[arg(long, default_value = DEFAULT_PEER_AGENT_ID)]
+    peer_agent_id: String,
+
+    #[arg(long)]
+    destination: Option<String>,
+
+    #[arg(long, default_value = DEFAULT_SHARED_SECRET)]
+    shared_secret: String,
+
+    #[arg(long, default_value = "hello from SHADI A2A")]
+    message: String,
+
+    #[arg(long, default_value_t = false)]
+    stream: bool,
+
+    #[arg(long, default_value_t = 20)]
+    timeout_seconds: u64,
+}
+
 #[derive(Default)]
 struct InMemorySecretStore {
     entries: Mutex<HashMap<String, Vec<u8>>>,
@@ -193,6 +260,194 @@ struct VerifiedSessionVerifier;
 impl AgentVerifier for VerifiedSessionVerifier {
     fn verify(&self, session: &SessionContext) -> SecretResult<()> {
         AgentSecretAccess::require_verified(session)
+    }
+}
+
+struct DemoA2AExecutor {
+    agent_name: String,
+}
+
+#[async_trait]
+impl AgentExecutor for DemoA2AExecutor {
+    fn execute(&self, ctx: a2a_server::ExecutorContext) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+        let input = ctx
+            .message
+            .as_ref()
+            .map(readable_message_text)
+            .unwrap_or_else(|| "(no request message)".to_string());
+        let response = Message {
+            message_id: new_message_id(),
+            context_id: Some(ctx.context_id.clone()),
+            task_id: Some(ctx.task_id.clone()),
+            role: Role::Agent,
+            parts: vec![Part::text(format!("echo:{}:{}", self.agent_name, input))],
+            metadata: None,
+            extensions: None,
+            reference_task_ids: None,
+        };
+        let history = ctx.message.clone().map(|message| vec![message]);
+
+        Box::pin(futures::stream::iter(vec![
+            Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: ctx.task_id.clone(),
+                context_id: ctx.context_id.clone(),
+                status: TaskStatus {
+                    state: TaskState::Working,
+                    message: None,
+                    timestamp: None,
+                },
+                metadata: None,
+            })),
+            Ok(StreamResponse::Task(Task {
+                id: ctx.task_id,
+                context_id: ctx.context_id,
+                status: TaskStatus {
+                    state: TaskState::Completed,
+                    message: Some(response),
+                    timestamp: None,
+                },
+                artifacts: None,
+                history,
+                metadata: None,
+            })),
+        ]))
+    }
+
+    fn cancel(&self, ctx: a2a_server::ExecutorContext) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+        Box::pin(futures::stream::once(async move {
+            Ok(StreamResponse::Task(Task {
+                id: ctx.task_id,
+                context_id: ctx.context_id,
+                status: TaskStatus {
+                    state: TaskState::Canceled,
+                    message: None,
+                    timestamp: None,
+                },
+                artifacts: None,
+                history: None,
+                metadata: None,
+            }))
+        }))
+    }
+}
+
+struct DemoA2AHandler {
+    inner: DefaultRequestHandler,
+    card: AgentCard,
+    request_seen: Arc<Notify>,
+}
+
+impl DemoA2AHandler {
+    fn new(agent_name: String, target: String, request_seen: Arc<Notify>) -> Self {
+        Self {
+            inner: DefaultRequestHandler::new(
+                DemoA2AExecutor {
+                    agent_name: agent_name.clone(),
+                },
+                InMemoryTaskStore::new(),
+            ),
+            card: demo_a2a_agent_card(&agent_name, &target),
+            request_seen,
+        }
+    }
+}
+
+#[async_trait]
+impl RequestHandler for DemoA2AHandler {
+    async fn send_message(
+        &self,
+        params: &A2AServiceParams,
+        req: SendMessageRequest,
+    ) -> Result<SendMessageResponse, A2AError> {
+        let result = self.inner.send_message(params, req).await;
+        if result.is_ok() {
+            self.request_seen.notify_waiters();
+        }
+        result
+    }
+
+    async fn send_streaming_message(
+        &self,
+        params: &A2AServiceParams,
+        req: SendMessageRequest,
+    ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+        let result = self.inner.send_streaming_message(params, req).await;
+        if result.is_ok() {
+            self.request_seen.notify_waiters();
+        }
+        result
+    }
+
+    async fn get_task(
+        &self,
+        params: &A2AServiceParams,
+        req: GetTaskRequest,
+    ) -> Result<Task, A2AError> {
+        self.inner.get_task(params, req).await
+    }
+
+    async fn list_tasks(
+        &self,
+        params: &A2AServiceParams,
+        req: ListTasksRequest,
+    ) -> Result<ListTasksResponse, A2AError> {
+        self.inner.list_tasks(params, req).await
+    }
+
+    async fn cancel_task(
+        &self,
+        params: &A2AServiceParams,
+        req: CancelTaskRequest,
+    ) -> Result<Task, A2AError> {
+        self.inner.cancel_task(params, req).await
+    }
+
+    async fn subscribe_to_task(
+        &self,
+        params: &A2AServiceParams,
+        req: SubscribeToTaskRequest,
+    ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+        self.inner.subscribe_to_task(params, req).await
+    }
+
+    async fn create_push_config(
+        &self,
+        params: &A2AServiceParams,
+        req: CreateTaskPushNotificationConfigRequest,
+    ) -> Result<TaskPushNotificationConfig, A2AError> {
+        self.inner.create_push_config(params, req).await
+    }
+
+    async fn get_push_config(
+        &self,
+        params: &A2AServiceParams,
+        req: GetTaskPushNotificationConfigRequest,
+    ) -> Result<TaskPushNotificationConfig, A2AError> {
+        self.inner.get_push_config(params, req).await
+    }
+
+    async fn list_push_configs(
+        &self,
+        params: &A2AServiceParams,
+        req: ListTaskPushNotificationConfigsRequest,
+    ) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
+        self.inner.list_push_configs(params, req).await
+    }
+
+    async fn delete_push_config(
+        &self,
+        params: &A2AServiceParams,
+        req: DeleteTaskPushNotificationConfigRequest,
+    ) -> Result<(), A2AError> {
+        self.inner.delete_push_config(params, req).await
+    }
+
+    async fn get_extended_agent_card(
+        &self,
+        _params: &A2AServiceParams,
+        _req: GetExtendedAgentCardRequest,
+    ) -> Result<AgentCard, A2AError> {
+        Ok(self.card.clone())
     }
 }
 
@@ -329,6 +584,8 @@ pub fn main_entry() -> ExitCode {
         Some(Commands::ShellTicker(args)) => run_shell_ticker(args),
         Some(Commands::SandboxProbe(args)) => run_sandbox_probe(args),
         Some(Commands::SlimEchoPeer(args)) => run_slim_echo_peer(args),
+        Some(Commands::A2AEchoPeer(args)) => run_a2a_echo_peer(args),
+        Some(Commands::A2ASend(args)) => run_a2a_send(args),
         None => run_feature_bot(FeatureBotArgs::default()),
     };
 
@@ -373,10 +630,34 @@ fn run_feature_bot(args: FeatureBotArgs) -> Result<(), String> {
             args.slim_timeout_seconds,
             args.no_slim,
         );
+        run_a2a_checks(
+            &mut report,
+            &current_exe,
+            &tmp_dir,
+            &slim_endpoint,
+            &args.slim_bot_agent_id,
+            &args.slim_peer_agent_id,
+            &slim_destination,
+            &args.slim_shared_secret,
+            args.slim_timeout_seconds,
+            args.no_slim,
+        );
         run_sandbox_checks(&mut report, &current_exe, &repo_root, &tmp_dir);
     } else {
         run_sandbox_checks(&mut report, &current_exe, &repo_root, &tmp_dir);
         run_slim_checks(
+            &mut report,
+            &current_exe,
+            &tmp_dir,
+            &slim_endpoint,
+            &args.slim_bot_agent_id,
+            &args.slim_peer_agent_id,
+            &slim_destination,
+            &args.slim_shared_secret,
+            args.slim_timeout_seconds,
+            args.no_slim,
+        );
+        run_a2a_checks(
             &mut report,
             &current_exe,
             &tmp_dir,
@@ -835,6 +1116,149 @@ fn run_slim_checks(
     }
 }
 
+fn run_a2a_checks(
+    report: &mut DemoReport,
+    current_exe: &Path,
+    tmp_dir: &Path,
+    slim_endpoint: &str,
+    bot_agent_id: &str,
+    peer_agent_id: &str,
+    destination: &str,
+    shared_secret: &str,
+    timeout_seconds: u64,
+    no_slim: bool,
+) {
+    if no_slim {
+        report.push(DemoStatus::Skip, "A2A over SLIMRPC", "skipped by --no-slim");
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = (
+            current_exe,
+            tmp_dir,
+            slim_endpoint,
+            bot_agent_id,
+            peer_agent_id,
+            destination,
+            shared_secret,
+            timeout_seconds,
+        );
+        report.push(
+            DemoStatus::Skip,
+            "A2A over SLIMRPC",
+            "local A2A demo is currently wired for Unix/macOS assets",
+        );
+        return;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let outcome = (|| -> Result<String, String> {
+            let task_detail = run_a2a_exchange(
+                current_exe,
+                tmp_dir,
+                slim_endpoint,
+                bot_agent_id,
+                peer_agent_id,
+                destination,
+                shared_secret,
+                &format!("demo a2a ping from {}", bot_agent_id),
+                false,
+                timeout_seconds,
+            )?;
+            let stream_detail = run_a2a_exchange(
+                current_exe,
+                tmp_dir,
+                slim_endpoint,
+                bot_agent_id,
+                peer_agent_id,
+                destination,
+                shared_secret,
+                &format!("demo a2a stream ping from {}", bot_agent_id),
+                true,
+                timeout_seconds,
+            )?;
+
+            Ok(format!("{}; {}", task_detail, stream_detail))
+        })();
+
+        match outcome {
+            Ok(detail) => report.push(DemoStatus::Pass, "A2A over SLIMRPC", detail),
+            Err(err) => report.push(DemoStatus::Fail, "A2A over SLIMRPC", err),
+        }
+    }
+}
+
+fn run_a2a_exchange(
+    current_exe: &Path,
+    tmp_dir: &Path,
+    slim_endpoint: &str,
+    bot_agent_id: &str,
+    peer_agent_id: &str,
+    destination: &str,
+    shared_secret: &str,
+    message: &str,
+    stream: bool,
+    timeout_seconds: u64,
+) -> Result<String, String> {
+    ensure_slim_tls_assets(tmp_dir)?;
+
+    let ready_file = tmp_dir.join(if stream {
+        "shadi-demo-a2a-peer-stream.ready"
+    } else {
+        "shadi-demo-a2a-peer-task.ready"
+    });
+    let _ = fs::remove_file(&ready_file);
+
+    let peer = Command::new(current_exe)
+        .arg("a2a-echo-peer")
+        .arg("--shadi-tmp-dir")
+        .arg(tmp_dir)
+        .arg("--endpoint")
+        .arg(slim_endpoint)
+        .arg("--agent-id")
+        .arg(peer_agent_id)
+        .arg("--shared-secret")
+        .arg(shared_secret)
+        .arg("--listen-timeout-seconds")
+        .arg(timeout_seconds.to_string())
+        .arg("--ready-file")
+        .arg(&ready_file)
+        .arg("--start-local-node")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn A2A peer: {}", err))?;
+
+    wait_for_file(&ready_file, Duration::from_secs(10))?;
+
+    let detail = run_a2a_send_once(&A2ASendArgs {
+                shadi_tmp_dir: Some(tmp_dir.to_path_buf()),
+                endpoint: slim_endpoint.to_string(),
+                agent_id: bot_agent_id.to_string(),
+                peer_agent_id: peer_agent_id.to_string(),
+                destination: Some(destination.to_string()),
+                shared_secret: shared_secret.to_string(),
+                message: message.to_string(),
+                stream,
+                timeout_seconds,
+            })?;
+
+    let output = wait_for_child_output(peer, Duration::from_secs(timeout_seconds + 5))?;
+    if !output.status.success() {
+        return Err(format!(
+            "A2A peer exited with {} stdout={} stderr={}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(detail)
+}
+
 fn run_shell_ticker(args: ShellTickerArgs) -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
     install_shutdown_handlers(&shutdown)?;
@@ -951,6 +1375,189 @@ fn run_slim_echo_peer(args: SlimEchoPeerArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
+    let repo_root = repo_root()?;
+    let tmp_dir = resolve_tmp_dir(args.shadi_tmp_dir.as_deref(), &repo_root)?;
+    let tls_dir = ensure_slim_tls_assets(&tmp_dir)?;
+    let peer_name = canonical_name(&args.agent_id);
+
+    let server_tls = server_tls_material(&tls_dir);
+    let client_tls = client_tls_material(&tls_dir, &args.agent_id)?;
+
+    let node_service = if args.start_local_node {
+        let service = Service::new(format!("shadi-demo-a2a-node-{}", std::process::id()));
+        service
+            .run_server(build_server_config(&args.endpoint, &server_tls))
+            .map_err(format_slim_error)?;
+        thread::sleep(Duration::from_millis(300));
+        Some(service)
+    } else {
+        None
+    };
+
+    let service = Service::new(format!("shadi-demo-a2a-peer-{}", std::process::id()));
+    let connection_id = service
+        .connect(build_client_config(&args.endpoint, &client_tls))
+        .map_err(format_slim_error)?;
+    let peer_name_ref = Arc::new(parse_name(&peer_name)?);
+    let app = service
+        .create_app_with_secret(peer_name_ref.clone(), args.shared_secret.clone())
+        .map_err(format_slim_error)?;
+    app.subscribe(peer_name_ref.clone(), Some(connection_id))
+        .map_err(format_slim_error)?;
+
+    let server = Arc::new(Server::new(&app, app.name().clone()));
+    let request_seen = Arc::new(Notify::new());
+    let handler = Arc::new(DemoA2AHandler::new(
+        peer_name.clone(),
+        format!("slimrpc://{}", peer_name),
+        request_seen.clone(),
+    ));
+    SlimRpcHandler::new(handler).register(&server);
+
+    let ready_file = args.ready_file.clone();
+    let endpoint = args.endpoint.clone();
+    let wait_seconds = args.listen_timeout_seconds;
+    let peer_label = peer_name.clone();
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
+
+    let serve_result = runtime.block_on(async move {
+        let server_task = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .serve_async()
+                    .await
+                    .map_err(|err| format!("A2A SLIMRPC server failed: {}", err))
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if let Some(ready_file) = &ready_file {
+            fs::write(ready_file, b"ready")
+                .map_err(|err| format!("failed to write {}: {}", ready_file.display(), err))?;
+        }
+
+        println!("[a2a-peer] ready as {} on {}", peer_label, endpoint);
+
+        let request_result = tokio::time::timeout(
+            Duration::from_secs(wait_seconds),
+            request_seen.notified(),
+        )
+        .await;
+
+        if request_result.is_ok() {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        server.shutdown_async().await;
+        let server_status = server_task
+            .await
+            .map_err(|err| format!("failed to join A2A SLIMRPC server task: {}", err))?;
+        server_status?;
+
+        request_result.map_err(|_| {
+            format!(
+                "timed out waiting for A2A request after {}s",
+                wait_seconds
+            )
+        })?;
+
+        Ok::<(), String>(())
+    });
+
+    let _ = app.unsubscribe(peer_name_ref, Some(connection_id));
+    let _ = service.disconnect(connection_id);
+    let _ = service.shutdown();
+
+    if let Some(service) = node_service {
+        let _ = service.stop_server(args.endpoint.clone());
+        let _ = service.shutdown();
+    }
+
+    serve_result
+}
+
+fn run_a2a_send(args: A2ASendArgs) -> Result<(), String> {
+    let detail = run_a2a_send_once(&args)?;
+    println!("{}", detail);
+    Ok(())
+}
+
+fn run_a2a_send_once(args: &A2ASendArgs) -> Result<String, String> {
+    let repo_root = repo_root()?;
+    let tmp_dir = resolve_tmp_dir(args.shadi_tmp_dir.as_deref(), &repo_root)?;
+    let tls_dir = ensure_slim_tls_assets(&tmp_dir)?;
+    let client_tls = client_tls_material(&tls_dir, &args.agent_id)?;
+    let local_name = canonical_name(&args.agent_id);
+    let destination = args
+        .destination
+        .clone()
+        .unwrap_or_else(|| canonical_name(&args.peer_agent_id));
+
+    let service = Service::new(format!("shadi-demo-a2a-client-{}", std::process::id()));
+    let connection_id = service
+        .connect(build_client_config(&args.endpoint, &client_tls))
+        .map_err(format_slim_error)?;
+    let local_name_ref = Arc::new(parse_name(&local_name)?);
+    let remote_name_ref = Arc::new(parse_name(&destination)?);
+    let app = service
+        .create_app_with_secret(local_name_ref.clone(), args.shared_secret.clone())
+        .map_err(format_slim_error)?;
+    app.subscribe(local_name_ref.clone(), Some(connection_id))
+        .map_err(format_slim_error)?;
+
+    let mut session = SessionContext::new(&args.agent_id, "a2a-demo-session");
+    session.verified = true;
+    let verifier: Arc<dyn AgentVerifier> = Arc::new(VerifiedSessionVerifier);
+    let channel = A2AChannelBuilder::new(app.clone(), remote_name_ref, verifier, session)
+        .connection_id(connection_id)
+        .build();
+    let client = A2AClient::new(Box::new(channel));
+    let request = SendMessageRequest {
+        message: Message::new(Role::User, vec![Part::text(args.message.clone())]),
+        configuration: None,
+        metadata: None,
+        tenant: None,
+    };
+
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
+    let response_detail = runtime
+        .block_on(async {
+            if args.stream {
+                use futures::StreamExt;
+
+                let stream = client.send_streaming_message(&request).await?;
+                let events = stream.collect::<Vec<_>>().await;
+                client.destroy().await?;
+                Ok::<String, A2AError>(describe_a2a_stream(&events))
+            } else {
+                let response = client.send_message(&request).await?;
+                client.destroy().await?;
+                Ok::<String, A2AError>(describe_a2a_response(&response))
+            }
+        })
+        .map_err(|err| format!("failed to send A2A message: {}", err))?;
+
+    let _ = app.unsubscribe(local_name_ref, Some(connection_id));
+    let _ = service.disconnect(connection_id);
+    let _ = service.shutdown();
+
+    Ok(format!(
+        "sent {:?} to {} via {} and received {}",
+        args.message,
+        destination,
+        local_name,
+        response_detail
+    ))
 }
 
 fn resolve_tmp_dir(candidate: Option<&Path>, repo_root: &Path) -> Result<PathBuf, String> {
@@ -1221,6 +1828,93 @@ fn clock_time_string() -> String {
 
 fn canonical_name(agent_id: &str) -> String {
     format!("agntcy/shadi/{}", agent_id)
+}
+
+fn readable_message_text(message: &Message) -> String {
+    let text = message
+        .parts
+        .iter()
+        .filter_map(Part::as_text)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        "(no text parts)".to_string()
+    } else {
+        text
+    }
+}
+
+fn describe_a2a_response(response: &SendMessageResponse) -> String {
+    match response {
+        SendMessageResponse::Message(message) => {
+            format!("message {:?}", readable_message_text(message))
+        }
+        SendMessageResponse::Task(task) => {
+            let detail = task
+                .status
+                .message
+                .as_ref()
+                .map(readable_message_text)
+                .unwrap_or_else(|| format!("state {:?}", task.status.state));
+            format!("task {} ({})", task.id, detail)
+        }
+    }
+}
+
+fn describe_a2a_stream(events: &[Result<StreamResponse, A2AError>]) -> String {
+    let mut descriptions = Vec::new();
+    for event in events {
+        match event {
+            Ok(StreamResponse::StatusUpdate(update)) => descriptions.push(format!(
+                "status {:?}",
+                update.status.state
+            )),
+            Ok(StreamResponse::Task(task)) => descriptions.push(format!(
+                "task {} ({})",
+                task.id,
+                task.status
+                    .message
+                    .as_ref()
+                    .map(readable_message_text)
+                    .unwrap_or_else(|| format!("state {:?}", task.status.state))
+            )),
+            Ok(StreamResponse::Message(message)) => {
+                descriptions.push(format!("message {:?}", readable_message_text(message)))
+            }
+            Ok(StreamResponse::ArtifactUpdate(update)) => {
+                descriptions.push(format!("artifact {}", update.task_id))
+            }
+            Err(error) => descriptions.push(format!("error {}", error)),
+        }
+    }
+    format!("stream [{}]", descriptions.join(", "))
+}
+
+fn demo_a2a_agent_card(agent_name: &str, target: &str) -> AgentCard {
+    AgentCard {
+        name: format!("SHADI Demo A2A Peer ({})", agent_name),
+        description: "Demo SHADI agent exposing A2A over SLIMRPC".to_string(),
+        version: VERSION.to_string(),
+        supported_interfaces: vec![AgentInterface::new(
+            target.to_string(),
+            TRANSPORT_PROTOCOL_SLIMRPC,
+        )],
+        capabilities: AgentCapabilities {
+            streaming: Some(true),
+            push_notifications: Some(false),
+            extensions: None,
+            extended_agent_card: Some(true),
+        },
+        default_input_modes: vec!["text/plain".to_string()],
+        default_output_modes: vec!["text/plain".to_string()],
+        skills: Vec::new(),
+        provider: None,
+        documentation_url: None,
+        icon_url: None,
+        security_schemes: None,
+        security_requirements: None,
+        signatures: None,
+    }
 }
 
 fn parse_name(raw: &str) -> Result<Name, String> {
@@ -1601,6 +2295,27 @@ mod tests {
     }
 
     #[test]
+    fn run_a2a_checks_can_be_skipped_without_runtime_setup() {
+        let mut report = DemoReport::default();
+        run_a2a_checks(
+            &mut report,
+            Path::new("unused"),
+            Path::new("unused"),
+            "127.0.0.1:12345",
+            DEFAULT_BOT_AGENT_ID,
+            DEFAULT_PEER_AGENT_ID,
+            &canonical_name(DEFAULT_PEER_AGENT_ID),
+            DEFAULT_SHARED_SECRET,
+            1,
+            true,
+        );
+
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].status, DemoStatus::Skip);
+        assert!(report.checks[0].detail.contains("--no-slim"));
+    }
+
+    #[test]
     fn resolve_tmp_dir_supports_explicit_and_default_locations() {
         let dir = tempfile::tempdir().expect("tempdir");
         let explicit = dir.path().join("explicit");
@@ -1792,6 +2507,48 @@ mod tests {
             secret_err_to_string(SecretError::InvalidInput),
             "invalid input"
         );
+
+        let response = SendMessageResponse::Task(Task {
+            id: "task-1".to_string(),
+            context_id: "ctx-1".to_string(),
+            status: TaskStatus {
+                state: TaskState::Completed,
+                message: Some(Message::new(Role::Agent, vec![Part::text("done")])),
+                timestamp: None,
+            },
+            artifacts: None,
+            history: None,
+            metadata: None,
+        });
+        assert!(describe_a2a_response(&response).contains("task task-1 (done)"));
+
+        let stream = vec![
+            Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: "task-1".to_string(),
+                context_id: "ctx-1".to_string(),
+                status: TaskStatus {
+                    state: TaskState::Working,
+                    message: None,
+                    timestamp: None,
+                },
+                metadata: None,
+            })),
+            Ok(StreamResponse::Task(Task {
+                id: "task-1".to_string(),
+                context_id: "ctx-1".to_string(),
+                status: TaskStatus {
+                    state: TaskState::Completed,
+                    message: Some(Message::new(Role::Agent, vec![Part::text("done")])),
+                    timestamp: None,
+                },
+                artifacts: None,
+                history: None,
+                metadata: None,
+            })),
+        ];
+        let stream_detail = describe_a2a_stream(&stream);
+        assert!(stream_detail.contains("status Working"));
+        assert!(stream_detail.contains("task task-1 (done)"));
     }
 
     #[test]

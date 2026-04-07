@@ -203,6 +203,61 @@ pub(crate) struct SlimCli {
 pub(crate) enum SlimCommand {
     #[command(name = "start-node", about = "Run the local native SLIM node until interrupted")]
     StartNode,
+    #[command(
+        name = "a2a-echo-peer",
+        about = "Serve a task-backed A2A peer over SLIMRPC until one request or timeout"
+    )]
+    A2AEchoPeer(SlimA2AEchoPeerArgs),
+    #[command(
+        name = "a2a-send",
+        about = "Send a unary or streaming A2A request over SLIMRPC"
+    )]
+    A2ASend(SlimA2ASendArgs),
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct SlimA2AEchoPeerArgs {
+    #[arg(long, env = "SLIM_ENDPOINT", value_name = "ENDPOINT")]
+    pub(crate) endpoint: Option<String>,
+
+    #[arg(long, env = "SHADI_AGENT_ID", default_value = "secops-a")]
+    pub(crate) agent_id: String,
+
+    #[arg(long, default_value_t = 20)]
+    pub(crate) listen_timeout_seconds: u64,
+
+    #[arg(long)]
+    pub(crate) ready_file: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    pub(crate) start_local_node: bool,
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct SlimA2ASendArgs {
+    #[arg(long, env = "SLIM_ENDPOINT", value_name = "ENDPOINT")]
+    pub(crate) endpoint: Option<String>,
+
+    #[arg(long, env = "SHADI_AGENT_ID", default_value = "avatar")]
+    pub(crate) agent_id: String,
+
+    #[arg(long, default_value = "secops-a")]
+    pub(crate) peer_agent_id: String,
+
+    #[arg(long)]
+    pub(crate) destination: Option<String>,
+
+    #[arg(long, default_value = "hello from SHADI A2A")]
+    pub(crate) message: String,
+
+    #[arg(long, default_value_t = false)]
+    pub(crate) stream: bool,
+
+    #[arg(long, default_value_t = 20)]
+    pub(crate) timeout_seconds: u64,
+
+    #[arg(long, default_value = "shadictl-a2a-session")]
+    pub(crate) session_id: String,
 }
 
 #[derive(Subcommand, Debug)]

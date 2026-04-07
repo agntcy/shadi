@@ -12,9 +12,15 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
+a2a = { package = "agntcy-a2a", version = "0.2.4" }
+a2a-client = { package = "agntcy-a2a-client", version = "0.1.13" }
+a2a-server = { package = "agntcy-a2a-server", version = "0.2.6" }
+async-trait = "0.1"
+futures = "0.3"
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.0", path = "../shadi_sandbox" }
 agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.1.0", path = "../agent_transport_slim" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.0", path = "../agent_secrets", features = ["onepassword"] }
+shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.0", path = "../shadi_a2a" }
 shadi_memory = { package = "agntcy-shadi-memory", version = "0.1.0", path = "../shadi_memory" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path = "../shadi_telemetry" }
 slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.0", path = "../slim_mas" }
@@ -33,6 +39,7 @@ libc = "0.2"
 unicode-width = "0.2"
 ctrlc = "3.4"
 signal-hook = "0.3"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }

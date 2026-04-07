@@ -22,6 +22,7 @@ use crate::cli_types::{
 use crate::introspection_command::{run_config_command, run_policy_command};
 use crate::policy_watch;
 use crate::secrets_command;
+use crate::slim_a2a;
 use crate::slim_shell::SlimShellState;
 use crate::snapshot_command;
 use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
@@ -43,6 +44,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/trace summary", "Summarize trace logs by span name"),
     ("/slim status", "Show native SLIM shell status"),
     ("/slim start node", "Start a local native SLIM node with SHADI mTLS defaults"),
+    ("/slim a2a-echo-peer", "Serve one task-backed A2A request over SLIMRPC"),
+    ("/slim a2a-send", "Send a unary or streaming A2A request over SLIMRPC"),
     ("/slim create", "Create a SLIM group session for a channel name"),
     ("/slim invite", "Invite a participant into the active SLIM group session"),
     ("/slim join", "Wait for and join an invited SLIM group session"),
@@ -137,6 +140,41 @@ managed mTLS files under .tmp/shadi-slim-mtls.
 Environment:
     SLIM_ENDPOINT            Override the local endpoint (default: 127.0.0.1:47357)
     SHADI_TMP_DIR            Override the base temp directory that contains shadi-slim-mtls"),
+        ("/slim a2a-echo-peer", "\
+Usage: /slim a2a-echo-peer [--endpoint HOST:PORT] [--agent-id ID] [--listen-timeout SECONDS] [--ready-file PATH] [--start-local-node]
+
+Serve a task-backed A2A peer over SLIMRPC until one request arrives or the
+listen timeout elapses.
+
+Options:
+    --endpoint HOST:PORT     Override the SLIM endpoint
+    --agent-id ID            Local peer identity (default: secops-a)
+    --listen-timeout SECONDS Stop waiting after SECONDS (default: 20)
+    --ready-file PATH        Write a ready marker once the peer is serving
+    --start-local-node       Start a local SLIM node in the same process
+
+Examples:
+    /slim a2a-echo-peer --start-local-node
+    /slim a2a-echo-peer --agent-id secops-a --listen-timeout 30"),
+        ("/slim a2a-send", "\
+Usage: /slim a2a-send [--endpoint HOST:PORT] [--agent-id ID] [--peer-agent-id ID] [--destination NAME] [--message TEXT...] [--stream] [--timeout SECONDS] [--session-id ID]
+
+Send a unary or streaming A2A request over SLIMRPC using SHADI's verifier-gated
+channel. Multi-word message text is accepted after --message until the next flag.
+
+Options:
+    --endpoint HOST:PORT     Override the SLIM endpoint
+    --agent-id ID            Local sender identity (default: avatar)
+    --peer-agent-id ID       Remote peer identity (default: secops-a)
+    --destination NAME       Override the canonical remote SLIM name
+    --message TEXT...        Message text to send
+    --stream                 Use the streaming A2A path
+    --timeout SECONDS        Response timeout in seconds (default: 20)
+    --session-id ID          Session context id for verifier gating
+
+Examples:
+    /slim a2a-send --message hello from avatar
+    /slim a2a-send --peer-agent-id secops-a --stream --message hello from avatar"),
         ("/slim create", "\
 Usage: /slim create <organization/namespace/application>
 
@@ -373,7 +411,15 @@ impl Completer for ShellHelper {
                 return Ok((offset, candidates));
             }
 
-            let subs = ["status", "start", "create", "invite", "join"];
+            let subs = [
+                "status",
+                "start",
+                "a2a-echo-peer",
+                "a2a-send",
+                "create",
+                "invite",
+                "join",
+            ];
             for sub in subs {
                 if sub.starts_with(sub_input) {
                     candidates.push(Pair {
@@ -551,17 +597,19 @@ impl ShellSession {
                     eprintln!("usage: /slim start node");
                     LoopAction::Continue
                 }
+                "a2a-echo-peer" => self.cmd_slim_a2a_echo_peer(&parts[2..]),
+                "a2a-send" => self.cmd_slim_a2a_send(&parts[2..]),
                 "create" => self.cmd_slim_create(&parts[2..]),
                 "invite" => self.cmd_slim_invite(&parts[2..]),
                 "join" => self.cmd_slim_join(&parts[2..]),
                 _ => {
                     eprintln!("unknown slim subcommand: {}", parts[1]);
-                    eprintln!("  available: status, start node, create, invite, join");
+                    eprintln!("  available: status, start node, a2a-echo-peer, a2a-send, create, invite, join");
                     LoopAction::Continue
                 }
             },
             "/slim" => {
-                eprintln!("usage: /slim <status|start node|create|invite|join>");
+                eprintln!("usage: /slim <status|start node|a2a-echo-peer|a2a-send|create|invite|join>");
                 LoopAction::Continue
             }
             "/snapshot" if parts.len() >= 2 => match parts[1] {
@@ -1020,6 +1068,30 @@ impl ShellSession {
         match self.slim.start_node() {
             Ok(message) => println!("{}", message),
             Err(err) => eprintln!("error starting SLIM node: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_a2a_echo_peer(&mut self, args: &[&str]) -> LoopAction {
+        match slim_a2a::parse_shell_a2a_echo_peer_args(args) {
+            Ok(parsed) => {
+                if let Err(err) = slim_a2a::run_a2a_echo_peer(parsed) {
+                    eprintln!("error serving A2A peer: {}", err);
+                }
+            }
+            Err(err) => eprintln!("{}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_a2a_send(&mut self, args: &[&str]) -> LoopAction {
+        match slim_a2a::parse_shell_a2a_send_args(args) {
+            Ok(parsed) => {
+                if let Err(err) = slim_a2a::run_a2a_send(parsed) {
+                    eprintln!("error sending A2A request: {}", err);
+                }
+            }
+            Err(err) => eprintln!("{}", err),
         }
         LoopAction::Continue
     }
@@ -1534,8 +1606,37 @@ fn print_banner(color: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     // ── helpers ──────────────────────────────────────────────
+
+    struct ScopedEnvVar {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     fn session() -> ShellSession {
         ShellSession::new(None)
@@ -1565,6 +1666,18 @@ mod tests {
             matches!(session.handle_command(cmd), LoopAction::Exit),
             "{cmd} should exit"
         );
+    }
+
+    fn with_missing_slim_assets(test: impl FnOnce()) {
+        let _guard = crate::lock_test_env();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _shared_secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shell-test-secret");
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+
+        test();
     }
 
     // ── prompt utilities ─────────────────────────────────────
@@ -1794,6 +1907,31 @@ mod tests {
     #[test]
     fn given_session_when_slim_start_node_then_continues() {
         assert_continues(&mut session(), "/slim start node");
+    }
+
+    #[test]
+    fn given_session_when_slim_a2a_echo_peer_then_continues() {
+        with_missing_slim_assets(|| {
+            assert_continues(
+                &mut session(),
+                "/slim a2a-echo-peer --agent-id secops-a --listen-timeout 1",
+            );
+        });
+    }
+
+    #[test]
+    fn given_session_when_slim_a2a_send_then_continues() {
+        with_missing_slim_assets(|| {
+            assert_continues(
+                &mut session(),
+                "/slim a2a-send --peer-agent-id secops-a --message hello from shell --stream --timeout 1",
+            );
+        });
+    }
+
+    #[test]
+    fn given_session_when_slim_a2a_send_with_missing_message_then_continues() {
+        assert_continues(&mut session(), "/slim a2a-send --message");
     }
 
     #[test]
@@ -2238,6 +2376,10 @@ mod tests {
             candidates.iter().any(|c| c.display == "status"),
             "should complete /slim subcommands"
         );
+        assert!(
+            candidates.iter().any(|c| c.display == "a2a-send"),
+            "should include A2A shell subcommands"
+        );
     }
 
     #[test]
@@ -2326,6 +2468,11 @@ mod tests {
     #[test]
     fn given_session_when_help_detail_for_known_command_then_continues() {
         assert_continues(&mut session(), "/help policy patch");
+    }
+
+    #[test]
+    fn given_session_when_help_slim_a2a_send_then_continues() {
+        assert_continues(&mut session(), "/help slim a2a-send");
     }
 
     #[test]
