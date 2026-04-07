@@ -14,7 +14,7 @@ restricted capability set.
 ## CLI
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --allow . \
   --net-block \
   -- \
@@ -27,7 +27,7 @@ cargo run -p shadictl -- \
 without platform-specific Bash/PowerShell wrappers:
 
 ```bash
-cargo run -p shadictl -- --profile strict -- -- ./your-agent
+cargo run -p agntcy-shadi-cli -- --profile strict -- -- ./your-agent
 ```
 
 Profiles:
@@ -58,7 +58,7 @@ Then tighten with explicit path flags (`--allow`, `--read`, `--write`) and only 
 Print the resolved profile policy:
 
 ```bash
-cargo run -p shadictl -- --profile balanced --print-policy
+cargo run -p agntcy-shadi-cli -- --profile balanced --print-policy
 ```
 
 The printed policy now includes `platform_profile`, which is `minimal` on
@@ -108,7 +108,7 @@ You can pass a JSON policy file to avoid long CLI arguments:
 Run it with:
 
 ```bash
-cargo run -p shadictl -- --policy ./sandbox.json -- ./your-agent
+cargo run -p agntcy-shadi-cli -- --policy ./sandbox.json -- ./your-agent
 ```
 
 CLI flags override policy file settings. Paths are canonicalized before use.
@@ -150,7 +150,7 @@ from scratch.
 Enable it explicitly:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --allow . \
   --git-snapshot \
   --git-snapshot-untracked \
@@ -193,10 +193,10 @@ but the nested repo entry will still show the change through its own
 `shadictl` also manages OpenPGP keys and agent DIDs without invoking OS `gpg`:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   put-key --key human/gpg --in /path/to/human-secret.asc
 
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-did --secret human/gpg --name agent-a --prefix agents
 ```
 
@@ -215,7 +215,7 @@ secret before sandboxing and inject it as an environment variable when direct
 disclosure is intentional:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --allow . \
   --read / \
   --net-block \
@@ -270,7 +270,7 @@ with no TCP fallback.
 ### Enabling the control socket
 
 ```bash
-cargo run -p shadictl -- --watch-policy --profile balanced -- ./your-agent
+cargo run -p agntcy-shadi-cli -- --watch-policy --profile balanced -- ./your-agent
 ```
 
 On startup, `shadictl` prints the control socket path to stderr:
@@ -282,7 +282,7 @@ control socket: /tmp/shadi-ctl-12345.sock
 ### Querying the current policy
 
 ```bash
-cargo run -p shadictl -- policy query --socket /tmp/shadi-ctl-12345.sock
+cargo run -p agntcy-shadi-cli -- policy query --socket /tmp/shadi-ctl-12345.sock
 ```
 
 ### Sending a policy patch
@@ -290,7 +290,7 @@ cargo run -p shadictl -- policy query --socket /tmp/shadi-ctl-12345.sock
 From the CLI:
 
 ```bash
-cargo run -p shadictl -- policy patch \
+cargo run -p agntcy-shadi-cli -- policy patch \
   --socket /tmp/shadi-ctl-12345.sock \
   --add-allow-command npm \
   --add-block-command curl \
@@ -309,7 +309,7 @@ From a JSON patch file:
 ```
 
 ```bash
-cargo run -p shadictl -- policy patch \
+cargo run -p agntcy-shadi-cli -- policy patch \
   --socket /tmp/shadi-ctl-12345.sock \
   --patch-file ./patch.json
 ```
@@ -390,7 +390,7 @@ The Windows AppContainer sandbox has an opt-in integration test. Run it on
 Windows with:
 
 ```bash
-SHADI_WINDOWS_INTEGRATION=1 cargo test -p shadi_sandbox
+SHADI_WINDOWS_INTEGRATION=1 cargo test -p agntcy-shadi-sandbox
 ```
 
 Or via Just:

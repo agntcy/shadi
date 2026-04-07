@@ -1,10 +1,16 @@
 [package]
-name = "shadi_memory"
+name = "agntcy-shadi-memory"
 version = "0.1.0"
 edition = "2021"
+description = "Encrypted local memory storage for SHADI using SQLCipher."
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "shadi_memory"
 
 [dependencies]
-agent_secrets = { path = "../agent_secrets" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.0", path = "../agent_secrets" }
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

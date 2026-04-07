@@ -5,10 +5,10 @@ edition = "2021"
 publish = false
 
 [dependencies]
-agent_secrets = { path = "../../crates/agent_secrets" }
-agent_transport_slim = { path = "../../crates/agent_transport_slim" }
-shadi_memory = { path = "../../crates/shadi_memory" }
-shadi_sandbox = { path = "../../crates/shadi_sandbox" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", path = "../../crates/agent_secrets" }
+agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", path = "../../crates/agent_transport_slim" }
+shadi_memory = { package = "agntcy-shadi-memory", path = "../../crates/shadi_memory" }
+shadi_sandbox = { package = "agntcy-shadi-sandbox", path = "../../crates/shadi_sandbox" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "1.3.0" }
 clap = { version = "4.5", features = ["derive", "env"] }
 ctrlc = "3.4"

@@ -46,7 +46,7 @@ Under `shadictl shell` / policy-watch flow:
 
 ```bash
 cargo build -p shadi_demo_bot
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
     --policy examples/shell_demo/policy.json \
     --watch-policy \
     -- ./target/debug/shadi_demo_bot shell-ticker

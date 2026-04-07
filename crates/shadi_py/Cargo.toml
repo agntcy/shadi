@@ -1,7 +1,10 @@
 [package]
-name = "shadi_py"
+name = "agntcy-shadi-py"
 version = "0.1.0"
 edition = "2021"
+description = "PyO3 Python bindings for SHADI runtime services."
+license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "shadi"
@@ -10,10 +13,10 @@ test = false
 doctest = false
 
 [dependencies]
-agent_secrets = { path = "../agent_secrets", features = ["onepassword"] }
-shadi_memory = { path = "../shadi_memory" }
-shadi_sandbox = { path = "../shadi_sandbox" }
-shadi_telemetry = { path = "../shadi_telemetry" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.0", path = "../agent_secrets", features = ["onepassword"] }
+shadi_memory = { package = "agntcy-shadi-memory", version = "0.1.0", path = "../shadi_memory" }
+shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.0", path = "../shadi_sandbox" }
+shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path = "../shadi_telemetry" }
 tracing = "0.1"
 
 [dependencies.pyo3]

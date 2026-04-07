@@ -144,7 +144,7 @@ build_shell_command() {
     fi
 
     command+="'' 'Status check:' $(quote_shell '  /slim status') '' ; "
-    command+="cargo run -p shadictl -- shell"
+    command+="cargo run -p agntcy-shadi-cli -- shell"
     printf '%s' "$command"
 }
 
@@ -158,11 +158,11 @@ Channel:    ${SHADI_SLIM_CHANNEL}
 
 Moderator shell:
   cd $(quote_shell "$ROOT_DIR")
-  env SHADI_TMP_DIR=$(quote_shell "$SHADI_TMP_DIR") SLIM_ENDPOINT=$(quote_shell "$SLIM_ENDPOINT") SHADI_AGENT_ID=$(quote_shell "$SHADI_SLIM_MODERATOR_AGENT") cargo run -p shadictl -- shell
+    env SHADI_TMP_DIR=$(quote_shell "$SHADI_TMP_DIR") SLIM_ENDPOINT=$(quote_shell "$SLIM_ENDPOINT") SHADI_AGENT_ID=$(quote_shell "$SHADI_SLIM_MODERATOR_AGENT") cargo run -p agntcy-shadi-cli -- shell
 
 Participant shell:
   cd $(quote_shell "$ROOT_DIR")
-  env SHADI_TMP_DIR=$(quote_shell "$SHADI_TMP_DIR") SLIM_ENDPOINT=$(quote_shell "$SLIM_ENDPOINT") SHADI_AGENT_ID=$(quote_shell "$SHADI_SLIM_PARTICIPANT_AGENT") cargo run -p shadictl -- shell
+    env SHADI_TMP_DIR=$(quote_shell "$SHADI_TMP_DIR") SLIM_ENDPOINT=$(quote_shell "$SLIM_ENDPOINT") SHADI_AGENT_ID=$(quote_shell "$SHADI_SLIM_PARTICIPANT_AGENT") cargo run -p agntcy-shadi-cli -- shell
 
 Run order:
   1. Moderator:   /slim start node
@@ -172,7 +172,7 @@ Run order:
   5. Both:        /slim status
 
 Smoke test alternative:
-  cargo test -p shadictl live_group_session_flow_works_with_local_assets -- --ignored --nocapture --test-threads=1
+    cargo test -p agntcy-shadi-cli live_group_session_flow_works_with_local_assets -- --ignored --nocapture --test-threads=1
 EOF
 }
 
@@ -217,12 +217,12 @@ check_demo_prereqs
 
 if [[ "$run_smoke_test" -eq 1 ]]; then
     cd "$ROOT_DIR"
-    exec cargo test -p shadictl live_group_session_flow_works_with_local_assets -- --ignored --nocapture --test-threads=1
+    exec cargo test -p agntcy-shadi-cli live_group_session_flow_works_with_local_assets -- --ignored --nocapture --test-threads=1
 fi
 
 if [[ "$skip_build" -eq 0 ]]; then
     cd "$ROOT_DIR"
-    cargo build -p shadictl
+    cargo build -p agntcy-shadi-cli
 fi
 
 print_manual_steps

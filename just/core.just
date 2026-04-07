@@ -80,14 +80,14 @@ docs-serve:
 [group('profiles')]
 [doc('Print the strict built-in security profile.')]
 secure-profile-strict:
-  cargo run -p shadictl -- --profile strict --print-policy
+  cargo run -p agntcy-shadi-cli -- --profile strict --print-policy
 
 [group('profiles')]
 [doc('Print the balanced built-in security profile.')]
 secure-profile-balanced:
-  cargo run -p shadictl -- --profile balanced --print-policy
+  cargo run -p agntcy-shadi-cli -- --profile balanced --print-policy
 
 [group('profiles')]
 [doc('Print the connected built-in security profile.')]
 secure-profile-connected:
-  cargo run -p shadictl -- --profile connected --print-policy
+  cargo run -p agntcy-shadi-cli -- --profile connected --print-policy
