@@ -189,7 +189,7 @@ impl Transport for A2AChannel {
 mod tests {
     use super::*;
     use agent_secrets::{SecretError, SecretResult};
-    use futures::stream;
+    use futures::{stream, StreamExt};
 
     struct AllowVerifier;
 
@@ -353,5 +353,150 @@ mod tests {
         // the auth gate was passed and the call reached the transport layer.
         let err = channel.send_message(&params, &req).await.unwrap_err();
         assert_eq!(err.message, "stub");
+    }
+
+    #[tokio::test]
+    async fn allow_verifier_reaches_remaining_transport_methods() {
+        let channel = make_channel(Arc::new(AllowVerifier));
+        let params = ServiceParams::new();
+        let req = SendMessageRequest {
+            message: Message::new(Role::User, vec![Part::text("hello")]),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+        };
+
+        let mut stream = channel
+            .send_streaming_message(&params, &req)
+            .await
+            .expect("streaming transport");
+        assert!(stream.next().await.is_none());
+
+        let task_err = channel
+            .get_task(
+                &params,
+                &GetTaskRequest {
+                    id: "task-1".to_string(),
+                    history_length: Some(1),
+                    tenant: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(task_err.message, "stub");
+
+        let list_err = channel
+            .list_tasks(
+                &params,
+                &ListTasksRequest {
+                    context_id: Some("context-1".to_string()),
+                    status: Some(TaskState::Working),
+                    page_size: Some(1),
+                    page_token: None,
+                    history_length: Some(1),
+                    status_timestamp_after: None,
+                    include_artifacts: Some(false),
+                    tenant: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(list_err.message, "stub");
+
+        let cancel_err = channel
+            .cancel_task(
+                &params,
+                &CancelTaskRequest {
+                    id: "task-1".to_string(),
+                    metadata: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(cancel_err.message, "stub");
+
+        let mut subscription = channel
+            .subscribe_to_task(
+                &params,
+                &SubscribeToTaskRequest {
+                    id: "task-1".to_string(),
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("subscription transport");
+        assert!(subscription.next().await.is_none());
+
+        let push_config = PushNotificationConfig {
+            url: "https://example.invalid/hook".to_string(),
+            id: Some("cfg-1".to_string()),
+            token: None,
+            authentication: None,
+        };
+
+        let create_err = channel
+            .create_push_config(
+                &params,
+                &CreateTaskPushNotificationConfigRequest {
+                    task_id: "task-1".to_string(),
+                    config: push_config.clone(),
+                    tenant: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(create_err.message, "stub");
+
+        let get_push_err = channel
+            .get_push_config(
+                &params,
+                &GetTaskPushNotificationConfigRequest {
+                    task_id: "task-1".to_string(),
+                    id: "cfg-1".to_string(),
+                    tenant: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(get_push_err.message, "stub");
+
+        let list_push_err = channel
+            .list_push_configs(
+                &params,
+                &ListTaskPushNotificationConfigsRequest {
+                    task_id: "task-1".to_string(),
+                    page_size: Some(10),
+                    page_token: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(list_push_err.message, "stub");
+
+        let delete_push_err = channel
+            .delete_push_config(
+                &params,
+                &DeleteTaskPushNotificationConfigRequest {
+                    task_id: "task-1".to_string(),
+                    id: push_config.id.expect("push config id"),
+                    tenant: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(delete_push_err.message, "stub");
+
+        let card_err = channel
+            .get_extended_agent_card(
+                &params,
+                &GetExtendedAgentCardRequest { tenant: None },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(card_err.message, "stub");
+
+        channel.destroy().await.expect("destroy transport");
     }
 }

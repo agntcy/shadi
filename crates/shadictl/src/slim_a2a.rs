@@ -671,6 +671,30 @@ fn a2a_agent_card(agent_name: &str, target: &str) -> AgentCard {
 mod tests {
     use super::*;
     use agent_secrets::SecretError;
+    use futures::StreamExt;
+    use std::collections::HashMap;
+
+    fn send_request(text: &str) -> SendMessageRequest {
+        SendMessageRequest {
+            message: Message::new(Role::User, vec![Part::text(text)]),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+        }
+    }
+
+    fn executor_context(message: Option<Message>) -> a2a_server::ExecutorContext {
+        a2a_server::ExecutorContext {
+            message,
+            task_id: "task-1".to_string(),
+            stored_task: None,
+            context_id: "context-1".to_string(),
+            metadata: None,
+            user: None,
+            service_params: HashMap::new(),
+            tenant: None,
+        }
+    }
 
     #[test]
     fn slim_name_canonicalizes_bare_agent_ids() {
@@ -738,6 +762,273 @@ mod tests {
     }
 
     #[test]
+    fn describe_a2a_stream_formats_message_artifact_and_error_variants() {
+        let events = vec![
+            Ok(StreamResponse::Message(Message::new(
+                Role::Agent,
+                vec![Part::text("direct reply")],
+            ))),
+            Ok(StreamResponse::ArtifactUpdate(a2a::event::TaskArtifactUpdateEvent {
+                task_id: "task-1".to_string(),
+                context_id: "context-1".to_string(),
+                artifact: Artifact {
+                    artifact_id: "artifact-1".to_string(),
+                    name: None,
+                    description: None,
+                    parts: vec![Part::text("artifact body")],
+                    metadata: None,
+                    extensions: None,
+                },
+                append: Some(true),
+                last_chunk: Some(false),
+                metadata: None,
+            })),
+            Err(A2AError::internal("stream failed")),
+        ];
+
+        assert_eq!(
+            describe_a2a_stream(&events),
+            "stream [message \"direct reply\", artifact task-1, error stream failed]"
+        );
+    }
+
+    #[test]
+    fn readable_message_text_returns_placeholder_when_text_is_missing() {
+        let message = Message::new(Role::User, vec![]);
+
+        assert_eq!(readable_message_text(&message), "(no text parts)");
+    }
+
+    #[test]
+    fn resolve_endpoint_prefers_override_then_env_then_default() {
+        let _guard = crate::lock_test_env();
+        std::env::set_var("SLIM_ENDPOINT", "192.0.2.8:4555");
+
+        assert_eq!(
+            resolve_endpoint(Some("198.51.100.5:4777")),
+            "198.51.100.5:4777"
+        );
+        assert_eq!(resolve_endpoint(Some("   ")), "192.0.2.8:4555");
+
+        std::env::remove_var("SLIM_ENDPOINT");
+        assert_eq!(resolve_endpoint(None), DEFAULT_SLIM_ENDPOINT);
+    }
+
+    #[test]
+    fn collect_message_value_stops_at_next_flag() {
+        let (message, next_index) = collect_message_value(
+            &["hello", "from", "avatar", "--stream", "--timeout", "7"],
+            0,
+        )
+        .expect("collect message");
+
+        assert_eq!(message, "hello from avatar");
+        assert_eq!(next_index, 3);
+    }
+
+    #[test]
+    fn a2a_agent_card_exposes_slimrpc_interface() {
+        let card = a2a_agent_card("agntcy/shadi/secops-a", "slimrpc://agntcy/shadi/secops-a");
+
+        assert_eq!(card.name, "SHADI CLI A2A Peer (agntcy/shadi/secops-a)");
+        assert_eq!(card.supported_interfaces.len(), 1);
+        assert_eq!(
+            card.supported_interfaces[0].protocol_binding,
+            TRANSPORT_PROTOCOL_SLIMRPC
+        );
+        assert_eq!(card.capabilities.streaming, Some(true));
+    }
+
+    #[test]
+    fn slim_a2a_executor_emits_status_and_completed_task() {
+        let executor = SlimA2AExecutor {
+            agent_name: "agntcy/shadi/secops-a".to_string(),
+        };
+        let events = futures::executor::block_on(async {
+            executor
+                .execute(executor_context(Some(Message::new(
+                    Role::User,
+                    vec![Part::text("hello executor")],
+                ))))
+                .collect::<Vec<_>>()
+                .await
+        });
+
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            Ok(StreamResponse::StatusUpdate(update)) => {
+                assert_eq!(update.status.state, TaskState::Working);
+            }
+            other => panic!("unexpected first executor event: {other:?}"),
+        }
+        match &events[1] {
+            Ok(StreamResponse::Task(task)) => {
+                assert_eq!(task.id, "task-1");
+                assert_eq!(
+                    readable_message_text(task.status.message.as_ref().expect("task message")),
+                    "echo:agntcy/shadi/secops-a:hello executor"
+                );
+                assert_eq!(task.history.as_ref().expect("history").len(), 1);
+            }
+            other => panic!("unexpected second executor event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slim_a2a_executor_cancel_marks_task_canceled() {
+        let executor = SlimA2AExecutor {
+            agent_name: "agntcy/shadi/secops-a".to_string(),
+        };
+        let events = futures::executor::block_on(async {
+            executor
+                .cancel(executor_context(None))
+                .collect::<Vec<_>>()
+                .await
+        });
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamResponse::Task(task)) => {
+                assert_eq!(task.id, "task-1");
+                assert_eq!(task.status.state, TaskState::Canceled);
+            }
+            other => panic!("unexpected cancel event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn slim_a2a_handler_routes_requests_and_push_configs() {
+        let request_seen = Arc::new(Notify::new());
+        let handler = SlimA2AHandler::new(
+            "agntcy/shadi/secops-a".to_string(),
+            "slimrpc://agntcy/shadi/secops-a".to_string(),
+            request_seen.clone(),
+        );
+        let params: A2AServiceParams = HashMap::new();
+
+        let send_wait = request_seen.notified();
+        let response = handler
+            .send_message(&params, send_request("hello handler"))
+            .await
+            .expect("send message through handler");
+        tokio::time::timeout(Duration::from_secs(1), send_wait)
+            .await
+            .expect("send_message should notify waiters");
+
+        let task = match response {
+            SendMessageResponse::Task(task) => task,
+            other => panic!("unexpected send_message response: {other:?}"),
+        };
+
+        let send_stream_wait = request_seen.notified();
+        let stream_events = handler
+            .send_streaming_message(&params, send_request("hello stream"))
+            .await
+            .expect("send streaming message")
+            .collect::<Vec<_>>()
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), send_stream_wait)
+            .await
+            .expect("send_streaming_message should notify waiters");
+        assert_eq!(stream_events.len(), 2);
+
+        let fetched = handler
+            .get_task(
+                &params,
+                GetTaskRequest {
+                    id: task.id.clone(),
+                    history_length: Some(1),
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("get task");
+        assert_eq!(fetched.id, task.id);
+
+        let listed = handler
+            .list_tasks(
+                &params,
+                ListTasksRequest {
+                    context_id: Some(task.context_id.clone()),
+                    status: None,
+                    page_size: Some(10),
+                    page_token: None,
+                    history_length: Some(1),
+                    status_timestamp_after: None,
+                    include_artifacts: Some(false),
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("list tasks");
+        assert!(listed.tasks.iter().any(|entry| entry.id == task.id));
+
+        let push_config_err = handler
+            .create_push_config(
+                &params,
+                CreateTaskPushNotificationConfigRequest {
+                    task_id: task.id.clone(),
+                    config: PushNotificationConfig {
+                        url: "https://example.invalid/hook".to_string(),
+                        id: Some("cfg-1".to_string()),
+                        token: None,
+                        authentication: None,
+                    },
+                    tenant: None,
+                },
+            )
+            .await
+            .expect_err("push config should not be supported");
+        assert!(push_config_err.message.contains("not supported"));
+
+        let fetched_push_err = handler
+            .get_push_config(
+                &params,
+                GetTaskPushNotificationConfigRequest {
+                    task_id: task.id.clone(),
+                    id: "cfg-1".to_string(),
+                    tenant: None,
+                },
+            )
+            .await
+            .expect_err("get push config should not be supported");
+        assert!(fetched_push_err.message.contains("not supported"));
+
+        let listed_push_err = handler
+            .list_push_configs(
+                &params,
+                ListTaskPushNotificationConfigsRequest {
+                    task_id: task.id.clone(),
+                    page_size: Some(10),
+                    page_token: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect_err("list push configs should not be supported");
+        assert!(listed_push_err.message.contains("not supported"));
+
+        let delete_push_err = handler
+            .delete_push_config(
+                &params,
+                DeleteTaskPushNotificationConfigRequest {
+                    task_id: task.id.clone(),
+                    id: "cfg-1".to_string(),
+                    tenant: None,
+                },
+            )
+            .await
+            .expect_err("delete push config should not be supported");
+        assert!(delete_push_err.message.contains("not supported"));
+
+        let card = handler
+            .get_extended_agent_card(&params, GetExtendedAgentCardRequest { tenant: None })
+            .await
+            .expect("extended agent card");
+        assert_eq!(card.supported_interfaces[0].url, "slimrpc://agntcy/shadi/secops-a");
+    }
+
+    #[test]
     fn verified_session_verifier_requires_verified_session() {
         let verifier = VerifiedSessionVerifier;
         let unverified = SessionContext::new("avatar", "session-1");
@@ -802,5 +1093,11 @@ mod tests {
     fn parse_shell_a2a_send_args_rejects_missing_message_value() {
         let err = parse_shell_a2a_send_args(&["--message"]).unwrap_err();
         assert_eq!(err, SHELL_A2A_SEND_USAGE);
+    }
+
+    #[test]
+    fn parse_shell_a2a_echo_peer_args_rejects_missing_value() {
+        let err = parse_shell_a2a_echo_peer_args(&["--ready-file"]).unwrap_err();
+        assert_eq!(err, SHELL_A2A_ECHO_PEER_USAGE);
     }
 }

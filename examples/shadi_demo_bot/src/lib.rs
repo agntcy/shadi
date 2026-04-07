@@ -2044,7 +2044,31 @@ fn build_server_config(endpoint: &str, tls: &TlsMaterial) -> ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use futures::StreamExt;
     use std::io::{Cursor, Error, ErrorKind};
+
+    fn demo_send_request(text: &str) -> SendMessageRequest {
+        SendMessageRequest {
+            message: Message::new(Role::User, vec![Part::text(text)]),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+        }
+    }
+
+    fn demo_executor_context(message: Option<Message>) -> a2a_server::ExecutorContext {
+        a2a_server::ExecutorContext {
+            message,
+            task_id: "task-1".to_string(),
+            stored_task: None,
+            context_id: "context-1".to_string(),
+            metadata: None,
+            user: None,
+            service_params: HashMap::new(),
+            tenant: None,
+        }
+    }
 
     struct FailingReader;
 
@@ -2315,6 +2339,88 @@ mod tests {
         assert!(report.checks[0].detail.contains("--no-slim"));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn run_a2a_checks_record_failure_when_peer_binary_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        create_tls_assets(dir.path());
+        let missing_binary = dir.path().join("missing-a2a-peer");
+        let mut report = DemoReport::default();
+
+        run_a2a_checks(
+            &mut report,
+            &missing_binary,
+            dir.path(),
+            "127.0.0.1:12345",
+            DEFAULT_BOT_AGENT_ID,
+            DEFAULT_PEER_AGENT_ID,
+            &canonical_name(DEFAULT_PEER_AGENT_ID),
+            DEFAULT_SHARED_SECRET,
+            1,
+            false,
+        );
+
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].status, DemoStatus::Fail);
+        assert!(report.checks[0].detail.contains("failed to spawn A2A peer"));
+    }
+
+    #[test]
+    fn cli_parses_a2a_commands_with_expected_defaults_and_flags() {
+        let echo_peer = Cli::try_parse_from([
+            "shadi-demo-bot",
+            "a2a-echo-peer",
+            "--endpoint",
+            "127.0.0.1:4555",
+            "--agent-id",
+            "secops-a",
+            "--listen-timeout-seconds",
+            "9",
+            "--start-local-node",
+        ])
+        .expect("parse a2a-echo-peer args");
+
+        match echo_peer.command {
+            Some(Commands::A2AEchoPeer(args)) => {
+                assert_eq!(args.endpoint, "127.0.0.1:4555");
+                assert_eq!(args.agent_id, "secops-a");
+                assert_eq!(args.listen_timeout_seconds, 9);
+                assert!(args.start_local_node);
+            }
+            _ => panic!("unexpected parsed command"),
+        }
+
+        let send = Cli::try_parse_from([
+            "shadi-demo-bot",
+            "a2a-send",
+            "--endpoint",
+            "127.0.0.1:4666",
+            "--peer-agent-id",
+            "secops-a",
+            "--destination",
+            "agntcy/shadi/secops-a",
+            "--message",
+            "hello from parser",
+            "--stream",
+            "--timeout-seconds",
+            "11",
+        ])
+        .expect("parse a2a-send args");
+
+        match send.command {
+            Some(Commands::A2ASend(args)) => {
+                assert_eq!(args.endpoint, "127.0.0.1:4666");
+                assert_eq!(args.agent_id, DEFAULT_BOT_AGENT_ID);
+                assert_eq!(args.peer_agent_id, "secops-a");
+                assert_eq!(args.destination.as_deref(), Some("agntcy/shadi/secops-a"));
+                assert_eq!(args.message, "hello from parser");
+                assert!(args.stream);
+                assert_eq!(args.timeout_seconds, 11);
+            }
+            _ => panic!("unexpected parsed command"),
+        }
+    }
+
     #[test]
     fn resolve_tmp_dir_supports_explicit_and_default_locations() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2427,6 +2533,7 @@ mod tests {
         assert!(success.detail.contains("connected to"));
 
         drop(listener);
+        thread::sleep(Duration::from_millis(50));
 
         let refused = attempt_network_connect("127.0.0.1", port);
         assert!(!refused.success);
@@ -2549,6 +2656,202 @@ mod tests {
         let stream_detail = describe_a2a_stream(&stream);
         assert!(stream_detail.contains("status Working"));
         assert!(stream_detail.contains("task task-1 (done)"));
+    }
+
+    #[test]
+    fn demo_a2a_helpers_cover_executor_handler_and_card_paths() {
+        let empty_message = Message::new(Role::User, vec![]);
+        assert_eq!(readable_message_text(&empty_message), "(no text parts)");
+
+        let card = demo_a2a_agent_card(
+            "agntcy/shadi/secops-a",
+            "slimrpc://agntcy/shadi/secops-a",
+        );
+        assert_eq!(card.name, "SHADI Demo A2A Peer (agntcy/shadi/secops-a)");
+        assert_eq!(card.supported_interfaces.len(), 1);
+        assert_eq!(
+            card.supported_interfaces[0].protocol_binding,
+            TRANSPORT_PROTOCOL_SLIMRPC
+        );
+
+        let executor = DemoA2AExecutor {
+            agent_name: "agntcy/shadi/secops-a".to_string(),
+        };
+        let events = futures::executor::block_on(async {
+            executor
+                .execute(demo_executor_context(Some(Message::new(
+                    Role::User,
+                    vec![Part::text("hello demo executor")],
+                ))))
+                .collect::<Vec<_>>()
+                .await
+        });
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            Ok(StreamResponse::StatusUpdate(update)) => {
+                assert_eq!(update.status.state, TaskState::Working);
+            }
+            other => panic!("unexpected first executor event: {other:?}"),
+        }
+        match &events[1] {
+            Ok(StreamResponse::Task(task)) => {
+                assert_eq!(task.id, "task-1");
+                assert_eq!(
+                    readable_message_text(task.status.message.as_ref().expect("task message")),
+                    "echo:agntcy/shadi/secops-a:hello demo executor"
+                );
+                assert_eq!(task.history.as_ref().expect("history").len(), 1);
+            }
+            other => panic!("unexpected second executor event: {other:?}"),
+        }
+
+        let cancel_events = futures::executor::block_on(async {
+            executor
+                .cancel(demo_executor_context(None))
+                .collect::<Vec<_>>()
+                .await
+        });
+        match &cancel_events[0] {
+            Ok(StreamResponse::Task(task)) => {
+                assert_eq!(task.status.state, TaskState::Canceled);
+            }
+            other => panic!("unexpected cancel event: {other:?}"),
+        }
+
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async {
+            let request_seen = Arc::new(Notify::new());
+            let handler = DemoA2AHandler::new(
+                "agntcy/shadi/secops-a".to_string(),
+                "slimrpc://agntcy/shadi/secops-a".to_string(),
+                request_seen.clone(),
+            );
+            let params: A2AServiceParams = HashMap::new();
+
+            let send_wait = request_seen.notified();
+            let response = handler
+                .send_message(&params, demo_send_request("hello demo handler"))
+                .await
+                .expect("send message through handler");
+            tokio::time::timeout(Duration::from_secs(1), send_wait)
+                .await
+                .expect("send_message should notify waiters");
+
+            let task = match response {
+                SendMessageResponse::Task(task) => task,
+                other => panic!("unexpected send_message response: {other:?}"),
+            };
+
+            let send_stream_wait = request_seen.notified();
+            let stream_events = handler
+                .send_streaming_message(&params, demo_send_request("hello demo stream"))
+                .await
+                .expect("send streaming message")
+                .collect::<Vec<_>>()
+                .await;
+            tokio::time::timeout(Duration::from_secs(1), send_stream_wait)
+                .await
+                .expect("send_streaming_message should notify waiters");
+            assert_eq!(stream_events.len(), 2);
+
+            let fetched = handler
+                .get_task(
+                    &params,
+                    GetTaskRequest {
+                        id: task.id.clone(),
+                        history_length: Some(1),
+                        tenant: None,
+                    },
+                )
+                .await
+                .expect("get task");
+            assert_eq!(fetched.id, task.id);
+
+            let listed = handler
+                .list_tasks(
+                    &params,
+                    ListTasksRequest {
+                        context_id: Some(task.context_id.clone()),
+                        status: None,
+                        page_size: Some(10),
+                        page_token: None,
+                        history_length: Some(1),
+                        status_timestamp_after: None,
+                        include_artifacts: Some(false),
+                        tenant: None,
+                    },
+                )
+                .await
+                .expect("list tasks");
+            assert!(listed.tasks.iter().any(|entry| entry.id == task.id));
+
+            let push_config_err = handler
+                .create_push_config(
+                    &params,
+                    CreateTaskPushNotificationConfigRequest {
+                        task_id: task.id.clone(),
+                        config: PushNotificationConfig {
+                            url: "https://example.invalid/hook".to_string(),
+                            id: Some("cfg-1".to_string()),
+                            token: None,
+                            authentication: None,
+                        },
+                        tenant: None,
+                    },
+                )
+                .await
+                .expect_err("push config should not be supported");
+            assert!(push_config_err.message.contains("not supported"));
+
+            let fetched_push_err = handler
+                .get_push_config(
+                    &params,
+                    GetTaskPushNotificationConfigRequest {
+                        task_id: task.id.clone(),
+                        id: "cfg-1".to_string(),
+                        tenant: None,
+                    },
+                )
+                .await
+                .expect_err("get push config should not be supported");
+            assert!(fetched_push_err.message.contains("not supported"));
+
+            let listed_push_err = handler
+                .list_push_configs(
+                    &params,
+                    ListTaskPushNotificationConfigsRequest {
+                        task_id: task.id.clone(),
+                        page_size: Some(10),
+                        page_token: None,
+                        tenant: None,
+                    },
+                )
+                .await
+                .expect_err("list push configs should not be supported");
+            assert!(listed_push_err.message.contains("not supported"));
+
+            let delete_push_err = handler
+                .delete_push_config(
+                    &params,
+                    DeleteTaskPushNotificationConfigRequest {
+                        task_id: task.id.clone(),
+                        id: "cfg-1".to_string(),
+                        tenant: None,
+                    },
+                )
+                .await
+                .expect_err("delete push config should not be supported");
+            assert!(delete_push_err.message.contains("not supported"));
+
+            let card = handler
+                .get_extended_agent_card(&params, GetExtendedAgentCardRequest { tenant: None })
+                .await
+                .expect("extended agent card");
+            assert_eq!(card.supported_interfaces[0].url, "slimrpc://agntcy/shadi/secops-a");
+        });
     }
 
     #[test]

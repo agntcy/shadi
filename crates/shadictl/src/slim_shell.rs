@@ -1016,6 +1016,61 @@ mod tests {
     }
 
     #[test]
+    fn given_store_key_override_when_loading_shared_secret_then_store_value_is_used() {
+        let _guard = lock_env();
+        let key_name = format!("secops/test-shared-secret-{}", std::process::id());
+        crate::test_store_put(&key_name, b"stored-shared-secret");
+
+        let _secret = ScopedEnvVar::unset("SLIM_SHARED_SECRET");
+        let _key_name = ScopedEnvVar::set("SHADI_SLIM_SHARED_SECRET_KEY", &key_name);
+
+        assert_eq!(
+            resolve_default_shared_secret().expect("shared secret from store"),
+            "stored-shared-secret"
+        );
+    }
+
+    #[test]
+    fn given_non_utf8_store_secret_when_loading_shared_secret_then_error_is_returned() {
+        let _guard = lock_env();
+        let key_name = format!("secops/test-shared-secret-nonutf8-{}", std::process::id());
+        crate::test_store_put(&key_name, &[0xff, 0xfe]);
+
+        let _secret = ScopedEnvVar::unset("SLIM_SHARED_SECRET");
+        let _key_name = ScopedEnvVar::set("SHADI_SLIM_SHARED_SECRET_KEY", &key_name);
+
+        let err = resolve_default_shared_secret().expect_err("non-utf8 secret should fail");
+        assert!(err.contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn given_agent_specific_tls_material_when_resolving_then_agent_pair_is_used() {
+        let _guard = lock_env();
+        let dir = TestDir::new("shell-agent-specific-tls");
+        let tls_dir = dir.path().join("shadi-slim-mtls");
+        fs::create_dir_all(&tls_dir).expect("create tls dir");
+
+        let cert = tls_dir.join("client-avatar.crt");
+        let key = tls_dir.join("client-avatar.key");
+        let ca = tls_dir.join("ca.crt");
+        write_test_file(&cert);
+        write_test_file(&key);
+        write_test_file(&ca);
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+        let _agent_id = ScopedEnvVar::unset("SHADI_AGENT_ID");
+
+        let tls = resolve_client_tls_material_for_agent(Some("avatar")).expect("agent tls material");
+
+        assert_eq!(tls.cert, cert);
+        assert_eq!(tls.key, key);
+        assert_eq!(tls.ca, ca);
+    }
+
+    #[test]
     #[cfg(not(windows))]
     fn given_generated_assets_when_inviting_without_active_session_then_error_is_returned() {
         let _guard = lock_env();
