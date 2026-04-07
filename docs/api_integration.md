@@ -6,13 +6,13 @@ This guide describes SHADI APIs and integration patterns for applications.
 
 ```bash
 # 1) Fetch human public key from GitHub and store DID artifacts.
-cargo run -p shadictl -- did-from-github --user alice --out human.did.json
+cargo run -p agntcy-shadi-cli -- did-from-github --user alice --out human.did.json
 
 # 2) Store the human OpenPGP secret key locally.
-cargo run -p shadictl -- put-key --key human/gpg --in /path/to/human-secret.asc
+cargo run -p agntcy-shadi-cli -- put-key --key human/gpg --in /path/to/human-secret.asc
 
 # 3) Derive agent identities and keys.
-cargo run -p shadictl -- derive-agent-did --secret human/gpg --name agent-a --prefix agents
+cargo run -p agntcy-shadi-cli -- derive-agent-did --secret human/gpg --name agent-a --prefix agents
 ```
 
 ```mermaid
@@ -31,8 +31,8 @@ flowchart LR
 To list secrets stored for an app or agent, use `shadictl`:
 
 ```bash
-cargo run -p shadictl -- --list-keychain --list-prefix agents/
-cargo run -p shadictl -- --list-keychain --list-prefix apps/
+cargo run -p agntcy-shadi-cli -- --list-keychain --list-prefix agents/
+cargo run -p agntcy-shadi-cli -- --list-keychain --list-prefix apps/
 ```
 
 Avoid printing secret values. Pass key names to helpers that resolve secrets
@@ -42,14 +42,14 @@ To list or search long-term memory in the encrypted SQLCipher store, use the
 `shadictl memory` helper so keys stay in SHADI:
 
 ```bash
-cargo run -p shadictl -- memory list \
+cargo run -p agntcy-shadi-cli -- memory list \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --limit 50
 ```
 
 ```bash
-cargo run -p shadictl -- memory search \
+cargo run -p agntcy-shadi-cli -- memory search \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --query policy --limit 10
@@ -224,10 +224,10 @@ Use `shadictl` to ingest OpenPGP keys and derive agent DIDs without invoking
 OS `gpg`:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   put-key --key human/gpg --in /path/to/human-secret.asc
 
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-did --secret human/gpg --name agent-a --prefix agents
 ```
 
@@ -246,7 +246,7 @@ of agent DIDs and key material stored in the SHADI secret store.
 1) Fetch the public OpenPGP key from GitHub and create a DID document:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   did-from-github --user alice --out human.did.json
 ```
 
@@ -259,17 +259,17 @@ This stores the human DID and DID document under:
 from GitHub):
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   put-key --key human/gpg --in /path/to/human-secret.asc
 ```
 
 3) Derive agent identities and keys from the human secret key:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-did --secret human/gpg --name agent-a --prefix agents
 
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-did --secret human/gpg --name agent-b --prefix agents
 ```
 
@@ -301,7 +301,7 @@ sandbox by default to enforce least-privilege execution.
 Invoke `shadictl` with policy flags and a command to execute:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --allow . \
   --read / \
   --net-block \
@@ -324,7 +324,7 @@ If keychain access is restricted in the sandbox, broker a secret outside the
 sandbox and inject it as an environment variable:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --inject-keychain app/config=APP_CONFIG \
   -- \
   ./your-agent

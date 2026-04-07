@@ -1,10 +1,13 @@
 [package]
-name = "agent_secrets"
+name = "agntcy-shadi-agent-secrets"
 version = "0.1.0"
 edition = "2021"
 description = "Keychain-backed secret storage and access verification for SHADI."
 license.workspace = true
 repository.workspace = true
+
+[lib]
+name = "agent_secrets"
 
 [features]
 default = ["std"]

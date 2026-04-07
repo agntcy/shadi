@@ -9,7 +9,7 @@
 # - blocked file reads outside the allowlist (`/etc/hosts` or `/private/etc/hosts`)
 #
 # Usage:
-#   cargo run -p shadictl -- \
+#   cargo run -p agntcy-shadi-cli -- \
 #       --policy examples/shell_demo/policy.json --watch-policy \
 #       -- bash examples/shell_demo/demo_agent.sh
 

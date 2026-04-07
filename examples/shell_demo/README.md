@@ -6,7 +6,7 @@ manage a sandboxed agent process in real time.
 ## Prerequisites
 
 ```bash
-cargo build -p shadictl
+cargo build -p agntcy-shadi-cli
 cargo build -p shadi_demo_bot
 ```
 
@@ -21,7 +21,7 @@ cargo run -p shadi_demo_bot -- shell-ticker
 Open a terminal and run:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
     --policy examples/shell_demo/policy.json \
     --watch-policy \
     -- bash examples/shell_demo/demo_agent.sh
@@ -56,7 +56,7 @@ Leave this running.
 In a **second terminal**:
 
 ```bash
-cargo run -p shadictl -- shell
+cargo run -p agntcy-shadi-cli -- shell
 ```
 
 You'll see the SHADI banner and prompt:

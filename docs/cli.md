@@ -13,7 +13,7 @@ memory, and sandbox execution. The CLI remains useful for ops and debugging.
 managing OpenPGP keys and DIDs. In development, run it with:
 
 ```bash
-cargo run -p shadictl -- [FLAGS] -- [COMMAND]
+cargo run -p agntcy-shadi-cli -- [FLAGS] -- [COMMAND]
 ```
 
 ### Global flags
@@ -54,26 +54,26 @@ Inspect effective runtime config (profile, policy source, backend metadata, and
 effective policy):
 
 ```bash
-cargo run -p shadictl -- config show --format json
+cargo run -p agntcy-shadi-cli -- config show --format json
 ```
 
 Explain resolved policy with source inputs (profile defaults, policy file, and
 CLI overrides):
 
 ```bash
-cargo run -p shadictl -- policy explain --format json
+cargo run -p agntcy-shadi-cli -- policy explain --format json
 ```
 
 Diff effective policy against a baseline profile:
 
 ```bash
-cargo run -p shadictl -- policy diff --against profile:strict --format json
+cargo run -p agntcy-shadi-cli -- policy diff --against profile:strict --format json
 ```
 
 Diff effective policy against another policy file:
 
 ```bash
-cargo run -p shadictl -- policy diff --against file:./sandbox.json --format json
+cargo run -p agntcy-shadi-cli -- policy diff --against file:./sandbox.json --format json
 ```
 
 Supported formats for these commands: `json` (default) and `text`.
@@ -83,7 +83,7 @@ Supported formats for these commands: `json` (default) and `text`.
 Show effective config with explicit overrides:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   config show \
   --profile connected \
   --policy ./sandbox.json \
@@ -114,7 +114,7 @@ Expected JSON fields include:
 Explain policy source inputs and inspect only the source section:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   policy explain \
   --profile balanced \
   --policy ./sandbox.json \
@@ -123,7 +123,7 @@ cargo run -p shadictl -- \
 ```
 
 ```bash
-cargo run -q -p shadictl -- \
+cargo run -q -p agntcy-shadi-cli -- \
   policy explain --policy ./sandbox.json --format json \
   | jq '.sources'
 ```
@@ -131,7 +131,7 @@ cargo run -q -p shadictl -- \
 Diff current effective policy against a baseline policy file:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   policy diff \
   --policy ./sandbox.json \
   --allow . \
@@ -142,7 +142,7 @@ cargo run -p shadictl -- \
 Inspect only changed fields from the diff payload:
 
 ```bash
-cargo run -q -p shadictl -- \
+cargo run -q -p agntcy-shadi-cli -- \
   policy diff --against profile:strict --format json \
   | jq '.diff.changed_fields'
 ```
@@ -160,7 +160,7 @@ Invalid baseline targets return exit code `2` with an error message. Accepted
 Run a command inside the sandbox after flags:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --allow . \
   --read / \
   --net-block \
@@ -171,7 +171,7 @@ cargo run -p shadictl -- \
 Print the effective policy after merging JSON and flags:
 
 ```bash
-cargo run -p shadictl -- --policy ./sandbox.json --print-policy
+cargo run -p agntcy-shadi-cli -- --policy ./sandbox.json --print-policy
 ```
 
 On macOS, the built-in `balanced` and `connected` profiles no longer imply a
@@ -258,7 +258,7 @@ Current platform notes:
 Inject a secret into the command environment (explicit disclosure mode):
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --inject-keychain app/config=APP_CONFIG \
   -- \
   ./your-agent
@@ -268,7 +268,7 @@ Low-level trusted-secret flags are also available for testing or explicit
 compatibility wiring when you are not using a JSON policy file:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --trusted-secret secops/github_token=github-token \
   --trusted-secret-exec github-token=/usr/bin/curl \
   --trusted-secret-fd-env github-token=GITHUB_TOKEN_FD \
@@ -279,7 +279,7 @@ cargo run -p shadictl -- \
 Capture a read-only Git snapshot around a sandboxed run:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --allow . \
   --git-snapshot \
   --git-snapshot-untracked \
@@ -346,7 +346,7 @@ This is the same derivation path used by `derive-agent-did` and
 Create a DID document from an OpenPGP public key file:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   did-from-gpg \
   --in /path/to/human-public.asc \
   --out human.did.json
@@ -355,7 +355,7 @@ cargo run -p shadictl -- \
 Fetch an OpenPGP key from GitHub and create a DID document:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   did-from-github \
   --user octocat \
   --out github.did.json
@@ -364,7 +364,7 @@ cargo run -p shadictl -- \
 Store an OpenPGP secret key in the SHADI secret store:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   put-key \
   --key human/gpg \
   --in /path/to/human-secret.asc
@@ -373,7 +373,7 @@ cargo run -p shadictl -- \
 Derive an agent DID and keypair from a human OpenPGP secret key:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-did \
   --secret human/gpg \
   --name agent-a \
@@ -386,7 +386,7 @@ Automate identity creation for one or more agents from a human identity source
 derivation pipeline:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-identity \
   --source gpg \
   --human-secret human/gpg \
@@ -399,7 +399,7 @@ cargo run -p shadictl -- \
 For non-GPG identities, store source material in SHADI and use `--source seed`:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-identity \
   --source seed \
   --human-secret human/seed \
@@ -410,7 +410,7 @@ cargo run -p shadictl -- \
 If you already store the human DID, bind derived identities to it:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   derive-agent-identity \
   --source gpg \
   --human-secret human/gpg \
@@ -423,7 +423,7 @@ Verify that a stored agent identity belongs to a human source by recomputing
 the key and DID from the same derivation pipeline:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   verify-agent-identity \
   --source gpg \
   --human-secret human/gpg \
@@ -434,7 +434,7 @@ cargo run -p shadictl -- \
 Require verification of stored human binding:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   verify-agent-identity \
   --source gpg \
   --human-secret human/gpg \
@@ -469,7 +469,7 @@ the SHADI secret store (no key material is printed).
 Initialize a store:
 
 ```bash
-cargo run -p shadictl -- memory init \
+cargo run -p agntcy-shadi-cli -- memory init \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key
 ```
@@ -477,14 +477,14 @@ cargo run -p shadictl -- memory init \
 Put a memory entry from inline payload or file:
 
 ```bash
-cargo run -p shadictl -- memory put \
+cargo run -p agntcy-shadi-cli -- memory put \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state --payload '{"status":"ok"}'
 ```
 
 ```bash
-cargo run -p shadictl -- memory put \
+cargo run -p agntcy-shadi-cli -- memory put \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state --payload-file ./state.json
@@ -493,7 +493,7 @@ cargo run -p shadictl -- memory put \
 Get the latest entry:
 
 ```bash
-cargo run -p shadictl -- memory get \
+cargo run -p agntcy-shadi-cli -- memory get \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state
@@ -502,7 +502,7 @@ cargo run -p shadictl -- memory get \
 Search entries:
 
 ```bash
-cargo run -p shadictl -- memory search \
+cargo run -p agntcy-shadi-cli -- memory search \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --query policy --limit 10
@@ -511,7 +511,7 @@ cargo run -p shadictl -- memory search \
 List entries:
 
 ```bash
-cargo run -p shadictl -- memory list \
+cargo run -p agntcy-shadi-cli -- memory list \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --limit 50
@@ -520,7 +520,7 @@ cargo run -p shadictl -- memory list \
 Delete an entry:
 
 ```bash
-cargo run -p shadictl -- memory delete \
+cargo run -p agntcy-shadi-cli -- memory delete \
   --db "${SHADI_TMP_DIR:-./.tmp}/shadi-memory.db" \
   --key-name shadi/memory/sqlcipher_key \
   --scope app --entry-key state
@@ -539,25 +539,25 @@ cargo run -p shadictl -- memory delete \
 List available groups:
 
 ```bash
-cargo run -p shadictl -- slim-mas list-groups
+cargo run -p agntcy-shadi-cli -- slim-mas list-groups
 ```
 
 List members for a group:
 
 ```bash
-cargo run -p shadictl -- slim-mas list-members --group team-a
+cargo run -p agntcy-shadi-cli -- slim-mas list-members --group team-a
 ```
 
 Validate config (ensures a default group exists):
 
 ```bash
-cargo run -p shadictl -- slim-mas validate
+cargo run -p agntcy-shadi-cli -- slim-mas validate
 ```
 
 Admit or deny a member:
 
 ```bash
-cargo run -p shadictl -- slim-mas admit --group team-a --did did:key:human --role human
+cargo run -p agntcy-shadi-cli -- slim-mas admit --group team-a --did did:key:human --role human
 ```
 
 Exit codes:

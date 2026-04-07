@@ -6,7 +6,7 @@ provided policy presets.
 ## Prerequisites
 
 ```bash
-cargo build -p shadictl
+cargo build -p agntcy-shadi-cli
 npm install -g @openai/codex      # for the codex demo
 npm install -g @github/copilot-cli  # for the copilot demo
 ```
@@ -21,7 +21,7 @@ npm install -g @github/copilot-cli  # for the copilot demo
 > Without it no control socket is created and the session is invisible.
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
     --watch-policy \
     --policy policies/presets/codex.json \
     --read ~/.nvm \
@@ -39,7 +39,7 @@ control socket: /var/folders/…/shadi-ctl-<pid>.sock
 ### Attach from another terminal
 
 ```bash
-cargo run -p shadictl -- shell
+cargo run -p agntcy-shadi-cli -- shell
 # then inside the shell:
 /sessions      # lists the running session
 /attach /var/folders/…/shadi-ctl-<pid>.sock
@@ -61,7 +61,7 @@ cargo run -p shadictl -- shell
 ### Launch
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
     --watch-policy \
     --policy policies/presets/copilot-cli.json \
     --read ~/.nvm \
@@ -86,8 +86,8 @@ Open a second terminal while the agent is running:
 
 ```bash
 # Allow an extra network destination
-cargo run -p shadictl -- policy patch --add-net-allow example.com
+cargo run -p agntcy-shadi-cli -- policy patch --add-net-allow example.com
 
 # Remove it again
-cargo run -p shadictl -- policy patch --remove-net-allow example.com
+cargo run -p agntcy-shadi-cli -- policy patch --remove-net-allow example.com
 ```

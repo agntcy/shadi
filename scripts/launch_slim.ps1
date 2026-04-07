@@ -10,4 +10,4 @@ if (-not $env:SLIM_ENDPOINT) {
 }
 
 Set-Location $rootDir
-cargo run -p shadictl -- slim start-node
+cargo run -p agntcy-shadi-cli -- slim start-node

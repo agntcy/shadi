@@ -50,7 +50,7 @@ SHADI resolves sandbox policy before process start. That is the key runtime
 property to keep in mind while reading the rest of the documentation.
 
 ```bash
-cargo run -p shadictl -- --profile balanced --print-policy
+cargo run -p agntcy-shadi-cli -- --profile balanced --print-policy
 ```
 
 Use these defaults as your baseline:
@@ -69,7 +69,7 @@ Use these defaults as your baseline:
 Launch a trivial command with explicit local access:
 
 ```bash
-cargo run -p shadictl -- \
+cargo run -p agntcy-shadi-cli -- \
   --allow . \
   --read / \
   --net-block \
@@ -106,14 +106,14 @@ access on verified sessions.
 === "Store Human Identity Material"
 
     ```bash
-    cargo run -p shadictl -- \
+    cargo run -p agntcy-shadi-cli -- \
       put-key --key human/gpg --in /path/to/human-secret.asc
     ```
 
 === "Derive an Agent Identity"
 
     ```bash
-    cargo run -p shadictl -- \
+    cargo run -p agntcy-shadi-cli -- \
       derive-agent-identity \
       --source gpg \
       --human-secret human/gpg \
