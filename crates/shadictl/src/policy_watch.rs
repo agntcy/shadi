@@ -234,7 +234,8 @@ pub(crate) fn start_control_socket(
 fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_path: &Path) {
     loop {
         match listener.accept() {
-            Ok((mut stream, _)) => {
+            Ok((stream, _)) => {
+                let mut stream = stream;
                 #[cfg(unix)]
                 if let Err(err) = authorize_control_peer(&stream) {
                     let _ = write_response(

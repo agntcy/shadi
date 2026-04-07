@@ -20,6 +20,7 @@ use agent_secrets::{
     AgentSecretAccess, AgentVerifier, SecretBytes, SecretError, SecretPolicy, SecretResult,
     SecretStore, SessionContext,
 };
+#[cfg(not(windows))]
 use agent_transport_slim::{NativeSlimBootstrap, NativeSlimSession, SecureAgentChannel};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
@@ -451,11 +452,13 @@ impl RequestHandler for DemoA2AHandler {
     }
 }
 
+#[cfg(any(test, not(windows)))]
 struct ScopedEnvVar {
     name: &'static str,
     previous: Option<OsString>,
 }
 
+#[cfg(any(test, not(windows)))]
 impl ScopedEnvVar {
     fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
         let previous = std::env::var_os(name);
@@ -470,6 +473,7 @@ impl ScopedEnvVar {
     }
 }
 
+#[cfg(any(test, not(windows)))]
 impl Drop for ScopedEnvVar {
     fn drop(&mut self) {
         match self.previous.take() {
@@ -1191,6 +1195,7 @@ fn run_a2a_checks(
     }
 }
 
+#[cfg(not(windows))]
 fn run_a2a_exchange(
     current_exe: &Path,
     tmp_dir: &Path,
@@ -1742,6 +1747,7 @@ fn reserve_local_endpoint() -> Result<String, String> {
     Ok(endpoint)
 }
 
+#[cfg(any(test, not(windows)))]
 fn wait_for_file(path: &Path, timeout: Duration) -> Result<(), String> {
     let start = Instant::now();
     while !path.exists() {
@@ -1753,6 +1759,7 @@ fn wait_for_file(path: &Path, timeout: Duration) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(test, not(windows)))]
 fn wait_for_child_output(
     mut child: Child,
     timeout: Duration,

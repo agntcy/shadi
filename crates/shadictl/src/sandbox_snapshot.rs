@@ -1318,17 +1318,22 @@ fn unix_timestamp_ms() -> u128 {
 mod tests {
     use super::*;
     use crate::{Cli, PolicyFile, resolve_policy};
-    use std::sync::mpsc;
-    use std::sync::Arc;
+    #[cfg(unix)]
     use std::sync::atomic::AtomicBool;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    use std::sync::mpsc;
+    #[cfg(unix)]
+    use std::sync::Arc;
     use tempfile::TempDir;
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
 
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
         crate::lock_test_env()
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[derive(Clone)]
     struct TestTlsMaterial {
         cert: PathBuf,
@@ -1373,6 +1378,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn generate_test_tls_dir(base_dir: &Path) -> PathBuf {
         let tls_dir = base_dir.join("shadi-slim-mtls");
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1395,6 +1401,7 @@ mod tests {
         tls_dir
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> TestTlsMaterial {
         TestTlsMaterial {
             cert: base_dir.join(format!("client-{agent_id}.crt")),
@@ -1403,6 +1410,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn test_server_tls_material(base_dir: &Path) -> TestTlsMaterial {
         TestTlsMaterial {
             cert: base_dir.join("server.crt"),
@@ -1411,6 +1419,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn build_test_client_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ClientConfig {
         let mut config = slim_bindings::ClientConfig::default();
         config.endpoint = format!("https://{endpoint}");
@@ -1430,6 +1439,7 @@ mod tests {
         config
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn build_test_server_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ServerConfig {
         let mut config = slim_bindings::ServerConfig::default();
         config.endpoint = endpoint.to_string();
@@ -1449,6 +1459,7 @@ mod tests {
         config
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn reserve_test_endpoint() -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let endpoint = listener.local_addr().expect("local addr").to_string();
@@ -1456,6 +1467,7 @@ mod tests {
         endpoint
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn format_slim_error(err: slim_bindings::SlimError) -> String {
         err.to_string()
     }

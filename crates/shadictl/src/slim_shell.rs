@@ -622,13 +622,16 @@ mod tests {
     use std::net::TcpListener;
     #[cfg(not(windows))]
     use std::process::Command;
+    #[cfg(not(windows))]
     use std::sync::mpsc;
     use std::sync::MutexGuard;
+    #[cfg(not(windows))]
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
+    #[cfg(not(windows))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
 
     fn lock_env() -> MutexGuard<'static, ()> {
@@ -1308,6 +1311,7 @@ mod tests {
         assert!(shutdown_status.connection_id.is_none());
     }
 
+    #[cfg(not(windows))]
     fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
         let (cert, key) = client_identity_candidates(base_dir, Some(agent_id))
             .into_iter()
@@ -1321,6 +1325,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     fn reserve_test_endpoint() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let endpoint = listener.local_addr().expect("local addr").to_string();
