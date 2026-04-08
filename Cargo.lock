@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-agent-transport-slim"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-slim-bindings",
