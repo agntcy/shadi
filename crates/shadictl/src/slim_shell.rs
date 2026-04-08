@@ -37,10 +37,10 @@ pub(crate) struct SlimStatus {
 }
 
 #[derive(Clone)]
-struct TlsMaterial {
-    cert: PathBuf,
-    key: PathBuf,
-    ca: PathBuf,
+pub(crate) struct TlsMaterial {
+    pub(crate) cert: PathBuf,
+    pub(crate) key: PathBuf,
+    pub(crate) ca: PathBuf,
 }
 
 impl SlimShellState {
@@ -301,26 +301,7 @@ impl SlimShellState {
             return Ok(shared_secret.clone());
         }
 
-        if let Ok(shared_secret) = std::env::var("SLIM_SHARED_SECRET") {
-            if !shared_secret.trim().is_empty() {
-                self.shared_secret = Some(shared_secret.clone());
-                return Ok(shared_secret);
-            }
-        }
-
-        let key_name = std::env::var("SHADI_SLIM_SHARED_SECRET_KEY")
-            .unwrap_or_else(|_| DEFAULT_SHARED_SECRET_KEY.to_string());
-        let store = crate::default_secret_store();
-        let secret = store.get(&key_name).map_err(|err| {
-            format!(
-                "failed to read SLIM shared secret from {}: {}",
-                key_name, err
-            )
-        })?;
-        let bytes = secret.expose(|data| data.to_vec());
-        let shared_secret = String::from_utf8(bytes)
-            .map_err(|_| format!("SLIM shared secret {} is not valid UTF-8", key_name))?;
-
+        let shared_secret = resolve_default_shared_secret()?;
         self.shared_secret = Some(shared_secret.clone());
         Ok(shared_secret)
     }
@@ -405,11 +386,11 @@ fn default_group_session_config() -> SessionConfig {
 }
 
 fn build_client_config() -> Result<ClientConfig, String> {
-    let tls = resolve_client_tls_material()?;
+    let tls = resolve_client_tls_material_for_agent(None)?;
     Ok(build_client_config_for_endpoint(&resolve_endpoint(), &tls))
 }
 
-fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
+pub(crate) fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     let mut config = ClientConfig::default();
     config.endpoint = resolve_client_endpoint_value(endpoint);
     config.tls = TlsClientConfig {
@@ -429,21 +410,11 @@ fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Client
 }
 
 fn build_server_config() -> Result<ServerConfig, String> {
-    let cert_dir = slim_tls_dir();
-    let tls = TlsMaterial {
-        cert: cert_dir.join("server.crt"),
-        key: cert_dir.join("server.key"),
-        ca: cert_dir.join("ca.crt"),
-    };
-
-    ensure_file_exists(&tls.cert, "SLIM server certificate")?;
-    ensure_file_exists(&tls.key, "SLIM server key")?;
-    ensure_file_exists(&tls.ca, "SLIM client CA")?;
-
+    let tls = resolve_server_tls_material()?;
     Ok(build_server_config_for_endpoint(&resolve_endpoint(), &tls))
 }
 
-fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ServerConfig {
+pub(crate) fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ServerConfig {
     let mut config = ServerConfig::default();
     config.endpoint = endpoint.to_string();
     config.tls = TlsServerConfig {
@@ -462,12 +433,43 @@ fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Server
     config
 }
 
+pub(crate) fn resolve_server_tls_material() -> Result<TlsMaterial, String> {
+    let cert_dir = slim_tls_dir();
+    let tls = TlsMaterial {
+        cert: cert_dir.join("server.crt"),
+        key: cert_dir.join("server.key"),
+        ca: cert_dir.join("ca.crt"),
+    };
+
+    ensure_file_exists(&tls.cert, "SLIM server certificate")?;
+    ensure_file_exists(&tls.key, "SLIM server key")?;
+    ensure_file_exists(&tls.ca, "SLIM client CA")?;
+
+    Ok(tls)
+}
+
+#[cfg(test)]
 fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
+    resolve_client_tls_material_for_agent(None)
+}
+
+pub(crate) fn resolve_client_tls_material_for_agent(
+    agent_id_override: Option<&str>,
+) -> Result<TlsMaterial, String> {
     let cert_override = std::env::var_os("SLIM_TLS_CERT").map(PathBuf::from);
     let key_override = std::env::var_os("SLIM_TLS_KEY").map(PathBuf::from);
     let ca = std::env::var_os("SLIM_TLS_CA")
         .map(PathBuf::from)
         .unwrap_or_else(|| slim_tls_dir().join("ca.crt"));
+    let agent_id = agent_id_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var("SHADI_AGENT_ID")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
 
     let (cert, key) = match (cert_override, key_override) {
         (Some(cert), Some(key)) => (cert, key),
@@ -476,9 +478,6 @@ fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
         }
         (None, None) => {
             let base_dir = slim_tls_dir();
-            let agent_id = std::env::var("SHADI_AGENT_ID")
-                .ok()
-                .filter(|value| !value.trim().is_empty());
             client_identity_candidates(&base_dir, agent_id.as_deref())
                 .into_iter()
                 .find(|(cert, key)| cert.is_file() && key.is_file())
@@ -501,6 +500,27 @@ fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
     ensure_file_exists(&ca, "SLIM client CA")?;
 
     Ok(TlsMaterial { cert, key, ca })
+}
+
+pub(crate) fn resolve_default_shared_secret() -> Result<String, String> {
+    if let Ok(shared_secret) = std::env::var("SLIM_SHARED_SECRET") {
+        if !shared_secret.trim().is_empty() {
+            return Ok(shared_secret);
+        }
+    }
+
+    let key_name = std::env::var("SHADI_SLIM_SHARED_SECRET_KEY")
+        .unwrap_or_else(|_| DEFAULT_SHARED_SECRET_KEY.to_string());
+    let store = crate::default_secret_store();
+    let secret = store.get(&key_name).map_err(|err| {
+        format!(
+            "failed to read SLIM shared secret from {}: {}",
+            key_name, err
+        )
+    })?;
+    let bytes = secret.expose(|data| data.to_vec());
+    String::from_utf8(bytes)
+        .map_err(|_| format!("SLIM shared secret {} is not valid UTF-8", key_name))
 }
 
 fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(PathBuf, PathBuf)> {
@@ -561,7 +581,7 @@ fn resolve_local_name_value(
     ))
 }
 
-fn parse_name(raw: &str) -> Result<Name, String> {
+pub(crate) fn parse_name(raw: &str) -> Result<Name, String> {
     Name::from_string(raw.to_string()).map_err(|err| {
         format!(
             "invalid SLIM name {}: {} (expected organization/namespace/application)",
@@ -591,7 +611,7 @@ fn ensure_file_exists(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
-fn format_slim_error(err: slim_bindings::SlimError) -> String {
+pub(crate) fn format_slim_error(err: slim_bindings::SlimError) -> String {
     err.to_string()
 }
 
@@ -602,13 +622,16 @@ mod tests {
     use std::net::TcpListener;
     #[cfg(not(windows))]
     use std::process::Command;
+    #[cfg(not(windows))]
     use std::sync::mpsc;
     use std::sync::MutexGuard;
+    #[cfg(not(windows))]
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
+    #[cfg(not(windows))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
 
     fn lock_env() -> MutexGuard<'static, ()> {
@@ -996,6 +1019,61 @@ mod tests {
     }
 
     #[test]
+    fn given_store_key_override_when_loading_shared_secret_then_store_value_is_used() {
+        let _guard = lock_env();
+        let key_name = format!("secops/test-shared-secret-{}", std::process::id());
+        crate::test_store_put(&key_name, b"stored-shared-secret");
+
+        let _secret = ScopedEnvVar::unset("SLIM_SHARED_SECRET");
+        let _key_name = ScopedEnvVar::set("SHADI_SLIM_SHARED_SECRET_KEY", &key_name);
+
+        assert_eq!(
+            resolve_default_shared_secret().expect("shared secret from store"),
+            "stored-shared-secret"
+        );
+    }
+
+    #[test]
+    fn given_non_utf8_store_secret_when_loading_shared_secret_then_error_is_returned() {
+        let _guard = lock_env();
+        let key_name = format!("secops/test-shared-secret-nonutf8-{}", std::process::id());
+        crate::test_store_put(&key_name, &[0xff, 0xfe]);
+
+        let _secret = ScopedEnvVar::unset("SLIM_SHARED_SECRET");
+        let _key_name = ScopedEnvVar::set("SHADI_SLIM_SHARED_SECRET_KEY", &key_name);
+
+        let err = resolve_default_shared_secret().expect_err("non-utf8 secret should fail");
+        assert!(err.contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn given_agent_specific_tls_material_when_resolving_then_agent_pair_is_used() {
+        let _guard = lock_env();
+        let dir = TestDir::new("shell-agent-specific-tls");
+        let tls_dir = dir.path().join("shadi-slim-mtls");
+        fs::create_dir_all(&tls_dir).expect("create tls dir");
+
+        let cert = tls_dir.join("client-avatar.crt");
+        let key = tls_dir.join("client-avatar.key");
+        let ca = tls_dir.join("ca.crt");
+        write_test_file(&cert);
+        write_test_file(&key);
+        write_test_file(&ca);
+
+        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
+        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
+        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
+        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
+        let _agent_id = ScopedEnvVar::unset("SHADI_AGENT_ID");
+
+        let tls = resolve_client_tls_material_for_agent(Some("avatar")).expect("agent tls material");
+
+        assert_eq!(tls.cert, cert);
+        assert_eq!(tls.key, key);
+        assert_eq!(tls.ca, ca);
+    }
+
+    #[test]
     #[cfg(not(windows))]
     fn given_generated_assets_when_inviting_without_active_session_then_error_is_returned() {
         let _guard = lock_env();
@@ -1233,6 +1311,7 @@ mod tests {
         assert!(shutdown_status.connection_id.is_none());
     }
 
+    #[cfg(not(windows))]
     fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
         let (cert, key) = client_identity_candidates(base_dir, Some(agent_id))
             .into_iter()
@@ -1246,6 +1325,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     fn reserve_test_endpoint() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let endpoint = listener.local_addr().expect("local addr").to_string();

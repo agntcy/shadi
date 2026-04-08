@@ -411,9 +411,11 @@ fn format_slim_error(err: slim_bindings::SlimError) -> String {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    #[cfg(not(windows))]
     use std::net::TcpListener;
     #[cfg(not(windows))]
     use std::process::Command;
+    #[cfg(not(windows))]
     use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -421,6 +423,7 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    #[cfg(not(windows))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
 
     fn env_lock() -> &'static Mutex<()> {

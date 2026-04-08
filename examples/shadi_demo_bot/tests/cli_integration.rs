@@ -1,7 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::Duration;
 
 fn demo_bot_binary() -> PathBuf {

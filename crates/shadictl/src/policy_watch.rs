@@ -234,7 +234,8 @@ pub(crate) fn start_control_socket(
 fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_path: &Path) {
     loop {
         match listener.accept() {
-            Ok((mut stream, _)) => {
+            Ok((stream, _)) => {
+                let mut stream = stream;
                 #[cfg(unix)]
                 if let Err(err) = authorize_control_peer(&stream) {
                     let _ = write_response(
@@ -658,12 +659,10 @@ fn send_message(socket_path: &Path, msg: &ControlMessage) -> Result<ControlRespo
 
     let json =
         serde_json::to_string(msg).map_err(|e| format!("failed to serialize message: {}", e))?;
+    let payload = format!("{}\n", json);
     stream
-        .write_all(json.as_bytes())
+        .write_all(payload.as_bytes())
         .map_err(|e| format!("failed to write: {}", e))?;
-    stream
-        .write_all(b"\n")
-        .map_err(|e| format!("failed to write newline: {}", e))?;
     stream
         .flush()
         .map_err(|e| format!("failed to flush: {}", e))?;

@@ -39,7 +39,9 @@ llvm_cov="$(resolve_tool llvm-cov)"
 llvm_profdata="$(resolve_tool llvm-profdata)"
 
 # On macOS, auto-resolve OPENSSL_DIR via Homebrew if not already set.
-# On Linux, point to the system prefix where libssl-dev installs.
+# On Linux, prefer pkg-config so OpenSSL resolves correctly on multiarch
+# runners, where libssl is typically under /usr/lib/<triple> rather than
+# directly under /usr/lib.
 # (Windows sets it in CI via GITHUB_ENV.)
 if [[ -z "${OPENSSL_DIR:-}" ]]; then
   case "$(uname)" in
@@ -52,8 +54,15 @@ if [[ -z "${OPENSSL_DIR:-}" ]]; then
       done
       ;;
     Linux)
-      if [[ -d /usr/include/openssl ]]; then
-        export OPENSSL_DIR=/usr
+      if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl; then
+        export OPENSSL_LIB_DIR="$(pkg-config --variable=libdir openssl)"
+        export OPENSSL_INCLUDE_DIR="$(pkg-config --variable=includedir openssl)"
+      elif [[ -d /usr/include/openssl ]]; then
+        export OPENSSL_INCLUDE_DIR=/usr/include
+        libssl_path="$(find /usr/lib* -name 'libssl.so*' -print -quit 2>/dev/null || true)"
+        if [[ -n "$libssl_path" ]]; then
+          export OPENSSL_LIB_DIR="$(dirname "$libssl_path")"
+        fi
       fi
       ;;
   esac

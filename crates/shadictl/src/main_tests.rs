@@ -1639,6 +1639,85 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_named_command_dispatches_slim_a2a_echo_peer_variant() {
+        let _guard = trace_env_lock();
+        let dir = temp_dir();
+        let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
+        let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
+        let previous_shared_secret = std::env::var_os("SLIM_SHARED_SECRET");
+
+        std::env::set_var("SHADI_TMP_DIR", dir.path());
+        std::env::set_var("SLIM_ENDPOINT", "127.0.0.1:65535");
+        std::env::set_var("SLIM_SHARED_SECRET", "dispatch-shared-secret");
+
+        let code = run_named_command(Commands::Slim(SlimCli {
+            command: SlimCommand::A2AEchoPeer(SlimA2AEchoPeerArgs {
+                endpoint: None,
+                agent_id: "secops-a".to_string(),
+                listen_timeout_seconds: 1,
+                ready_file: None,
+                start_local_node: false,
+            }),
+        }));
+
+        match previous_tmp_dir {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        match previous_endpoint {
+            Some(value) => std::env::set_var("SLIM_ENDPOINT", value),
+            None => std::env::remove_var("SLIM_ENDPOINT"),
+        }
+        match previous_shared_secret {
+            Some(value) => std::env::set_var("SLIM_SHARED_SECRET", value),
+            None => std::env::remove_var("SLIM_SHARED_SECRET"),
+        }
+
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_named_command_dispatches_slim_a2a_send_variant() {
+        let _guard = trace_env_lock();
+        let dir = temp_dir();
+        let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
+        let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
+        let previous_shared_secret = std::env::var_os("SLIM_SHARED_SECRET");
+
+        std::env::set_var("SHADI_TMP_DIR", dir.path());
+        std::env::set_var("SLIM_ENDPOINT", "127.0.0.1:65535");
+        std::env::set_var("SLIM_SHARED_SECRET", "dispatch-shared-secret");
+
+        let code = run_named_command(Commands::Slim(SlimCli {
+            command: SlimCommand::A2ASend(SlimA2ASendArgs {
+                endpoint: None,
+                agent_id: "avatar".to_string(),
+                peer_agent_id: "secops-a".to_string(),
+                destination: None,
+                message: "dispatch-test".to_string(),
+                stream: true,
+                timeout_seconds: 1,
+                session_id: "dispatch-session".to_string(),
+            }),
+        }));
+
+        match previous_tmp_dir {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        match previous_endpoint {
+            Some(value) => std::env::set_var("SLIM_ENDPOINT", value),
+            None => std::env::remove_var("SLIM_ENDPOINT"),
+        }
+        match previous_shared_secret {
+            Some(value) => std::env::set_var("SLIM_SHARED_SECRET", value),
+            None => std::env::remove_var("SLIM_SHARED_SECRET"),
+        }
+
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
     fn run_named_command_dispatches_config_variant() {
         let code = run_named_command(Commands::Config(ConfigCli {
             command: ConfigCommand::Show(ConfigShowArgs {
