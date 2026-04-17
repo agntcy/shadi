@@ -1,3 +1,9 @@
 [workspace]
 release_always = false
+publish = true
 publish_no_verify = true
+publish_timeout = "30m"
+
+[[package]]
+name = "shadi_demo_bot"
+release = false

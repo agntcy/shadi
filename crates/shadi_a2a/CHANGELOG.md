@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- migrate the SHADI A2A wrapper to the official `a2aproject/a2a-rs` SDK
+
 ## [0.1.0] - 2026-04-07
 
 ### Added

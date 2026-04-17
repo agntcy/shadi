@@ -2,6 +2,7 @@
 name = "agntcy-shadi-cli"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "Command-line interface for SHADI policy, secrets, memory, and SLIM operations."
 license.workspace = true
 repository.workspace = true
@@ -12,9 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
-a2a = { package = "agntcy-a2a", version = "0.2.4" }
-a2a-client = { package = "agntcy-a2a-client", version = "0.1.13" }
-a2a-server = { package = "agntcy-a2a-server", version = "0.2.6" }
+a2a = { package = "a2a-lf", version = "0.2.4" }
+a2a-client = { package = "a2a-client-lf", version = "0.1.13" }
+a2a-server = { package = "a2a-server-lf", version = "0.2.6" }
 async-trait = "0.1"
 futures = "0.3"
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.0", path = "../shadi_sandbox" }

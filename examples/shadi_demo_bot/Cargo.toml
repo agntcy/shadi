@@ -2,12 +2,13 @@
 name = "shadi_demo_bot"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 publish = false
 
 [dependencies]
-a2a = { package = "agntcy-a2a", version = "0.2" }
-a2a-client = { package = "agntcy-a2a-client", version = "0.1" }
-a2a-server = { package = "agntcy-a2a-server", version = "0.2" }
+a2a = { package = "a2a-lf", version = "0.2.4" }
+a2a-client = { package = "a2a-client-lf", version = "0.1.13" }
+a2a-server = { package = "a2a-server-lf", version = "0.2.6" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", path = "../../crates/agent_secrets" }
 agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", path = "../../crates/agent_transport_slim" }
 async-trait = "0.1"

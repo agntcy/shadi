@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- switch `shadictl` A2A commands to the official `a2aproject/a2a-rs` SDK through `shadi_a2a`
+
 ## [0.1.0](https://github.com/agntcy/shadi/releases/tag/agntcy-shadi-cli-v0.1.0) - 2026-04-07
 
 ### Added
