@@ -43,6 +43,17 @@ fn wait_for_file(path: &std::path::Path, timeout: Duration) {
     panic!("timed out waiting for {}", path.display());
 }
 
+#[cfg(unix)]
+#[test]
+fn wait_for_file_panics_on_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("missing.ready");
+
+    let result = std::panic::catch_unwind(|| wait_for_file(&missing, Duration::from_millis(0)));
+
+    assert!(result.is_err(), "expected timeout panic");
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
