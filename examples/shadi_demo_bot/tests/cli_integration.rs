@@ -30,6 +30,19 @@ fn stderr_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[cfg(unix)]
+fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("timed out waiting for {}", path.display());
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -156,16 +169,21 @@ fn feature_bot_surfaces_memory_path_errors() {
 #[cfg(unix)]
 #[test]
 fn shell_ticker_handles_sigterm() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let ready_file = temp_dir.path().join("shell-ticker.ready");
+
     let child = Command::new(demo_bot_binary())
         .arg("shell-ticker")
         .arg("--tick-seconds")
         .arg("1")
+        .arg("--ready-file")
+        .arg(&ready_file)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn shell ticker");
 
-    thread::sleep(Duration::from_millis(750));
+    wait_for_file(&ready_file, Duration::from_secs(5));
 
     let status = Command::new("kill")
         .arg("-TERM")

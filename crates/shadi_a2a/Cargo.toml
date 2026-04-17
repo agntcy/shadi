@@ -2,7 +2,7 @@
 name = "agntcy-shadi-a2a"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A2A channel support for SHADI over SLIMRPC."
 license.workspace = true
 repository.workspace = true

@@ -113,6 +113,9 @@ impl Default for FeatureBotArgs {
 struct ShellTickerArgs {
     #[arg(long, env = "DEMO_TICK", default_value_t = DEFAULT_TICK_SECONDS)]
     tick_seconds: u64,
+
+    #[arg(long, hide = true)]
+    ready_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -1267,6 +1270,15 @@ fn run_a2a_exchange(
 fn run_shell_ticker(args: ShellTickerArgs) -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
     install_shutdown_handlers(&shutdown)?;
+
+    if let Some(path) = &args.ready_file {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create ready file parent: {}", err))?;
+        }
+        fs::write(path, b"ready")
+            .map_err(|err| format!("failed to write ready file: {}", err))?;
+    }
 
     println!("[demo-agent] starting - press Ctrl-C to stop");
     println!("[demo-agent] pid={}", std::process::id());
