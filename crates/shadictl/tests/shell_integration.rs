@@ -103,6 +103,9 @@ fn mock_accept_loop(listener: &UnixListener, state: &Arc<Mutex<MockState>>, sock
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("set blocking mock stream");
                 // Spawn a thread per connection so the listener is never
                 // blocked while handling a client; this prevents the race
                 // where a short-lived probe connect holds the accept loop
