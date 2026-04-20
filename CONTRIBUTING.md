@@ -105,6 +105,18 @@ usually a good idea to first open an issue describing the change to solicit
 feedback and guidance. This will increase the likelihood of the PR getting
 merged.
 
+## Releasing crates
+
+Rust crate releases are driven by `.github/workflows/release-rust.yml` using
+`release-plz`.
+
+- Public workspace crates are published to crates.io from the `main` branch
+   release job.
+- The release job requires the repository secret `CARGO_REGISTRY_TOKEN` and
+   fails early if the token is missing.
+- Non-publishable workspace members such as `shadi_demo_bot` are excluded from
+   release-plz so they do not generate release tags or publish attempts.
+
 ## Developer's Certificate of Origin
 
 To improve tracking of who did what, we have introduced a "sign-off" procedure.

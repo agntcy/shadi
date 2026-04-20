@@ -9,7 +9,7 @@ It has three roles behind one binary:
 - `shell-ticker`: tiny long-running ticker for the shell walkthrough
 - `slim-echo-peer`: helper used by the feature bot for the local SLIM echo flow
 - `a2a-echo-peer`: helper that exposes a task-backed A2A handler over SLIMRPC
-- `a2a-send`: client that uses `shadi_a2a::A2AChannel` to send unary or streaming A2A requests
+- `a2a-send`: client that uses `shadi_a2a::A2AChannel` and the official `a2aproject/a2a-rs` SDK to send unary or streaming A2A requests
 
 ## Build
 
@@ -76,7 +76,8 @@ The peer exposes a `SlimRpcHandler` backed by the A2A server task model, so the
 unary path returns a completed task and the streaming path emits a working
 status followed by a completed task. The client side uses
 `shadi_a2a::A2AChannelBuilder`, which gates the outbound A2A call through
-SHADI's `AgentVerifier` before it sends protocol traffic.
+SHADI's `AgentVerifier` before it sends protocol traffic through the official
+Rust A2A transport bindings.
 
 ## Use The Rust Shell Ticker
 

@@ -530,6 +530,10 @@ cargo run -p agntcy-shadi-cli -- memory delete \
 
 `shadictl slim` exposes native SLIM helpers and an A2A-over-SLIMRPC demo surface.
 
+The A2A commands are backed by `shadi_a2a`, which wraps the official
+`a2aproject/a2a-rs` SDK and keeps SHADI's outbound verifier gate in front of
+the transport.
+
 The A2A commands reuse the same SLIM mTLS assets as the rest of the native SLIM path:
 
 - Client certs from `SLIM_TLS_CERT` and `SLIM_TLS_KEY`, or the default `.tmp/shadi-slim-mtls/client[-$SHADI_AGENT_ID].crt|key` lookup.

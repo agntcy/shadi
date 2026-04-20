@@ -113,6 +113,9 @@ impl Default for FeatureBotArgs {
 struct ShellTickerArgs {
     #[arg(long, env = "DEMO_TICK", default_value_t = DEFAULT_TICK_SECONDS)]
     tick_seconds: u64,
+
+    #[arg(long, hide = true)]
+    ready_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -1268,6 +1271,8 @@ fn run_shell_ticker(args: ShellTickerArgs) -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
     install_shutdown_handlers(&shutdown)?;
 
+    maybe_write_ready_file(args.ready_file.as_deref())?;
+
     println!("[demo-agent] starting - press Ctrl-C to stop");
     println!("[demo-agent] pid={}", std::process::id());
     println!(
@@ -1802,6 +1807,19 @@ where
     Ok(output)
 }
 
+fn maybe_write_ready_file(path: Option<&Path>) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create ready file parent: {}", err))?;
+    }
+
+    fs::write(path, b"ready").map_err(|err| format!("failed to write ready file: {}", err))
+}
+
 #[cfg(unix)]
 fn install_shutdown_handlers(shutdown: &Arc<AtomicBool>) -> Result<(), String> {
     use signal_hook::consts::signal::{SIGINT, SIGTERM};
@@ -2128,6 +2146,27 @@ mod tests {
             fs::write(tls_dir.join(relative), b"fixture").expect("write tls fixture");
         }
         tls_dir
+    }
+
+    #[test]
+    fn maybe_write_ready_file_accepts_none() {
+        assert!(maybe_write_ready_file(None).is_ok());
+    }
+
+    #[test]
+    fn maybe_write_ready_file_writes_nested_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ready_file = dir.path().join("nested").join("shell-ticker.ready");
+
+        maybe_write_ready_file(Some(ready_file.as_path())).expect("write ready file");
+
+        assert_eq!(fs::read(&ready_file).expect("read ready file"), b"ready");
+    }
+
+    #[test]
+    fn maybe_write_ready_file_reports_write_error_without_parent() {
+        let err = maybe_write_ready_file(Some(Path::new(""))).expect_err("empty path should fail");
+        assert!(err.contains("failed to write ready file"), "{err}");
     }
 
     #[test]
