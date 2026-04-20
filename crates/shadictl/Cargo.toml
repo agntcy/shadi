@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Command-line interface for SHADI policy, secrets, memory, and SLIM operations."
@@ -21,7 +21,7 @@ futures = "0.3"
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.0", path = "../shadi_sandbox" }
 agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.1.1", path = "../agent_transport_slim" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.0", path = "../agent_secrets", features = ["onepassword"] }
-shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.0", path = "../shadi_a2a" }
+shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.1", path = "../shadi_a2a" }
 shadi_memory = { package = "agntcy-shadi-memory", version = "0.1.0", path = "../shadi_memory" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path = "../shadi_telemetry" }
 slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.0", path = "../slim_mas" }
