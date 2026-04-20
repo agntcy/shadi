@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright AGNTCY Contributors (https://github.com/agntcy)
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 mode="${1:-lcov}"
