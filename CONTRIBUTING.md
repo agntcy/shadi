@@ -116,6 +116,13 @@ Rust crate releases are driven by `.github/workflows/release-rust.yml` using
    fails early if the token is missing.
 - Non-publishable workspace members such as `shadi_demo_bot` are excluded from
    release-plz so they do not generate release tags or publish attempts.
+- `.github/workflows/shadictl-binaries.yml` builds and packages `shadictl` for
+   the primary release targets on every PR and `main` push: Linux
+   `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, macOS
+   `aarch64-apple-darwin` and `x86_64-apple-darwin`, and Windows
+   `x86_64-pc-windows-msvc`.
+- The same workflow uploads `.tar.gz` or `.zip` archives plus `.sha256`
+   checksum files to each published `agntcy-shadi-cli-v*` GitHub release.
 - `.github/workflows/homebrew-formula.yml` opens or updates a follow-up PR that
    refreshes `Formula/shadictl.rb` when an `agntcy-shadi-cli-v*` release is
    published.

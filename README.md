@@ -39,7 +39,9 @@ brew install agntcy/shadi/shadictl
 ```
 
 The Homebrew formula builds from the published `agntcy-shadi-cli` release tag.
-For unreleased changes or non-macOS hosts, use the source build flow below.
+Published `agntcy-shadi-cli` releases also include prebuilt archives for Linux
+(`x86_64` and `aarch64`), macOS (`arm64` and `x86_64`), and Windows (`x86_64`).
+For unreleased changes or any other host, use the source build flow below.
 
 ## Quick Start
 
