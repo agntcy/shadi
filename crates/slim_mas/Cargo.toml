@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-slim-mas"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Managed agent set configuration helpers for SHADI SLIM deployments."
 license.workspace = true
@@ -12,7 +12,7 @@ name = "slim_mas"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
-agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.0", path = "../agent_secrets" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", path = "../agent_secrets" }
 
 [dev-dependencies]
 tempfile = "3.27"

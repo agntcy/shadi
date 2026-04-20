@@ -11,7 +11,7 @@ repository.workspace = true
 name = "shadi_a2a"
 
 [dependencies]
-agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.0", path = "../agent_secrets" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", path = "../agent_secrets" }
 a2a = { package = "a2a-lf", version = "0.2.4" }
 a2a-client = { package = "a2a-client-lf", version = "0.1.13" }
 a2a-server = { package = "a2a-server-lf", version = "0.2.6" }

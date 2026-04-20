@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-slim-mas-v0.1.0...agntcy-shadi-slim-mas-v0.1.1) - 2026-04-20
+
+### Other
+
+- update Rust dependency versions ([#79](https://github.com/agntcy/shadi/pull/79))
+
 ## [0.1.0](https://github.com/agntcy/shadi/releases/tag/agntcy-shadi-slim-mas-v0.1.0) - 2026-04-07
 
 ### Added
