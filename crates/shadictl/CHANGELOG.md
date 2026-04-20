@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- add WinGet distribution support for Windows installs of `shadictl`
+
 ## [0.1.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.0...agntcy-shadi-cli-v0.1.1) - 2026-04-20
 
 ### Other
