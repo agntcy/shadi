@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.1.0...agntcy-shadi-a2a-v0.1.1) - 2026-04-20
+
+### Other
+
+- adopt official A2A SDK and enable release-plz publish ([#67](https://github.com/agntcy/shadi/pull/67))
+
 ### Changed
 
 - migrate the SHADI A2A wrapper to the official `a2aproject/a2a-rs` SDK
