@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright AGNTCY Contributors (https://github.com/agntcy)
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 CERT_DIR="${1:-./tmp/shadi-slim-mtls}"
