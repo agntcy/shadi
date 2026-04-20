@@ -18,6 +18,13 @@ WORKSPACE_MANIFEST = ROOT / "Cargo.toml"
 CLI_MANIFEST = ROOT / "crates" / "shadictl" / "Cargo.toml"
 DEFAULT_OUTPUT = ROOT / "Formula" / "shadictl.rb"
 TAG_PATTERN = re.compile(r"^agntcy-shadi-cli-v(?P<version>[0-9A-Za-z.+-]+)$")
+FORMULA_HEADER = textwrap.dedent(
+    """\
+    # Copyright AGNTCY Contributors (https://github.com/agntcy)
+    # SPDX-License-Identifier: Apache-2.0
+
+    """
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,7 +92,7 @@ def render_formula(tag: str) -> str:
     source_sha256 = fetch_sha256(source_url)
     git_url = homepage if homepage.endswith(".git") else f"{homepage}.git"
 
-    return textwrap.dedent(
+    formula_body = textwrap.dedent(
         f"""\
         class Shadictl < Formula
           desc \"{ruby_string(description)}\"
@@ -114,6 +121,8 @@ def render_formula(tag: str) -> str:
         end
         """
     )
+
+    return f"{FORMULA_HEADER}{formula_body}"
 
 
 def main() -> int:
