@@ -83,43 +83,12 @@ jobs:
       - name: Resolve release metadata
         id: metadata
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
-          TARGET_TRIPLE: ${{ matrix.target }}
         run: |
-          python - <<'PY'
-          import os
-          import tomllib
-          from pathlib import Path
-
-          manifest_path = Path("crates/shadictl/Cargo.toml")
-          with manifest_path.open("rb") as handle:
-              manifest = tomllib.load(handle)
-
-          version = manifest["package"]["version"]
-          release_tag = ""
-          if os.environ["EVENT_NAME"] == "release":
-              release_tag = os.environ["RELEASE_TAG"]
-              prefix = "agntcy-shadi-cli-v"
-              if not release_tag.startswith(prefix):
-                  raise SystemExit(f"expected {prefix}<version>, got {release_tag}")
-              tag_version = release_tag[len(prefix):]
-              if tag_version != version:
-                  raise SystemExit(
-                      f"release tag version {tag_version} does not match crates/shadictl/Cargo.toml version {version}"
-                  )
-              version = tag_version
-
-          output_path = Path(os.environ["GITHUB_OUTPUT"])
-          with output_path.open("a", encoding="utf-8") as handle:
-              handle.write(f"version={version}\n")
-              handle.write(f"release_tag={release_tag}\n")
-              handle.write(f"binary_path=target/{os.environ['TARGET_TRIPLE']}/release/shadictl")
-              if os.environ["TARGET_TRIPLE"].endswith("windows-msvc"):
-                  handle.write(".exe")
-              handle.write("\n")
-          PY
+          python scripts/resolve_shadictl_release_metadata.py \
+          --event-name "${{ github.event_name }}" \
+          --release-tag "${{ github.event.release.tag_name || '' }}" \
+          --target "${{ matrix.target }}" \
+          --github-output "$GITHUB_OUTPUT"
 
       - name: Build shadictl
         run: cargo build -p agntcy-shadi-cli --release --locked --target ${{ matrix.target }}
