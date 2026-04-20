@@ -38,6 +38,14 @@ brew tap agntcy/shadi https://github.com/agntcy/shadi
 brew install agntcy/shadi/shadictl
 ```
 
+On Windows, once the matching WinGet manifest has landed in the default source,
+you can install or upgrade `shadictl` with:
+
+```powershell
+winget install --id AGNTCY.shadictl -e
+winget upgrade --id AGNTCY.shadictl -e
+```
+
 The Homebrew formula builds from the published `agntcy-shadi-cli` release tag.
 Published `agntcy-shadi-cli` releases also include prebuilt archives for Linux
 (`x86_64` and `aarch64`), macOS (`arm64` and `x86_64`), and Windows (`x86_64`).

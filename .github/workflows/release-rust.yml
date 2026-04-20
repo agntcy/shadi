@@ -58,9 +58,40 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  resolve-shadictl-release:
+    name: Resolve shadictl release
+    needs: release-crates
+    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - name: Resolve CLI release tag
+        id: release
+        shell: bash
+        env:
+          RELEASES: ${{ needs.release-crates.outputs.releases }}
+        run: |
+          release_tag=$(python - <<'PY'
+          import json
+          import os
+
+          releases = json.loads(os.environ["RELEASES"])
+          for release in releases:
+              if release["package_name"] == "agntcy-shadi-cli":
+                  print(release["tag"])
+                  break
+          else:
+              raise SystemExit("agntcy-shadi-cli release not found in release-plz outputs")
+          PY
+          )
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
   release-shadictl-binaries:
     name: Release shadictl binaries (${{ matrix.name }})
-    needs: release-crates
+    needs:
+      - release-crates
+      - resolve-shadictl-release
     if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -129,34 +160,13 @@ jobs:
           "OPENSSL_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENSSL_INCLUDE_DIR=$opensslDir\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Resolve CLI release tag
-        id: release
-        shell: bash
-        env:
-          RELEASES: ${{ needs.release-crates.outputs.releases }}
-        run: |
-          release_tag=$(python - <<'PY'
-          import json
-          import os
-
-          releases = json.loads(os.environ["RELEASES"])
-          for release in releases:
-              if release["package_name"] == "agntcy-shadi-cli":
-                  print(release["tag"])
-                  break
-          else:
-              raise SystemExit("agntcy-shadi-cli release not found in release-plz outputs")
-          PY
-          )
-          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
-
       - name: Resolve release metadata
         id: metadata
         shell: bash
         run: |
           python scripts/resolve_shadictl_release_metadata.py \
             --event-name release \
-            --release-tag "${{ steps.release.outputs.release_tag }}" \
+            --release-tag "${{ needs.resolve-shadictl-release.outputs.release_tag }}" \
             --target "${{ matrix.target }}" \
             --github-output "$GITHUB_OUTPUT"
 
@@ -184,6 +194,28 @@ jobs:
             "${{ steps.package.outputs.checksum_path }}" \
             --repo "${{ github.repository }}" \
             --clobber
+
+  release-shadictl-winget:
+    name: Publish shadictl WinGet manifests
+    needs:
+      - release-crates
+      - resolve-shadictl-release
+      - release-shadictl-binaries
+    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-shadictl-release.outputs.release_tag }}
+    steps:
+      - name: Trigger WinGet manifest workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run winget-manifests.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            -f release_tag="$RELEASE_TAG"
 
   release-crates-pr:
     name: Release crates - PR
