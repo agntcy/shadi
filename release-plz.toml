@@ -6,4 +6,5 @@ publish_timeout = "30m"
 
 [[package]]
 name = "shadi_demo_bot"
+publish = false
 release = false
