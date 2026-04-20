@@ -29,6 +29,18 @@ SHADI is for teams that want agents to work with real tools and real credentials
 - [`agent_transport_slim`](docs/architecture.md#4-transport-layer): secure transport and stdio bridge support.
 - [`examples/shadi_demo_bot`](examples/shadi_demo_bot/README.md): a Rust demo bot that exercises the main SHADI features, including SLIM messaging.
 
+## Install the CLI
+
+On macOS, you can install the latest released `shadictl` formula with Homebrew:
+
+```bash
+brew tap agntcy/shadi https://github.com/agntcy/shadi
+brew install agntcy/shadi/shadictl
+```
+
+The Homebrew formula builds from the published `agntcy-shadi-cli` release tag.
+For unreleased changes or non-macOS hosts, use the source build flow below.
+
 ## Quick Start
 
 ```bash

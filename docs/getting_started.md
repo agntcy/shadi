@@ -15,6 +15,16 @@ By the end of this guide, you will have:
 
 ## Before You Begin
 
+If you only need the released CLI on macOS, install it with Homebrew:
+
+```bash
+brew tap agntcy/shadi https://github.com/agntcy/shadi
+brew install agntcy/shadi/shadictl
+```
+
+Use the source-build path below if you are developing SHADI or need unreleased
+changes from the workspace.
+
 Install the local tooling SHADI expects:
 
 - Rust stable with Cargo
