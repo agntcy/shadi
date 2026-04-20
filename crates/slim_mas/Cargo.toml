@@ -15,4 +15,4 @@ toml = "0.8"
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.0", path = "../agent_secrets" }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = "3.27"
