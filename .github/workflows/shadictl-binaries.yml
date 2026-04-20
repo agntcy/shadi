@@ -63,12 +63,7 @@ jobs:
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install python@3.12 nettle pkg-config
-
-      - name: Set Python for PyO3 (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: echo "PYO3_PYTHON=$(brew --prefix python@3.12)/bin/python3.12" >> "$GITHUB_ENV"
+        run: brew install nettle pkg-config
 
       - name: Set OpenSSL env vars (Windows)
         if: runner.os == 'Windows'
