@@ -125,6 +125,20 @@ Rust crate releases are driven by `.github/workflows/release-rust.yml` using
    plus `.sha256` checksum files to each published `agntcy-shadi-cli-v*`
    GitHub release in the same workflow run that `release-plz` uses to create
    the release.
+- WinGet publication uses the released Windows archive
+   `shadictl-v<version>-x86_64-pc-windows-msvc.zip` plus its `.sha256` sidecar
+   as the source of truth for the WinGet installer manifest.
+- `scripts/render_winget_manifests.py` renders the WinGet version,
+   default-locale, and installer manifests for `AGNTCY.shadictl` directly from
+   a released `agntcy-shadi-cli-v*` tag.
+- `.github/workflows/winget-manifests.yml` can be run manually with a release
+   tag, and `.github/workflows/release-rust.yml` calls it automatically after
+   the release assets are uploaded so WinGet publication tracks CLI releases.
+- When the repository secret `WINGET_PKGS_TOKEN` is configured,
+   `.github/workflows/winget-manifests.yml` syncs a fork of
+   `microsoft/winget-pkgs`, commits the generated manifests, and opens or
+   updates the upstream PR. Without that secret, the workflow still uploads the
+   generated manifest tree as an artifact for manual submission.
 - `.github/workflows/homebrew-formula.yml` opens or updates a follow-up PR that
    refreshes `Formula/shadictl.rb` when an `agntcy-shadi-cli-v*` release is
    published.
