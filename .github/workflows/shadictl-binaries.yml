@@ -5,16 +5,10 @@ on:
   push:
     branches:
       - main
-  release:
-    types:
-      - published
 
 jobs:
   build-shadictl-release-artifacts:
-    if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'agntcy-shadi-cli-v') }}
     runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -85,10 +79,10 @@ jobs:
         shell: bash
         run: |
           python scripts/resolve_shadictl_release_metadata.py \
-          --event-name "${{ github.event_name }}" \
-          --release-tag "${{ github.event.release.tag_name || '' }}" \
-          --target "${{ matrix.target }}" \
-          --github-output "$GITHUB_OUTPUT"
+            --event-name "${{ github.event_name }}" \
+            --release-tag "" \
+            --target "${{ matrix.target }}" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Build shadictl
         run: cargo build -p agntcy-shadi-cli --release --locked --target ${{ matrix.target }}
@@ -103,15 +97,3 @@ jobs:
             --version "${{ steps.metadata.outputs.version }}" \
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"
-
-      - name: Upload release assets
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          gh release upload "${{ steps.metadata.outputs.release_tag }}" \
-            "${{ steps.package.outputs.archive_path }}" \
-            "${{ steps.package.outputs.checksum_path }}" \
-            --repo "${{ github.repository }}" \
-            --clobber
