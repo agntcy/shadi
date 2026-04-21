@@ -146,8 +146,9 @@ Rust crate releases are driven by `.github/workflows/release-rust.yml` using
    the release assets are uploaded so WinGet publication tracks CLI releases.
 - When the repository secrets `PROJECT_APP_ID` and `PROJECT_APP_KEY` are
    configured, `.github/workflows/winget-manifests.yml` authenticates as the
-   project GitHub App bot, syncs a fork of `microsoft/winget-pkgs`, commits the
-   generated manifests, and opens or updates the upstream PR. Without those
+   project GitHub App bot, expects an existing `agntcy/winget-pkgs` fork of
+   `microsoft/winget-pkgs`, branches from the latest `upstream/master`, commits
+   the generated manifests, and opens or updates the upstream PR. Without those
    secrets, the workflow still uploads the generated manifest tree as an
    artifact for manual submission.
 - `.github/workflows/homebrew-formula.yml` opens or updates a follow-up PR that
