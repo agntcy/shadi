@@ -217,6 +217,28 @@ jobs:
             --ref "${{ github.ref_name }}" \
             -f release_tag="$RELEASE_TAG"
 
+  release-shadictl-homebrew:
+    name: Publish shadictl Homebrew formula
+    needs:
+      - release-crates
+      - resolve-shadictl-release
+      - release-shadictl-binaries
+    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-shadictl-release.outputs.release_tag }}
+    steps:
+      - name: Trigger Homebrew formula workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run homebrew-formula.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            -f tag="$RELEASE_TAG"
+
   release-crates-pr:
     name: Release crates - PR
     runs-on: ubuntu-latest
