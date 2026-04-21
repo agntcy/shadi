@@ -89,7 +89,7 @@ jobs:
           fork_owner="$FORK_OWNER"
 
           if ! GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo view "$fork_owner/winget-pkgs" >/dev/null 2>&1; then
-            GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo fork microsoft/winget-pkgs --clone=false --remote=false --default-branch-only
+            GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo fork microsoft/winget-pkgs --org "$fork_owner" --clone=false --default-branch-only
           fi
 
           GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo sync "$fork_owner/winget-pkgs" --source microsoft/winget-pkgs --branch master
