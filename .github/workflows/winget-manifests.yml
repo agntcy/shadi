@@ -93,6 +93,7 @@ jobs:
             exit 1
           fi
 
+          export GH_TOKEN="$WINGET_PKGS_TOKEN"
           GH_TOKEN="$WINGET_PKGS_TOKEN" gh auth setup-git >/dev/null
 
           rm -rf /tmp/winget-pkgs
@@ -115,12 +116,13 @@ jobs:
           rm -rf "$MANIFEST_REL_DIR"
           cp -R "$MANIFEST_DIR" "$(dirname "$MANIFEST_REL_DIR")/"
 
-          if git diff --quiet -- "$MANIFEST_REL_DIR"; then
+          git add --all "$MANIFEST_REL_DIR"
+
+          if git diff --cached --quiet -- "$MANIFEST_REL_DIR"; then
             echo "WinGet manifests are already up to date for $RELEASE_TAG"
             exit 0
           fi
 
-          git add "$MANIFEST_REL_DIR"
           git commit -m "release: add WinGet manifest for shadictl v$PACKAGE_VERSION"
           git push --force --set-upstream origin "$branch"
 
