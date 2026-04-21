@@ -93,6 +93,7 @@ jobs:
             exit 1
           fi
 
+          export GH_TOKEN="$WINGET_PKGS_TOKEN"
           GH_TOKEN="$WINGET_PKGS_TOKEN" gh auth setup-git >/dev/null
 
           rm -rf /tmp/winget-pkgs
