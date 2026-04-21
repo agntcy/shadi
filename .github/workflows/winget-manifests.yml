@@ -89,10 +89,11 @@ jobs:
           fork_owner="$FORK_OWNER"
 
           if ! GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo view "$fork_owner/winget-pkgs" >/dev/null 2>&1; then
-            GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo fork microsoft/winget-pkgs --org "$fork_owner" --clone=false --default-branch-only
+            echo "::error::Expected an existing fork at $fork_owner/winget-pkgs. Create and maintain that fork before running this workflow."
+            exit 1
           fi
 
-          GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo sync "$fork_owner/winget-pkgs" --source microsoft/winget-pkgs --branch master
+          GH_TOKEN="$WINGET_PKGS_TOKEN" gh auth setup-git >/dev/null
 
           rm -rf /tmp/winget-pkgs
           GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo clone "$fork_owner/winget-pkgs" /tmp/winget-pkgs -- --depth 1 --branch master
@@ -100,9 +101,11 @@ jobs:
           branch="automation/winget-shadictl-$PACKAGE_VERSION"
 
           cd /tmp/winget-pkgs
+          git remote add upstream https://github.com/microsoft/winget-pkgs.git
+          git fetch --depth 1 upstream master
           git config user.name "$GIT_AUTHOR_NAME"
           git config user.email "$GIT_AUTHOR_EMAIL"
-          git checkout -B "$branch"
+          git checkout -B "$branch" upstream/master
 
           mkdir -p "$(dirname "$MANIFEST_REL_DIR")"
           rm -rf "$MANIFEST_REL_DIR"
