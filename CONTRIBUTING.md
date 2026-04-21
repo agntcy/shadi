@@ -134,11 +134,12 @@ Rust crate releases are driven by `.github/workflows/release-rust.yml` using
 - `.github/workflows/winget-manifests.yml` can be run manually with a release
    tag, and `.github/workflows/release-rust.yml` calls it automatically after
    the release assets are uploaded so WinGet publication tracks CLI releases.
-- When the repository secret `WINGET_PKGS_TOKEN` is configured,
-   `.github/workflows/winget-manifests.yml` syncs a fork of
-   `microsoft/winget-pkgs`, commits the generated manifests, and opens or
-   updates the upstream PR. Without that secret, the workflow still uploads the
-   generated manifest tree as an artifact for manual submission.
+- When the repository secrets `PROJECT_APP_ID` and `PROJECT_APP_KEY` are
+   configured, `.github/workflows/winget-manifests.yml` authenticates as the
+   project GitHub App bot, syncs a fork of `microsoft/winget-pkgs`, commits the
+   generated manifests, and opens or updates the upstream PR. Without those
+   secrets, the workflow still uploads the generated manifest tree as an
+   artifact for manual submission.
 - `.github/workflows/homebrew-formula.yml` opens or updates a follow-up PR that
    refreshes `Formula/shadictl.rb` when an `agntcy-shadi-cli-v*` release is
    published.
