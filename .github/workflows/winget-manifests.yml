@@ -101,7 +101,11 @@ jobs:
           branch="automation/winget-shadictl-$PACKAGE_VERSION"
 
           cd /tmp/winget-pkgs
-          git remote add upstream https://github.com/microsoft/winget-pkgs.git
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/microsoft/winget-pkgs.git
+          else
+            git remote add upstream https://github.com/microsoft/winget-pkgs.git
+          fi
           git fetch --depth 1 upstream master
           git config user.name "$GIT_AUTHOR_NAME"
           git config user.email "$GIT_AUTHOR_EMAIL"
