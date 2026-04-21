@@ -96,7 +96,7 @@ jobs:
           GH_TOKEN="$WINGET_PKGS_TOKEN" gh auth setup-git >/dev/null
 
           rm -rf /tmp/winget-pkgs
-          GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo clone "$fork_owner/winget-pkgs" /tmp/winget-pkgs -- --depth 1 --branch master
+          GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo clone "$fork_owner/winget-pkgs" /tmp/winget-pkgs -- --depth 1
 
           branch="automation/winget-shadictl-$PACKAGE_VERSION"
 
