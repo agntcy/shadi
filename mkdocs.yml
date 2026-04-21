@@ -1,7 +1,7 @@
 site_name: SHADI
 site_description: Secure Host Agentic AI Dynamic Instantiation
-site_url: https://example.com/shadi
-repo_url: https://github.com/your-org/shadi
+site_url: https://agntcy.github.io/shadi
+repo_url: https://github.com/agntcy/shadi
 repo_name: shadi
 
 extra:
@@ -59,6 +59,7 @@ nav:
       - Security Notes: security.md
       - Design Overview: design.md
   - Guides:
+      - Install the CLI: install.md
       - Getting Started: getting_started.md
       - Operations: operations.md
       - Telemetry: telemetry.md
