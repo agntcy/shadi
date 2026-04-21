@@ -15,6 +15,15 @@ By the end of this guide, you will have:
 
 ## Before You Begin
 
+If you only need the released CLI on Linux, install it with the hosted bash
+installer:
+
+```bash
+curl -fsSL https://agntcy.github.io/shadi/install.sh | bash
+```
+
+For version pinning or install path overrides, see [Install the CLI](install.md).
+
 If you only need the released CLI on macOS, install it with Homebrew:
 
 ```bash

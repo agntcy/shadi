@@ -31,6 +31,15 @@ SHADI is for teams that want agents to work with real tools and real credentials
 
 ## Install the CLI
 
+On Linux, install the latest released `shadictl` with:
+
+```bash
+curl -fsSL https://agntcy.github.io/shadi/install.sh | bash
+```
+
+For pinned versions, custom install paths, and installer environment overrides,
+see [docs/install.md](docs/install.md).
+
 On macOS, you can install the latest released `shadictl` formula with Homebrew:
 
 ```bash

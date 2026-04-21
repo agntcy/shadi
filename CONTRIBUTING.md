@@ -125,6 +125,16 @@ Rust crate releases are driven by `.github/workflows/release-rust.yml` using
    plus `.sha256` checksum files to each published `agntcy-shadi-cli-v*`
    GitHub release in the same workflow run that `release-plz` uses to create
    the release.
+- The hosted Linux installer at `https://agntcy.github.io/shadi/install.sh`
+   is sourced from `docs/install.sh` and consumes the released Linux archives
+   `shadictl-v<version>-x86_64-unknown-linux-gnu.tar.gz` or
+   `shadictl-v<version>-aarch64-unknown-linux-gnu.tar.gz` plus their `.sha256`
+   sidecars.
+- The Linux installer resolves the latest published `agntcy-shadi-cli-v*`
+   release automatically unless `SHADI_VERSION` is set, so normal CLI releases
+   do not require a per-release installer update. Only changes to asset names,
+   supported Linux targets, or the hosting location require updates to
+   `docs/install.sh` and `docs/install.md`.
 - WinGet publication uses the released Windows archive
    `shadictl-v<version>-x86_64-pc-windows-msvc.zip` plus its `.sha256` sidecar
    as the source of truth for the WinGet installer manifest.
