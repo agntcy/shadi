@@ -1,0 +1,20 @@
+[package]
+name = "agntcy-agentbridge"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "CLI coding-agent interconnect built on shadi_mas."
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "agentbridge"
+
+[dependencies]
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.1", path = "../shadi_mas" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["process", "io-util", "rt", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2.0"
+tracing = "0.1"

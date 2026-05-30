@@ -472,3 +472,89 @@ Agent workloads sit on top of the same runtime contract:
 }
 ```
 
+---
+
+## Multi-agent coordination layer (`shadi_mas`)
+
+`shadi_mas` is the coordination runtime that sits above the transport layer. It
+provides epoch-disciplined state machines that can drive any multi-agent pattern
+to a deterministic finalization outcome.
+
+### `CoordinationEngine` abstraction
+
+```
+SemanticEvent  ──►  CoordinationEngine  ──►  EventOutcome
+(proposal,          (PreferenceEngine,        (Applied,
+ vote, tool          DevelopmentEngine,         Finalized,
+ result, …)          …)                         Rejected,
+                                               Deferred)
+```
+
+Engines are wrapped in `MasRuntime<E>` which tracks the full history of applied
+transitions and exposes `engine()` / `engine_mut()` for inspection.
+
+### Engines
+
+| Engine | Pattern | Finalization criterion |
+|--------|---------|----------------------|
+| `PreferenceEngine` | Consensus on a scalar value | Median of proposals when quorum is met |
+| `DevelopmentEngine` | Consensus on a code artifact | Most-endorsed artifact when quorum is met |
+
+### Adapter traits
+
+Three adapter traits connect the runtime to real infrastructure:
+
+| Trait | Implementation | Purpose |
+|-------|---------------|---------|
+| `MessagingAdapter` | `RecordingMessagingAdapter` / `LiveSlimMessagingAdapter` | Publish events to SLIM |
+| `TaskAdapter` | `RecordingTaskAdapter` / `LiveA2ATaskAdapter` | Dispatch A2A tasks |
+| `ToolAdapter` | `RecordingToolAdapter` / `CommandToolAdapter` / `CliToolAdapter` | Invoke LLMs / CLI tools |
+
+---
+
+## Codebridge — CLI coding-agent interconnect
+
+Codebridge is an application layer on top of `shadi_mas` that wraps CLI coding
+tools as A2A agents and orchestrates them via SLIM + DIR.
+
+### Architecture
+
+```mermaid
+flowchart LR
+  subgraph Tools
+    C[Claude Code]
+    P[Copilot CLI]
+    D[Codex CLI]
+  end
+
+  subgraph Bridge[agentbridge]
+    A[CliAdapter\ntrait]
+    CP[ContextPacket]
+    CTA[CliToolAdapter\n→ ToolAdapter]
+  end
+
+  subgraph Coordination[shadi_mas]
+    DE[DevelopmentEngine]
+    RT[MasRuntime]
+  end
+
+  subgraph Infra[SHADI infra]
+    A2A[shadi_a2a\nA2A / SLIMRPC]
+    SLIM[agent_transport_slim\nSLIM messaging]
+    DIR[DIR discovery]
+    MEM[shadi_memory\nContextPacket store]
+  end
+
+  Tools --> Bridge
+  Bridge --> Coordination
+  Coordination --> Infra
+```
+
+### Interaction models
+
+1. **Context handoff** — `ContextPacket` from source → A2A task → destination.
+2. **Task delegation** — `LiveA2ATaskAdapter::dispatch()` sends a task and returns an artifact.
+3. **Autonomous coordination** — `MasRuntime<DevelopmentEngine>` runs rounds until `EventOutcome::Finalized`.
+
+For full details see [Codebridge](agentbridge.md).
+

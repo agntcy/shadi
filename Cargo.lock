@@ -143,6 +143,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentbridge_demo"
+version = "0.1.0"
+dependencies = [
+ "agntcy-agentbridge",
+ "agntcy-shadi-mas",
+]
+
+[[package]]
+name = "agntcy-agentbridge"
+version = "0.1.0"
+dependencies = [
+ "agntcy-shadi-mas",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "agntcy-agentbridge-cli"
+version = "0.1.0"
+dependencies = [
+ "agntcy-agentbridge",
+ "agntcy-shadi-mas",
+ "anyhow",
+ "clap",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "agntcy-shadi-a2a"
 version = "0.1.1"
 dependencies = [
@@ -214,6 +251,23 @@ dependencies = [
  "uds_windows",
  "unicode-width 0.2.2",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "agntcy-shadi-mas"
+version = "0.1.1"
+dependencies = [
+ "a2a-client-lf",
+ "a2a-lf",
+ "agntcy-shadi-a2a",
+ "agntcy-shadi-agent-secrets",
+ "agntcy-shadi-agent-transport-slim",
+ "agntcy-slim-bindings",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6414,6 +6468,7 @@ checksum = "5ac8b6f42ead25368cf5b098aeb3dc8a1a2c05a3eee8a9a1a68c640edbfc79d9"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
