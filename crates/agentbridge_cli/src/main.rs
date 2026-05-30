@@ -40,6 +40,14 @@ enum Cmd {
         /// GitHub token for DIR authentication (or set DIRECTORY_CLIENT_GITHUB_TOKEN).
         #[arg(long)]
         gh_token: Option<String>,
+
+        /// Start a SLIM A2A listener so remote callers can reach this adapter.
+        #[arg(long, env = "SLIM_ENDPOINT")]
+        slim_endpoint: Option<String>,
+
+        /// SLIM shared secret for the listener.
+        #[arg(long, env = "SLIM_SHARED_SECRET", default_value = "my_shared_secret_for_testing_purposes_only")]
+        slim_shared_secret: String,
     },
 
     /// List available adapters (Agent Directory or local SLIM node).
@@ -105,7 +113,7 @@ enum Cmd {
         goal: String,
 
         /// Comma-separated agent specs.
-        /// Formats: claude-code, claude-code:/path, generic-stdio:<command>
+        /// Formats: claude-code, claude-code:/path, generic-stdio:<command>, slim:<agent-id>, slim:<agent-id>@<host:port>
         #[arg(long, value_delimiter = ',')]
         agents: Vec<String>,
 
@@ -124,6 +132,14 @@ enum Cmd {
         /// Require explicit human approval before accepting the result.
         #[arg(long)]
         require_human: bool,
+
+        /// SLIM node endpoint used for slim:<agent-id> specs (env: SLIM_ENDPOINT).
+        #[arg(long, env = "SLIM_ENDPOINT", default_value = "127.0.0.1:47357")]
+        slim_endpoint: String,
+
+        /// SLIM shared secret for slim: agent specs (env: SLIM_SHARED_SECRET).
+        #[arg(long, env = "SLIM_SHARED_SECRET", default_value = "my_shared_secret_for_testing_purposes_only")]
+        slim_shared_secret: String,
     },
 }
 
@@ -138,8 +154,8 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Cmd::Register { tool, command, args, dir_publish, dir_server, gh_token } => {
-            let r = commands::register::run(&tool, command.as_deref(), &args);
+        Cmd::Register { tool, command, args, dir_publish, dir_server, gh_token, slim_endpoint, slim_shared_secret } => {
+            let r = commands::register::run(&tool, command.as_deref(), &args, slim_endpoint.as_deref(), &slim_shared_secret);
             if r.is_ok() && dir_publish {
                 commands::register::publish_to_dir(&tool, &dir_server, gh_token.as_deref())
             } else {
@@ -159,7 +175,7 @@ fn main() {
         Cmd::Delegate { prompt, to, agent_id, endpoint, shared_secret } => {
             commands::delegate::run(&prompt, &to, &agent_id, &endpoint, &shared_secret)
         }
-        Cmd::Coordinate { goal, agents, quorum, max_rounds, output, require_human } => {
+        Cmd::Coordinate { goal, agents, quorum, max_rounds, output, require_human, slim_endpoint, slim_shared_secret } => {
             commands::coordinate::run(
                 &goal,
                 &agents,
@@ -167,6 +183,8 @@ fn main() {
                 max_rounds,
                 output.as_deref(),
                 require_human,
+                &slim_endpoint,
+                &slim_shared_secret,
             )
         }
     };

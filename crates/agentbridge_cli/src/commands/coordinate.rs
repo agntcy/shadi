@@ -13,8 +13,11 @@ use agentbridge::{
         SemanticEvent, SemanticPayload,
     },
 };
-use shadi_mas::ToolAdapter;
-use std::sync::Arc;
+use shadi_mas::{
+    TaskAdapter, ToolAdapter, ToolCall, ToolProvider, ToolResult,
+    experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
+};
+use std::sync::{Arc, Mutex};
 
 struct AgentEntry {
     id: AgentId,
@@ -44,8 +47,10 @@ pub fn run(
     max_rounds: u64,
     output: Option<&str>,
     require_human: bool,
+    slim_endpoint: &str,
+    slim_shared_secret: &str,
 ) -> anyhow::Result<()> {
-    let agents = build_agents(agent_specs)?;
+    let agents = build_agents(agent_specs, slim_endpoint, slim_shared_secret)?;
     if agents.is_empty() {
         anyhow::bail!(
             "no agents specified — use --agents claude-code,cursor-agent,copilot,codex \
@@ -309,9 +314,52 @@ fn finish(
     Ok(())
 }
 
+// ─── SLIM remote tool adapter ─────────────────────────────────────────────────
+
+struct SlimToolAdapter {
+    inner: LiveA2ATaskAdapter,
+    dispatch_count: Mutex<usize>,
+}
+
+impl ToolAdapter for SlimToolAdapter {
+    fn provider(&self) -> ToolProvider {
+        ToolProvider::AgentSkills
+    }
+
+    fn call(&self, request: ToolCall) -> Result<ToolResult, String> {
+        let idx = {
+            let mut count = self.dispatch_count.lock().map_err(|_| "lock poisoned")?;
+            let v = *count;
+            *count += 1;
+            v
+        };
+        let task = shadi_mas::TaskEnvelope {
+            task_id: format!("slim-tool-{idx}"),
+            pattern: PatternKind::Development,
+            epoch: request.epoch,
+            correlation_id: request.correlation_id.clone(),
+            body: request.arguments,
+        };
+        self.inner.dispatch(task)?;
+        let dispatches = self.inner.dispatches()?;
+        let payload = dispatches
+            .get(idx)
+            .map(|r| r.response.as_bytes().to_vec())
+            .unwrap_or_default();
+        Ok(ToolResult {
+            provider: ToolProvider::AgentSkills,
+            tool_name: request.tool_name,
+            payload,
+            target: request.target,
+            correlation_id: request.correlation_id,
+            epoch: request.epoch,
+        })
+    }
+}
+
 // ─── Agent spec parser ────────────────────────────────────────────────────────
 
-fn build_agents(specs: &[String]) -> anyhow::Result<Vec<AgentEntry>> {
+fn build_agents(specs: &[String], slim_endpoint: &str, slim_shared_secret: &str) -> anyhow::Result<Vec<AgentEntry>> {
     let mut agents = Vec::new();
     for spec in specs {
         let (id_str, tool): (String, Arc<dyn ToolAdapter>) = if spec.starts_with("claude-code") {
@@ -355,11 +403,31 @@ fn build_agents(specs: &[String]) -> anyhow::Result<Vec<AgentEntry>> {
                     .map_err(|e| anyhow::anyhow!("failed to spawn {spec}: {e}"))?,
             );
             (spec.clone(), Arc::new(CliToolAdapter::new(adapter)))
+        } else if let Some(rest) = spec.strip_prefix("slim:") {
+            // Format: slim:<agent-id>  or  slim:<agent-id>@<host:port>
+            let (agent_id, endpoint) = rest
+                .split_once('@')
+                .map(|(id, ep)| (id.to_string(), ep.to_string()))
+                .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
+            let config = LiveA2ATaskAdapterConfig {
+                endpoint: endpoint.clone(),
+                agent_id: "coordinator".to_string(),
+                local_name: Some("agntcy/shadi/coordinator-a2a".to_string()),
+                peer_agent_id: agent_id.clone(),
+                destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+                shared_secret: slim_shared_secret.to_string(),
+            };
+            let slim_adapter = Arc::new(SlimToolAdapter {
+                inner: LiveA2ATaskAdapter::new(config),
+                dispatch_count: Mutex::new(0),
+            });
+            (agent_id, slim_adapter as Arc<dyn ToolAdapter>)
         } else {
             anyhow::bail!(
                 "unknown agent spec '{spec}'. Supported: \
                  claude-code[:/path], cursor-agent[:/path], \
-                 copilot[:/path], codex[:/path], generic-stdio:<command>"
+                 copilot[:/path], codex[:/path], generic-stdio:<command>, \
+                 slim:<agent-id>[@ <host:port>]"
             );
         };
         agents.push(AgentEntry {
