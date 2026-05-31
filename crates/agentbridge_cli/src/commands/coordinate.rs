@@ -317,6 +317,7 @@ fn finish(
 // ─── SLIM remote tool adapter ─────────────────────────────────────────────────
 
 struct SlimToolAdapter {
+    agent_id: String,
     inner: LiveA2ATaskAdapter,
     dispatch_count: Mutex<usize>,
 }
@@ -333,6 +334,21 @@ impl ToolAdapter for SlimToolAdapter {
             *count += 1;
             v
         };
+        let prompt = String::from_utf8_lossy(&request.arguments);
+        let phase = request
+            .correlation_id
+            .as_deref()
+            .and_then(|c| c.split('-').next())
+            .unwrap_or("?");
+        let epoch = request.epoch.0;
+
+        println!(
+            "\n┌─ A2A ─→ {} [{}] epoch {}",
+            self.agent_id, phase, epoch
+        );
+        println!("│  {}", truncate(&prompt, 120));
+        println!("└─────────────────────────────────────────────────────────");
+
         let task = shadi_mas::TaskEnvelope {
             task_id: format!("slim-tool-{idx}"),
             pattern: PatternKind::Development,
@@ -340,10 +356,23 @@ impl ToolAdapter for SlimToolAdapter {
             correlation_id: request.correlation_id.clone(),
             body: request.arguments,
         };
+
+        let started = std::time::Instant::now();
         self.inner.dispatch(task)?;
+        let elapsed_ms = started.elapsed().as_millis();
+
         let dispatches = self.inner.dispatches()?;
-        let payload = dispatches
-            .get(idx)
+        let record = dispatches.get(idx);
+        let response_str = record.map(|r| r.response.as_str()).unwrap_or("");
+
+        println!(
+            "\n┌─ A2A ←─ {} ({} ms)",
+            self.agent_id, elapsed_ms
+        );
+        println!("│  {}", truncate(response_str, 120));
+        println!("└─────────────────────────────────────────────────────────\n");
+
+        let payload = record
             .map(|r| r.response.as_bytes().to_vec())
             .unwrap_or_default();
         Ok(ToolResult {
@@ -354,6 +383,15 @@ impl ToolAdapter for SlimToolAdapter {
             correlation_id: request.correlation_id,
             epoch: request.epoch,
         })
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let first_line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or(s);
+    if first_line.len() > max {
+        format!("{}…", &first_line[..max])
+    } else {
+        first_line.to_string()
     }
 }
 
@@ -418,6 +456,7 @@ fn build_agents(specs: &[String], slim_endpoint: &str, slim_shared_secret: &str)
                 shared_secret: slim_shared_secret.to_string(),
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
+                agent_id: agent_id.clone(),
                 inner: LiveA2ATaskAdapter::new(config),
                 dispatch_count: Mutex::new(0),
             });

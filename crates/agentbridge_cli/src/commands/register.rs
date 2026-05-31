@@ -9,7 +9,12 @@ use a2a_server::{
     ServiceParams as A2AServiceParams,
 };
 use agentbridge::{
-    adapters::{claude_code::ClaudeCodeAdapter, generic_stdio::GenericStdioAdapter},
+    adapters::{
+        claude_code::ClaudeCodeAdapter,
+        codex::CodexAdapter,
+        copilot::CopilotAdapter,
+        generic_stdio::GenericStdioAdapter,
+    },
     dir_registry::{AdapterOasfRecord, DirError},
     CliAdapter,
 };
@@ -68,10 +73,37 @@ pub fn run(
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
         }
+        "copilot" => {
+            let work_dir = command
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let adapter = Arc::new(CopilotAdapter::new("copilot", work_dir));
+            println!("Registered Copilot adapter (agent id: {})", adapter.agent_id().0);
+            if let Some(endpoint) = slim_endpoint {
+                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/copilot-a2a ...");
+                run_slim_listener("copilot", adapter, endpoint, slim_shared_secret)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            } else {
+                println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
+            }
+        }
+        "codex" => {
+            let work_dir = command
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let adapter = Arc::new(CodexAdapter::new("codex", work_dir));
+            println!("Registered Codex adapter (agent id: {})", adapter.agent_id().0);
+            if let Some(endpoint) = slim_endpoint {
+                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/codex-a2a ...");
+                run_slim_listener("codex", adapter, endpoint, slim_shared_secret)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            } else {
+                println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
+            }
+        }
         other => {
             anyhow::bail!(
-                "Unknown tool type '{}'. Supported: generic-stdio, claude-code. \
-                 Coming soon: copilot, codex.",
+                "Unknown tool type '{}'. Supported: generic-stdio, claude-code, copilot, codex.",
                 other
             );
         }
@@ -85,22 +117,55 @@ struct AgentBridgeExecutor {
     adapter: Arc<dyn CliAdapter>,
 }
 
+fn preview(s: &str, max: usize) -> String {
+    let first_line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or(s);
+    if first_line.len() > max {
+        format!("{}…", &first_line[..max])
+    } else {
+        first_line.to_string()
+    }
+}
+
 #[async_trait]
 impl AgentExecutor for AgentBridgeExecutor {
     fn execute(
         &self,
         ctx: a2a_server::ExecutorContext,
     ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-        let prompt = ctx
+        let raw = ctx
             .message
             .as_ref()
             .map(extract_text)
             .unwrap_or_else(|| "(no prompt)".to_string());
 
+        // Extract the body from the task envelope rendered by render_task_message().
+        let prompt = raw
+            .split_once("\nbody:\n")
+            .map(|(_, body)| body)
+            .unwrap_or(&raw)
+            .to_string();
+
+        let agent_id = self.adapter.agent_id().0.clone();
+        println!(
+            "\n┌─ A2A recv [{agent_id}] task {}",
+            ctx.task_id
+        );
+        println!("│  {}", preview(&prompt, 120));
+        println!("└─────────────────────────────────────────────────────────");
+
+        let started = std::time::Instant::now();
         let response_text = match self.adapter.execute_prompt(&prompt) {
             Ok(text) => text,
             Err(e) => format!("agentbridge error: {e}"),
         };
+        let elapsed_ms = started.elapsed().as_millis();
+
+        println!(
+            "\n┌─ A2A send [{agent_id}] ({} ms)",
+            elapsed_ms
+        );
+        println!("│  {}", preview(&response_text, 120));
+        println!("└─────────────────────────────────────────────────────────\n");
 
         let response = Message {
             message_id: new_message_id(),

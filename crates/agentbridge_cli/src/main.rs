@@ -17,7 +17,7 @@ struct Cli {
 enum Cmd {
     /// Register and start a CLI tool adapter.
     Register {
-        /// Tool type: generic-stdio | claude-code | copilot | codex
+        /// Tool type: generic-stdio | claude-code | copilot | codex | cursor-agent
         #[arg(long)]
         tool: String,
 
