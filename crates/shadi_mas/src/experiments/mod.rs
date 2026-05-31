@@ -575,9 +575,12 @@ impl ToolAdapter for CommandToolAdapter {
                 .stdin
                 .as_mut()
                 .ok_or_else(|| format!("failed to open stdin for {}", self.program))?;
-            stdin
-                .write_all(prompt.as_bytes())
-                .map_err(|err| format!("failed to write prompt to {}: {}", self.program, err))?;
+            if let Err(err) = stdin.write_all(prompt.as_bytes()) {
+                if err.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(format!("failed to write prompt to {}: {}", self.program, err));
+                }
+                // BrokenPipe: process exited before reading stdin; stdout output is still valid.
+            }
         }
 
         let output = child
