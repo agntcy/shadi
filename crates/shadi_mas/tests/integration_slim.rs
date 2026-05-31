@@ -10,7 +10,7 @@
 //! Run with a single thread to avoid port conflicts:
 //!   cargo test -p agntcy-shadi-mas --test integration_slim -- --test-threads=1
 
-use shadi_mas::{MessagingAdapter, TaskAdapter, TaskEnvelope};
+use shadi_mas::{TaskAdapter, TaskEnvelope};
 use shadi_mas::experiments::{
     LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig, LiveSlimGroupConfig, LiveSlimMessagingAdapter,
 };
@@ -199,7 +199,11 @@ fn live_slim_group_rejects_mismatched_receipt_files() {
 /// is not listening — the key coverage goal is that the constructor code path
 /// is exercised end-to-end (rather than asserting success, which would require
 /// a peer subprocess).
+///
+/// Requires `slimctl` in PATH and certs under `.tmp/shadi-slim-mtls/`.
+/// Run with: `cargo test -p agntcy-shadi-mas --test integration_slim -- --include-ignored`
 #[test]
+#[ignore]
 fn live_slim_point_to_point_constructor_path_with_node() {
     let node = SlimNode::start();
     set_slim_client_env(&node.endpoint);
@@ -229,7 +233,11 @@ fn live_slim_point_to_point_constructor_path_with_node() {
 
 /// `LiveA2ATaskAdapter::dispatch()` returns an error (not a panic) when the
 /// configured peer is not present on the SLIM node.
+///
+/// Requires `slimctl` in PATH and certs under `.tmp/shadi-slim-mtls/`.
+/// Run with: `cargo test -p agntcy-shadi-mas --test integration_slim -- --include-ignored`
 #[test]
+#[ignore]
 fn live_a2a_adapter_dispatch_returns_error_without_peer() {
     let node = SlimNode::start();
     set_slim_client_env(&node.endpoint);
