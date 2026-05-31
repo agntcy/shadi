@@ -512,9 +512,9 @@ Three adapter traits connect the runtime to real infrastructure:
 
 ---
 
-## Codebridge — CLI coding-agent interconnect
+## agentbridge — CLI coding-agent interconnect
 
-Codebridge is an application layer on top of `shadi_mas` that wraps CLI coding
+agentbridge is an application layer on top of `shadi_mas` that wraps CLI coding
 tools as A2A agents and orchestrates them via SLIM + DIR.
 
 ### Architecture
@@ -525,6 +525,7 @@ flowchart LR
     C[Claude Code]
     P[Copilot CLI]
     D[Codex CLI]
+    CA[Cursor Agent]
   end
 
   subgraph Bridge[agentbridge]
@@ -556,5 +557,5 @@ flowchart LR
 2. **Task delegation** — `LiveA2ATaskAdapter::dispatch()` sends a task and returns an artifact.
 3. **Autonomous coordination** — `MasRuntime<DevelopmentEngine>` runs rounds until `EventOutcome::Finalized`.
 
-For full details see [Codebridge](agentbridge.md).
+For full details see [agentbridge](agentbridge.md).
 
