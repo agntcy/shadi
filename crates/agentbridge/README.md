@@ -12,8 +12,9 @@ programming goal.
 CLI tools          agentbridge adapters       shadi_mas engine
 ──────────────     ─────────────────────     ─────────────────────────────
 Claude Code    ──► ClaudeCodeAdapter   ──►
-Copilot CLI    ──► CopilotAdapter      ──►   MasRuntime<DevelopmentEngine>
-Codex CLI      ──► CodexAdapter        ──►
+Copilot CLI    ──► CopilotAdapter      ──►
+Codex CLI      ──► CodexAdapter        ──►   MasRuntime<DevelopmentEngine>
+Cursor Agent   ──► CursorAgentAdapter  ──►
 any CLI        ──► GenericStdioAdapter ──►
                         │                         │
                         │  ContextPacket           │  A2A / SLIM / DIR

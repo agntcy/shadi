@@ -116,12 +116,12 @@ The demo uses in-process mock adapters for clarity. The full production stack ad
 ```bash
 # All four agents, staggered vote loop, human approval on result
 agentbridge coordinate \
+  --goal "Write fibonacci(n: u64) -> u64 with memoization and doctest" \
   --agents claude-code,copilot,codex,cursor-agent \
   --quorum 4 \
   --max-rounds 3 \
   --output result.rs \
-  --require-human \
-  "Write fibonacci(n: u64) -> u64 with memoization and doctest"
+  --require-human
 ```
 
 See [docs/agentbridge.md](../../docs/agentbridge.md) for architecture and roadmap.
