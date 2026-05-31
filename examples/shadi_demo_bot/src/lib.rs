@@ -1582,8 +1582,22 @@ fn resolve_tmp_dir(candidate: Option<&Path>, repo_root: &Path) -> Result<PathBuf
 
 fn repo_root() -> Result<PathBuf, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    path.canonicalize()
-        .map_err(|err| format!("failed to resolve repository root: {}", err))
+    let canonical = path
+        .canonicalize()
+        .map_err(|err| format!("failed to resolve repository root: {}", err))?;
+    // On Windows, Path::canonicalize produces a \\?\ extended-length prefix.
+    // AppContainer security evaluation on newer Windows builds does not honour
+    // DACL grants made on the plain path when the child reads via the \\?\
+    // variant, so we strip the prefix here to keep the grant path and the
+    // read path consistent.
+    #[cfg(windows)]
+    {
+        let s = canonical.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix("\\\\?\\") {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+    Ok(canonical)
 }
 
 fn blocked_probe_path(repo_root: &Path) -> PathBuf {
