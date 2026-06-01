@@ -99,6 +99,110 @@ agentbridge coordinate \
 5. When `accepted_votes ≥ quorum` → `EventOutcome::Finalized` → loop exits.
 6. The winning artifact is written to disk. Human approval is optional.
 
+## A2A server — how `register` exposes an adapter over SLIM
+
+When `agentbridge register` is called with `--slim-endpoint`, it starts a
+full A2A server that makes the local adapter reachable to any SLIM peer.
+
+### SLIM address
+
+Each adapter registers under the hierarchical name:
+
+```
+agntcy/shadi/<tool>-a2a
+```
+
+For example, `--tool copilot` listens as `agntcy/shadi/copilot-a2a`. The
+`coordinate` command reaches it with `--agents slim:copilot`.
+
+### Request handler stack
+
+```
+SlimRpcHandler (shadi_a2a)          ← decodes SLIMRPC frames
+  └─ AgentBridgeRequestHandler      ← full A2A protocol surface
+       ├─ DefaultRequestHandler      ← routes send/get/list/cancel/subscribe/push
+       │    └─ AgentBridgeExecutor   ← executes the task against the CliAdapter
+       └─ InMemoryTaskStore          ← stores task state for get/list operations
+```
+
+`AgentBridgeRequestHandler` implements all A2A request methods and delegates
+to `DefaultRequestHandler` for everything except `get_extended_agent_card`,
+which returns a static `AgentCard` describing the adapter:
+
+| Field | Value |
+|-------|-------|
+| `capabilities.streaming` | `true` |
+| `capabilities.push_notifications` | `false` |
+| `default_input_modes` | `["text/plain"]` |
+| `default_output_modes` | `["text/plain"]` |
+
+### Task execution flow
+
+```
+remote caller                 agentbridge register
+─────────────                 ─────────────────────
+SendMessage(task) ──────────► AgentBridgeExecutor::execute()
+                                  │
+                                  │ strip task-envelope header ("body:\n…")
+                                  │ adapter.execute_prompt(prompt)
+                                  │
+                 ◄── StatusUpdate(Working)
+                 ◄── Task { state: Completed, message: response_text }
+```
+
+The executor streams two events: a `Working` status update followed by a
+`Completed` task carrying the adapter's response text as a `text/plain` part.
+Task history (the original prompt message) is included in the completed task.
+
+### TLS certificate resolution
+
+The listener needs a client-side mTLS certificate to authenticate with the
+SLIM node. Resolution order:
+
+1. **Explicit env vars** — `SLIM_TLS_CERT` + `SLIM_TLS_KEY` + `SLIM_TLS_CA`
+2. **Agent-specific fallback** — `.tmp/shadi-slim-mtls/client-<agent_id>.crt` / `.key`
+3. **Generic fallback** — `.tmp/shadi-slim-mtls/client.crt` / `.key`
+
+`SLIM_TLS_CA` defaults to `.tmp/shadi-slim-mtls/ca.crt`. Generate the
+certificate bundle once with `tools/generate_slim_mtls_certs.sh`.
+
+### Lifecycle
+
+```
+register --slim-endpoint 127.0.0.1:47357
+  │
+  ├─ Service::connect()      connect to SLIM node (TLS 1.3)
+  ├─ create_app_with_secret() authenticate with shared secret
+  ├─ app.subscribe()         subscribe to agntcy/shadi/<tool>-a2a
+  ├─ Server::serve_async()   start the A2A/SLIMRPC event loop
+  │
+  │  [agentbridge] ready — listening on agntcy/shadi/<tool>-a2a
+  │
+  ├─ … handles tasks until Ctrl-C …
+  │
+  └─ app.unsubscribe()       deregister from the SLIM topic
+     service.disconnect()    close the SLIM connection
+     service.shutdown()      clean up
+```
+
+### Wiring to `coordinate`
+
+The `coordinate` command uses `slim:<agent-id>` specs to reach registered
+adapters. It constructs a `LiveA2ATaskAdapter` per spec, which speaks the
+same SLIMRPC protocol to the listening server:
+
+```
+coordinate --agents slim:copilot,slim:codex
+  │
+  ├─ LiveA2ATaskAdapter { peer: agntcy/shadi/copilot-a2a }
+  └─ LiveA2ATaskAdapter { peer: agntcy/shadi/codex-a2a }
+        │
+        └─ SlimToolAdapter::call() → dispatch() → receives Task(Completed)
+```
+
+The A2A traffic is printed with `┌─ A2A ─→` / `┌─ A2A ←─` banners showing
+the agent ID, coordination phase, epoch, and elapsed milliseconds.
+
 ## `DevelopmentEngine` — the coordination core
 
 `DevelopmentEngine` is a `CoordinationEngine` that coordinates code artifacts
