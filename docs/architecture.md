@@ -520,42 +520,50 @@ tools as A2A agents and orchestrates them via SLIM + DIR.
 ### Architecture
 
 ```mermaid
-flowchart LR
-  subgraph Tools
-    C[Claude Code]
-    P[Copilot CLI]
-    D[Codex CLI]
-    CA[Cursor Agent]
+flowchart TB
+  subgraph devenv["Developer environment"]
+    tools["Claude Code  ·  Copilot CLI  ·  Codex CLI  ·  Cursor Agent"]
   end
 
-  subgraph Bridge[agentbridge]
-    A[CliAdapter\ntrait]
-    CP[ContextPacket]
-    CTA[CliToolAdapter\n→ ToolAdapter]
+  subgraph agb["agentbridge  —  adapter + CLI layer"]
+    direction LR
+    adp["CliAdapter\nexecute_prompt · snapshot_context · inject_context"]
+    pkt["ContextPacket\n(portable session snapshot)"]
+    brd["CliToolAdapter  →  ToolAdapter"]
   end
 
-  subgraph Coordination[shadi_mas]
-    DE[DevelopmentEngine]
-    RT[MasRuntime]
+  subgraph mas["shadi_mas  —  coordination runtime"]
+    rt["MasRuntime&lt;DevelopmentEngine&gt;\nproposal  ·  vote  ·  quorum  ·  finalize"]
   end
 
-  subgraph Infra[SHADI infra]
-    A2A[shadi_a2a\nA2A / SLIMRPC]
-    SLIM[agent_transport_slim\nSLIM messaging]
-    DIR[DIR discovery]
-    MEM[shadi_memory\nContextPacket store]
+  subgraph infra["SHADI infrastructure"]
+    direction LR
+    a2a["shadi_a2a\nA2A / SLIMRPC\n(task dispatch)"]
+    slim["agent_transport_slim\nSLIM messaging\n(group broadcast)"]
+    mem["shadi_memory\nSQLCipher\n(ContextPacket store)"]
+    dir["DIR  (OASF)\n(agent discovery)"]
   end
 
-  Tools --> Bridge
-  Bridge --> Coordination
-  Coordination --> Infra
+  tools -- "stdin / stdout" --> adp
+  adp -. "handoff payload" .-> pkt
+  adp -- "coordinate" --> brd --> rt
+  pkt -. "persist / restore" .-> mem
+  rt -- "task dispatch" --> a2a
+  rt -- "broadcast" --> slim
+  adp -- "register agent card" --> dir
 ```
+
+Solid arrows are the primary execution path (`coordinate`). Dashed arrows are
+the context-handoff path (`handoff`).
 
 ### Interaction models
 
-1. **Context handoff** — `ContextPacket` from source → A2A task → destination.
-2. **Task delegation** — `LiveA2ATaskAdapter::dispatch()` sends a task and returns an artifact.
-3. **Autonomous coordination** — `MasRuntime<DevelopmentEngine>` runs rounds until `EventOutcome::Finalized`.
+| Command | What it does | Key components |
+|---------|-------------|----------------|
+| `register` | Wraps a CLI tool as a live A2A service on SLIM | `CliAdapter` → `AgentBridgeRequestHandler` → SLIMRPC |
+| `handoff` | Exports a session snapshot and injects it into another tool | `ContextPacket` → `shadi_memory` → A2A `inject-context` task |
+| `delegate` | Sends a single task to a remote adapter and returns the artifact | `LiveA2ATaskAdapter::dispatch()` over SLIMRPC |
+| `coordinate` | Runs multi-round proposal + vote loop across N agents | `CliToolAdapter` → `MasRuntime<DevelopmentEngine>` → finalization |
 
-For full details see [agentbridge](agentbridge.md).
+For full details and sequence diagrams see [agentbridge](agentbridge.md).
 
