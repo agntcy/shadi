@@ -19,40 +19,96 @@ agentbridge solves this using the existing SHADI infrastructure: A2A for task
 delegation, SLIM for transport, DIR for discovery, and `shadi_mas` for
 autonomous multi-round coordination.
 
-## Stack overview
+## Architecture
+
+### Deployment topology
+
+`register` and `coordinate` run on separate hosts (or separate terminals on the
+same machine). SLIM is the authenticated transport bus between them.
 
 ```mermaid
-flowchart TB
-  subgraph Tools[CLI Coding Tools]
-    Claude[Claude Code]
-    Copilot[GitHub Copilot CLI]
-    Codex[OpenAI Codex CLI]
-    Cursor[Cursor Agent]
-    Custom[any subprocess]
+flowchart LR
+  subgraph reg["agentbridge register  (one per agent)"]
+    direction TB
+    tool["CLI tool\nclaude-code | copilot | codex | cursor-agent"]
+    ca["CliAdapter\nexecute_prompt(prompt) → text"]
+    srv["A2A server\nAgentBridgeRequestHandler\nInMemoryTaskStore"]
+    tool -- "stdin / stdout" --> ca --> srv
   end
 
-  subgraph Bridge[agentbridge adapter layer]
-    Adapter[CliAdapter trait]
-    Packet[ContextPacket]
-    Generic[GenericStdioAdapter]
-    Native[ClaudeCode / Copilot / Codex / CursorAgent adapters]
+  slim{{"SLIM node\nagntcy/shadi/&lt;tool&gt;-a2a\nmTLS · shared secret"}}
+
+  subgraph coord["agentbridge coordinate"]
+    direction TB
+    mas["MasRuntime&lt;DevelopmentEngine&gt;\nproposal → vote → finalize"]
+    sta["SlimToolAdapter\n(one per --agents spec)"]
+    laa["LiveA2ATaskAdapter\nSLIMRPC dispatch"]
+    mas --> sta --> laa
   end
 
-  subgraph Coordination[shadi_mas coordination runtime]
-    Dev[DevelopmentEngine]
-    Pref[PreferenceEngine]
-    Runtime[MasRuntime]
+  srv <-- "A2A tasks  (text/plain)" --> slim
+  slim <-- "A2A tasks  (text/plain)" --> laa
+```
+
+### Coordination loop
+
+Each epoch has two phases: every agent proposes a code artifact, then every
+agent votes on the best one. Finalization fires as soon as endorsements reach
+the quorum — triggered by applying the last proposal of the epoch.
+
+```mermaid
+sequenceDiagram
+  participant MAS as DevelopmentEngine
+  participant CO as coordinator
+  participant A  as copilot (SLIM)
+  participant B  as codex   (SLIM)
+
+  rect rgb(240,248,255)
+    note right of CO: epoch 0 — proposal phase
+    CO->>A: proposal prompt  (goal, epoch 0)
+    A-->>CO: code artifact
+    CO->>B: proposal prompt  (goal, epoch 0)
+    B-->>CO: code artifact
+    CO->>MAS: apply ExternalBytes(copilot_code)
+    CO->>MAS: apply ExternalBytes(codex_code)
   end
 
-  subgraph Transport[SHADI transport]
-    A2A[A2A / SLIMRPC]
-    SLIM[SLIM messaging]
-    DIR[DIR discovery]
+  rect rgb(240,255,240)
+    note right of CO: epoch 0 — vote phase
+    CO->>A: vote prompt  (goal + both proposals)
+    A-->>CO: endorses copilot
+    CO->>B: vote prompt  (goal + both proposals)
+    B-->>CO: endorses copilot
+    CO->>MAS: apply ToolResult{copilot, accepted:true}
+    CO->>MAS: apply ExternalBytes(codex_vote_artifact)
+    note over MAS: quorum met on last apply
+    MAS-->>CO: Finalized — winner: copilot  (2/2 votes)
   end
 
-  Tools --> Bridge
-  Bridge --> Coordination
-  Coordination --> Transport
+  CO->>CO: write artifact → output.rs
+```
+
+### A2A task flow inside a registered adapter
+
+```mermaid
+sequenceDiagram
+  participant CO as coordinator
+  participant SL as SLIM node
+  participant SV as AgentBridgeRequestHandler
+  participant EX as AgentBridgeExecutor
+  participant AD as CliAdapter
+
+  CO->>SL: SendMessage(task envelope)
+  SL->>SV: SLIMRPC frame
+  SV->>EX: execute(context)
+  EX->>EX: strip "body:\n" envelope header
+  EX->>AD: execute_prompt(prompt)
+  AD->>AD: invoke CLI tool  (subprocess / API)
+  AD-->>EX: response text
+  EX-->>SV: StatusUpdate(Working)
+  EX-->>SV: Task{Completed, message: response_text}
+  SV-->>SL: stream response
+  SL-->>CO: Task{Completed}
 ```
 
 ## Three interaction models
@@ -138,19 +194,8 @@ which returns a static `AgentCard` describing the adapter:
 
 ### Task execution flow
 
-```
-remote caller                 agentbridge register
-─────────────                 ─────────────────────
-SendMessage(task) ──────────► AgentBridgeExecutor::execute()
-                                  │
-                                  │ strip task-envelope header ("body:\n…")
-                                  │ adapter.execute_prompt(prompt)
-                                  │
-                 ◄── StatusUpdate(Working)
-                 ◄── Task { state: Completed, message: response_text }
-```
-
-The executor streams two events: a `Working` status update followed by a
+See the [A2A task flow sequence diagram](#a2a-task-flow-inside-a-registered-adapter)
+above. The executor streams two events: a `Working` status update followed by a
 `Completed` task carrying the adapter's response text as a `text/plain` part.
 Task history (the original prompt message) is included in the completed task.
 
