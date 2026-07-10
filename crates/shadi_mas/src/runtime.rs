@@ -55,33 +55,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engines::preference::{PreferenceEngine, PreferenceEngineConfig};
+    use crate::engines::development::{DevelopmentEngine, DevelopmentEngineConfig};
     use crate::types::{
-        AgentId, Epoch, EventId, EventMetadata, EventOutcome, EventSource, Proposal, SemanticEvent,
+        AgentId, Epoch, EventId, EventMetadata, EventOutcome, EventSource, SemanticEvent,
         SemanticPayload,
     };
 
-    fn make_runtime() -> MasRuntime<PreferenceEngine> {
-        let config = PreferenceEngineConfig::new(
+    fn make_runtime() -> MasRuntime<DevelopmentEngine> {
+        let config = DevelopmentEngineConfig::new(
             [AgentId::from("a"), AgentId::from("b")],
             2,
+            10,
         );
-        MasRuntime::new(PreferenceEngine::new(Epoch(0), config))
+        MasRuntime::new(DevelopmentEngine::new(Epoch(0), config))
     }
 
     fn proposal(id: &str, participant: &str, value: i64) -> SemanticEvent {
         SemanticEvent {
-            pattern: PatternKind::Preference,
+            pattern: PatternKind::Development,
             metadata: EventMetadata {
                 event_id: EventId::from(id),
                 correlation_id: None,
                 epoch: Epoch(0),
                 source: EventSource::Peer(AgentId::from(participant)),
             },
-            payload: SemanticPayload::Proposal(Proposal {
-                participant: AgentId::from(participant),
-                value,
-            }),
+            payload: SemanticPayload::ExternalBytes(value.to_le_bytes().to_vec()),
         }
     }
 
