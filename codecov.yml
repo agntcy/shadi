@@ -1,0 +1,39 @@
+# Codecov configuration.
+#
+# The project holds a high overall coverage bar (patch target = auto). A number
+# of modules are thin I/O shims whose behaviour can only be exercised against
+# external processes or a live SLIM/A2A data plane that are not available in CI,
+# so they are excluded from coverage rather than padded with mock-only tests.
+# Their pure, in-process logic is still unit-tested where it exists.
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
+ignore:
+  # Runnable demos and sample artifacts (not built under `cargo llvm-cov --tests`).
+  - "examples"
+  # CLI adapters that shell out to external coding-agent binaries not present in CI.
+  - "crates/agentbridge/src/adapters/claude_code.rs"
+  - "crates/agentbridge/src/adapters/codex.rs"
+  - "crates/agentbridge/src/adapters/copilot.rs"
+  - "crates/agentbridge/src/adapters/cursor_agent.rs"
+  # Agent Directory discovery/publish — shells out to the external `dirctl` CLI.
+  - "crates/agentbridge/src/dir_registry.rs"
+  # agentbridge CLI entrypoint and command runners that require a live SLIM node
+  # or spawn external subprocesses (integration-tested manually, not in CI).
+  - "crates/agentbridge_cli/src/main.rs"
+  - "crates/agentbridge_cli/src/commands/register.rs"
+  - "crates/agentbridge_cli/src/commands/coordinate.rs"
+  - "crates/agentbridge_cli/src/commands/delegate.rs"
+  - "crates/agentbridge_cli/src/commands/handoff.rs"
+  - "crates/agentbridge_cli/src/commands/list.rs"
+  # Live A2A/SLIM transport task adapter — the send path needs a running node.
+  - "crates/shadi_mas/src/experiments/mod.rs"

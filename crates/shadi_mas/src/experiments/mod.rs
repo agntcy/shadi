@@ -432,7 +432,7 @@ fn format_slim_error(err: slim_bindings::SlimError) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod transport_tests {
     use super::*;
     use crate::types::{Epoch, PatternKind};
 
