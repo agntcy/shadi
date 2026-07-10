@@ -1,0 +1,171 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mas-jobs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mas-job-listener
+  namespace: mas-jobs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mas-job-listener
+  namespace: mas-jobs
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mas-job-listener
+  namespace: mas-jobs
+subjects:
+  - kind: ServiceAccount
+    name: mas-job-listener
+    namespace: mas-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mas-job-listener
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mas-job-listener
+  namespace: mas-jobs
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mas-job-listener
+  template:
+    metadata:
+      labels:
+        app: mas-job-listener
+    spec:
+      serviceAccountName: mas-job-listener
+      containers:
+        - name: listener
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: SHADI_LISTENER_DEST_NAMESPACE
+              value: mas-jobs
+            - name: SHADI_LISTENER_SLIM_SECRET_NAMESPACE
+              value: mas-jobs
+            - name: SHADI_LISTENER_VLLM_SECRET_NAMESPACE
+              value: mas-jobs
+            - name: SHADI_LISTENER_REQUIRE_AUTH
+              value: "1"
+            - name: SHADI_LISTENER_AUTH_SECRET_NAMESPACE
+              value: mas-jobs
+            - name: SHADI_LISTENER_AUTH_SECRET_NAME
+              value: mas-job-listener-api
+            - name: SHADI_LISTENER_AUTH_SECRET_KEY
+              value: submit-api-key
+            - name: SHADI_LISTENER_SOURCE_MODE
+              value: git
+            - name: SHADI_SKIP_NAMESPACE_CREATE
+              value: "1"
+            - name: SHADI_LISTENER_HTTP_PROXY
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: SHADI_LISTENER_HTTPS_PROXY
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: SHADI_MAS_HTTP_PROXY
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: SHADI_MAS_HTTPS_PROXY
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: SHADI_LISTENER_HOST
+              value: 0.0.0.0
+            - name: SHADI_LISTENER_PORT
+              value: "8088"
+            - name: HTTP_PROXY
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: HTTPS_PROXY
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: http_proxy
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: https_proxy
+              value: http://proxy-wsa.esl.cisco.com:80
+            - name: NO_PROXY
+              value: 127.0.0.1,localhost,.svc,.svc.cluster.local,.cluster.local,kubernetes,kubernetes.default,kubernetes.default.svc,kubernetes.default.svc.cluster.local,10.152.183.1,10.152.0.0/16
+            - name: no_proxy
+              value: 127.0.0.1,localhost,.svc,.svc.cluster.local,.cluster.local,kubernetes,kubernetes.default,kubernetes.default.svc,kubernetes.default.svc.cluster.local,10.152.183.1,10.152.0.0/16
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              python3 - <<'PY'
+              import os
+              import stat
+              import urllib.request
+
+              url = "https://dl.k8s.io/release/v1.30.2/bin/linux/amd64/kubectl"
+              dst = "/usr/local/bin/kubectl"
+
+              req = urllib.request.Request(url)
+              with urllib.request.urlopen(req, timeout=60) as r, open(dst, "wb") as f:
+                  f.write(r.read())
+
+              os.chmod(dst, os.stat(dst).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+              PY
+              chmod +x /usr/local/bin/kubectl
+              python3 /app/scripts/mas_job_listener.py --host 0.0.0.0 --port 8088
+          ports:
+            - containerPort: 8088
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - name: listener-scripts
+              mountPath: /app/scripts
+              readOnly: true
+      volumes:
+        - name: listener-scripts
+          configMap:
+            name: mas-job-listener-scripts
+            defaultMode: 0444
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mas-job-listener
+  namespace: mas-jobs
+spec:
+  selector:
+    app: mas-job-listener
+  ports:
+    - name: http
+      port: 8088
+      targetPort: http

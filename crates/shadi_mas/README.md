@@ -110,7 +110,7 @@ cargo run --example cascade_experiment -p agntcy-shadi-mas
 # Resource extraction governance
 cargo run --example resource_experiment -p agntcy-shadi-mas
 
-# Live protocol spotcheck (needs slimctl + Ollama)
+# Live protocol spotcheck (needs slimctl + an LLM backend; vLLM by default)
 cargo run --example mas_live_protocol_spotcheck -p agntcy-shadi-mas
 ```
 

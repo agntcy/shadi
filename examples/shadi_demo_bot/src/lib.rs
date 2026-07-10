@@ -5,7 +5,7 @@ use std::io::Read;
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -54,6 +54,7 @@ enum Commands {
     FeatureBot(FeatureBotArgs),
     ShellTicker(ShellTickerArgs),
     SandboxProbe(SandboxProbeArgs),
+    SlimNode(SlimNodeArgs),
     SlimEchoPeer(SlimEchoPeerArgs),
     A2AEchoPeer(A2AEchoPeerArgs),
     A2ASend(A2ASendArgs),
@@ -140,6 +141,21 @@ struct SandboxProbeArgs {
 }
 
 #[derive(Args)]
+struct SlimNodeArgs {
+    #[arg(long, env = "SHADI_TMP_DIR")]
+    shadi_tmp_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    endpoint: String,
+
+    #[arg(long, default_value_t = 21600)]
+    runtime_seconds: u64,
+
+    #[arg(long)]
+    ready_file: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct SlimEchoPeerArgs {
     #[arg(long, env = "SHADI_TMP_DIR")]
     shadi_tmp_dir: Option<PathBuf>,
@@ -155,6 +171,9 @@ struct SlimEchoPeerArgs {
 
     #[arg(long, default_value_t = 20)]
     listen_timeout_seconds: u64,
+
+    #[arg(long, default_value_t = 1)]
+    expected_messages: usize,
 
     #[arg(long)]
     ready_file: Option<PathBuf>,
@@ -179,6 +198,9 @@ struct A2AEchoPeerArgs {
 
     #[arg(long, default_value_t = 20)]
     listen_timeout_seconds: u64,
+
+    #[arg(long, default_value_t = 1)]
+    expected_requests: usize,
 
     #[arg(long)]
     ready_file: Option<PathBuf>,
@@ -339,10 +361,16 @@ struct DemoA2AHandler {
     inner: DefaultRequestHandler,
     card: AgentCard,
     request_seen: Arc<Notify>,
+    request_count: Arc<AtomicUsize>,
 }
 
 impl DemoA2AHandler {
-    fn new(agent_name: String, target: String, request_seen: Arc<Notify>) -> Self {
+    fn new(
+        agent_name: String,
+        target: String,
+        request_seen: Arc<Notify>,
+        request_count: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
                 DemoA2AExecutor {
@@ -352,6 +380,7 @@ impl DemoA2AHandler {
             ),
             card: demo_a2a_agent_card(&agent_name, &target),
             request_seen,
+            request_count,
         }
     }
 }
@@ -365,6 +394,7 @@ impl RequestHandler for DemoA2AHandler {
     ) -> Result<SendMessageResponse, A2AError> {
         let result = self.inner.send_message(params, req).await;
         if result.is_ok() {
+            self.request_count.fetch_add(1, Ordering::SeqCst);
             self.request_seen.notify_waiters();
         }
         result
@@ -377,6 +407,7 @@ impl RequestHandler for DemoA2AHandler {
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         let result = self.inner.send_streaming_message(params, req).await;
         if result.is_ok() {
+            self.request_count.fetch_add(1, Ordering::SeqCst);
             self.request_seen.notify_waiters();
         }
         result
@@ -590,6 +621,7 @@ pub fn main_entry() -> ExitCode {
         Some(Commands::FeatureBot(args)) => run_feature_bot(args),
         Some(Commands::ShellTicker(args)) => run_shell_ticker(args),
         Some(Commands::SandboxProbe(args)) => run_sandbox_probe(args),
+        Some(Commands::SlimNode(args)) => run_slim_node(args),
         Some(Commands::SlimEchoPeer(args)) => run_slim_echo_peer(args),
         Some(Commands::A2AEchoPeer(args)) => run_a2a_echo_peer(args),
         Some(Commands::A2ASend(args)) => run_a2a_send(args),
@@ -1326,7 +1358,35 @@ fn run_sandbox_probe(args: SandboxProbeArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn run_slim_node(args: SlimNodeArgs) -> Result<(), String> {
+    let repo_root = repo_root()?;
+    let tmp_dir = resolve_tmp_dir(args.shadi_tmp_dir.as_deref(), &repo_root)?;
+    let tls_dir = ensure_slim_tls_assets(&tmp_dir)?;
+    let server_tls = server_tls_material(&tls_dir);
+
+    let service = Service::new(format!("shadi-demo-node-{}", std::process::id()));
+    service
+        .run_server(build_server_config(&args.endpoint, &server_tls))
+        .map_err(format_slim_error)?;
+
+    if let Some(ready_file) = &args.ready_file {
+        fs::write(ready_file, b"ready")
+            .map_err(|err| format!("failed to write {}: {}", ready_file.display(), err))?;
+    }
+
+    println!("[slim-node] ready on {}", args.endpoint);
+    thread::sleep(Duration::from_secs(args.runtime_seconds));
+
+    let _ = service.stop_server(args.endpoint.clone());
+    let _ = service.shutdown();
+    Ok(())
+}
+
 fn run_slim_echo_peer(args: SlimEchoPeerArgs) -> Result<(), String> {
+    if args.expected_messages == 0 {
+        return Err("expected_messages must be at least 1".to_string());
+    }
+
     let repo_root = repo_root()?;
     let tmp_dir = resolve_tmp_dir(args.shadi_tmp_dir.as_deref(), &repo_root)?;
     let tls_dir = ensure_slim_tls_assets(&tmp_dir)?;
@@ -1363,18 +1423,35 @@ fn run_slim_echo_peer(args: SlimEchoPeerArgs) -> Result<(), String> {
     }
 
     println!("[slim-peer] ready as {} on {}", peer_name, args.endpoint);
-    let session = app
-        .listen_for_session(Some(Duration::from_secs(args.listen_timeout_seconds)))
-        .map_err(format_slim_error)?;
-    let message = session
-        .get_message(Some(Duration::from_secs(args.listen_timeout_seconds)))
-        .map_err(format_slim_error)?;
-    let payload_text = String::from_utf8_lossy(&message.payload).to_string();
-    let reply = format!("echo:{}:{}", peer_name, payload_text).into_bytes();
-    session
-        .publish_and_wait(reply, Some("text/plain".to_string()), Some(HashMap::new()))
-        .map_err(format_slim_error)?;
-    let _ = app.delete_session_and_wait(session);
+    let idle_grace_seconds = std::env::var("SHADI_LIVE_PEER_IDLE_GRACE_SECONDS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(5);
+    let mut observed_messages = 0usize;
+    loop {
+        let listen_timeout = if observed_messages < args.expected_messages {
+            Duration::from_secs(args.listen_timeout_seconds)
+        } else {
+            Duration::from_secs(idle_grace_seconds)
+        };
+
+        let session = match app.listen_for_session(Some(listen_timeout)) {
+            Ok(session) => session,
+            Err(_err) if observed_messages >= args.expected_messages => break,
+            Err(err) => return Err(format_slim_error(err)),
+        };
+        let message = session
+            .get_message(Some(Duration::from_secs(args.listen_timeout_seconds)))
+            .map_err(format_slim_error)?;
+        let payload_text = String::from_utf8_lossy(&message.payload).to_string();
+        let reply = format!("echo:{}:{}", peer_name, payload_text).into_bytes();
+        session
+            .publish_and_wait(reply, Some("text/plain".to_string()), Some(HashMap::new()))
+            .map_err(format_slim_error)?;
+        let _ = app.delete_session_and_wait(session);
+        observed_messages = observed_messages.saturating_add(1);
+    }
     let _ = app.unsubscribe(peer_name_ref, Some(connection_id));
     let _ = service.disconnect(connection_id);
     let _ = service.shutdown();
@@ -1388,6 +1465,10 @@ fn run_slim_echo_peer(args: SlimEchoPeerArgs) -> Result<(), String> {
 }
 
 fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
+    if args.expected_requests == 0 {
+        return Err("expected_requests must be at least 1".to_string());
+    }
+
     let repo_root = repo_root()?;
     let tmp_dir = resolve_tmp_dir(args.shadi_tmp_dir.as_deref(), &repo_root)?;
     let tls_dir = ensure_slim_tls_assets(&tmp_dir)?;
@@ -1420,16 +1501,24 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
 
     let server = Arc::new(Server::new(&app, app.name().clone()));
     let request_seen = Arc::new(Notify::new());
+    let request_count = Arc::new(AtomicUsize::new(0));
     let handler = Arc::new(DemoA2AHandler::new(
         peer_name.clone(),
         format!("slimrpc://{}", peer_name),
         request_seen.clone(),
+        request_count.clone(),
     ));
     SlimRpcHandler::new(handler).register(&server);
 
     let ready_file = args.ready_file.clone();
     let endpoint = args.endpoint.clone();
     let wait_seconds = args.listen_timeout_seconds;
+    let idle_grace_seconds = std::env::var("SHADI_LIVE_PEER_IDLE_GRACE_SECONDS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(5);
+    let expected_requests = args.expected_requests;
     let peer_label = peer_name.clone();
     let runtime = TokioRuntimeBuilder::new_current_thread()
         .enable_all()
@@ -1455,14 +1544,34 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
 
         println!("[a2a-peer] ready as {} on {}", peer_label, endpoint);
 
-        let request_result = tokio::time::timeout(
-            Duration::from_secs(wait_seconds),
-            request_seen.notified(),
-        )
-        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds);
+        while tokio::time::Instant::now() < deadline {
+            let observed = request_count.load(Ordering::SeqCst);
+            if observed >= expected_requests {
+                let idle = tokio::time::timeout(
+                    Duration::from_secs(idle_grace_seconds),
+                    request_seen.notified(),
+                )
+                .await;
+                if idle.is_err() {
+                    break;
+                }
+                continue;
+            }
 
-        if request_result.is_ok() {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            let now = tokio::time::Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
+            let notified = tokio::time::timeout(remaining, request_seen.notified()).await;
+            if notified.is_err() {
+                break;
+            }
+        }
+
+        let observed = request_count.load(Ordering::SeqCst);
+
+        if observed >= expected_requests {
+            // Allow in-flight response streams to flush before stopping the server.
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
 
         server.shutdown_async().await;
@@ -1471,12 +1580,12 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
             .map_err(|err| format!("failed to join A2A SLIMRPC server task: {}", err))?;
         server_status?;
 
-        request_result.map_err(|_| {
-            format!(
-                "timed out waiting for A2A request after {}s",
-                wait_seconds
-            )
-        })?;
+        if observed == 0 {
+            return Err(format!(
+                "timed out waiting for A2A requests after {}s (observed {}, expected {})",
+                wait_seconds, observed, expected_requests
+            ));
+        }
 
         Ok::<(), String>(())
     });
@@ -2020,6 +2129,10 @@ fn client_tls_material(base_dir: &Path, agent_id: &str) -> Result<TlsMaterial, S
     let cert = base_dir.join(format!("client-{}.crt", agent_id));
     let key = base_dir.join(format!("client-{}.key", agent_id));
     if !cert.is_file() || !key.is_file() {
+        generate_client_tls_material(base_dir, agent_id)?;
+    }
+
+    if !cert.is_file() || !key.is_file() {
         return Err(format!(
             "missing client TLS material for {} under {}",
             agent_id,
@@ -2032,6 +2145,97 @@ fn client_tls_material(base_dir: &Path, agent_id: &str) -> Result<TlsMaterial, S
         key,
         ca: base_dir.join("ca.crt"),
     })
+}
+
+fn generate_client_tls_material(base_dir: &Path, agent_id: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = (base_dir, agent_id);
+        return Err("cannot generate dynamic SLIM client TLS material on Windows".to_string());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let cert = base_dir.join(format!("client-{}.crt", agent_id));
+        let key = base_dir.join(format!("client-{}.key", agent_id));
+        let csr = base_dir.join(format!("client-{}.csr", agent_id));
+        let ca_crt = base_dir.join("ca.crt");
+        let ca_key = base_dir.join("ca.key");
+        let client_ext = base_dir.join("client.ext");
+        if !client_ext.is_file() {
+            fs::write(
+                &client_ext,
+                "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth\n",
+            )
+            .map_err(|err| format!("failed to write {}: {}", client_ext.display(), err))?;
+        }
+
+        let req = Command::new("openssl")
+            .args([
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                key.to_str()
+                    .ok_or_else(|| format!("invalid path {}", key.display()))?,
+                "-out",
+                csr.to_str()
+                    .ok_or_else(|| format!("invalid path {}", csr.display()))?,
+                "-subj",
+                &format!("/CN={}", agent_id),
+            ])
+            .output()
+            .map_err(|err| format!("failed to run openssl req: {}", err))?;
+        if !req.status.success() {
+            return Err(format!(
+                "failed to generate client key/csr for {}: {}{}",
+                agent_id,
+                String::from_utf8_lossy(&req.stdout),
+                String::from_utf8_lossy(&req.stderr)
+            ));
+        }
+
+        let sign = Command::new("openssl")
+            .args([
+                "x509",
+                "-req",
+                "-in",
+                csr.to_str()
+                    .ok_or_else(|| format!("invalid path {}", csr.display()))?,
+                "-CA",
+                ca_crt
+                    .to_str()
+                    .ok_or_else(|| format!("invalid path {}", ca_crt.display()))?,
+                "-CAkey",
+                ca_key
+                    .to_str()
+                    .ok_or_else(|| format!("invalid path {}", ca_key.display()))?,
+                "-CAcreateserial",
+                "-out",
+                cert.to_str()
+                    .ok_or_else(|| format!("invalid path {}", cert.display()))?,
+                "-days",
+                "365",
+                "-extfile",
+                client_ext
+                    .to_str()
+                    .ok_or_else(|| format!("invalid path {}", client_ext.display()))?,
+            ])
+            .output()
+            .map_err(|err| format!("failed to run openssl x509: {}", err))?;
+        if !sign.status.success() {
+            return Err(format!(
+                "failed to sign client cert for {}: {}{}",
+                agent_id,
+                String::from_utf8_lossy(&sign.stdout),
+                String::from_utf8_lossy(&sign.stderr)
+            ));
+        }
+
+        let _ = fs::remove_file(csr);
+        Ok(())
+    }
 }
 
 fn server_tls_material(base_dir: &Path) -> TlsMaterial {
