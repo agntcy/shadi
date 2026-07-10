@@ -545,3 +545,52 @@ pub fn publish_to_dir(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_truncates_to_first_nonblank_line() {
+        assert_eq!(preview("\n\nhello world", 5), "hello…");
+        assert_eq!(preview("short", 20), "short");
+    }
+
+    #[test]
+    fn extract_text_joins_parts_or_reports_empty() {
+        let msg = Message::new(
+            Role::User,
+            vec![Part::text("a".to_string()), Part::text("b".to_string())],
+        );
+        assert_eq!(extract_text(&msg), "a b");
+        let empty = Message::new(Role::User, vec![]);
+        assert_eq!(extract_text(&empty), "(no text parts)");
+    }
+
+    #[test]
+    fn parse_name_accepts_qualified_and_rejects_bare() {
+        assert!(parse_name("agntcy/shadi/copilot-a2a").is_ok());
+        assert!(parse_name("bare").is_err());
+    }
+
+    #[test]
+    fn slim_tls_dir_ends_with_mtls_subdir() {
+        assert!(slim_tls_dir().ends_with("shadi-slim-mtls"));
+    }
+
+    #[test]
+    fn build_client_config_prefixes_https_and_sets_tls() {
+        let tls = TlsMaterial {
+            cert: PathBuf::from("/c"),
+            key: PathBuf::from("/k"),
+            ca: PathBuf::from("/a"),
+        };
+        let cfg = build_client_config("node:1", &tls);
+        assert_eq!(cfg.endpoint, "https://node:1");
+        assert_eq!(cfg.tls.tls_version, "tls1.3");
+        assert!(!cfg.tls.insecure);
+        assert!(build_client_config("https://node:1", &tls)
+            .endpoint
+            .starts_with("https://"));
+    }
+}

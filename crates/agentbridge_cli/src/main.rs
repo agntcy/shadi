@@ -194,3 +194,50 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_list_local_subcommand() {
+        let cli = Cli::try_parse_from(["agentbridge", "list", "--local"]).expect("parse");
+        match cli.command {
+            Cmd::List { local, .. } => assert!(local),
+            _ => panic!("expected list subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_coordinate_with_comma_separated_agents() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "coordinate",
+            "--goal",
+            "build a parser",
+            "--agents",
+            "claude-code,copilot",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Coordinate { goal, agents, quorum, .. } => {
+                assert_eq!(goal, "build a parser");
+                assert_eq!(agents, ["claude-code", "copilot"]);
+                assert_eq!(quorum, 2);
+            }
+            _ => panic!("expected coordinate subcommand"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_subcommand() {
+        assert!(Cli::try_parse_from(["agentbridge", "nope"]).is_err());
+    }
+}

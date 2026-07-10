@@ -476,3 +476,117 @@ fn build_agents(specs: &[String], slim_endpoint: &str, slim_shared_secret: &str)
     }
     Ok(agents)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shadi_mas::{SemanticPayload, ToolResult};
+
+    struct MockTool;
+
+    impl ToolAdapter for MockTool {
+        fn provider(&self) -> ToolProvider {
+            ToolProvider::AgentSkills
+        }
+
+        fn call(&self, request: ToolCall) -> Result<ToolResult, String> {
+            Ok(ToolResult {
+                provider: ToolProvider::AgentSkills,
+                tool_name: request.tool_name,
+                payload: b"mock-response".to_vec(),
+                target: request.target,
+                correlation_id: request.correlation_id,
+                epoch: request.epoch,
+            })
+        }
+    }
+
+    #[test]
+    fn proposal_prompt_without_prior_requests_fresh_implementation() {
+        let prompt = proposal_prompt("build a parser", 0, &[]);
+        assert!(prompt.contains("Goal: build a parser"));
+        assert!(prompt.contains("Epoch 0"));
+        assert!(prompt.contains("ONLY source code"));
+    }
+
+    #[test]
+    fn proposal_prompt_with_prior_references_other_agents() {
+        let prior = vec![(AgentId("claude-code".to_string()), "fn main() {}".to_string())];
+        let prompt = proposal_prompt("build a parser", 1, &prior);
+        assert!(prompt.contains("prior proposals"));
+        assert!(prompt.contains("claude-code"));
+    }
+
+    #[test]
+    fn vote_prompt_asks_for_a_single_agent_name() {
+        let prompt = vote_prompt("build a parser", "[claude-code]: fn main()", 2);
+        assert!(prompt.contains("Which agent"));
+        assert!(prompt.contains("ONLY the agent name"));
+    }
+
+    #[test]
+    fn build_proposal_list_previews_first_signature_line() {
+        let proposals = vec![
+            (AgentId("a".to_string()), "\nfn solve() -> u8 { 0 }\nmore".to_string()),
+            (AgentId("b".to_string()), "struct S;".to_string()),
+        ];
+        let list = build_proposal_list(&proposals);
+        assert!(list.contains("[a]: fn solve() -> u8 { 0 }"));
+        assert!(list.contains("[b]: struct S;"));
+    }
+
+    #[test]
+    fn proposal_event_carries_development_pattern_and_bytes() {
+        let event = proposal_event(&AgentId("a".to_string()), 4, b"code");
+        assert_eq!(event.pattern, PatternKind::Development);
+        assert_eq!(event.metadata.event_id.0, "prop-a-e4");
+        assert!(matches!(event.payload, SemanticPayload::ExternalBytes(ref b) if b == b"code"));
+        assert!(matches!(event.metadata.source, EventSource::Peer(ref id) if id.0 == "a"));
+    }
+
+    #[test]
+    fn vote_event_records_endorsement_as_tool_result() {
+        let event = vote_event(&AgentId("voter".to_string()), "winner", 1, true);
+        assert_eq!(event.metadata.event_id.0, "vote-voter-e1");
+        match event.payload {
+            SemanticPayload::ToolResult { tool_name, accepted } => {
+                assert_eq!(tool_name, "winner");
+                assert!(accepted);
+            }
+            _ => panic!("expected tool-result payload"),
+        }
+    }
+
+    #[test]
+    fn truncate_shortens_long_single_lines() {
+        assert_eq!(truncate("hello world", 5), "hello…");
+        assert_eq!(truncate("short", 20), "short");
+    }
+
+    #[test]
+    fn invoke_tool_returns_adapter_payload_as_string() {
+        let tool: Arc<dyn ToolAdapter> = Arc::new(MockTool);
+        let out = invoke_tool(&tool, "do it", "claude-code", "prop", 0).expect("call");
+        assert_eq!(out, "mock-response");
+    }
+
+    #[test]
+    fn build_agents_constructs_native_and_slim_specs() {
+        let specs = vec![
+            "claude-code".to_string(),
+            "copilot".to_string(),
+            "codex".to_string(),
+            "cursor-agent".to_string(),
+            "slim:peer@127.0.0.1:47357".to_string(),
+        ];
+        let agents = build_agents(&specs, "127.0.0.1:47357", "secret").expect("build");
+        let ids: Vec<&str> = agents.iter().map(|a| a.id.0.as_str()).collect();
+        assert_eq!(ids, ["claude-code", "copilot", "codex", "cursor-agent", "peer"]);
+    }
+
+    #[test]
+    fn build_agents_rejects_unknown_specs() {
+        let specs = vec!["totally-unknown".to_string()];
+        assert!(build_agents(&specs, "127.0.0.1:47357", "secret").is_err());
+    }
+}

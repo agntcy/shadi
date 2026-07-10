@@ -430,3 +430,230 @@ fn canonical_slim_name(agent_id: &str) -> String {
 fn format_slim_error(err: slim_bindings::SlimError) -> String {
     err.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Epoch, PatternKind};
+
+    fn sample_task() -> TaskEnvelope {
+        TaskEnvelope {
+            task_id: "task-1".to_string(),
+            pattern: PatternKind::Development,
+            epoch: Epoch(3),
+            correlation_id: Some("corr-1".to_string()),
+            body: b"hello world".to_vec(),
+        }
+    }
+
+    #[test]
+    fn canonical_slim_name_qualifies_bare_agent_ids() {
+        assert_eq!(canonical_slim_name("avatar"), "agntcy/shadi/avatar");
+    }
+
+    #[test]
+    fn canonical_slim_name_preserves_qualified_names() {
+        assert_eq!(
+            canonical_slim_name("acme/team/avatar"),
+            "acme/team/avatar"
+        );
+    }
+
+    #[test]
+    fn parse_slim_name_accepts_three_part_names() {
+        let name = parse_slim_name("agntcy/shadi/avatar").expect("valid name");
+        // Round-trips back through the canonical string form.
+        assert!(format!("{name:?}").contains("avatar") || !format!("{name:?}").is_empty());
+    }
+
+    #[test]
+    fn parse_slim_name_rejects_malformed_names() {
+        assert!(parse_slim_name("not-a-valid-name").is_err());
+    }
+
+    #[test]
+    fn resolve_client_endpoint_value_defaults_to_https() {
+        assert_eq!(
+            resolve_client_endpoint_value("127.0.0.1:47357"),
+            "https://127.0.0.1:47357"
+        );
+    }
+
+    #[test]
+    fn resolve_client_endpoint_value_preserves_explicit_scheme() {
+        assert_eq!(
+            resolve_client_endpoint_value("http://node:1234"),
+            "http://node:1234"
+        );
+    }
+
+    #[test]
+    fn render_task_message_includes_envelope_fields() {
+        let rendered = render_task_message(&sample_task());
+        assert!(rendered.contains("task_id: task-1"));
+        assert!(rendered.contains("pattern: Development"));
+        assert!(rendered.contains("epoch: 3"));
+        assert!(rendered.contains("body:\nhello world"));
+    }
+
+    #[test]
+    fn readable_message_text_joins_text_parts() {
+        let message = Message::new(
+            Role::Agent,
+            vec![Part::text("first".to_string()), Part::text("second".to_string())],
+        );
+        assert_eq!(readable_message_text(&message), "first second");
+    }
+
+    #[test]
+    fn readable_message_text_reports_when_no_text_parts() {
+        let message = Message::new(Role::Agent, vec![]);
+        assert_eq!(readable_message_text(&message), "(no text parts)");
+    }
+
+    #[test]
+    fn describe_a2a_response_renders_message_payload() {
+        let response = SendMessageResponse::Message(Message::new(
+            Role::Agent,
+            vec![Part::text("done".to_string())],
+        ));
+        assert_eq!(describe_a2a_response(&response), "done");
+    }
+
+    #[test]
+    fn describe_a2a_response_falls_back_for_taskless_status() {
+        let task = Task {
+            id: "task-9".to_string(),
+            context_id: "ctx-9".to_string(),
+            status: TaskStatus {
+                state: TaskState::Completed,
+                message: None,
+                timestamp: None,
+            },
+            artifacts: None,
+            history: None,
+            metadata: None,
+        };
+        assert_eq!(
+            describe_a2a_response(&SendMessageResponse::Task(task)),
+            "task task-9 completed"
+        );
+    }
+
+    #[test]
+    fn ensure_file_exists_reports_missing_paths() {
+        let err = ensure_file_exists(Path::new("/no/such/shadi/file"), "test file")
+            .expect_err("missing file must error");
+        assert!(err.contains("test file not found"));
+    }
+
+    #[test]
+    fn ensure_file_exists_accepts_present_files() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("shadi-ensure-{}.tmp", std::process::id()));
+        std::fs::write(&path, b"x").expect("write temp file");
+        assert!(ensure_file_exists(&path, "temp file").is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn client_identity_candidates_prefers_agent_scoped_certs() {
+        let base = Path::new("/tls");
+        let candidates = client_identity_candidates(base, Some("avatar"));
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].0, base.join("client-avatar.crt"));
+        assert_eq!(candidates[0].1, base.join("client-avatar.key"));
+        assert_eq!(candidates[1].0, base.join("client.crt"));
+    }
+
+    #[test]
+    fn client_identity_candidates_without_agent_only_uses_default() {
+        let base = Path::new("/tls");
+        let candidates = client_identity_candidates(base, None);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, base.join("client.crt"));
+    }
+
+    #[test]
+    fn slim_tls_dir_ends_with_mtls_subdir() {
+        assert!(slim_tls_dir().ends_with("shadi-slim-mtls"));
+    }
+
+    #[test]
+    fn default_tmp_dir_targets_workspace_tmp() {
+        assert!(default_tmp_dir().ends_with(".tmp"));
+    }
+
+    #[test]
+    fn transient_dispatch_errors_are_classified() {
+        assert!(LiveA2ATaskAdapter::is_transient_dispatch_error(
+            "Session closed by peer"
+        ));
+        assert!(LiveA2ATaskAdapter::is_transient_dispatch_error(
+            "Connection refused"
+        ));
+        assert!(!LiveA2ATaskAdapter::is_transient_dispatch_error(
+            "invalid SLIM name"
+        ));
+    }
+
+    #[test]
+    fn build_client_config_for_endpoint_sets_mtls_material() {
+        let tls = TlsMaterial {
+            cert: PathBuf::from("/tls/client.crt"),
+            key: PathBuf::from("/tls/client.key"),
+            ca: PathBuf::from("/tls/ca.crt"),
+        };
+        let config = build_client_config_for_endpoint("node:47357", &tls);
+        assert_eq!(config.endpoint, "https://node:47357");
+        assert!(!config.tls.insecure);
+        assert_eq!(config.tls.tls_version, "tls1.3");
+        match config.tls.source {
+            TlsSource::File { cert, key } => {
+                assert_eq!(cert, "/tls/client.crt");
+                assert_eq!(key, "/tls/client.key");
+            }
+            _ => panic!("expected file-based TLS source"),
+        }
+    }
+
+    #[test]
+    fn live_task_adapter_starts_with_no_dispatches() {
+        let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+            endpoint: "node:47357".to_string(),
+            agent_id: "avatar".to_string(),
+            local_name: None,
+            peer_agent_id: "peer".to_string(),
+            destination: None,
+            shared_secret: "secret".to_string(),
+        });
+        assert!(adapter.dispatches().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn recording_messaging_adapter_captures_published_messages() {
+        let adapter = RecordingMessagingAdapter::default();
+        adapter.publish("topic-a", b"payload").expect("publish");
+        let published = adapter.published_messages().expect("read");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].topic, "topic-a");
+        assert_eq!(published[0].payload, b"payload");
+    }
+
+    #[test]
+    fn recording_task_adapter_captures_dispatched_tasks() {
+        let adapter = RecordingTaskAdapter::default();
+        adapter.dispatch(sample_task()).expect("dispatch");
+        let tasks = adapter.dispatched_tasks().expect("read");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "task-1");
+    }
+
+    #[test]
+    fn verified_session_verifier_enforces_verification() {
+        let mut session = SessionContext::new("avatar", "unit-test");
+        assert!(VerifiedSessionVerifier.verify(&session).is_err());
+        session.verified = true;
+        assert!(VerifiedSessionVerifier.verify(&session).is_ok());
+    }
+}

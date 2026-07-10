@@ -38,3 +38,15 @@ pub fn run(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_discovery_is_a_no_op_stub() {
+        // The `--local` path prints guidance and returns Ok without touching
+        // the network or requiring dirctl.
+        assert!(run(true, "unused-addr:443", None).is_ok());
+    }
+}
