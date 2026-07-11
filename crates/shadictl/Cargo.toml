@@ -53,7 +53,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(not(windows))'.dependencies]
-sequoia-openpgp = { version = "2.2" }
+sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
 
 [dev-dependencies]
 tempfile = "3.27"

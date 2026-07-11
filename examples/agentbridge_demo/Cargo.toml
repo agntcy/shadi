@@ -1,0 +1,15 @@
+[package]
+name = "agentbridge_demo"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "agentbridge_demo"
+path = "src/main.rs"
+
+[dependencies]
+agentbridge = { package = "agntcy-agentbridge", version = "0.1.0", path = "../../crates/agentbridge" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.1", path = "../../crates/shadi_mas" }

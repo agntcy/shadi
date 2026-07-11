@@ -472,3 +472,98 @@ Agent workloads sit on top of the same runtime contract:
 }
 ```
 
+---
+
+## Multi-agent coordination layer (`shadi_mas`)
+
+`shadi_mas` is the coordination runtime that sits above the transport layer. It
+provides epoch-disciplined state machines that can drive any multi-agent pattern
+to a deterministic finalization outcome.
+
+### `CoordinationEngine` abstraction
+
+```
+SemanticEvent  ──►  CoordinationEngine  ──►  EventOutcome
+(proposal,          (PreferenceEngine,        (Applied,
+ vote, tool          DevelopmentEngine,         Finalized,
+ result, …)          …)                         Rejected,
+                                               Deferred)
+```
+
+Engines are wrapped in `MasRuntime<E>` which tracks the full history of applied
+transitions and exposes `engine()` / `engine_mut()` for inspection.
+
+### Engines
+
+| Engine | Pattern | Finalization criterion |
+|--------|---------|----------------------|
+| `PreferenceEngine` | Consensus on a scalar value | Median of proposals when quorum is met |
+| `DevelopmentEngine` | Consensus on a code artifact | Most-endorsed artifact when quorum is met |
+
+### Adapter traits
+
+Three adapter traits connect the runtime to real infrastructure:
+
+| Trait | Implementation | Purpose |
+|-------|---------------|---------|
+| `MessagingAdapter` | `RecordingMessagingAdapter` / `LiveSlimMessagingAdapter` | Publish events to SLIM |
+| `TaskAdapter` | `RecordingTaskAdapter` / `LiveA2ATaskAdapter` | Dispatch A2A tasks |
+| `ToolAdapter` | `RecordingToolAdapter` / `CommandToolAdapter` / `CliToolAdapter` | Invoke LLMs / CLI tools |
+
+---
+
+## agentbridge — CLI coding-agent interconnect
+
+agentbridge is an application layer on top of `shadi_mas` that wraps CLI coding
+tools as A2A agents and orchestrates them via SLIM + DIR.
+
+### Architecture
+
+```mermaid
+flowchart TB
+  subgraph devenv["Developer environment"]
+    tools["Claude Code  ·  Copilot CLI  ·  Codex CLI  ·  Cursor Agent"]
+  end
+
+  subgraph agb["agentbridge  —  adapter + CLI layer"]
+    direction LR
+    adp["CliAdapter\nexecute_prompt · snapshot_context · inject_context"]
+    pkt["ContextPacket\n(portable session snapshot)"]
+    brd["CliToolAdapter  →  ToolAdapter"]
+  end
+
+  subgraph mas["shadi_mas  —  coordination runtime"]
+    rt["MasRuntime&lt;DevelopmentEngine&gt;\nproposal  ·  vote  ·  quorum  ·  finalize"]
+  end
+
+  subgraph infra["SHADI infrastructure"]
+    direction LR
+    a2a["shadi_a2a\nA2A / SLIMRPC\n(task dispatch)"]
+    slim["agent_transport_slim\nSLIM messaging\n(group broadcast)"]
+    mem["shadi_memory\nSQLCipher\n(ContextPacket store)"]
+    dir["DIR  (OASF)\n(agent discovery)"]
+  end
+
+  tools -- "stdin / stdout" --> adp
+  adp -. "handoff payload" .-> pkt
+  adp -- "coordinate" --> brd --> rt
+  pkt -. "persist / restore" .-> mem
+  rt -- "task dispatch" --> a2a
+  rt -- "broadcast" --> slim
+  adp -- "register agent card" --> dir
+```
+
+Solid arrows are the primary execution path (`coordinate`). Dashed arrows are
+the context-handoff path (`handoff`).
+
+### Interaction models
+
+| Command | What it does | Key components |
+|---------|-------------|----------------|
+| `register` | Wraps a CLI tool as a live A2A service on SLIM | `CliAdapter` → `AgentBridgeRequestHandler` → SLIMRPC |
+| `handoff` | Exports a session snapshot and injects it into another tool | `ContextPacket` → `shadi_memory` → A2A `inject-context` task |
+| `delegate` | Sends a single task to a remote adapter and returns the artifact | `LiveA2ATaskAdapter::dispatch()` over SLIMRPC |
+| `coordinate` | Runs multi-round proposal + vote loop across N agents | `CliToolAdapter` → `MasRuntime<DevelopmentEngine>` → finalization |
+
+For full details and sequence diagrams see [agentbridge](agentbridge.md).
+

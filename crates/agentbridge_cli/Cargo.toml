@@ -1,0 +1,31 @@
+[package]
+name = "agntcy-agentbridge-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "CLI binary for the agentbridge coding-agent interconnect."
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "agentbridge"
+path = "src/main.rs"
+
+[dependencies]
+agentbridge = { package = "agntcy-agentbridge", version = "0.1.0", path = "../agentbridge" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.1", path = "../shadi_mas" }
+shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.1", path = "../shadi_a2a" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "1.3.0" }
+a2a = { package = "a2a-lf", version = "0.2.4" }
+a2a-server = { package = "a2a-server-lf", version = "0.2.6" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", path = "../agent_secrets" }
+async-trait = "0.1"
+futures = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v4"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
