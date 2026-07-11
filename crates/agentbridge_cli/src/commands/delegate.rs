@@ -21,6 +21,8 @@ pub fn run(
     std::env::set_var("SLIM_ENDPOINT", endpoint);
     std::env::set_var("SLIM_SHARED_SECRET", shared_secret);
 
+    crate::commands::warn_if_default_secret(shared_secret, endpoint);
+
     let config = LiveA2ATaskAdapterConfig {
         endpoint: endpoint.to_string(),
         agent_id: local_agent_id.to_string(),

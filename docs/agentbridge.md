@@ -248,6 +248,52 @@ coordinate --agents slim:copilot,slim:codex
 The A2A traffic is printed with `┌─ A2A ─→` / `┌─ A2A ←─` banners showing
 the agent ID, coordination phase, epoch, and elapsed milliseconds.
 
+## Security model
+
+agentbridge executes real coding tools on your machine and reaches them over a
+shared SLIM bus, so two trust boundaries matter.
+
+### The register listener is a remote-execution surface
+
+A registered adapter forwards every incoming A2A task straight to the local CLI
+tool (`execute_prompt` → subprocess). Some adapters run their tool with elevated
+permissions — for example, `CopilotAdapter` invokes `copilot --allow-all-tools`
+so it can act non-interactively. **Any peer able to reach
+`agntcy/shadi/<tool>-a2a` on the SLIM node can therefore drive local code
+execution.**
+
+Controls:
+
+- The listener prints a warning on start-up naming the tool that will execute
+  incoming tasks.
+- Only expose the listener to trusted SLIM peers. Run agents inside the SHADI
+  [sandbox](sandbox.md) so tool execution is confined by OS policy.
+- Keep the SLIM node on loopback (`127.0.0.1`) for local demos; only bind a
+  routable address when the peer set is trusted and authenticated.
+
+### Shared secret
+
+SLIM apps authenticate with a shared secret (`create_app_with_secret`). For the
+loopback demo, `register`, `delegate`, and `coordinate` fall back to a built-in
+default secret (`my_shared_secret_for_testing_purposes_only`) when
+`SLIM_SHARED_SECRET` is unset.
+
+!!! danger "The default secret provides no authentication"
+    The default is compiled into the binary and is public. It is safe **only**
+    for a loopback demo. The commands emit a security warning when the default
+    is used, and warn more loudly when the endpoint is not loopback. Always set
+    `SLIM_SHARED_SECRET` (or `--slim-shared-secret`) to a private value before
+    exposing the SLIM node.
+
+### Transport authentication
+
+Peer-to-peer A2A traffic runs over SLIMRPC with mutual TLS. The listener resolves
+a client certificate from `SLIM_TLS_CERT` / `SLIM_TLS_KEY` / `SLIM_TLS_CA`, an
+agent-specific fallback, or a generic fallback (see
+[TLS certificate resolution](#tls-certificate-resolution)). Generate the bundle
+with `tools/generate_slim_mtls_certs.sh` and keep the CA private to the peers you
+trust.
+
 ## `DevelopmentEngine` — the coordination core
 
 `DevelopmentEngine` is a `CoordinationEngine` that coordinates code artifacts

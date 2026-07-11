@@ -77,6 +77,25 @@ Treat environment injection as explicit disclosure, not as the default secure
 path. Prefer final-consumer delivery when the parent process only needs to
 launch a child tool rather than directly hold the credential.
 
+## agentbridge listeners
+
+`agentbridge register` exposes a local coding tool as an A2A service over SLIM.
+Every incoming task is forwarded to that tool's subprocess, so a registered
+listener is a **remote code-execution surface**: any peer that can reach
+`agntcy/shadi/<tool>-a2a` can drive the local tool (some adapters, such as
+`copilot`, run with `--allow-all-tools`).
+
+Controls:
+
+- SLIM peers authenticate with a shared secret. The built-in default secret is
+  public and for loopback demos only — set `SLIM_SHARED_SECRET` to a private
+  value before binding a routable address. The CLI warns when the default is in
+  use and warns more loudly for non-loopback endpoints.
+- Transport is mutually authenticated with SLIMRPC over TLS; keep the CA bundle
+  private to trusted peers.
+- Run bridged tools inside the SHADI [sandbox](sandbox.md) so tool execution is
+  confined by OS policy. See [AgentBridge → Security model](agentbridge.md#security-model).
+
 ## Non-goals
 - Protecting against a fully compromised host OS.
 - Metadata privacy beyond message content when using SLIM/MLS.

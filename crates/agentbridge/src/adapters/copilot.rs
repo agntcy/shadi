@@ -68,27 +68,22 @@ impl CopilotAdapter {
 
 /// Remove the trailing stats block that `copilot -p` appends:
 ///   "\n\nChanges    +0 -0\n"
-fn strip_copilot_stats(output: &str) -> &str {
-    let lines: Vec<&str> = output.lines().collect();
-    // Walk backwards to find where the stats block starts.
-    let mut end = lines.len();
-    for (i, line) in lines.iter().enumerate().rev() {
-        let t = line.trim();
-        if t.starts_with("Changes") || t.is_empty() {
-            end = i;
+///
+/// Handles both `\n` and `\r\n` line endings (`str::lines` strips a trailing
+/// `\r`) and any number of trailing blank lines. Internal line endings are
+/// normalized to `\n`, which is harmless for the code/text payloads copilot
+/// emits.
+fn strip_copilot_stats(output: &str) -> String {
+    let mut lines: Vec<&str> = output.lines().collect();
+    while let Some(last) = lines.last() {
+        let t = last.trim();
+        if t.is_empty() || t.starts_with("Changes") {
+            lines.pop();
         } else {
             break;
         }
     }
-    // Reconstruct up to `end`.
-    let trimmed = lines[..end].join("\n");
-    // Return the original slice up to the same byte offset.
-    let byte_end = output
-        .char_indices()
-        .nth(trimmed.chars().count())
-        .map(|(i, _)| i)
-        .unwrap_or(output.len());
-    &output[..byte_end]
+    lines.join("\n")
 }
 
 impl CliAdapter for CopilotAdapter {
@@ -168,6 +163,12 @@ mod tests {
     fn strip_copilot_stats_leaves_clean_output_intact() {
         let output = "fn parse() {}";
         assert_eq!(strip_copilot_stats(output), "fn parse() {}");
+    }
+
+    #[test]
+    fn strip_copilot_stats_handles_crlf_line_endings() {
+        let output = "fn parse() {}\r\n\r\nChanges    +1 -0\r\n";
+        assert_eq!(strip_copilot_stats(output).trim(), "fn parse() {}");
     }
 
     #[test]

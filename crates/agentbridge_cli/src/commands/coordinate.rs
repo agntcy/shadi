@@ -58,6 +58,11 @@ pub fn run(
         );
     }
 
+    // Only relevant when reaching remote adapters over SLIM (slim:<id> specs).
+    if agent_specs.iter().any(|s| s.starts_with("slim:")) {
+        crate::commands::warn_if_default_secret(slim_shared_secret, slim_endpoint);
+    }
+
     let effective_quorum = quorum.min(agents.len());
     let config = DevelopmentEngineConfig::new(
         agents.iter().map(|a| a.id.clone()),

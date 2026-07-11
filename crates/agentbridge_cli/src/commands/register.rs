@@ -366,6 +366,14 @@ fn run_slim_listener(
     shared_secret: &str,
 ) -> Result<(), String> {
     let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
+
+    // Security posture: incoming A2A tasks are executed by the local CLI tool.
+    eprintln!(
+        "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
+         CLI tool. Only expose this listener to trusted SLIM peers."
+    );
+    crate::commands::warn_if_default_secret(shared_secret, endpoint);
+
     let tls = resolve_client_tls(Some(agent_id))?;
 
     let service = Service::new(format!("agentbridge-listener-{}-{}", agent_id, std::process::id()));

@@ -156,10 +156,17 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SLIM_ENDPOINT` | `127.0.0.1:47357` | SLIM node address |
-| `SLIM_SHARED_SECRET` | — | SLIM authentication |
+| `SLIM_SHARED_SECRET` | demo default | SLIM authentication |
 | `SHADI_AGENT_ID` | `avatar` | Agent identity for SLIM/DIR |
 | `SLIM_TLS_CERT` / `SLIM_TLS_KEY` | — | mTLS client certificate paths |
 | `SLIM_TLS_CA` | — | CA certificate for server verification |
+
+> ⚠️ **Security:** when `SLIM_SHARED_SECRET` is unset, `register`, `delegate`, and
+> `coordinate` fall back to a public, built-in demo secret that provides **no**
+> authentication. A `register` listener forwards incoming A2A tasks to the local
+> CLI tool, so any peer that knows the secret can drive local code execution. The
+> commands warn when the default is used. Set `SLIM_SHARED_SECRET` to a private
+> value before binding a routable (non-loopback) address.
 
 ## Live SLIM demo (4 terminals)
 

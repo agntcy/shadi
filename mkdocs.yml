@@ -67,6 +67,7 @@ nav:
   - Integrations:
       - API Guide: api_integration.md
       - SLIM and A2A: slim_a2a.md
+      - AgentBridge: agentbridge.md
       - Mobile: mobile_integration.md
   - Reference:
       - CLI Reference: cli.md
