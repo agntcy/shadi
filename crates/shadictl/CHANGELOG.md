@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.1...agntcy-shadi-cli-v0.1.2) - 2026-07-11
+
+### Added
+
+- *(agentbridge)* CLI coding-agent interconnect with MAS coordination over SLIM A2A ([#89](https://github.com/agntcy/shadi/pull/89))
+
 ### Added
 
 - add WinGet distribution support for Windows installs of `shadictl`
