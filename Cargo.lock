@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
