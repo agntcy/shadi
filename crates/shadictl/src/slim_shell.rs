@@ -406,6 +406,11 @@ pub(crate) fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial
         include_system_ca_certs_pool: false,
         tls_version: "tls1.3".to_string(),
     };
+    // slim-bindings' run_server builds the node MessageProcessor with
+    // require_header_mac=false, while the config default resolves to true. Pin
+    // both ends to false so the rotating link-HMAC key never gates the SLIM
+    // session handshake (mTLS + shared-secret already secure the transport).
+    config.require_header_mac = Some(false);
     config
 }
 
@@ -430,6 +435,9 @@ pub(crate) fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial
         tls_version: Some("tls1.3".to_string()),
         reload_client_ca_file: Some(false),
     };
+    // Match the node MessageProcessor (require_header_mac=false); see the client
+    // config builder above.
+    config.require_header_mac = Some(false);
     config
 }
 

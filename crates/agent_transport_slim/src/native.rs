@@ -241,6 +241,10 @@ fn build_client_config() -> Result<ClientConfig, String> {
 fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     let mut config = ClientConfig::default();
     config.endpoint = resolve_client_endpoint_value(endpoint);
+    // Pin require_header_mac=false to match the node MessageProcessor and avoid
+    // the rotating link-HMAC key gating the SLIM session handshake (mTLS +
+    // shared-secret already secure the transport).
+    config.require_header_mac = Some(false);
     config.tls = TlsClientConfig {
         insecure: false,
         insecure_skip_verify: false,
@@ -550,6 +554,7 @@ mod tests {
     fn build_test_server_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::ServerConfig {
         let mut config = slim_bindings::ServerConfig::default();
         config.endpoint = endpoint.to_string();
+        config.require_header_mac = Some(false);
         config.tls = slim_bindings::TlsServerConfig {
             insecure: false,
             source: TlsSource::File {
