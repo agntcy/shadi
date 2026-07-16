@@ -15,7 +15,8 @@ use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretResult, SessionConte
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use shadi_a2a::{A2AChannelBuilder, SlimRpcHandler};
-use slim_bindings::{Server, Service};
+use slim_bindings::Service;
+use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
 
@@ -196,7 +197,7 @@ impl RequestHandler for SlimA2AHandler {
     async fn create_push_config(
         &self,
         params: &A2AServiceParams,
-        req: CreateTaskPushNotificationConfigRequest,
+        req: TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.inner.create_push_config(params, req).await
     }
@@ -263,14 +264,20 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
-    let server = Arc::new(Server::new(&app, app.name().clone()));
+    let server = Arc::new(Server::new_with_shared_rx_and_connection(
+        app.inner(),
+        app.name().as_slim_name(),
+        None,
+        app.notification_receiver(),
+        Some(slim_bindings::get_runtime()),
+    ));
     let request_seen = Arc::new(Notify::new());
     let handler = Arc::new(SlimA2AHandler::new(
         peer_name.clone(),
         format!("slimrpc://{}", peer_name),
         request_seen.clone(),
     ));
-    SlimRpcHandler::new(handler).register(&server);
+    SlimRpcHandler::new(handler).register(server.as_ref());
 
     let ready_file = args.ready_file.clone();
     let wait_seconds = args.listen_timeout_seconds;
@@ -966,15 +973,13 @@ mod tests {
         let push_config_err = handler
             .create_push_config(
                 &params,
-                CreateTaskPushNotificationConfigRequest {
+                TaskPushNotificationConfig {
                     task_id: task.id.clone(),
-                    config: PushNotificationConfig {
-                        url: "https://example.invalid/hook".to_string(),
-                        id: Some("cfg-1".to_string()),
-                        token: None,
-                        authentication: None,
-                    },
                     tenant: None,
+                    url: "https://example.invalid/hook".to_string(),
+                    id: Some("cfg-1".to_string()),
+                    token: None,
+                    authentication: None,
                 },
             )
             .await

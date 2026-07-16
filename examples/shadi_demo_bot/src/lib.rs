@@ -30,9 +30,10 @@ use shadi_a2a::{A2AChannelBuilder, SlimRpcHandler};
 use shadi_memory::SqlCipherStore;
 use shadi_sandbox::{spawn_sandboxed, SandboxError, SandboxPolicy};
 use slim_bindings::{
-    CaSource, ClientConfig, Name, Server, ServerConfig, Service, TlsClientConfig,
+    CaSource, ClientConfig, Name, ServerConfig, Service, TlsClientConfig,
     TlsServerConfig, TlsSource,
 };
+use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
 
@@ -417,7 +418,7 @@ impl RequestHandler for DemoA2AHandler {
     async fn create_push_config(
         &self,
         params: &A2AServiceParams,
-        req: CreateTaskPushNotificationConfigRequest,
+        req: TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.inner.create_push_config(params, req).await
     }
@@ -1418,14 +1419,20 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
-    let server = Arc::new(Server::new(&app, app.name().clone()));
+    let server = Arc::new(Server::new_with_shared_rx_and_connection(
+        app.inner(),
+        app.name().as_slim_name(),
+        None,
+        app.notification_receiver(),
+        Some(slim_bindings::get_runtime()),
+    ));
     let request_seen = Arc::new(Notify::new());
     let handler = Arc::new(DemoA2AHandler::new(
         peer_name.clone(),
         format!("slimrpc://{}", peer_name),
         request_seen.clone(),
     ));
-    SlimRpcHandler::new(handler).register(&server);
+    SlimRpcHandler::new(handler).register(server.as_ref());
 
     let ready_file = args.ready_file.clone();
     let endpoint = args.endpoint.clone();
@@ -2851,15 +2858,13 @@ mod tests {
             let push_config_err = handler
                 .create_push_config(
                     &params,
-                    CreateTaskPushNotificationConfigRequest {
+                    TaskPushNotificationConfig {
                         task_id: task.id.clone(),
-                        config: PushNotificationConfig {
-                            url: "https://example.invalid/hook".to_string(),
-                            id: Some("cfg-1".to_string()),
-                            token: None,
-                            authentication: None,
-                        },
                         tenant: None,
+                        url: "https://example.invalid/hook".to_string(),
+                        id: Some("cfg-1".to_string()),
+                        token: None,
+                        authentication: None,
                     },
                 )
                 .await

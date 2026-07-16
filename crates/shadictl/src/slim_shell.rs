@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use slim_bindings::{
-    App, CaSource, ClientConfig, Name, ServerConfig, Service, Session, SessionConfig,
+    App, CaSource, ClientConfig, MlsSettings, Name, ServerConfig, Service, Session, SessionConfig,
     SessionType, TlsClientConfig, TlsServerConfig, TlsSource,
 };
 
@@ -378,7 +378,7 @@ fn wait_for_shutdown_signal() -> Result<(), String> {
 fn default_group_session_config() -> SessionConfig {
     SessionConfig {
         session_type: SessionType::Group,
-        enable_mls: true,
+        mls_settings: Some(MlsSettings::default()),
         max_retries: Some(5),
         interval: Some(Duration::from_secs(5)),
         metadata: HashMap::new(),
@@ -908,7 +908,7 @@ mod tests {
         let config = default_group_session_config();
 
         assert_eq!(config.session_type, SessionType::Group);
-        assert!(config.enable_mls);
+        assert!(config.mls_settings.is_some());
         assert_eq!(config.max_retries, Some(5));
         assert_eq!(config.interval, Some(Duration::from_secs(5)));
         assert!(config.metadata.is_empty());

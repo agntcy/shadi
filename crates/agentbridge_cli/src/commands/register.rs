@@ -22,8 +22,9 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use shadi_a2a::SlimRpcHandler;
 use slim_bindings::{
-    CaSource, ClientConfig, Name, Server, Service, TlsClientConfig, TlsSource,
+    CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource,
 };
+use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
 
@@ -298,7 +299,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
     async fn create_push_config(
         &self,
         params: &A2AServiceParams,
-        req: CreateTaskPushNotificationConfigRequest,
+        req: TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.inner.create_push_config(params, req).await
     }
@@ -388,10 +389,16 @@ fn run_slim_listener(
     app.subscribe(name_ref.clone(), Some(connection_id))
         .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
 
-    let server = Arc::new(Server::new(&app, app.name().clone()));
+    let server = Arc::new(Server::new_with_shared_rx_and_connection(
+        app.inner(),
+        app.name().as_slim_name(),
+        None,
+        app.notification_receiver(),
+        Some(slim_bindings::get_runtime()),
+    ));
     let ready = Arc::new(Notify::new());
     let handler = Arc::new(AgentBridgeRequestHandler::new(adapter, &agent_name, ready));
-    SlimRpcHandler::new(handler).register(&server);
+    SlimRpcHandler::new(handler).register(server.as_ref());
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
         .enable_all()

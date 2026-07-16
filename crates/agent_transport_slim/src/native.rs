@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use agent_secrets::{SecretError, SecretResult};
 use slim_bindings::{
-    App, CaSource, ClientConfig, Name, Service, Session, SessionConfig, SessionType,
+    App, CaSource, ClientConfig, MlsSettings, Name, Service, Session, SessionConfig, SessionType,
     SlimError,
     TlsClientConfig, TlsSource,
 };
@@ -226,7 +226,7 @@ fn client_service_name() -> String {
 fn point_to_point_session_config() -> SessionConfig {
     SessionConfig {
         session_type: SessionType::PointToPoint,
-        enable_mls: true,
+        mls_settings: Some(MlsSettings::default()),
         max_retries: Some(5),
         interval: Some(Duration::from_secs(5)),
         metadata: HashMap::new(),
@@ -683,7 +683,7 @@ mod tests {
         let config = point_to_point_session_config();
 
         assert_eq!(config.session_type, SessionType::PointToPoint);
-        assert!(config.enable_mls);
+        assert!(config.mls_settings.is_some());
         assert_eq!(config.max_retries, Some(5));
         assert_eq!(config.interval, Some(Duration::from_secs(5)));
         assert!(config.metadata.is_empty());
