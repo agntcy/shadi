@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use slim_bindings::{
-    App, CaSource, ClientConfig, Name, ServerConfig, Service, Session, SessionConfig,
+    App, CaSource, ClientConfig, MlsSettings, Name, ServerConfig, Service, Session, SessionConfig,
     SessionType, TlsClientConfig, TlsServerConfig, TlsSource,
 };
 
@@ -378,7 +378,7 @@ fn wait_for_shutdown_signal() -> Result<(), String> {
 fn default_group_session_config() -> SessionConfig {
     SessionConfig {
         session_type: SessionType::Group,
-        enable_mls: true,
+        mls_settings: Some(MlsSettings::default()),
         max_retries: Some(5),
         interval: Some(Duration::from_secs(5)),
         metadata: HashMap::new(),
@@ -406,6 +406,11 @@ pub(crate) fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial
         include_system_ca_certs_pool: false,
         tls_version: "tls1.3".to_string(),
     };
+    // slim-bindings' run_server builds the node MessageProcessor with
+    // require_header_mac=false, while the config default resolves to true. Pin
+    // both ends to false so the rotating link-HMAC key never gates the SLIM
+    // session handshake (mTLS + shared-secret already secure the transport).
+    config.require_header_mac = Some(false);
     config
 }
 
@@ -430,6 +435,9 @@ pub(crate) fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial
         tls_version: Some("tls1.3".to_string()),
         reload_client_ca_file: Some(false),
     };
+    // Match the node MessageProcessor (require_header_mac=false); see the client
+    // config builder above.
+    config.require_header_mac = Some(false);
     config
 }
 
@@ -908,7 +916,7 @@ mod tests {
         let config = default_group_session_config();
 
         assert_eq!(config.session_type, SessionType::Group);
-        assert!(config.enable_mls);
+        assert!(config.mls_settings.is_some());
         assert_eq!(config.max_retries, Some(5));
         assert_eq!(config.interval, Some(Duration::from_secs(5)));
         assert!(config.metadata.is_empty());

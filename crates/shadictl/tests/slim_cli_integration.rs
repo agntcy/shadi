@@ -9,6 +9,13 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+// Upper-bound waits, sized so the A2A-over-SLIMRPC round-trip survives the ~2-4x
+// slowdown under coverage instrumentation (cargo-llvm-cov). `wait_for_file` /
+// `wait_for_child_output` return as soon as the file/child is ready, so the extra
+// headroom costs nothing on normal runs (~13s) while keeping the coverage job green.
+const READY_FILE_TIMEOUT: Duration = Duration::from_secs(30);
+const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
 struct TestDir {
     path: PathBuf,
 }
@@ -85,7 +92,7 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
         .spawn()
         .expect("spawn shadictl slim a2a-echo-peer");
 
-    wait_for_file(&ready_file, Duration::from_secs(10));
+    wait_for_file(&ready_file, READY_FILE_TIMEOUT);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_shadictl"))
         .args([
@@ -114,7 +121,7 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
     }
 
     let (peer_status, peer_stdout, peer_stderr) =
-        wait_for_child_output(&mut peer, Duration::from_secs(20));
+        wait_for_child_output(&mut peer, CHILD_EXIT_TIMEOUT);
 
     assert_eq!(sender.status.code(), Some(0), "sender stderr={} stdout={}", String::from_utf8_lossy(&sender.stderr), String::from_utf8_lossy(&sender.stdout));
     let sender_stdout = String::from_utf8_lossy(&sender.stdout);
@@ -154,7 +161,7 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_task_round_trip
         .spawn()
         .expect("spawn shadictl slim a2a-echo-peer");
 
-    wait_for_file(&ready_file, Duration::from_secs(10));
+    wait_for_file(&ready_file, READY_FILE_TIMEOUT);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_shadictl"))
         .args([
@@ -186,7 +193,7 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_task_round_trip
     }
 
     let (peer_status, peer_stdout, peer_stderr) =
-        wait_for_child_output(&mut peer, Duration::from_secs(20));
+        wait_for_child_output(&mut peer, CHILD_EXIT_TIMEOUT);
 
     assert_eq!(sender.status.code(), Some(0), "sender stderr={} stdout={}", String::from_utf8_lossy(&sender.stderr), String::from_utf8_lossy(&sender.stdout));
     let sender_stdout = String::from_utf8_lossy(&sender.stdout);

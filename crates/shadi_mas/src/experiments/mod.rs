@@ -303,6 +303,9 @@ fn readable_message_text(message: &Message) -> String {
 fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     let mut config = ClientConfig::default();
     config.endpoint = resolve_client_endpoint_value(endpoint);
+    // Match the node MessageProcessor (require_header_mac=false); see SHADI's
+    // slim config builders.
+    config.require_header_mac = Some(false);
     config.tls = TlsClientConfig {
         insecure: false,
         insecure_skip_verify: false,

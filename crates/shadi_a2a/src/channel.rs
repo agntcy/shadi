@@ -66,8 +66,8 @@ impl A2AChannelBuilder {
 
     pub fn build(self) -> A2AChannel {
         let transport = SlimRpcTransport::new_with_connection(
-            self.app,
-            self.remote,
+            self.app.inner(),
+            Arc::new(self.remote.as_slim_name()),
             self.connection_id,
         );
         A2AChannel {
@@ -137,7 +137,7 @@ impl Transport for A2AChannel {
     async fn create_push_config(
         &self,
         params: &ServiceParams,
-        req: &CreateTaskPushNotificationConfigRequest,
+        req: &TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.check_auth()?;
         self.transport.create_push_config(params, req).await
@@ -262,7 +262,7 @@ mod tests {
         async fn create_push_config(
             &self,
             _params: &ServiceParams,
-            _req: &CreateTaskPushNotificationConfigRequest,
+            _req: &TaskPushNotificationConfig,
         ) -> Result<TaskPushNotificationConfig, A2AError> {
             Err(A2AError::internal("stub"))
         }
@@ -428,20 +428,16 @@ mod tests {
             .expect("subscription transport");
         assert!(subscription.next().await.is_none());
 
-        let push_config = PushNotificationConfig {
-            url: "https://example.invalid/hook".to_string(),
-            id: Some("cfg-1".to_string()),
-            token: None,
-            authentication: None,
-        };
-
         let create_err = channel
             .create_push_config(
                 &params,
-                &CreateTaskPushNotificationConfigRequest {
+                &TaskPushNotificationConfig {
                     task_id: "task-1".to_string(),
-                    config: push_config.clone(),
                     tenant: None,
+                    url: "https://example.invalid/hook".to_string(),
+                    id: Some("cfg-1".to_string()),
+                    token: None,
+                    authentication: None,
                 },
             )
             .await
@@ -480,7 +476,7 @@ mod tests {
                 &params,
                 &DeleteTaskPushNotificationConfigRequest {
                     task_id: "task-1".to_string(),
-                    id: push_config.id.expect("push config id"),
+                    id: "cfg-1".to_string(),
                     tenant: None,
                 },
             )
