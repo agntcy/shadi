@@ -7,6 +7,10 @@ pub struct SessionContext {
     pub session_id: String,
     pub verified: bool,
     pub claims: Vec<String>,
+    /// The peer's DID, once established for this session. `None` until an
+    /// identity layer sets it (asserted by the caller in the app-layer phase;
+    /// cryptographically proven from a DID-signed token in later phases).
+    pub did: Option<String>,
 }
 
 impl SessionContext {
@@ -16,6 +20,13 @@ impl SessionContext {
             session_id: session_id.into(),
             verified: false,
             claims: Vec::new(),
+            did: None,
         }
+    }
+
+    /// Attach the peer's DID to this session context.
+    pub fn with_did(mut self, did: impl Into<String>) -> Self {
+        self.did = Some(did.into());
+        self
     }
 }
