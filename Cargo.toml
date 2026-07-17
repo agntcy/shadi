@@ -9,6 +9,7 @@ members = [
   "crates/agentbridge",
   "crates/agentbridge_cli",
   "crates/slim_mas",
+  "crates/shadi_identity",
   "crates/shadi_memory",
   "crates/shadi_py",
   "crates/shadi_sandbox",
