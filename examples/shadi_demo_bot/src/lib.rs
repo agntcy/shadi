@@ -2052,9 +2052,6 @@ fn server_tls_material(base_dir: &Path) -> TlsMaterial {
 fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     let mut config = ClientConfig::default();
     config.endpoint = format!("https://{}", endpoint);
-    // Match the node MessageProcessor (require_header_mac=false); see SHADI's
-    // slim config builders.
-    config.require_header_mac = Some(false);
     config.tls = TlsClientConfig {
         insecure: false,
         insecure_skip_verify: false,
@@ -2074,7 +2071,6 @@ fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
 fn build_server_config(endpoint: &str, tls: &TlsMaterial) -> ServerConfig {
     let mut config = ServerConfig::default();
     config.endpoint = endpoint.to_string();
-    config.require_header_mac = Some(false);
     config.tls = TlsServerConfig {
         insecure: false,
         source: TlsSource::File {

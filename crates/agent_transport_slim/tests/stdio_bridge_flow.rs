@@ -152,7 +152,6 @@ fn server_tls_material(base_dir: &Path) -> TlsMaterial {
 fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::ClientConfig {
     let mut config = slim_bindings::ClientConfig::default();
     config.endpoint = format!("https://{endpoint}");
-    config.require_header_mac = Some(false);
     config.tls = slim_bindings::TlsClientConfig {
         insecure: false,
         insecure_skip_verify: false,
@@ -172,7 +171,6 @@ fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::Clie
 fn build_server_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::ServerConfig {
     let mut config = slim_bindings::ServerConfig::default();
     config.endpoint = endpoint.to_string();
-    config.require_header_mac = Some(false);
     config.tls = slim_bindings::TlsServerConfig {
         insecure: false,
         source: TlsSource::File {

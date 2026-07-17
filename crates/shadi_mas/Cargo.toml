@@ -18,7 +18,7 @@ a2a-client = { package = "a2a-client-lf", version = "0.2.1" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", path = "../agent_secrets" }
 agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.1.2", path = "../agent_transport_slim" }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.1", path = "../shadi_a2a" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.6" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.7" }
 tokio = { version = "1", features = ["rt", "time"] }
 tracing = "0.1"
 
