@@ -1423,7 +1423,6 @@ mod tests {
     fn build_test_client_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ClientConfig {
         let mut config = slim_bindings::ClientConfig::default();
         config.endpoint = format!("https://{endpoint}");
-        config.require_header_mac = Some(false);
         config.tls = slim_bindings::TlsClientConfig {
             insecure: false,
             insecure_skip_verify: false,
@@ -1444,7 +1443,6 @@ mod tests {
     fn build_test_server_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ServerConfig {
         let mut config = slim_bindings::ServerConfig::default();
         config.endpoint = endpoint.to_string();
-        config.require_header_mac = Some(false);
         config.tls = slim_bindings::TlsServerConfig {
             insecure: false,
             source: slim_bindings::TlsSource::File {

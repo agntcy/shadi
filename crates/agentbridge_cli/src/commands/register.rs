@@ -491,9 +491,6 @@ fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     };
     let mut config = ClientConfig::default();
     config.endpoint = endpoint_url;
-    // Match the node MessageProcessor (require_header_mac=false) so the rotating
-    // link-HMAC key never gates the SLIM session handshake.
-    config.require_header_mac = Some(false);
     config.tls = TlsClientConfig {
         insecure: false,
         insecure_skip_verify: false,

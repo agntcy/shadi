@@ -15,8 +15,8 @@ async-trait = "0.1"
 shadi_memory = { package = "agntcy-shadi-memory", path = "../../crates/shadi_memory" }
 shadi_sandbox = { package = "agntcy-shadi-sandbox", path = "../../crates/shadi_sandbox" }
 shadi_a2a = { package = "agntcy-shadi-a2a", path = "../../crates/shadi_a2a" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.6" }
-slim_rpc = { package = "agntcy-slim-rpc", version = "2.0.0-alpha.4" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.7" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "2.0.0-alpha.5" }
 clap = { version = "4.6", features = ["derive", "env"] }
 ctrlc = "3.5"
 futures = "0.3"
