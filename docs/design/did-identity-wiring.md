@@ -36,8 +36,14 @@ secret — anyone holding the secret gets in. This note connects the two.
 - Constructors `AuthProvider::jwt_signer(SignerJwt)` / `AuthVerifier::jwt_verifier(VerifierJwt)`
 - JWT algorithms include **EdDSA (Ed25519)** and **ES256 (P-256)**
 
-`Service::create_app(&name, provider, verifier)` already takes an
-`AuthProvider`/`AuthVerifier` pair — the shared-secret path is just one choice.
+**Config-driven, not hand-rolled crypto.** slim-bindings exposes
+`Service::create_app(name, IdentityProviderConfig, IdentityVerifierConfig)`;
+`create_app_with_secret` is just the `SharedSecret` convenience over it. The provider
+enum has a **`Jwt { config: ClientJwtAuth { key, subject, audience, issuer, duration } }`**
+variant — SHADI supplies the **Ed25519 key + `subject = did` + `audience = channel`**
+and slim's config layer signs/verifies the JWT. So SHADI does **not** touch
+`jsonwebtoken` `EncodingKey`/DER directly; the DID path is the same `create_app` call
+with a `Jwt` config in place of `SharedSecret`.
 
 SHADI already depends on **`ed25519-dalek`** and **`bs58`** — exactly the primitives
 `did:key` (Ed25519) needs. No new crypto stack required.
@@ -79,12 +85,16 @@ Agent (did:key + Ed25519 key, both from the agent_secrets secret store)
   `SessionContext`; add a `DidPolicyVerifier` impl of `AgentVerifier` that calls
   `slim_mas::is_member_allowed`. Wire the group config in. *Immediately makes the
   allow-list real for the A2A channel path.*
-- **P1 — DID + DID-JWT primitives.** Small `identity` module: `did:key` gen/parse
-  (Ed25519 via ed25519-dalek + bs58 multibase), mint/verify DID-JWT through
-  `slim_auth` `SignerJwt`/`VerifierJwt`.
-- **P2 — swap admission auth.** Replace `create_app_with_secret` with a helper that
-  builds the JWT provider/verifier at the ~8 sites, behind a `--auth did|shared-secret`
-  config flag (shared-secret fallback retained).
+- **P1 — DID primitives + identity-config builders.** `did:key` gen/parse (Ed25519 via
+  ed25519-dalek + bs58 multibase/multicodec `0xed01`), and helpers that build
+  `IdentityProviderConfig::Jwt { ClientJwtAuth { key, subject=did, audience=channel } }`
+  + the matching verifier config. No `jsonwebtoken`/DER hand-rolling — slim's config
+  layer signs/verifies. Key material sourced from the `agent_secrets` secret store.
+  (Confirm the `Key` field's format — inline PEM vs file path — before wiring.)
+- **P2 — swap admission auth.** Replace `create_app_with_secret(name, secret)` with
+  `create_app(name, provider_cfg, verifier_cfg)` at the ~8 sites, behind a
+  `--auth did|shared-secret` flag (shared-secret retained). Populate `SessionContext.did`
+  from the verified token and flip `DidPolicyVerifier` on.
 - **P3 — tests.** Unit: DID-JWT mint/verify, policy allow/deny. Integration: allowed
   DID joins + exchanges; disallowed DID rejected at admission.
 - **Future.** `did:web` resolver; VC-JWT; control-plane/channel-manager central
