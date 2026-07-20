@@ -121,9 +121,36 @@ Agent (did:key + Ed25519 key, both from the agent_secrets secret store)
 
 ## Moderator role & enrollment (design)
 
-The **moderator is a human**, bound to the identity of the person who **creates the
-channel** — not an agent. `GroupConfig.moderator_did` is that human's DID. The
-moderator has authority agents do not:
+### Derived identities (human root → client/moderator)
+
+Identities are **hierarchical**. A human has a **root identity**; their moderator and
+client identities are **derived** from it — a human can have **many** (per device, per
+channel, per client). The moderator is a *client connected to* the human identity, not
+the human's key used directly.
+
+For a verifier to confirm a derived DID belongs to human X, the human→derived link must
+be **provable**:
+
+- **Signed delegation (required for verifiability):** the human root DID signs a small
+  attestation — *"derived DID D acts for me"*. The derived identity presents it; a
+  verifier checks D's own signature **and** the root's signature on the delegation.
+  Works with plain Ed25519; publicly verifiable. This is a minimal signed attestation,
+  not full W3C VC machinery.
+- **HD key derivation (optional, key-management only):** SLIP-0010 Ed25519 lets one root
+  seed produce many child keys — convenient, but Ed25519 HD is *hardened-only*, so a
+  child public key can't be derived/verified from the parent public key. HD does **not**
+  provide the verifiable link; delegation does.
+
+Implication for the allow-list: a channel can trust a **human root DID** and accept any
+derived identity that presents a valid delegation from it (verify delegation → then the
+JWKS/allow-list check), rather than pinning every individual derived DID.
+
+### Moderator role
+
+The **moderator is a human** (via a derived client identity bound to that human),
+bound to the person who **creates the channel** — not an agent. `GroupConfig.moderator_did`
+is that human's root DID (or a derived identity linked to it). The moderator has
+authority agents do not:
 
 - **Creates channels** — establishes a group and sets `moderator_did = <their DID>`.
 - **Invites members** — adds a member's DID (+ role) to the channel's allow-list.
