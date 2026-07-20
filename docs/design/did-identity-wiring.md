@@ -128,22 +128,21 @@ client identities are **derived** from it — a human can have **many** (per dev
 channel, per client). The moderator is a *client connected to* the human identity, not
 the human's key used directly.
 
-For a verifier to confirm a derived DID belongs to human X, the human→derived link must
-be **provable**:
+**This already exists in SHADI** (`shadictl` `identity_command.rs`): `derive_agent_keypair`
+= HKDF-SHA256(salt `"shadi-agent-derive"`, ikm = human secret key, info = agent name) →
+Ed25519 agent key → `did:key`. One human key deterministically yields many agent
+identities (one per name), and the `DeriveAgentDid`/`DeriveAgentIdentity` commands
+**store the human↔agent binding** — so "which human does this agent belong to" is
+answerable. The human key may itself be an OpenPGP/GPG key.
 
-- **Signed delegation (required for verifiability):** the human root DID signs a small
-  attestation — *"derived DID D acts for me"*. The derived identity presents it; a
-  verifier checks D's own signature **and** the root's signature on the delegation.
-  Works with plain Ed25519; publicly verifiable. This is a minimal signed attestation,
-  not full W3C VC machinery.
-- **HD key derivation (optional, key-management only):** SLIP-0010 Ed25519 lets one root
-  seed produce many child keys — convenient, but Ed25519 HD is *hardened-only*, so a
-  child public key can't be derived/verified from the parent public key. HD does **not**
-  provide the verifiable link; delegation does.
+`shadi_identity` bridges to this via `AgentIdentity::from_signing_key_bytes` (consumes the
+derived key), so the crate and the existing commands share one `did:key` code path.
 
-Implication for the allow-list: a channel can trust a **human root DID** and accept any
-derived identity that presents a valid delegation from it (verify delegation → then the
-JWKS/allow-list check), rather than pinning every individual derived DID.
+Verifiability note: HKDF derivation is one-way, so the human→agent link is proven by the
+**stored binding / registry** (the moderator derives + registers agents), not by the DID
+alone. If *third-party cryptographic* proof of the link is ever needed, a **signed
+delegation** (human root DID signs "derived DID D acts for me") can be layered on;
+today's admission gate is the member-JWKS allow-list, which the moderator maintains.
 
 ### Moderator role
 

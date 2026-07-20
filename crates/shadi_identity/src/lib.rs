@@ -68,6 +68,23 @@ impl AgentIdentity {
         Ok(Self { signing_key })
     }
 
+    /// Build from a 32-byte Ed25519 signing key — the bridge to SHADI's existing
+    /// HKDF agent derivation (`derive_agent_keypair` returns these bytes), so a
+    /// derived agent and its `did:key` are identical here and there.
+    pub fn from_signing_key_bytes(bytes: &[u8; 32]) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(bytes),
+        }
+    }
+
+    /// Same as [`Self::from_signing_key_bytes`] from a slice (must be 32 bytes).
+    pub fn from_signing_key_slice(bytes: &[u8]) -> Result<Self, IdentityError> {
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| IdentityError::KeyGen("Ed25519 signing key must be 32 bytes".to_string()))?;
+        Ok(Self::from_signing_key_bytes(&arr))
+    }
+
     /// Serialize the private key as PKCS#8 PEM (for storage in the secret store).
     pub fn to_pkcs8_pem(&self) -> Result<String, IdentityError> {
         self.signing_key
@@ -182,6 +199,20 @@ mod tests {
         assert!(did.starts_with("did:key:z"));
         let parsed = parse_did_key(&did).unwrap();
         assert_eq!(parsed.as_bytes(), id.verifying_key().as_bytes());
+    }
+
+    #[test]
+    fn from_signing_key_bytes_is_deterministic() {
+        // Same derived key bytes -> same did:key (bridge to HKDF agent derivation).
+        let seed = [7u8; 32];
+        let a = AgentIdentity::from_signing_key_bytes(&seed);
+        let b = AgentIdentity::from_signing_key_bytes(&seed);
+        assert_eq!(a.did(), b.did());
+        assert!(a.did().starts_with("did:key:z6Mk"));
+        // Slice form must agree with the array form.
+        let c = AgentIdentity::from_signing_key_slice(&seed).unwrap();
+        assert_eq!(c.did(), a.did());
+        assert!(AgentIdentity::from_signing_key_slice(&[0u8; 16]).is_err());
     }
 
     #[test]
