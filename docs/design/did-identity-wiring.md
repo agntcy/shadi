@@ -119,7 +119,32 @@ Agent (did:key + Ed25519 key, both from the agent_secrets secret store)
   is a per-deployment choice, set the same across all agents. (Dual-verify / per-channel
   were considered and rejected as unnecessary complexity.)
 
+## Moderator role & enrollment (design)
+
+The **moderator is a human**, bound to the identity of the person who **creates the
+channel** — not an agent. `GroupConfig.moderator_did` is that human's DID. The
+moderator has authority agents do not:
+
+- **Creates channels** — establishes a group and sets `moderator_did = <their DID>`.
+- **Invites members** — adds a member's DID (+ role) to the channel's allow-list.
+  Only the moderator may change membership.
+- **May be offline.** Membership authority is exercised at *config time* (create /
+  invite). At *runtime*, member admission is the member JWKS (allow-list) — the
+  moderator's key is not needed for members to join and interact. So a channel keeps
+  working with its moderator offline.
+
+**Enrollment flow:** an agent generates its own `did:key` (held in `agent_secrets`) and
+presents it to the moderator out of band; the **moderator invites** it (adds the DID to
+the group config). Agents self-hold keys; only the moderator mutates the allow-list.
+
+**UX requirement (SHADI app):** the moderator's special role must be **visible** —
+distinguish the human moderator from agent members, show who created the channel, and
+surface that only the moderator can invite/remove. This is a product-surface concern
+beyond the auth plumbing (P0–P3) and should be tracked as its own workstream.
+
 ## Open / to confirm before P2
 
-- **Moderator role:** how `moderator_did` maps to elevated session capabilities
-  (does not block P0 — admission uses `is_member_allowed(group, did, role)` as-is).
+- **`aud` binding** — `create_app` fixes auth per-app (mesh-wide today), before any
+  channel is joined. Options: `aud = None` (identity-only; allow-list is the gate) /
+  app's own name / destination channel (must be known at `create_app`). Leaning
+  `aud = None` for the current lifecycle.
