@@ -132,6 +132,107 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
     assert!(peer_stdout.contains("[shadictl a2a-peer] ready as agntcy/shadi/secops-a"), "peer stdout={peer_stdout}");
 }
 
+// DID admission crypto is proven in `tests/admission.rs` (member verifies, non-member
+// rejected). This end-to-end CLI round-trip additionally exercises a live MLS session
+// under DID auth, which currently stalls at MLS `add participant` with asymmetric
+// per-identity keys (same session-layer symptom as agntcy/slim#1869, which fixed the
+// shared-secret case). Ignored until slim's MLS layer supports DID-based sessions.
+#[ignore = "blocked on slim MLS add-participant with per-identity DID keys; crypto proven in tests/admission.rs"]
+#[test]
+fn given_did_auth_when_member_peer_and_sender_run_then_round_trip_succeeds() {
+    let dir = TestDir::new("a2a-did-roundtrip");
+    let endpoint = reserve_endpoint();
+    let ready_file = dir.path().join("a2a-peer.ready");
+    let tls_dir = dir.path().join("shadi-slim-mtls");
+    generate_mtls_assets(&tls_dir);
+
+    // Both agents are derived from one human seed; the allow-list is their DIDs.
+    let seed = "integration-test-human-seed";
+    let peer_did = shadi_identity::AgentIdentity::derive(seed.as_bytes(), "secops-a")
+        .unwrap()
+        .did();
+    let sender_did = shadi_identity::AgentIdentity::derive(seed.as_bytes(), "avatar")
+        .unwrap()
+        .did();
+    let members = format!("{peer_did},{sender_did}");
+
+    let mut peer = Command::new(env!("CARGO_BIN_EXE_shadictl"))
+        .args([
+            "slim",
+            "a2a-echo-peer",
+            "--endpoint",
+            &endpoint,
+            "--agent-id",
+            "secops-a",
+            "--start-local-node",
+            "--ready-file",
+            ready_file.to_str().unwrap(),
+            "--listen-timeout-seconds",
+            "40",
+        ])
+        .env("SHADI_TMP_DIR", dir.path())
+        .env("SHADI_SLIM_AUTH", "did")
+        .env("SLIM_HUMAN_SEED", seed)
+        .env("SLIM_MEMBER_DIDS", &members)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn shadictl slim a2a-echo-peer (did)");
+
+    wait_for_file(&ready_file, READY_FILE_TIMEOUT);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_shadictl"))
+        .args([
+            "slim",
+            "a2a-send",
+            "--endpoint",
+            &endpoint,
+            "--agent-id",
+            "avatar",
+            "--peer-agent-id",
+            "secops-a",
+            "--message",
+            "hello over DID",
+            "--timeout-seconds",
+            "15",
+        ])
+        .env("SHADI_TMP_DIR", dir.path())
+        .env("SHADI_SLIM_AUTH", "did")
+        .env("SLIM_HUMAN_SEED", seed)
+        .env("SLIM_MEMBER_DIDS", &members)
+        .output()
+        .expect("run shadictl slim a2a-send (did)");
+
+    if !sender.status.success() {
+        let _ = peer.kill();
+        let _ = peer.wait();
+    }
+
+    let (peer_status, peer_stdout, peer_stderr) =
+        wait_for_child_output(&mut peer, CHILD_EXIT_TIMEOUT);
+
+    assert_eq!(
+        sender.status.code(),
+        Some(0),
+        "sender stderr={} stdout={}",
+        String::from_utf8_lossy(&sender.stderr),
+        String::from_utf8_lossy(&sender.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&sender.stdout)
+            .contains("echo:agntcy/shadi/secops-a:hello over DID"),
+        "sender stdout={}",
+        String::from_utf8_lossy(&sender.stdout)
+    );
+    assert_eq!(
+        peer_status.code(),
+        Some(0),
+        "peer stderr={} stdout={}",
+        peer_stderr,
+        peer_stdout
+    );
+}
+
 #[test]
 fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_task_round_trip_succeeds() {
     let dir = TestDir::new("a2a-task-roundtrip");

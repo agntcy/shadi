@@ -13,8 +13,6 @@ use std::sync::{Mutex, OnceLock};
 
 use base64::Engine;
 use clap::{ArgAction, Parser, Subcommand};
-use ed25519_dalek::SigningKey;
-use hkdf::Hkdf;
 #[cfg(not(test))]
 use reqwest::blocking::Client;
 #[cfg(not(test))]

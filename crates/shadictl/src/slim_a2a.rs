@@ -23,8 +23,8 @@ use tokio::sync::Notify;
 use crate::cli_types::{SlimA2AEchoPeerArgs, SlimA2ASendArgs};
 use crate::slim_shell::{
     build_client_config_for_endpoint, build_server_config_for_endpoint, format_slim_error,
-    parse_name, resolve_client_tls_material_for_agent, resolve_default_shared_secret,
-    resolve_server_tls_material,
+    parse_name, resolve_client_tls_material_for_agent, resolve_server_tls_material,
+    resolve_slim_auth,
 };
 
 const DEFAULT_SLIM_ENDPOINT: &str = "127.0.0.1:47357";
@@ -237,7 +237,7 @@ impl RequestHandler for SlimA2AHandler {
 
 pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String> {
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
-    let shared_secret = resolve_default_shared_secret()?;
+    let auth = resolve_slim_auth(&args.agent_id)?;
     let peer_name = slim_name(&args.agent_id);
     let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
     let server_tls = resolve_server_tls_material()?;
@@ -258,8 +258,7 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
         .connect(build_client_config_for_endpoint(&endpoint, &client_tls))
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
-    let app = service
-        .create_app_with_secret(peer_name_ref.clone(), shared_secret)
+    let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
@@ -450,7 +449,7 @@ pub(crate) fn parse_shell_a2a_send_args(args: &[&str]) -> Result<SlimA2ASendArgs
 
 fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
-    let shared_secret = resolve_default_shared_secret()?;
+    let auth = resolve_slim_auth(&args.agent_id)?;
     let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
     let local_name = slim_name(&args.agent_id);
     let destination = args
@@ -464,8 +463,7 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
         .map_err(format_slim_error)?;
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let remote_name_ref = Arc::new(parse_name(&destination)?);
-    let app = service
-        .create_app_with_secret(local_name_ref.clone(), shared_secret)
+    let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(local_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;

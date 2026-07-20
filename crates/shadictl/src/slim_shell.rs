@@ -523,6 +523,47 @@ pub(crate) fn resolve_default_shared_secret() -> Result<String, String> {
         .map_err(|_| format!("SLIM shared secret {} is not valid UTF-8", key_name))
 }
 
+/// Resolve how this agent authenticates to the SLIM mesh.
+///
+/// `SHADI_SLIM_AUTH=did` selects DID-JWT admission: the agent's key is derived
+/// from the human root secret (`SLIM_HUMAN_SEED`) via SHADI's HKDF agent
+/// derivation, and the allow-list is `SLIM_MEMBER_DIDS` (comma-separated
+/// `did:key`s). Anything else (default) uses the shared-secret mesh key.
+pub(crate) fn resolve_slim_auth(agent_id: &str) -> Result<shadi_identity::SlimAuth, String> {
+    let mode = std::env::var("SHADI_SLIM_AUTH").unwrap_or_else(|_| "shared-secret".to_string());
+    if mode.eq_ignore_ascii_case("did") {
+        let human_seed = std::env::var("SLIM_HUMAN_SEED")
+            .map_err(|_| "SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED".to_string())?;
+        let members = std::env::var("SLIM_MEMBER_DIDS")
+            .map_err(|_| "SHADI_SLIM_AUTH=did requires SLIM_MEMBER_DIDS".to_string())?;
+        build_did_auth(human_seed.as_bytes(), &members, agent_id)
+    } else {
+        Ok(shadi_identity::SlimAuth::SharedSecret(
+            resolve_default_shared_secret()?,
+        ))
+    }
+}
+
+/// Build DID-JWT auth for `agent_id`: derive the agent key from `human_seed` and
+/// trust the comma-separated `member_dids` allow-list. Pure (no env) for testing.
+fn build_did_auth(
+    human_seed: &[u8],
+    member_dids: &str,
+    agent_id: &str,
+) -> Result<shadi_identity::SlimAuth, String> {
+    let dids: Vec<&str> = member_dids
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if dids.is_empty() {
+        return Err("SLIM_MEMBER_DIDS is empty".to_string());
+    }
+    let agent =
+        shadi_identity::AgentIdentity::derive(human_seed, agent_id).map_err(|e| e.to_string())?;
+    shadi_identity::SlimAuth::did(&agent, dids).map_err(|e| e.to_string())
+}
+
 fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(PathBuf, PathBuf)> {
     let mut candidates = Vec::new();
 
@@ -630,6 +671,21 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn build_did_auth_builds_did_slim_auth_for_members() {
+        let a = shadi_identity::AgentIdentity::derive(b"seed", "agent-x").unwrap();
+        let p = shadi_identity::AgentIdentity::derive(b"seed", "peer").unwrap();
+        let members = format!("{}, {}", a.did(), p.did());
+        let auth = build_did_auth(b"seed", &members, "agent-x").expect("did auth");
+        assert!(matches!(auth, shadi_identity::SlimAuth::Did { .. }));
+    }
+
+    #[test]
+    fn build_did_auth_rejects_empty_and_invalid_members() {
+        assert!(build_did_auth(b"seed", "  ,  ", "agent-x").is_err());
+        assert!(build_did_auth(b"seed", "not-a-did-key", "agent-x").is_err());
+    }
 
     #[cfg(not(windows))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";

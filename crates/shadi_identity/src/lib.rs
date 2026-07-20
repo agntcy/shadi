@@ -77,6 +77,36 @@ impl AgentIdentity {
         }
     }
 
+    /// Derive an agent identity from a human root secret and an agent name, via
+    /// HKDF-SHA256 (salt `"shadi-agent-derive"`, info = agent name). One human key
+    /// yields many agent DIDs (one per name); which human an agent belongs to is
+    /// recorded by the caller's binding store. This is SHADI's canonical agent
+    /// derivation — `shadictl`'s `derive_agent_keypair` delegates here.
+    pub fn derive(human_secret: &[u8], agent_name: &str) -> Result<Self, IdentityError> {
+        if agent_name.trim().is_empty() {
+            return Err(IdentityError::KeyGen(
+                "agent name cannot be empty".to_string(),
+            ));
+        }
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"shadi-agent-derive"), human_secret);
+        let mut seed = [0u8; 32];
+        hk.expand(agent_name.as_bytes(), &mut seed)
+            .map_err(|_| IdentityError::KeyGen("failed to derive agent key".to_string()))?;
+        let id = Self::from_signing_key_bytes(&seed);
+        seed.iter_mut().for_each(|b| *b = 0);
+        Ok(id)
+    }
+
+    /// The 32-byte Ed25519 signing (private) key.
+    pub fn signing_key_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
+    /// The 32-byte Ed25519 verifying (public) key.
+    pub fn verifying_key_bytes(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
     /// Same as [`Self::from_signing_key_bytes`] from a slice (must be 32 bytes).
     pub fn from_signing_key_slice(bytes: &[u8]) -> Result<Self, IdentityError> {
         let arr: [u8; 32] = bytes
@@ -199,6 +229,23 @@ mod tests {
         assert!(did.starts_with("did:key:z"));
         let parsed = parse_did_key(&did).unwrap();
         assert_eq!(parsed.as_bytes(), id.verifying_key().as_bytes());
+    }
+
+    #[test]
+    fn derive_is_deterministic_and_name_scoped() {
+        let human = b"human-root-secret";
+        let a1 = AgentIdentity::derive(human, "agent-a").unwrap();
+        let a2 = AgentIdentity::derive(human, "agent-a").unwrap();
+        let b = AgentIdentity::derive(human, "agent-b").unwrap();
+        assert_eq!(a1.did(), a2.did()); // deterministic
+        assert_ne!(a1.did(), b.did()); // scoped by name
+        assert_ne!(
+            AgentIdentity::derive(b"other-human", "agent-a")
+                .unwrap()
+                .did(),
+            a1.did()
+        ); // scoped by human key
+        assert!(AgentIdentity::derive(human, "  ").is_err());
     }
 
     #[test]

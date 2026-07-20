@@ -239,6 +239,7 @@ dependencies = [
  "agntcy-shadi-a2a",
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-agent-transport-slim",
+ "agntcy-shadi-identity",
  "agntcy-shadi-memory",
  "agntcy-shadi-sandbox",
  "agntcy-shadi-slim-mas",
@@ -280,8 +281,10 @@ dependencies = [
  "bs58",
  "ed25519-dalek",
  "getrandom 0.2.17",
+ "hkdf",
  "pkcs8",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
