@@ -112,4 +112,5 @@ mod tests {
         assert!(matches!(p, IdentityProviderConfig::Jwt { .. }));
         assert!(matches!(v, IdentityVerifierConfig::Jwt { .. }));
     }
+
 }

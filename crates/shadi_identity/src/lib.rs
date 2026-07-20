@@ -232,6 +232,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_did_key_rejects_valid_base58_wrong_multicodec() {
+        // Valid base58 multibase, but not the Ed25519 multicodec/length.
+        let bad = format!("did:key:z{}", bs58::encode([0x12u8, 0x00, 1, 2, 3]).into_string());
+        assert!(parse_did_key(&bad).is_err());
+    }
+
+    #[test]
+    fn identity_error_display_covers_variants() {
+        assert!(IdentityError::KeyGen("x".into())
+            .to_string()
+            .contains("key generation"));
+        assert!(IdentityError::Pkcs8("x".into())
+            .to_string()
+            .contains("PKCS#8"));
+        assert!(IdentityError::InvalidDid("x".into())
+            .to_string()
+            .contains("invalid did:key"));
+    }
+
+    #[test]
+    fn verifier_config_from_dids_builds_jwt_verifier() {
+        let a = AgentIdentity::generate().unwrap();
+        let cfg = verifier_config_from_dids([a.did().as_str()], None).unwrap();
+        assert!(matches!(
+            cfg,
+            slim_bindings::IdentityVerifierConfig::Jwt { .. }
+        ));
+        assert!(verifier_config_from_dids(["did:web:nope"], None).is_err());
+    }
+
+    #[test]
+    fn provider_config_with_audience_scopes_channel() {
+        let a = AgentIdentity::generate().unwrap();
+        let cfg = a.provider_config(Some("org/ns/chan")).unwrap();
+        match cfg {
+            slim_bindings::IdentityProviderConfig::Jwt { config } => {
+                assert_eq!(config.audience, Some(vec!["org/ns/chan".to_string()]));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn public_jwk_is_okp_ed25519() {
         let id = AgentIdentity::generate().unwrap();
         let jwk = id.public_jwk();
