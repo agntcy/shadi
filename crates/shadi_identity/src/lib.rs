@@ -17,7 +17,10 @@ use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use pkcs8::LineEnding;
 
+pub mod auth;
 pub mod config;
+
+pub use auth::{create_app, SlimAuth};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
@@ -87,30 +90,30 @@ impl AgentIdentity {
         verifying_key_to_jwk(&self.verifying_key(), &self.did())
     }
 
-    /// SLIM identity **provider** config that proves this agent's DID on `channel`
-    /// by signing a DID-JWT with its Ed25519 key.
+    /// SLIM identity **provider** config that proves this agent's DID by signing a
+    /// DID-JWT with its Ed25519 key. `audience` scopes to a channel when `Some`.
     pub fn provider_config(
         &self,
-        channel: &str,
+        audience: Option<&str>,
     ) -> Result<slim_bindings::IdentityProviderConfig, IdentityError> {
         Ok(config::did_provider_config(
             &self.to_pkcs8_pem()?,
             &self.did(),
-            channel,
+            audience,
         ))
     }
 }
 
-/// SLIM identity **verifier** config for `channel` whose trusted-key set is the
-/// given member DIDs — the cryptographic allow-list.
+/// SLIM identity **verifier** config whose trusted-key set is the given member
+/// DIDs — the cryptographic allow-list. `audience` scopes to a channel when `Some`.
 pub fn verifier_config_from_dids<'a, I>(
     dids: I,
-    channel: &str,
+    audience: Option<&str>,
 ) -> Result<slim_bindings::IdentityVerifierConfig, IdentityError>
 where
     I: IntoIterator<Item = &'a str>,
 {
-    Ok(config::did_verifier_config(&jwks_from_dids(dids)?, channel))
+    Ok(config::did_verifier_config(&jwks_from_dids(dids)?, audience))
 }
 
 /// Encode an Ed25519 public key as a `did:key` (`did:key:z<base58btc(0xed01 || pubkey)>`).

@@ -273,13 +273,16 @@ dependencies = [
 name = "agntcy-shadi-identity"
 version = "0.1.0"
 dependencies = [
+ "agntcy-slim-auth",
  "agntcy-slim-bindings",
+ "agntcy-slim-config",
  "base64 0.22.1",
  "bs58",
  "ed25519-dalek",
  "getrandom 0.2.17",
  "pkcs8",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

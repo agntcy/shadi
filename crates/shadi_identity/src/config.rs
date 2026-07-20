@@ -18,9 +18,15 @@ use slim_bindings::{
 /// removal for revocation).
 pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(300);
 
-/// Identity provider config: prove this agent's DID to a channel by signing a
-/// DID-JWT (`sub = did`, `aud = channel`) with its Ed25519 private key (PKCS#8 PEM).
-pub fn did_provider_config(private_pem: &str, did: &str, channel: &str) -> IdentityProviderConfig {
+/// Identity provider config: prove this agent's DID by signing a DID-JWT
+/// (`sub = did`) with its Ed25519 private key (PKCS#8 PEM). `audience` scopes the
+/// token to a channel when `Some`; `None` = identity-only (admission is the
+/// verifier's allow-list). See the design note (aud binding).
+pub fn did_provider_config(
+    private_pem: &str,
+    did: &str,
+    audience: Option<&str>,
+) -> IdentityProviderConfig {
     IdentityProviderConfig::Jwt {
         config: ClientJwtAuth {
             key: JwtKeyType::Encoding {
@@ -32,8 +38,10 @@ pub fn did_provider_config(private_pem: &str, did: &str, channel: &str) -> Ident
                     },
                 },
             },
-            audience: Some(vec![channel.to_string()]),
-            issuer: None,
+            audience: audience.map(|c| vec![c.to_string()]),
+            // Self-issued DID-JWT: iss = sub = the agent's did:key. The verifier
+            // requires an issuer claim to be present.
+            issuer: Some(did.to_string()),
             subject: Some(did.to_string()),
             duration: DEFAULT_TOKEN_TTL,
         },
@@ -41,8 +49,9 @@ pub fn did_provider_config(private_pem: &str, did: &str, channel: &str) -> Ident
 }
 
 /// Identity verifier config whose trusted-key set is `member_jwks` (the DID
-/// allow-list). Only JWTs signed by a member DID (and scoped to `channel`) verify.
-pub fn did_verifier_config(member_jwks: &str, channel: &str) -> IdentityVerifierConfig {
+/// allow-list). Only JWTs signed by a member DID verify; `audience` additionally
+/// scopes to a channel when `Some`.
+pub fn did_verifier_config(member_jwks: &str, audience: Option<&str>) -> IdentityVerifierConfig {
     IdentityVerifierConfig::Jwt {
         config: JwtAuth {
             key: JwtKeyType::Decoding {
@@ -54,7 +63,7 @@ pub fn did_verifier_config(member_jwks: &str, channel: &str) -> IdentityVerifier
                     },
                 },
             },
-            audience: Some(vec![channel.to_string()]),
+            audience: audience.map(|c| vec![c.to_string()]),
             issuer: None,
             subject: None,
             duration: DEFAULT_TOKEN_TTL,
@@ -71,7 +80,7 @@ mod tests {
     fn provider_config_sets_did_subject_and_channel_audience() {
         let id = AgentIdentity::generate().unwrap();
         let pem = id.to_pkcs8_pem().unwrap();
-        let cfg = did_provider_config(&pem, &id.did(), "org/ns/chan");
+        let cfg = did_provider_config(&pem, &id.did(), Some("org/ns/chan"));
         match cfg {
             IdentityProviderConfig::Jwt { config } => {
                 assert_eq!(config.subject.as_deref(), Some(id.did().as_str()));
@@ -99,7 +108,7 @@ mod tests {
         let a = AgentIdentity::generate().unwrap();
         let b = AgentIdentity::generate().unwrap();
         let jwks = jwks_from_dids([a.did().as_str(), b.did().as_str()]).unwrap();
-        let cfg = did_verifier_config(&jwks, "org/ns/chan");
+        let cfg = did_verifier_config(&jwks, Some("org/ns/chan"));
         match cfg {
             IdentityVerifierConfig::Jwt { config } => {
                 assert_eq!(config.audience, Some(vec!["org/ns/chan".to_string()]));
