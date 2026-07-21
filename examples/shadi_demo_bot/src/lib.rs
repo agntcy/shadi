@@ -1448,7 +1448,7 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
             let server = server.clone();
             tokio::spawn(async move {
                 server
-                    .serve_async()
+                    .serve()
                     .await
                     .map_err(|err| format!("A2A SLIMRPC server failed: {}", err))
             })
@@ -1472,7 +1472,7 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
-        server.shutdown_async().await;
+        server.shutdown().await;
         let server_status = server_task
             .await
             .map_err(|err| format!("failed to join A2A SLIMRPC server task: {}", err))?;

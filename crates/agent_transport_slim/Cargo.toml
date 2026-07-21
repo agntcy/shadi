@@ -15,4 +15,4 @@ slim = []
 
 [dependencies]
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", path = "../agent_secrets" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.7" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }

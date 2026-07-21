@@ -132,12 +132,13 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
     assert!(peer_stdout.contains("[shadictl a2a-peer] ready as agntcy/shadi/secops-a"), "peer stdout={peer_stdout}");
 }
 
-// DID admission crypto is proven in `tests/admission.rs` (member verifies, non-member
-// rejected). This end-to-end CLI round-trip additionally exercises a live MLS session
-// under DID auth, which currently stalls at MLS `add participant` with asymmetric
-// per-identity keys (same session-layer symptom as agntcy/slim#1869, which fixed the
-// shared-secret case). Ignored until slim's MLS layer supports DID-based sessions.
-#[ignore = "blocked on slim MLS add-participant with per-identity DID keys; crypto proven in tests/admission.rs"]
+// End-to-end DID-auth round trip: two agents derived from one human seed form a
+// live SLIM group session (moderator invite -> discovery -> MLS join) and exchange
+// an A2A message. This exercises the per-identity `did:key` JWT admission path that
+// was fixed in agntcy/slim#1883 (slim-auth 0.14.0): a multi-member JWKS allow-list
+// now selects the right key per token, so the participant verifies the moderator's
+// DiscoveryRequest instead of dropping it. The DID admission crypto is also proven
+// in isolation in `tests/admission.rs`.
 #[test]
 fn given_did_auth_when_member_peer_and_sender_run_then_round_trip_succeeds() {
     let dir = TestDir::new("a2a-did-roundtrip");

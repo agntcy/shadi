@@ -408,7 +408,7 @@ fn run_slim_listener(
     let result = runtime.block_on(async move {
         let srv = server.clone();
         let server_task = tokio::spawn(async move {
-            srv.serve_async()
+            srv.serve()
                 .await
                 .map_err(|e| format!("A2A SLIMRPC server error: {e}"))
         });
@@ -422,7 +422,7 @@ fn run_slim_listener(
             .map_err(|e| format!("ctrl_c error: {e}"))?;
 
         println!("\n[agentbridge] shutting down...");
-        server.shutdown_async().await;
+        server.shutdown().await;
         let _ = server_task.await;
         Ok::<(), String>(())
     });
