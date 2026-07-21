@@ -23,8 +23,8 @@ use tokio::sync::Notify;
 use crate::cli_types::{SlimA2AEchoPeerArgs, SlimA2ASendArgs};
 use crate::slim_shell::{
     build_client_config_for_endpoint, build_server_config_for_endpoint, format_slim_error,
-    parse_name, resolve_client_tls_material_for_agent, resolve_default_shared_secret,
-    resolve_server_tls_material,
+    parse_name, resolve_client_tls_material_for_agent, resolve_server_tls_material,
+    resolve_slim_auth,
 };
 
 const DEFAULT_SLIM_ENDPOINT: &str = "127.0.0.1:47357";
@@ -237,7 +237,7 @@ impl RequestHandler for SlimA2AHandler {
 
 pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String> {
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
-    let shared_secret = resolve_default_shared_secret()?;
+    let auth = resolve_slim_auth(&args.agent_id)?;
     let peer_name = slim_name(&args.agent_id);
     let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
     let server_tls = resolve_server_tls_material()?;
@@ -258,8 +258,7 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
         .connect(build_client_config_for_endpoint(&endpoint, &client_tls))
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
-    let app = service
-        .create_app_with_secret(peer_name_ref.clone(), shared_secret)
+    let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
@@ -293,7 +292,7 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
             let server = server.clone();
             tokio::spawn(async move {
                 server
-                    .serve_async()
+                    .serve()
                     .await
                     .map_err(|err| format!("A2A SLIMRPC server failed: {}", err))
             })
@@ -317,7 +316,7 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
-        server.shutdown_async().await;
+        server.shutdown().await;
         let server_status = server_task
             .await
             .map_err(|err| format!("failed to join A2A SLIMRPC server task: {}", err))?;
@@ -450,7 +449,7 @@ pub(crate) fn parse_shell_a2a_send_args(args: &[&str]) -> Result<SlimA2ASendArgs
 
 fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
-    let shared_secret = resolve_default_shared_secret()?;
+    let auth = resolve_slim_auth(&args.agent_id)?;
     let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
     let local_name = slim_name(&args.agent_id);
     let destination = args
@@ -464,18 +463,27 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
         .map_err(format_slim_error)?;
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let remote_name_ref = Arc::new(parse_name(&destination)?);
-    let app = service
-        .create_app_with_secret(local_name_ref.clone(), shared_secret)
+    let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(local_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
+
     let mut session = SessionContext::new(&args.agent_id, &args.session_id);
     session.verified = true;
     let verifier: Arc<dyn AgentVerifier> = Arc::new(VerifiedSessionVerifier);
-    let channel = A2AChannelBuilder::new(app.clone(), remote_name_ref, verifier, session)
-        .connection_id(connection_id)
-        .build();
+    // slim_rpc::Channel captures `tokio::runtime::Handle::current()` at construction,
+    // so build the transport inside the runtime context.
+    let channel = {
+        let _enter = runtime.enter();
+        A2AChannelBuilder::new(app.clone(), remote_name_ref, verifier, session)
+            .connection_id(connection_id)
+            .build()
+    };
     let client = A2AClient::new(Box::new(channel));
     let request = SendMessageRequest {
         message: Message::new(Role::User, vec![Part::text(args.message.clone())]),
@@ -484,10 +492,6 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
         tenant: None,
     };
 
-    let runtime = TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
     let response_detail = runtime
         .block_on(async {
             tokio::time::timeout(Duration::from_secs(args.timeout_seconds), async {

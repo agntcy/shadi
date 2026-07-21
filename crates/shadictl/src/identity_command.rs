@@ -553,16 +553,14 @@ fn github_api_get_gpg_keys(user: &str) -> Result<String, String> {
 }
 
 pub(crate) fn derive_agent_keypair(secret_key: &[u8], agent_name: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
-    if agent_name.trim().is_empty() {
-        return Err("agent name cannot be empty".to_string());
-    }
-    let hk = Hkdf::<Sha256>::new(Some(b"shadi-agent-derive"), secret_key);
-    let mut seed = [0u8; 32];
-    hk.expand(agent_name.as_bytes(), &mut seed)
-        .map_err(|_| "failed to derive agent key".to_string())?;
-    let signing = SigningKey::from_bytes(&seed);
-    let verifying = signing.verifying_key();
-    Ok((signing.to_bytes().to_vec(), verifying.to_bytes().to_vec()))
+    // Canonical HKDF agent derivation lives in shadi_identity; delegate so there
+    // is a single did:key derivation code path across the workspace.
+    let id = shadi_identity::AgentIdentity::derive(secret_key, agent_name)
+        .map_err(|err| err.to_string())?;
+    Ok((
+        id.signing_key_bytes().to_vec(),
+        id.verifying_key_bytes().to_vec(),
+    ))
 }
 
 pub(crate) fn extract_ed25519_public_key(openpgp_bytes: &[u8]) -> Result<Vec<u8>, String> {

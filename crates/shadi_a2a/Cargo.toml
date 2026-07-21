@@ -15,10 +15,10 @@ agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", pat
 a2a = { package = "a2a-lf", version = "0.3.0" }
 a2a-client = { package = "a2a-client-lf", version = "0.2.1" }
 a2a-server = { package = "a2a-server-lf", version = "0.4.1" }
-a2a-slimrpc = { package = "a2a-slimrpc", version = "0.2.1" }
+a2a-slimrpc = { package = "a2a-slimrpc", version = "0.2.2" }
 async-trait = "0.1"
 futures = "0.3"
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.7" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

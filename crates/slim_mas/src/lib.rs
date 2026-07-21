@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use agent_secrets::{AgentVerifier, SecretError, SecretResult, SessionContext};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -15,14 +16,14 @@ pub struct MasSettings {
     pub default_group: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GroupConfig {
     pub moderator_did: Option<String>,
     #[serde(default)]
     pub members: Vec<MemberConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MemberConfig {
     pub did: String,
     pub role: Option<String>,
@@ -64,6 +65,35 @@ pub fn is_member_allowed(group: &GroupConfig, did: &str, role: Option<&str>) -> 
             (None, _) => true,
         }
     })
+}
+
+/// [`AgentVerifier`] that admits a session only when its DID is on a group's
+/// allow-list ([`is_member_allowed`]). The DID is read from
+/// [`SessionContext::did`]; a session with no DID, or a DID absent from the
+/// group, is rejected.
+///
+/// This enforces the `slim_mas` membership policy at the application layer. The
+/// DID is trusted-by-assertion here; later phases establish it cryptographically
+/// from a DID-signed token before it reaches this check.
+pub struct DidPolicyVerifier {
+    group: GroupConfig,
+}
+
+impl DidPolicyVerifier {
+    pub fn new(group: GroupConfig) -> Self {
+        Self { group }
+    }
+}
+
+impl AgentVerifier for DidPolicyVerifier {
+    fn verify(&self, session: &SessionContext) -> SecretResult<()> {
+        let did = session.did.as_deref().ok_or(SecretError::NotAuthorized)?;
+        if is_member_allowed(&self.group, did, None) {
+            Ok(())
+        } else {
+            Err(SecretError::NotAuthorized)
+        }
+    }
 }
 
 pub fn resolve_did_ref<F>(did_ref: &str, mut fetch: F) -> Result<String, String>
@@ -236,5 +266,42 @@ members = [
         let resolved = resolve_group_dids(&group, |key| Ok(format!("did:{}", key))).expect("group");
         assert_eq!(resolved.moderator_did.as_deref(), Some("did:mod"));
         assert_eq!(resolved.members[0].did, "did:member");
+    }
+
+    fn single_member_group(did: &str) -> GroupConfig {
+        GroupConfig {
+            moderator_did: None,
+            members: vec![MemberConfig {
+                did: did.to_string(),
+                role: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn did_policy_verifier_admits_allowed_did() {
+        let verifier = DidPolicyVerifier::new(single_member_group("did:key:agent"));
+        let session = SessionContext::new("agent", "s1").with_did("did:key:agent");
+        assert!(verifier.verify(&session).is_ok());
+    }
+
+    #[test]
+    fn did_policy_verifier_rejects_unknown_did() {
+        let verifier = DidPolicyVerifier::new(single_member_group("did:key:agent"));
+        let session = SessionContext::new("x", "s1").with_did("did:key:intruder");
+        assert!(matches!(
+            verifier.verify(&session),
+            Err(SecretError::NotAuthorized)
+        ));
+    }
+
+    #[test]
+    fn did_policy_verifier_rejects_session_without_did() {
+        let verifier = DidPolicyVerifier::new(single_member_group("did:key:agent"));
+        let session = SessionContext::new("x", "s1"); // no DID established
+        assert!(matches!(
+            verifier.verify(&session),
+            Err(SecretError::NotAuthorized)
+        ));
     }
 }

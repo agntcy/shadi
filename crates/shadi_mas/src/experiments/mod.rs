@@ -166,20 +166,30 @@ impl LiveA2ATaskAdapter {
                 app.subscribe(local_name_ref.clone(), Some(connection_id))
                     .map_err(format_slim_error)?;
 
+                let runtime = TokioRuntimeBuilder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
+
                 let mut session = SessionContext::new(
                     &self.config.agent_id,
                     &format!("mas-task-session-{}", task.task_id),
                 );
                 session.verified = true;
 
-                let channel = A2AChannelBuilder::new(
-                    app.clone(),
-                    remote_name_ref,
-                    Arc::new(VerifiedSessionVerifier),
-                    session,
-                )
-                .connection_id(connection_id)
-                .build();
+                // slim_rpc::Channel captures `tokio::runtime::Handle::current()` at
+                // construction, so build the transport inside the runtime context.
+                let channel = {
+                    let _enter = runtime.enter();
+                    A2AChannelBuilder::new(
+                        app.clone(),
+                        remote_name_ref,
+                        Arc::new(VerifiedSessionVerifier),
+                        session,
+                    )
+                    .connection_id(connection_id)
+                    .build()
+                };
                 let client = A2AClient::new(Box::new(channel));
                 let request = SendMessageRequest {
                     message: Message::new(
@@ -191,10 +201,6 @@ impl LiveA2ATaskAdapter {
                     tenant: None,
                 };
 
-                let runtime = TokioRuntimeBuilder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
                 let response_detail = runtime
                     .block_on(async {
                         let response = client.send_message(&request).await?;
