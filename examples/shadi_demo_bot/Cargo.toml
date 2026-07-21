@@ -10,12 +10,13 @@ a2a = { package = "a2a-lf", version = "0.3.0" }
 a2a-client = { package = "a2a-client-lf", version = "0.2.1" }
 a2a-server = { package = "a2a-server-lf", version = "0.4.1" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", path = "../../crates/agent_secrets" }
+shadi_identity = { package = "agntcy-shadi-identity", path = "../../crates/shadi_identity" }
 agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", path = "../../crates/agent_transport_slim" }
 async-trait = "0.1"
 shadi_memory = { package = "agntcy-shadi-memory", path = "../../crates/shadi_memory" }
 shadi_sandbox = { package = "agntcy-shadi-sandbox", path = "../../crates/shadi_sandbox" }
 shadi_a2a = { package = "agntcy-shadi-a2a", path = "../../crates/shadi_a2a" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.7" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }
 slim_rpc = { package = "agntcy-slim-rpc", version = "2.0.0-alpha.5" }
 clap = { version = "4.6", features = ["derive", "env"] }
 ctrlc = "3.5"

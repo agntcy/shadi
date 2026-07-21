@@ -419,6 +419,7 @@ impl Completer for ShellHelper {
                 "create",
                 "invite",
                 "join",
+                "whoami",
             ];
             for sub in subs {
                 if sub.starts_with(sub_input) {
@@ -602,9 +603,10 @@ impl ShellSession {
                 "create" => self.cmd_slim_create(&parts[2..]),
                 "invite" => self.cmd_slim_invite(&parts[2..]),
                 "join" => self.cmd_slim_join(&parts[2..]),
+                "whoami" => self.cmd_slim_whoami(),
                 _ => {
                     eprintln!("unknown slim subcommand: {}", parts[1]);
-                    eprintln!("  available: status, start node, a2a-echo-peer, a2a-send, create, invite, join");
+                    eprintln!("  available: status, start node, a2a-echo-peer, a2a-send, create, invite, join, whoami");
                     LoopAction::Continue
                 }
             },
@@ -1118,6 +1120,14 @@ impl ShellSession {
         match self.slim.invite_participant(args[0]) {
             Ok(message) => println!("{}", message),
             Err(err) => eprintln!("error inviting SLIM participant: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_whoami(&mut self) -> LoopAction {
+        match self.slim.whoami() {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error resolving SLIM identity: {}", err),
         }
         LoopAction::Continue
     }

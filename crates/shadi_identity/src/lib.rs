@@ -20,7 +20,7 @@ use pkcs8::LineEnding;
 pub mod auth;
 pub mod config;
 
-pub use auth::{create_app, SlimAuth};
+pub use auth::{build_did_auth, create_app, did_auth_from_env, SlimAuth};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
@@ -30,6 +30,7 @@ pub enum IdentityError {
     KeyGen(String),
     Pkcs8(String),
     InvalidDid(String),
+    Config(String),
 }
 
 impl fmt::Display for IdentityError {
@@ -38,6 +39,7 @@ impl fmt::Display for IdentityError {
             IdentityError::KeyGen(e) => write!(f, "key generation failed: {e}"),
             IdentityError::Pkcs8(e) => write!(f, "PKCS#8 error: {e}"),
             IdentityError::InvalidDid(e) => write!(f, "invalid did:key: {e}"),
+            IdentityError::Config(e) => write!(f, "auth configuration error: {e}"),
         }
     }
 }

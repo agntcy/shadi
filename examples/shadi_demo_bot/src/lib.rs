@@ -1352,8 +1352,11 @@ fn run_slim_echo_peer(args: SlimEchoPeerArgs) -> Result<(), String> {
         .connect(build_client_config(&args.endpoint, &client_tls))
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
-    let app = service
-        .create_app_with_secret(peer_name_ref.clone(), args.shared_secret.clone())
+    let auth = match shadi_identity::did_auth_from_env(peer_name.rsplit('/').next().unwrap_or(&peer_name)) {
+        Some(result) => result.map_err(|e| e.to_string())?,
+        None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
+    };
+    let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
@@ -1413,8 +1416,11 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
         .connect(build_client_config(&args.endpoint, &client_tls))
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
-    let app = service
-        .create_app_with_secret(peer_name_ref.clone(), args.shared_secret.clone())
+    let auth = match shadi_identity::did_auth_from_env(peer_name.rsplit('/').next().unwrap_or(&peer_name)) {
+        Some(result) => result.map_err(|e| e.to_string())?,
+        None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
+    };
+    let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
@@ -1523,8 +1529,11 @@ fn run_a2a_send_once(args: &A2ASendArgs) -> Result<String, String> {
         .map_err(format_slim_error)?;
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let remote_name_ref = Arc::new(parse_name(&destination)?);
-    let app = service
-        .create_app_with_secret(local_name_ref.clone(), args.shared_secret.clone())
+    let auth = match shadi_identity::did_auth_from_env(local_name.rsplit('/').next().unwrap_or(&local_name)) {
+        Some(result) => result.map_err(|e| e.to_string())?,
+        None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
+    };
+    let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(local_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;

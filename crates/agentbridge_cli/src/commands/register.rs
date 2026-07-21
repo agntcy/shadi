@@ -383,8 +383,11 @@ fn run_slim_listener(
         .map_err(|e| format!("SLIM connect failed: {e:?}"))?;
 
     let name_ref = Arc::new(parse_name(&agent_name)?);
-    let app = service
-        .create_app_with_secret(name_ref.clone(), shared_secret.to_string())
+    let auth = match shadi_identity::did_auth_from_env(agent_id) {
+        Some(result) => result.map_err(|e| format!("SLIM auth error: {e}"))?,
+        None => shadi_identity::SlimAuth::SharedSecret(shared_secret.to_string()),
+    };
+    let app = shadi_identity::create_app(&service, name_ref.clone(), &auth)
         .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
     app.subscribe(name_ref.clone(), Some(connection_id))
         .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
