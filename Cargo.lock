@@ -180,6 +180,7 @@ dependencies = [
  "agntcy-agentbridge",
  "agntcy-shadi-a2a",
  "agntcy-shadi-agent-secrets",
+ "agntcy-shadi-identity",
  "agntcy-shadi-mas",
  "agntcy-slim-bindings",
  "agntcy-slim-rpc",
@@ -227,6 +228,7 @@ name = "agntcy-shadi-agent-transport-slim"
 version = "0.1.2"
 dependencies = [
  "agntcy-shadi-agent-secrets",
+ "agntcy-shadi-identity",
  "agntcy-slim-bindings",
 ]
 
@@ -298,6 +300,7 @@ dependencies = [
  "agntcy-shadi-a2a",
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-agent-transport-slim",
+ "agntcy-shadi-identity",
  "agntcy-slim-bindings",
  "serde",
  "serde_json",
@@ -5877,6 +5880,7 @@ dependencies = [
  "agntcy-shadi-a2a",
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-agent-transport-slim",
+ "agntcy-shadi-identity",
  "agntcy-shadi-memory",
  "agntcy-shadi-sandbox",
  "agntcy-slim-bindings",

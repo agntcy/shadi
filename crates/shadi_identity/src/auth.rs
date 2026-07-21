@@ -78,6 +78,53 @@ pub fn create_app(
     service.create_app(name, provider, verifier)
 }
 
+/// Build DID-JWT auth for `agent_id`: derive the agent key from `human_seed` (via
+/// SHADI's HKDF agent derivation) and trust the comma-separated `member_dids` as the
+/// allow-list. Pure (no environment access) so it is easy to unit-test.
+pub fn build_did_auth(
+    human_seed: &[u8],
+    member_dids: &str,
+    agent_id: &str,
+) -> Result<SlimAuth, IdentityError> {
+    let dids: Vec<&str> = member_dids
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if dids.is_empty() {
+        return Err(IdentityError::Config(
+            "member DID allow-list is empty".to_string(),
+        ));
+    }
+    let agent = AgentIdentity::derive(human_seed, agent_id)?;
+    SlimAuth::did(&agent, dids)
+}
+
+/// Resolve how `agent_id` should authenticate to the SLIM mesh, from the environment.
+///
+/// Returns `Some(..)` iff `SHADI_SLIM_AUTH=did`, in which case the agent key is
+/// derived from `SLIM_HUMAN_SEED` and the allow-list is `SLIM_MEMBER_DIDS`
+/// (comma-separated `did:key`s). Returns `None` for any other mode, signalling the
+/// caller to fall back to its own shared secret. This is the single env contract
+/// shared by every SHADI `create_app` site.
+pub fn did_auth_from_env(agent_id: &str) -> Option<Result<SlimAuth, IdentityError>> {
+    let mode = std::env::var("SHADI_SLIM_AUTH").unwrap_or_default();
+    if !mode.eq_ignore_ascii_case("did") {
+        return None;
+    }
+    Some(resolve_did_env(agent_id))
+}
+
+fn resolve_did_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
+    let human_seed = std::env::var("SLIM_HUMAN_SEED").map_err(|_| {
+        IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED".to_string())
+    })?;
+    let members = std::env::var("SLIM_MEMBER_DIDS").map_err(|_| {
+        IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_MEMBER_DIDS".to_string())
+    })?;
+    build_did_auth(human_seed.as_bytes(), &members, agent_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,4 +160,49 @@ mod tests {
         assert!(matches!(v, IdentityVerifierConfig::Jwt { .. }));
     }
 
+    #[test]
+    fn build_did_auth_builds_did_for_members() {
+        let a = AgentIdentity::derive(b"seed", "agent-x").unwrap();
+        let p = AgentIdentity::derive(b"seed", "peer").unwrap();
+        let members = format!("{}, {}", a.did(), p.did());
+        let auth = build_did_auth(b"seed", &members, "agent-x").expect("did auth");
+        assert!(matches!(auth, SlimAuth::Did { .. }));
+    }
+
+    #[test]
+    fn build_did_auth_rejects_empty_and_invalid_members() {
+        assert!(matches!(
+            build_did_auth(b"seed", "  ,  ", "agent-x"),
+            Err(IdentityError::Config(_))
+        ));
+        assert!(build_did_auth(b"seed", "not-a-did-key", "agent-x").is_err());
+    }
+
+    #[test]
+    fn did_auth_from_env_selects_mode() {
+        // These env vars are touched by no other test in this crate, so a single
+        // sequential test needs no cross-test lock.
+        use std::env;
+        let member = AgentIdentity::derive(b"human", "avatar").unwrap().did();
+
+        env::remove_var("SHADI_SLIM_AUTH");
+        assert!(did_auth_from_env("avatar").is_none());
+
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        env::set_var("SLIM_MEMBER_DIDS", &member);
+        assert!(matches!(
+            did_auth_from_env("avatar"),
+            Some(Ok(SlimAuth::Did { .. }))
+        ));
+
+        env::remove_var("SLIM_HUMAN_SEED");
+        assert!(matches!(
+            did_auth_from_env("avatar"),
+            Some(Err(IdentityError::Config(_)))
+        ));
+
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_MEMBER_DIDS");
+    }
 }

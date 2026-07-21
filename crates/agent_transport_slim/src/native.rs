@@ -54,7 +54,8 @@ impl NativeSlimSession {
     pub fn from_env(bootstrap: NativeSlimBootstrap) -> Result<Self, String> {
         let local_name = resolve_local_name()?;
         let local_name_ref = Arc::new(parse_name(&local_name)?);
-        let shared_secret = resolve_shared_secret()?;
+        // DID derivation uses the app (last) component of the local name.
+        let agent_id = local_name.rsplit('/').next().unwrap_or(&local_name).to_string();
         let client_config = build_client_config()?;
         let service = Service::new(client_service_name());
 
@@ -67,8 +68,11 @@ impl NativeSlimSession {
             let connected_id = service.connect(client_config).map_err(format_slim_error)?;
             connection_id = Some(connected_id);
 
-            let created_app = service
-                .create_app_with_secret(local_name_ref.clone(), shared_secret)
+            let auth = match shadi_identity::did_auth_from_env(&agent_id) {
+                Some(result) => result.map_err(|e| e.to_string())?,
+                None => shadi_identity::SlimAuth::SharedSecret(resolve_shared_secret()?),
+            };
+            let created_app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
                 .map_err(format_slim_error)?;
             created_app
                 .subscribe(local_name_ref.clone(), Some(connected_id))

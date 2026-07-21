@@ -160,8 +160,13 @@ impl LiveA2ATaskAdapter {
                 let local_name_ref = Arc::new(parse_slim_name(&local_name)?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
 
-                let app = service
-                    .create_app_with_secret(local_name_ref.clone(), self.config.shared_secret.clone())
+                let auth = match shadi_identity::did_auth_from_env(&self.config.agent_id) {
+                    Some(result) => result.map_err(|e| e.to_string())?,
+                    None => {
+                        shadi_identity::SlimAuth::SharedSecret(self.config.shared_secret.clone())
+                    }
+                };
+                let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
                     .map_err(format_slim_error)?;
                 app.subscribe(local_name_ref.clone(), Some(connection_id))
                     .map_err(format_slim_error)?;

@@ -14,6 +14,24 @@ const DEFAULT_LOCAL_NAMESPACE: &str = "shadi";
 const DEFAULT_LOCAL_APP: &str = "agent";
 const DEFAULT_SHARED_SECRET_KEY: &str = "secops/slim_shared_secret";
 
+/// Membership role in the active SLIM group session.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlimRole {
+    /// Created the channel and invites members (bound to a human identity under DID auth).
+    Moderator,
+    /// Joined a channel created by a moderator.
+    Participant,
+}
+
+impl SlimRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            SlimRole::Moderator => "moderator",
+            SlimRole::Participant => "participant",
+        }
+    }
+}
+
 pub(crate) struct SlimShellState {
     node_service: Option<Service>,
     client_service: Option<Service>,
@@ -25,6 +43,7 @@ pub(crate) struct SlimShellState {
     active_channel: Option<String>,
     subscribed_channel: Option<String>,
     node_started: bool,
+    role: Option<SlimRole>,
 }
 
 pub(crate) struct SlimStatus {
@@ -56,6 +75,7 @@ impl SlimShellState {
             active_channel: None,
             subscribed_channel: None,
             node_started: false,
+            role: None,
         }
     }
 
@@ -113,11 +133,14 @@ impl SlimShellState {
             .map_err(format_slim_error)?;
 
         self.replace_active_session(app, session, channel_name.to_string())?;
+        self.role = Some(SlimRole::Moderator);
 
-        Ok(format!(
-            "created group session for channel {} as {}",
-            channel_name,
-            self.local_name_string()?
+        let local = self.local_name_string()?;
+        let agent_id = self.agent_id()?;
+        Ok(format_create_channel_message(
+            &channel_name.to_string(),
+            &local,
+            did_identity_for_display(&agent_id),
         ))
     }
 
@@ -139,7 +162,12 @@ impl SlimShellState {
             .active_channel
             .clone()
             .unwrap_or_else(|| "<unknown>".to_string());
-        Ok(format!("invited {} to {}", participant_name, channel))
+        let agent_id = self.agent_id()?;
+        Ok(format_invite_message(
+            &participant_name.to_string(),
+            &channel,
+            did_identity_for_display(&agent_id),
+        ))
     }
 
     pub(crate) fn join_group_session(
@@ -165,6 +193,7 @@ impl SlimShellState {
         }
 
         self.replace_active_session(app, session, actual_name.clone())?;
+        self.role = Some(SlimRole::Participant);
 
         Ok(format!(
             "joined group session for channel {} as {}",
@@ -234,10 +263,13 @@ impl SlimShellState {
 
         let connection_id = self.ensure_connection()?;
         let local_name = self.local_name()?;
-        let shared_secret = self.shared_secret()?;
-        let app = self
-            .client_service_mut()
-            .create_app_with_secret(local_name.clone(), shared_secret)
+        // DID derivation uses the app (last) component of the local name as the agent id.
+        let agent_id = local_name.components().last().cloned().unwrap_or_default();
+        let auth = match shadi_identity::did_auth_from_env(&agent_id) {
+            Some(result) => result.map_err(|e| e.to_string())?,
+            None => shadi_identity::SlimAuth::SharedSecret(self.shared_secret()?),
+        };
+        let app = shadi_identity::create_app(self.client_service_mut(), local_name.clone(), &auth)
             .map_err(format_slim_error)?;
 
         app.subscribe(local_name, Some(connection_id))
@@ -294,6 +326,31 @@ impl SlimShellState {
 
     fn local_name_string(&mut self) -> Result<String, String> {
         Ok(self.local_name()?.to_string())
+    }
+
+    /// Agent id used for DID derivation: the app (last) component of the local name.
+    fn agent_id(&mut self) -> Result<String, String> {
+        Ok(self
+            .local_name()?
+            .components()
+            .last()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Report this agent's identity and role: agent name, auth mode, session role,
+    /// and (under DID auth) its derived DID plus the human DID it belongs to.
+    pub(crate) fn whoami(&mut self) -> Result<String, String> {
+        let local = self.local_name_string()?;
+        let agent_id = self.agent_id()?;
+        let role = self.role.map(SlimRole::as_str).unwrap_or("none");
+        Ok(match did_identity_for_display(&agent_id) {
+            Some((did, human)) => format!(
+                "agent {local}\n  auth:  did\n  role:  {role}\n  did:   {did}\n  human: {}",
+                human.unwrap_or_else(|| "<unset SLIM_HUMAN_DID>".to_string())
+            ),
+            None => format!("agent {local}\n  auth:  shared-secret\n  role:  {role}"),
+        })
     }
 
     fn shared_secret(&mut self) -> Result<String, String> {
@@ -525,43 +582,65 @@ pub(crate) fn resolve_default_shared_secret() -> Result<String, String> {
 
 /// Resolve how this agent authenticates to the SLIM mesh.
 ///
-/// `SHADI_SLIM_AUTH=did` selects DID-JWT admission: the agent's key is derived
-/// from the human root secret (`SLIM_HUMAN_SEED`) via SHADI's HKDF agent
-/// derivation, and the allow-list is `SLIM_MEMBER_DIDS` (comma-separated
-/// `did:key`s). Anything else (default) uses the shared-secret mesh key.
+/// `SHADI_SLIM_AUTH=did` selects DID-JWT admission (agent key derived from
+/// `SLIM_HUMAN_SEED`, allow-list `SLIM_MEMBER_DIDS`); anything else uses the
+/// shared-secret mesh key. The DID env contract lives in
+/// [`shadi_identity::did_auth_from_env`], shared by every SHADI create_app site.
 pub(crate) fn resolve_slim_auth(agent_id: &str) -> Result<shadi_identity::SlimAuth, String> {
-    let mode = std::env::var("SHADI_SLIM_AUTH").unwrap_or_else(|_| "shared-secret".to_string());
-    if mode.eq_ignore_ascii_case("did") {
-        let human_seed = std::env::var("SLIM_HUMAN_SEED")
-            .map_err(|_| "SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED".to_string())?;
-        let members = std::env::var("SLIM_MEMBER_DIDS")
-            .map_err(|_| "SHADI_SLIM_AUTH=did requires SLIM_MEMBER_DIDS".to_string())?;
-        build_did_auth(human_seed.as_bytes(), &members, agent_id)
-    } else {
-        Ok(shadi_identity::SlimAuth::SharedSecret(
+    match shadi_identity::did_auth_from_env(agent_id) {
+        Some(result) => result.map_err(|e| e.to_string()),
+        None => Ok(shadi_identity::SlimAuth::SharedSecret(
             resolve_default_shared_secret()?,
-        ))
+        )),
     }
 }
 
-/// Build DID-JWT auth for `agent_id`: derive the agent key from `human_seed` and
-/// trust the comma-separated `member_dids` allow-list. Pure (no env) for testing.
-fn build_did_auth(
-    human_seed: &[u8],
-    member_dids: &str,
-    agent_id: &str,
-) -> Result<shadi_identity::SlimAuth, String> {
-    let dids: Vec<&str> = member_dids
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if dids.is_empty() {
-        return Err("SLIM_MEMBER_DIDS is empty".to_string());
+/// The DID identity to display for `agent_id` when DID auth is active: its derived
+/// `did:key` plus the human DID it belongs to (`SLIM_HUMAN_DID`, optional). Returns
+/// `None` under shared-secret auth, so callers keep their legacy output.
+fn did_identity_for_display(agent_id: &str) -> Option<(String, Option<String>)> {
+    if !std::env::var("SHADI_SLIM_AUTH")
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("did")
+    {
+        return None;
     }
-    let agent =
-        shadi_identity::AgentIdentity::derive(human_seed, agent_id).map_err(|e| e.to_string())?;
-    shadi_identity::SlimAuth::did(&agent, dids).map_err(|e| e.to_string())
+    let seed = std::env::var("SLIM_HUMAN_SEED").ok()?;
+    let agent = shadi_identity::AgentIdentity::derive(seed.as_bytes(), agent_id).ok()?;
+    let human = std::env::var("SLIM_HUMAN_DID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    Some((agent.did(), human))
+}
+
+/// Format the `create-channel` result: moderator DID (+ human DID) under DID auth,
+/// legacy text under shared-secret. Pure so the role-visible output is unit-tested.
+fn format_create_channel_message(
+    channel: &str,
+    local: &str,
+    did: Option<(String, Option<String>)>,
+) -> String {
+    match did {
+        Some((moderator_did, human)) => format!(
+            "created channel {channel} as moderator {local} ({moderator_did}){}",
+            human.map(|h| format!(" — human {h}")).unwrap_or_default()
+        ),
+        None => format!("created group session for channel {channel} as {local}"),
+    }
+}
+
+/// Format the `invite` result: annotate with the moderator DID under DID auth.
+fn format_invite_message(
+    participant: &str,
+    channel: &str,
+    did: Option<(String, Option<String>)>,
+) -> String {
+    match did {
+        Some((moderator_did, _)) => {
+            format!("invited {participant} to {channel} (moderator {moderator_did})")
+        }
+        None => format!("invited {participant} to {channel}"),
+    }
 }
 
 fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(PathBuf, PathBuf)> {
@@ -672,21 +751,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn build_did_auth_builds_did_slim_auth_for_members() {
-        let a = shadi_identity::AgentIdentity::derive(b"seed", "agent-x").unwrap();
-        let p = shadi_identity::AgentIdentity::derive(b"seed", "peer").unwrap();
-        let members = format!("{}, {}", a.did(), p.did());
-        let auth = build_did_auth(b"seed", &members, "agent-x").expect("did auth");
-        assert!(matches!(auth, shadi_identity::SlimAuth::Did { .. }));
-    }
-
-    #[test]
-    fn build_did_auth_rejects_empty_and_invalid_members() {
-        assert!(build_did_auth(b"seed", "  ,  ", "agent-x").is_err());
-        assert!(build_did_auth(b"seed", "not-a-did-key", "agent-x").is_err());
-    }
-
     #[cfg(not(windows))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
 
@@ -720,6 +784,102 @@ mod tests {
                 None => std::env::remove_var(self.name),
             }
         }
+    }
+
+    #[test]
+    fn did_identity_for_display_selects_did_mode() {
+        let _guard = lock_env();
+        let _auth = ScopedEnvVar::set("SHADI_SLIM_AUTH", "did");
+        let _seed = ScopedEnvVar::set("SLIM_HUMAN_SEED", "human-root");
+        let _human = ScopedEnvVar::set("SLIM_HUMAN_DID", "did:key:zHUMAN");
+
+        let (did, human) = did_identity_for_display("avatar").expect("did identity");
+        assert!(did.starts_with("did:key:z"));
+        assert_eq!(human.as_deref(), Some("did:key:zHUMAN"));
+        // Deterministic, and name-scoped.
+        assert_eq!(did_identity_for_display("avatar").unwrap().0, did);
+        assert_ne!(did_identity_for_display("secops-a").unwrap().0, did);
+    }
+
+    #[test]
+    fn did_identity_for_display_none_under_shared_secret() {
+        let _guard = lock_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
+        assert!(did_identity_for_display("avatar").is_none());
+    }
+
+    #[test]
+    fn format_create_channel_message_covers_all_modes() {
+        // Shared-secret: legacy text, no DID.
+        assert_eq!(
+            format_create_channel_message("agntcy/shadi/room", "agntcy/shadi/avatar", None),
+            "created group session for channel agntcy/shadi/room as agntcy/shadi/avatar"
+        );
+        // DID, no human DID.
+        let did = format_create_channel_message(
+            "agntcy/shadi/room",
+            "agntcy/shadi/avatar",
+            Some(("did:key:zMOD".to_string(), None)),
+        );
+        assert!(did.contains("as moderator agntcy/shadi/avatar (did:key:zMOD)"), "{did}");
+        assert!(!did.contains("human"), "{did}");
+        // DID + human DID.
+        let both = format_create_channel_message(
+            "agntcy/shadi/room",
+            "agntcy/shadi/avatar",
+            Some(("did:key:zMOD".to_string(), Some("did:key:zHUMAN".to_string()))),
+        );
+        assert!(both.contains("(did:key:zMOD)"), "{both}");
+        assert!(both.contains("human did:key:zHUMAN"), "{both}");
+    }
+
+    #[test]
+    fn format_invite_message_covers_all_modes() {
+        assert_eq!(
+            format_invite_message("agntcy/shadi/secops-a", "agntcy/shadi/room", None),
+            "invited agntcy/shadi/secops-a to agntcy/shadi/room"
+        );
+        let did = format_invite_message(
+            "agntcy/shadi/secops-a",
+            "agntcy/shadi/room",
+            Some(("did:key:zMOD".to_string(), Some("did:key:zHUMAN".to_string()))),
+        );
+        assert_eq!(
+            did,
+            "invited agntcy/shadi/secops-a to agntcy/shadi/room (moderator did:key:zMOD)"
+        );
+    }
+
+    #[test]
+    fn whoami_reports_moderator_did_and_human() {
+        let _guard = lock_env();
+        let _custom = ScopedEnvVar::unset("SHADI_SLIM_LOCAL_NAME");
+        let _agent = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
+        let _auth = ScopedEnvVar::set("SHADI_SLIM_AUTH", "did");
+        let _seed = ScopedEnvVar::set("SLIM_HUMAN_SEED", "human-root");
+        let _human = ScopedEnvVar::set("SLIM_HUMAN_DID", "did:key:zHUMAN");
+
+        let mut state = SlimShellState::new();
+        state.role = Some(SlimRole::Moderator);
+        let out = state.whoami().expect("whoami");
+        assert!(out.contains("role:  moderator"), "{out}");
+        assert!(out.contains("auth:  did"), "{out}");
+        assert!(out.contains("did:key:zHUMAN"), "{out}");
+        assert!(out.contains("agntcy/shadi/avatar"), "{out}");
+    }
+
+    #[test]
+    fn whoami_shared_secret_has_no_did_lines() {
+        let _guard = lock_env();
+        let _custom = ScopedEnvVar::unset("SHADI_SLIM_LOCAL_NAME");
+        let _agent = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
+
+        let mut state = SlimShellState::new();
+        let out = state.whoami().expect("whoami");
+        assert!(out.contains("auth:  shared-secret"), "{out}");
+        assert!(out.contains("role:  none"), "{out}");
+        assert!(!out.contains("did:key:"), "{out}");
     }
 
     struct TestDir {
