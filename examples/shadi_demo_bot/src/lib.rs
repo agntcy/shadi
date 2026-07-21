@@ -1529,12 +1529,22 @@ fn run_a2a_send_once(args: &A2ASendArgs) -> Result<String, String> {
     app.subscribe(local_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
+
     let mut session = SessionContext::new(&args.agent_id, "a2a-demo-session");
     session.verified = true;
     let verifier: Arc<dyn AgentVerifier> = Arc::new(VerifiedSessionVerifier);
-    let channel = A2AChannelBuilder::new(app.clone(), remote_name_ref, verifier, session)
-        .connection_id(connection_id)
-        .build();
+    // slim_rpc::Channel captures `tokio::runtime::Handle::current()` at construction,
+    // so build the transport inside the runtime context.
+    let channel = {
+        let _enter = runtime.enter();
+        A2AChannelBuilder::new(app.clone(), remote_name_ref, verifier, session)
+            .connection_id(connection_id)
+            .build()
+    };
     let client = A2AClient::new(Box::new(channel));
     let request = SendMessageRequest {
         message: Message::new(Role::User, vec![Part::text(args.message.clone())]),
@@ -1543,10 +1553,6 @@ fn run_a2a_send_once(args: &A2ASendArgs) -> Result<String, String> {
         tenant: None,
     };
 
-    let runtime = TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
     let response_detail = runtime
         .block_on(async {
             if args.stream {
