@@ -137,15 +137,11 @@ impl SlimShellState {
 
         let local = self.local_name_string()?;
         let agent_id = self.agent_id()?;
-        Ok(match did_identity_for_display(&agent_id) {
-            Some((moderator_did, human)) => format!(
-                "created channel {channel_name} as moderator {local} ({moderator_did}){}",
-                human
-                    .map(|h| format!(" — human {h}"))
-                    .unwrap_or_default()
-            ),
-            None => format!("created group session for channel {channel_name} as {local}"),
-        })
+        Ok(format_create_channel_message(
+            &channel_name.to_string(),
+            &local,
+            did_identity_for_display(&agent_id),
+        ))
     }
 
     pub(crate) fn invite_participant(&mut self, participant: &str) -> Result<String, String> {
@@ -167,12 +163,11 @@ impl SlimShellState {
             .clone()
             .unwrap_or_else(|| "<unknown>".to_string());
         let agent_id = self.agent_id()?;
-        Ok(match did_identity_for_display(&agent_id) {
-            Some((moderator_did, _)) => {
-                format!("invited {participant_name} to {channel} (moderator {moderator_did})")
-            }
-            None => format!("invited {participant_name} to {channel}"),
-        })
+        Ok(format_invite_message(
+            &participant_name.to_string(),
+            &channel,
+            did_identity_for_display(&agent_id),
+        ))
     }
 
     pub(crate) fn join_group_session(
@@ -618,6 +613,36 @@ fn did_identity_for_display(agent_id: &str) -> Option<(String, Option<String>)> 
     Some((agent.did(), human))
 }
 
+/// Format the `create-channel` result: moderator DID (+ human DID) under DID auth,
+/// legacy text under shared-secret. Pure so the role-visible output is unit-tested.
+fn format_create_channel_message(
+    channel: &str,
+    local: &str,
+    did: Option<(String, Option<String>)>,
+) -> String {
+    match did {
+        Some((moderator_did, human)) => format!(
+            "created channel {channel} as moderator {local} ({moderator_did}){}",
+            human.map(|h| format!(" — human {h}")).unwrap_or_default()
+        ),
+        None => format!("created group session for channel {channel} as {local}"),
+    }
+}
+
+/// Format the `invite` result: annotate with the moderator DID under DID auth.
+fn format_invite_message(
+    participant: &str,
+    channel: &str,
+    did: Option<(String, Option<String>)>,
+) -> String {
+    match did {
+        Some((moderator_did, _)) => {
+            format!("invited {participant} to {channel} (moderator {moderator_did})")
+        }
+        None => format!("invited {participant} to {channel}"),
+    }
+}
+
 fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(PathBuf, PathBuf)> {
     let mut candidates = Vec::new();
 
@@ -781,6 +806,48 @@ mod tests {
         let _guard = lock_env();
         let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         assert!(did_identity_for_display("avatar").is_none());
+    }
+
+    #[test]
+    fn format_create_channel_message_covers_all_modes() {
+        // Shared-secret: legacy text, no DID.
+        assert_eq!(
+            format_create_channel_message("agntcy/shadi/room", "agntcy/shadi/avatar", None),
+            "created group session for channel agntcy/shadi/room as agntcy/shadi/avatar"
+        );
+        // DID, no human DID.
+        let did = format_create_channel_message(
+            "agntcy/shadi/room",
+            "agntcy/shadi/avatar",
+            Some(("did:key:zMOD".to_string(), None)),
+        );
+        assert!(did.contains("as moderator agntcy/shadi/avatar (did:key:zMOD)"), "{did}");
+        assert!(!did.contains("human"), "{did}");
+        // DID + human DID.
+        let both = format_create_channel_message(
+            "agntcy/shadi/room",
+            "agntcy/shadi/avatar",
+            Some(("did:key:zMOD".to_string(), Some("did:key:zHUMAN".to_string()))),
+        );
+        assert!(both.contains("(did:key:zMOD)"), "{both}");
+        assert!(both.contains("human did:key:zHUMAN"), "{both}");
+    }
+
+    #[test]
+    fn format_invite_message_covers_all_modes() {
+        assert_eq!(
+            format_invite_message("agntcy/shadi/secops-a", "agntcy/shadi/room", None),
+            "invited agntcy/shadi/secops-a to agntcy/shadi/room"
+        );
+        let did = format_invite_message(
+            "agntcy/shadi/secops-a",
+            "agntcy/shadi/room",
+            Some(("did:key:zMOD".to_string(), Some("did:key:zHUMAN".to_string()))),
+        );
+        assert_eq!(
+            did,
+            "invited agntcy/shadi/secops-a to agntcy/shadi/room (moderator did:key:zMOD)"
+        );
     }
 
     #[test]
