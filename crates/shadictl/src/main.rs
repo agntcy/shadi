@@ -39,6 +39,7 @@ mod sandbox_snapshot;
 mod secrets_command;
 mod slim_shell;
 mod slim_a2a;
+mod slim_controller;
 mod slim_mas_command;
 mod snapshot_command;
 mod trace_command;
@@ -245,6 +246,24 @@ fn run_slim_command(command: SlimCli) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        SlimCommand::Controller { command } => run_controller_command(command),
+    }
+}
+
+fn run_controller_command(command: ControllerCommand) -> ExitCode {
+    let result = match command {
+        ControllerCommand::Connect(args) => slim_controller::run_controller_connect(args),
+        ControllerCommand::ListRoutes(args) => slim_controller::run_controller_list_routes(args),
+        ControllerCommand::ListConnections(args) => {
+            slim_controller::run_controller_list_connections(args)
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(1)
+        }
     }
 }
 

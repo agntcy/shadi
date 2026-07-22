@@ -218,6 +218,66 @@ pub(crate) enum SlimCommand {
         about = "Broadcast an A2A message to a SLIM group channel and listen for others' (Collaborate)"
     )]
     A2ACollaborate(SlimA2ACollaborateArgs),
+    #[command(
+        name = "controller",
+        about = "Securely configure connections/routes on a SLIM node's controller endpoint"
+    )]
+    Controller {
+        #[command(subcommand)]
+        command: ControllerCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ControllerCommand {
+    #[command(
+        about = "Push a ConfigurationCommand (connections/routes) to a controller endpoint"
+    )]
+    Connect(SlimControllerConnectArgs),
+    #[command(name = "list-routes", about = "List routes known to a controller endpoint")]
+    ListRoutes(SlimControllerListArgs),
+    #[command(
+        name = "list-connections",
+        about = "List connections known to a controller endpoint"
+    )]
+    ListConnections(SlimControllerListArgs),
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct SlimControllerConnectArgs {
+    /// Controller endpoint to connect to (host:port) — the node's controller
+    /// server, not its data-plane endpoint.
+    #[arg(long, value_name = "ENDPOINT")]
+    pub(crate) endpoint: String,
+
+    /// Connection to create: <link_id>@<target-endpoint>. Repeatable.
+    #[arg(long = "create-connection", value_name = "LINK_ID@ENDPOINT")]
+    pub(crate) create_connection: Vec<String>,
+
+    /// Link id of a connection to delete. Repeatable.
+    #[arg(long = "delete-connection", value_name = "LINK_ID")]
+    pub(crate) delete_connection: Vec<String>,
+
+    /// Route (subscription) to set: <name>@<link_id>, name as org/ns/agent or
+    /// org/ns/agent/id (id: an integer, a UUID, or NULL_COMPONENT). Repeatable.
+    #[arg(long = "set-route", value_name = "NAME@LINK_ID")]
+    pub(crate) set_route: Vec<String>,
+
+    /// Route to delete: <name>@<link_id> (same name format as --set-route). Repeatable.
+    #[arg(long = "delete-route", value_name = "NAME@LINK_ID")]
+    pub(crate) delete_route: Vec<String>,
+
+    #[arg(long, default_value_t = 10)]
+    pub(crate) timeout_seconds: u64,
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct SlimControllerListArgs {
+    #[arg(long, value_name = "ENDPOINT")]
+    pub(crate) endpoint: String,
+
+    #[arg(long, default_value_t = 10)]
+    pub(crate) timeout_seconds: u64,
 }
 
 #[derive(clap::Args, Clone, Debug)]

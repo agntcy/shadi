@@ -27,6 +27,11 @@ shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path 
 slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.1", path = "../slim_mas" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }
 slim_rpc = { package = "agntcy-slim-rpc", version = "2.0.0-alpha.7" }
+slim_proto = { package = "agntcy-slim-proto", version = "0.4.0" }
+slim_config = { package = "agntcy-slim-config", version = "0.12.6" }
+tonic = { version = "0.14" }
+uuid = { version = "1", features = ["v4"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.0", path = "../shadi_identity" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
