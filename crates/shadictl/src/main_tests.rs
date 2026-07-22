@@ -4181,3 +4181,76 @@ members = [{{ did = "shadi://{}", role = "human" }}]
             ExitCode::from(1)
         );
     }
+
+    #[test]
+    fn run_controller_command_dispatches_list_routes_and_surfaces_errors() {
+        let _guard = trace_env_lock();
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        // No client TLS material is configured, so TLS resolution fails
+        // before any network I/O — exercising the ListRoutes dispatch arm
+        // and error path without needing a live controller endpoint.
+        let args = SlimControllerListArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            timeout_seconds: 1,
+        };
+        let code = run_controller_command(ControllerCommand::ListRoutes(args));
+
+        match previous_cert {
+            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
+            None => std::env::remove_var("SLIM_TLS_CERT"),
+        }
+        match previous_key {
+            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
+            None => std::env::remove_var("SLIM_TLS_KEY"),
+        }
+        match previous_ca {
+            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
+            None => std::env::remove_var("SLIM_TLS_CA"),
+        }
+
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_controller_command_dispatches_list_connections_and_surfaces_errors() {
+        let _guard = trace_env_lock();
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        let args = SlimControllerListArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            timeout_seconds: 1,
+        };
+        let code = run_controller_command(ControllerCommand::ListConnections(args));
+
+        match previous_cert {
+            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
+            None => std::env::remove_var("SLIM_TLS_CERT"),
+        }
+        match previous_key {
+            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
+            None => std::env::remove_var("SLIM_TLS_KEY"),
+        }
+        match previous_ca {
+            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
+            None => std::env::remove_var("SLIM_TLS_CA"),
+        }
+
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn exit_code_for_maps_ok_and_err() {
+        assert_eq!(exit_code_for(Ok(())), ExitCode::from(0));
+        assert_eq!(exit_code_for(Err("boom".to_string())), ExitCode::from(1));
+    }

@@ -258,6 +258,10 @@ fn run_controller_command(command: ControllerCommand) -> ExitCode {
             slim_controller::run_controller_list_connections(args)
         }
     };
+    exit_code_for(result)
+}
+
+fn exit_code_for(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::from(0),
         Err(err) => {
