@@ -9,8 +9,13 @@ tell which human an agent belongs to.
 It uses only `shadictl` shell commands. You can run it two ways:
 
 - **One command (recommended):** `bash docs/demos/run-demo.sh` orchestrates the whole
-  flow — node, moderator, four agents, invites, and an A2A roll-call broadcast — and
-  prints the result. Best for a quick, reliable demo.
+  flow — node, moderator, four agents, invites, an A2A roll-call broadcast, and real
+  task delegation to claude-code/codex/copilot — and prints the result. Best for a
+  quick, reliable demo. It prints its log dir immediately and echoes a one-line
+  status per phase as it runs; in a second terminal, `bash docs/demos/watch-demo.sh`
+  tails every per-agent log live (including ones from later phases, as they're
+  created) so you can watch progress in real time instead of waiting for the final
+  summary.
 - **By hand:** drive the `shadictl` shell across a terminal per agent (steps 1–6
   below). Best for exploring; note `/slim join` blocks, so mind the choreography and
   use generous `--timeout` values.
@@ -28,6 +33,9 @@ It uses only `shadictl` shell commands. You can run it two ways:
 - **A2A-native group messaging** — `/slim a2a-collaborate` broadcasts and receives
   through A2A's `Message` type (SLIM's group/multicast is used underneath A2A via
   the SLIMRPC `Collaborate` RPC, not instead of it), with `slim-src` attribution.
+- **Real coding-agent CLIs in the loop** — `agentbridge` wraps the actual `claude`/
+  `codex`/`copilot` binaries as SLIM/A2A listeners under the same DID identity, so a
+  delegated task really executes on that CLI, not a mock.
 
 ## Prerequisites
 
@@ -177,6 +185,82 @@ Give every terminal the peer-list of the *other* four members and start them all
 within the timeout window — this is a genuine mesh: every member reaches every
 other member directly, not just moderator → members.
 
+## 7. Delegate a real task to the coding-agent CLIs
+
+Everything so far shows *identity* and *messaging*. This step wires in the real
+thing: **`agentbridge`** wraps the actual installed `claude`, `codex`, and `copilot`
+CLI binaries as SLIM/A2A listeners, so a delegated task really invokes that CLI and
+returns its real output — using the *same* DID identity from step 1 (agentbridge
+checks `SHADI_SLIM_AUTH=did` the same way `shadictl` does, no separate setup).
+`cursor-agent` doesn't have an `agentbridge register` listener yet, so it's not part
+of this step (it still participates in the roll call above).
+
+**Each agent terminal (e.g. claude-code)** — registers a live adapter backed by the
+real CLI, reachable at `agntcy/shadi/claude-code-a2a`:
+
+```bash
+SHADI_AGENT_ID=claude-code target/debug/agentbridge register --tool claude-code \
+  --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT"
+```
+```text
+Registered Claude Code adapter (agent id: claude-code, dir: /path/to/shadi)
+Starting SLIM A2A listener on 127.0.0.1:47560 as agntcy/shadi/claude-code-a2a ...
+[agentbridge] ready — listening on agntcy/shadi/claude-code-a2a
+```
+
+Repeat for `codex` and `copilot` (same shape, `--tool codex` / `--tool copilot`).
+
+**Moderator terminal** — delegates one real task to each:
+
+```bash
+target/debug/agentbridge delegate "Reply with exactly the single word: PONG" \
+  --to claude-code --agent-id avatar --endpoint "$SLIM_ENDPOINT"
+```
+```text
+Delegating task 09024c44-... to 'claude-code'...
+Response from 'claude-code' (5518ms):
+PONG
+```
+
+The listener terminal prints the same round trip from its side:
+```text
+┌─ A2A recv [claude-code] task ...
+│  Reply with exactly the single word: PONG
+└─────────────────────────────────────────────────────────
+┌─ A2A send [claude-code] (5518 ms)
+│  PONG
+└─────────────────────────────────────────────────────────
+```
+
+**Chaining a real task across agents** — `run-demo.sh` does this for real: it
+delegates a disk-usage check to `codex`, a top-CPU-processes check to `copilot`,
+then hands *both real outputs* to `claude-code` and asks it to synthesize an
+operational report — each step genuinely depends on the previous agent's result,
+not a canned reply. By hand, that's three `delegate` calls chained through shell
+variables:
+
+```bash
+DISK=$(target/debug/agentbridge delegate \
+  "Run a disk usage check on this machine (e.g. df -h) and report the real output." \
+  --to codex --agent-id avatar --endpoint "$SLIM_ENDPOINT")
+CPU=$(target/debug/agentbridge delegate \
+  "Rank the top 10 processes on this machine by CPU usage (e.g. ps aux) and report the real output." \
+  --to copilot --agent-id avatar --endpoint "$SLIM_ENDPOINT")
+target/debug/agentbridge delegate \
+  "Summarize these two real system-health snippets into a short report, flagging anything concerning:\n\n$DISK\n\n$CPU" \
+  --to claude-code --agent-id avatar --endpoint "$SLIM_ENDPOINT"
+```
+
+`claude-code`'s response is a real report — e.g. flagging a disk volume nearing
+capacity or a process with unexpectedly high CPU — built from the other two
+agents' real command output.
+
+This is a genuinely live `claude`/`copilot` process handling the prompt — swap the
+message for any real coding task to see it delegated end to end. `codex`'s success
+depends on your local `codex` CLI/model configuration (an unsupported default model
+returns a `400` from the OpenAI backend, unrelated to SHADI); that's an environment
+issue, not a bug in this wiring.
+
 ## How admission works (under the hood)
 
 - The moderator's `create`/`invite` control messages carry its DID-JWT; each
@@ -202,7 +286,8 @@ other member directly, not just moderator → members.
   attribution on its reply-observer stream, but messages surfaced purely through the
   passive listener path have no per-message sender tag yet (the message text itself
   states the sender, which is enough for this demo).
-- The four agent names match the `agentbridge` coding-agent adapters
-  (`claude_code`, `codex`, `copilot`, `cursor_agent`). This demo forms the DID group
-  and passes messages; wiring the actual agent binaries in via `agentbridge` is the
-  next step.
+- `agentbridge register --tool claude-code|codex|copilot` needs that CLI actually
+  installed (and authenticated) on PATH; `cursor-agent` doesn't have a `register`
+  listener yet. A `delegate` failure usually means the target CLI itself errored
+  (auth, unsupported model, etc.), not the SLIM/A2A wiring — the response text
+  includes the real error from that CLI so it's easy to tell apart.
