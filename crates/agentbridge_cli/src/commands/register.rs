@@ -37,7 +37,6 @@ pub fn run(
     command: Option<&str>,
     args: &[String],
     slim_endpoint: Option<&str>,
-    slim_shared_secret: &str,
 ) -> anyhow::Result<()> {
     match tool {
         "generic-stdio" => {
@@ -49,8 +48,7 @@ pub fn run(
             println!("Registered adapter '{}' (agent id: {})", tool, adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
-                run_slim_listener(tool, adapter, endpoint, slim_shared_secret)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                run_slim_listener(tool, adapter, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 println!("Adapter is running. Press Ctrl-C to stop.");
                 std::thread::park();
@@ -68,7 +66,7 @@ pub fn run(
             );
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/claude-code-a2a ...");
-                run_slim_listener("claude-code", adapter, endpoint, slim_shared_secret)
+                run_slim_listener("claude-code", adapter, endpoint)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
@@ -82,8 +80,7 @@ pub fn run(
             println!("Registered Copilot adapter (agent id: {})", adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/copilot-a2a ...");
-                run_slim_listener("copilot", adapter, endpoint, slim_shared_secret)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                run_slim_listener("copilot", adapter, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
@@ -96,8 +93,7 @@ pub fn run(
             println!("Registered Codex adapter (agent id: {})", adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/codex-a2a ...");
-                run_slim_listener("codex", adapter, endpoint, slim_shared_secret)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                run_slim_listener("codex", adapter, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
@@ -360,11 +356,12 @@ impl RequestHandler for AgentBridgeRequestHandler {
 /// Start a SLIM A2A listener that forwards incoming tasks to `adapter`.
 ///
 /// Listens indefinitely under `agntcy/shadi/<agent_id>-a2a` until Ctrl-C.
+/// Coding-agent adapters authenticate via DID/keys only — see
+/// [`shadi_identity::require_did_auth_from_env`].
 fn run_slim_listener(
     agent_id: &str,
     adapter: Arc<dyn CliAdapter>,
     endpoint: &str,
-    shared_secret: &str,
 ) -> Result<(), String> {
     let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
 
@@ -373,7 +370,6 @@ fn run_slim_listener(
         "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
          CLI tool. Only expose this listener to trusted SLIM peers."
     );
-    crate::commands::warn_if_default_secret(shared_secret, endpoint);
 
     let tls = resolve_client_tls(Some(agent_id))?;
 
@@ -383,10 +379,8 @@ fn run_slim_listener(
         .map_err(|e| format!("SLIM connect failed: {e:?}"))?;
 
     let name_ref = Arc::new(parse_name(&agent_name)?);
-    let auth = match shadi_identity::did_auth_from_env(agent_id) {
-        Some(result) => result.map_err(|e| format!("SLIM auth error: {e}"))?,
-        None => shadi_identity::SlimAuth::SharedSecret(shared_secret.to_string()),
-    };
+    let auth = shadi_identity::require_did_auth_from_env(agent_id)
+        .map_err(|e| format!("SLIM auth error: {e}"))?;
     let app = shadi_identity::create_app(&service, name_ref.clone(), &auth)
         .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
     app.subscribe(name_ref.clone(), Some(connection_id))

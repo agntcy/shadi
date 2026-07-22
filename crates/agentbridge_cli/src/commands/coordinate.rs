@@ -48,19 +48,13 @@ pub fn run(
     output: Option<&str>,
     require_human: bool,
     slim_endpoint: &str,
-    slim_shared_secret: &str,
 ) -> anyhow::Result<()> {
-    let agents = build_agents(agent_specs, slim_endpoint, slim_shared_secret)?;
+    let agents = build_agents(agent_specs, slim_endpoint)?;
     if agents.is_empty() {
         anyhow::bail!(
             "no agents specified — use --agents claude-code,cursor-agent,copilot,codex \
              or --agents generic-stdio:<cmd>"
         );
-    }
-
-    // Only relevant when reaching remote adapters over SLIM (slim:<id> specs).
-    if agent_specs.iter().any(|s| s.starts_with("slim:")) {
-        crate::commands::warn_if_default_secret(slim_shared_secret, slim_endpoint);
     }
 
     let effective_quorum = quorum.min(agents.len());
@@ -402,7 +396,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 // ─── Agent spec parser ────────────────────────────────────────────────────────
 
-fn build_agents(specs: &[String], slim_endpoint: &str, slim_shared_secret: &str) -> anyhow::Result<Vec<AgentEntry>> {
+fn build_agents(specs: &[String], slim_endpoint: &str) -> anyhow::Result<Vec<AgentEntry>> {
     let mut agents = Vec::new();
     for spec in specs {
         let (id_str, tool): (String, Arc<dyn ToolAdapter>) = if spec.starts_with("claude-code") {
@@ -458,7 +452,6 @@ fn build_agents(specs: &[String], slim_endpoint: &str, slim_shared_secret: &str)
                 local_name: Some("agntcy/shadi/coordinator-a2a".to_string()),
                 peer_agent_id: agent_id.clone(),
                 destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
-                shared_secret: slim_shared_secret.to_string(),
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
                 agent_id: agent_id.clone(),
@@ -584,7 +577,7 @@ mod tests {
             "cursor-agent".to_string(),
             "slim:peer@127.0.0.1:47357".to_string(),
         ];
-        let agents = build_agents(&specs, "127.0.0.1:47357", "secret").expect("build");
+        let agents = build_agents(&specs, "127.0.0.1:47357").expect("build");
         let ids: Vec<&str> = agents.iter().map(|a| a.id.0.as_str()).collect();
         assert_eq!(ids, ["claude-code", "copilot", "codex", "cursor-agent", "peer"]);
     }
@@ -592,6 +585,6 @@ mod tests {
     #[test]
     fn build_agents_rejects_unknown_specs() {
         let specs = vec!["totally-unknown".to_string()];
-        assert!(build_agents(&specs, "127.0.0.1:47357", "secret").is_err());
+        assert!(build_agents(&specs, "127.0.0.1:47357").is_err());
     }
 }

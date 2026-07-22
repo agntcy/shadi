@@ -25,8 +25,7 @@ agentbridge register \
   --tool generic-stdio \
   --command my-tool \
   --arg --agentbridge-mode \
-  --slim-endpoint 127.0.0.1:47357 \
-  --slim-shared-secret my_secret
+  --slim-endpoint 127.0.0.1:47357
 
 # Start a Claude Code adapter
 agentbridge register --tool claude-code --slim-endpoint 127.0.0.1:47357
@@ -112,8 +111,7 @@ agentbridge coordinate \
   --quorum 1 \
   --max-rounds 2 \
   --output result.rs \
-  --slim-endpoint 127.0.0.1:47357 \
-  --slim-shared-secret my_secret
+  --slim-endpoint 127.0.0.1:47357
 
 # Require explicit human approval before accepting the result
 agentbridge coordinate \
@@ -156,17 +154,20 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SLIM_ENDPOINT` | `127.0.0.1:47357` | SLIM node address |
-| `SLIM_SHARED_SECRET` | demo default | SLIM authentication |
 | `SHADI_AGENT_ID` | `avatar` | Agent identity for SLIM/DIR |
+| `SHADI_SLIM_AUTH` | — | Must be `did` — see below |
+| `SLIM_HUMAN_SEED` | — | Human root secret DID keys are derived from |
+| `SLIM_MEMBER_DIDS` | — | Comma-separated `did:key` allow-list |
 | `SLIM_TLS_CERT` / `SLIM_TLS_KEY` | — | mTLS client certificate paths |
 | `SLIM_TLS_CA` | — | CA certificate for server verification |
 
-> ⚠️ **Security:** when `SLIM_SHARED_SECRET` is unset, `register`, `delegate`, and
-> `coordinate` fall back to a public, built-in demo secret that provides **no**
-> authentication. A `register` listener forwards incoming A2A tasks to the local
-> CLI tool, so any peer that knows the secret can drive local code execution. The
-> commands warn when the default is used. Set `SLIM_SHARED_SECRET` to a private
-> value before binding a routable (non-loopback) address.
+> ⚠️ **Security:** `register`, `delegate`, and `coordinate` (for `slim:` agent
+> specs) authenticate to the SLIM mesh via DID/keys only — set
+> `SHADI_SLIM_AUTH=did`, `SLIM_HUMAN_SEED`, and `SLIM_MEMBER_DIDS` (see
+> [`docs/demos/demo-env.sh`](../../docs/demos/demo-env.sh)). Shared secrets are
+> not supported: a `register` listener forwards incoming A2A tasks to the local
+> CLI tool, so admission must be cryptographic, not a symmetric secret compiled
+> into every demo script.
 
 ## Live SLIM demo (4 terminals)
 

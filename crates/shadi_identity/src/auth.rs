@@ -115,6 +115,23 @@ pub fn did_auth_from_env(agent_id: &str) -> Option<Result<SlimAuth, IdentityErro
     Some(resolve_did_env(agent_id))
 }
 
+/// Like [`did_auth_from_env`], but treats anything other than DID mode as a hard
+/// error instead of a signal to fall back to a shared secret.
+///
+/// Coding-agent adapters (the CLI tools `agentbridge` wraps) must always
+/// authenticate to the SLIM mesh via DID/keys — never a shared secret — so
+/// callers that admit those adapters should use this instead of
+/// [`did_auth_from_env`].
+pub fn require_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
+    did_auth_from_env(agent_id).unwrap_or_else(|| {
+        Err(IdentityError::Config(
+            "coding-agent adapters must authenticate via DID (set SHADI_SLIM_AUTH=did, \
+             SLIM_HUMAN_SEED, SLIM_MEMBER_DIDS); shared secrets are not permitted"
+                .to_string(),
+        ))
+    })
+}
+
 fn resolve_did_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
     let human_seed = std::env::var("SLIM_HUMAN_SEED").map_err(|_| {
         IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED".to_string())
@@ -187,6 +204,11 @@ mod tests {
 
         env::remove_var("SHADI_SLIM_AUTH");
         assert!(did_auth_from_env("avatar").is_none());
+        // require_did_auth_from_env never falls back — not-DID-mode is a hard error.
+        assert!(matches!(
+            require_did_auth_from_env("avatar"),
+            Err(IdentityError::Config(_))
+        ));
 
         env::set_var("SHADI_SLIM_AUTH", "did");
         env::set_var("SLIM_HUMAN_SEED", "human");
@@ -194,6 +216,10 @@ mod tests {
         assert!(matches!(
             did_auth_from_env("avatar"),
             Some(Ok(SlimAuth::Did { .. }))
+        ));
+        assert!(matches!(
+            require_did_auth_from_env("avatar"),
+            Ok(SlimAuth::Did { .. })
         ));
 
         env::remove_var("SLIM_HUMAN_SEED");

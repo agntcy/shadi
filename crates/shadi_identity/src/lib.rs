@@ -20,7 +20,7 @@ use pkcs8::LineEnding;
 pub mod auth;
 pub mod config;
 
-pub use auth::{build_did_auth, create_app, did_auth_from_env, SlimAuth};
+pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
