@@ -416,6 +416,7 @@ impl Completer for ShellHelper {
                 "start",
                 "a2a-echo-peer",
                 "a2a-send",
+                "a2a-collaborate",
                 "create",
                 "invite",
                 "join",
@@ -600,13 +601,16 @@ impl ShellSession {
                 }
                 "a2a-echo-peer" => self.cmd_slim_a2a_echo_peer(&parts[2..]),
                 "a2a-send" => self.cmd_slim_a2a_send(&parts[2..]),
+                "a2a-collaborate" => self.cmd_slim_a2a_collaborate(&parts[2..]),
                 "create" => self.cmd_slim_create(&parts[2..]),
                 "invite" => self.cmd_slim_invite(&parts[2..]),
                 "join" => self.cmd_slim_join(&parts[2..]),
                 "whoami" => self.cmd_slim_whoami(),
                 _ => {
                     eprintln!("unknown slim subcommand: {}", parts[1]);
-                    eprintln!("  available: status, start node, a2a-echo-peer, a2a-send, create, invite, join, whoami");
+                    eprintln!(
+                        "  available: status, start node, a2a-echo-peer, a2a-send, a2a-collaborate, create, invite, join, whoami"
+                    );
                     LoopAction::Continue
                 }
             },
@@ -1091,6 +1095,18 @@ impl ShellSession {
             Ok(parsed) => {
                 if let Err(err) = slim_a2a::run_a2a_send(parsed) {
                     eprintln!("error sending A2A request: {}", err);
+                }
+            }
+            Err(err) => eprintln!("{}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_a2a_collaborate(&mut self, args: &[&str]) -> LoopAction {
+        match slim_a2a::parse_shell_a2a_collaborate_args(args) {
+            Ok(parsed) => {
+                if let Err(err) = slim_a2a::run_a2a_collaborate(parsed) {
+                    eprintln!("error collaborating over A2A: {}", err);
                 }
             }
             Err(err) => eprintln!("{}", err),

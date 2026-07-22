@@ -3,5 +3,5 @@
 
 mod channel;
 
-pub use channel::{A2AChannel, A2AChannelBuilder};
-pub use a2a_slimrpc::SlimRpcHandler;
+pub use channel::{A2AChannel, A2AChannelBuilder, A2AGroupChannel, A2AGroupChannelBuilder};
+pub use a2a_slimrpc::{SLIM_SRC_METADATA_KEY, SlimRpcHandler, register_collaborate};

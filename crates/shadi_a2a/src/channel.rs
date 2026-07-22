@@ -78,6 +78,95 @@ impl A2AChannelBuilder {
     }
 }
 
+/// A many-to-many A2A channel over a SLIM **group** session, guarded by the same
+/// SHADI identity verification as [`A2AChannel`]. Exposes `Collaborate` (see the
+/// SLIMRPC collaborative channel extension spec) rather than the point-to-point
+/// `Transport` trait, since a group broadcast has no single "response" shape.
+pub struct A2AGroupChannel {
+    transport: SlimRpcTransport,
+    verifier: Arc<dyn AgentVerifier>,
+    ctx: SessionContext,
+}
+
+impl A2AGroupChannel {
+    fn check_auth(&self) -> Result<(), A2AError> {
+        self.verifier.verify(&self.ctx).map_err(secret_err_to_a2a)
+    }
+
+    /// Open a `Collaborate` session on the group: broadcast every `Message`
+    /// produced by `outbound`, and yield every `Message` broadcast by other
+    /// members (each attributed via `metadata["slim-src"]`). Runs the same
+    /// identity check as [`A2AChannel`]'s calls, once, before delegating.
+    pub fn collaborate(
+        &self,
+        outbound: impl futures::Stream<Item = Message> + Send + 'static,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<BoxStream<'static, Result<Message, A2AError>>, A2AError> {
+        self.check_auth()?;
+        // `SlimRpcTransport::collaborate` borrows `&self` (its `impl Stream` return
+        // captures the transport's lifetime), so own a clone inside the returned
+        // stream to satisfy this method's `'static` signature — same fix as the
+        // P2P streaming path (`call_unary_stream` in a2a-slimrpc's client.rs).
+        let transport = self.transport.clone();
+        Ok(Box::pin(async_stream::stream! {
+            let inner = transport.collaborate(outbound, timeout);
+            futures::pin_mut!(inner);
+            while let Some(item) = futures::StreamExt::next(&mut inner).await {
+                yield item;
+            }
+        }))
+    }
+}
+
+/// Builder for [`A2AGroupChannel`] backed by a SLIM group session spanning
+/// `members`. Separate from [`A2AChannelBuilder`] because a group has no single
+/// "remote" peer.
+pub struct A2AGroupChannelBuilder {
+    app: Arc<App>,
+    members: Vec<Arc<Name>>,
+    connection_id: Option<u64>,
+    verifier: Arc<dyn AgentVerifier>,
+    ctx: SessionContext,
+}
+
+impl A2AGroupChannelBuilder {
+    pub fn new(
+        app: Arc<App>,
+        members: Vec<Arc<Name>>,
+        verifier: Arc<dyn AgentVerifier>,
+        ctx: SessionContext,
+    ) -> Self {
+        Self {
+            app,
+            members,
+            connection_id: None,
+            verifier,
+            ctx,
+        }
+    }
+
+    pub fn connection_id(mut self, id: u64) -> Self {
+        self.connection_id = Some(id);
+        self
+    }
+
+    pub fn build(self) -> Result<A2AGroupChannel, A2AError> {
+        let members = self
+            .members
+            .iter()
+            .map(|name| Arc::new(name.as_slim_name()))
+            .collect();
+        let transport =
+            SlimRpcTransport::new_group_with_connection(self.app.inner(), members, self.connection_id)
+                .map_err(|error| a2a_slimrpc::errors::rpc_error_to_a2a_error(&error))?;
+        Ok(A2AGroupChannel {
+            transport,
+            verifier: self.verifier,
+            ctx: self.ctx,
+        })
+    }
+}
+
 #[async_trait]
 impl Transport for A2AChannel {
     async fn send_message(

@@ -238,6 +238,13 @@ fn run_slim_command(command: SlimCli) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        SlimCommand::A2ACollaborate(args) => match slim_a2a::run_a2a_collaborate(args) {
+            Ok(()) => ExitCode::from(0),
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
     }
 }
 
