@@ -7,21 +7,19 @@ use shadi_mas::{
 ///
 /// The adapter must be registered and listening on the SLIM node. Use
 /// `agentbridge register --tool <name>` in a separate terminal first.
+/// Coding-agent adapters authenticate via DID/keys only (`SHADI_SLIM_AUTH=did`,
+/// `SLIM_HUMAN_SEED`, `SLIM_MEMBER_DIDS`) — shared secrets are not supported.
 ///
 /// Environment variables used (same as `agentbridge register`):
-///   SLIM_ENDPOINT, SLIM_SHARED_SECRET, SLIM_TLS_CERT, SLIM_TLS_KEY, SLIM_TLS_CA
+///   SLIM_ENDPOINT, SLIM_TLS_CERT, SLIM_TLS_KEY, SLIM_TLS_CA
 pub fn run(
     prompt: &str,
     to_agent_id: &str,
     local_agent_id: &str,
     endpoint: &str,
-    shared_secret: &str,
 ) -> anyhow::Result<()> {
-    // Wire SLIM env vars that LiveA2ATaskAdapter reads internally.
+    // Wire the SLIM endpoint env var that LiveA2ATaskAdapter reads internally.
     std::env::set_var("SLIM_ENDPOINT", endpoint);
-    std::env::set_var("SLIM_SHARED_SECRET", shared_secret);
-
-    crate::commands::warn_if_default_secret(shared_secret, endpoint);
 
     let config = LiveA2ATaskAdapterConfig {
         endpoint: endpoint.to_string(),
@@ -29,7 +27,6 @@ pub fn run(
         local_name: Some(format!("agntcy/shadi/{local_agent_id}-a2a")),
         peer_agent_id: to_agent_id.to_string(),
         destination: Some(format!("agntcy/shadi/{to_agent_id}-a2a")),
-        shared_secret: shared_secret.to_string(),
     };
     let adapter = LiveA2ATaskAdapter::new(config);
 

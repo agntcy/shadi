@@ -80,7 +80,6 @@ pub struct LiveA2ATaskAdapterConfig {
     pub local_name: Option<String>,
     pub peer_agent_id: String,
     pub destination: Option<String>,
-    pub shared_secret: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,12 +159,8 @@ impl LiveA2ATaskAdapter {
                 let local_name_ref = Arc::new(parse_slim_name(&local_name)?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
 
-                let auth = match shadi_identity::did_auth_from_env(&self.config.agent_id) {
-                    Some(result) => result.map_err(|e| e.to_string())?,
-                    None => {
-                        shadi_identity::SlimAuth::SharedSecret(self.config.shared_secret.clone())
-                    }
-                };
+                let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
+                    .map_err(|e| e.to_string())?;
                 let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
                     .map_err(format_slim_error)?;
                 app.subscribe(local_name_ref.clone(), Some(connection_id))
@@ -636,7 +631,6 @@ mod transport_tests {
             local_name: None,
             peer_agent_id: "peer".to_string(),
             destination: None,
-            shared_secret: "secret".to_string(),
         });
         assert!(adapter.dispatches().expect("lock").is_empty());
     }
