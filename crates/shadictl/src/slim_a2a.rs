@@ -14,13 +14,13 @@ use a2a_server::{
 use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretResult, SessionContext};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use shadi_a2a::{A2AChannelBuilder, SlimRpcHandler};
-use slim_bindings::Service;
+use shadi_a2a::{A2AChannelBuilder, A2AGroupChannelBuilder, SLIM_SRC_METADATA_KEY, SlimRpcHandler};
+use slim_bindings::{Name, Service};
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
 
-use crate::cli_types::{SlimA2AEchoPeerArgs, SlimA2ASendArgs};
+use crate::cli_types::{SlimA2ACollaborateArgs, SlimA2AEchoPeerArgs, SlimA2ASendArgs};
 use crate::slim_shell::{
     build_client_config_for_endpoint, build_server_config_for_endpoint, format_slim_error,
     parse_name, resolve_client_tls_material_for_agent, resolve_server_tls_material,
@@ -32,6 +32,8 @@ pub(crate) const SHELL_A2A_ECHO_PEER_USAGE: &str =
     "usage: /slim a2a-echo-peer [--endpoint HOST:PORT] [--agent-id ID] [--listen-timeout SECONDS] [--ready-file PATH] [--start-local-node]";
 pub(crate) const SHELL_A2A_SEND_USAGE: &str =
     "usage: /slim a2a-send [--endpoint HOST:PORT] [--agent-id ID] [--peer-agent-id ID] [--destination NAME] [--message TEXT...] [--stream] [--timeout SECONDS] [--session-id ID]";
+pub(crate) const SHELL_A2A_COLLABORATE_USAGE: &str =
+    "usage: /slim a2a-collaborate <peer1,peer2,...> [--endpoint HOST:PORT] [--agent-id ID] [--timeout SECONDS] [--message TEXT...]";
 
 struct VerifiedSessionVerifier;
 
@@ -350,6 +352,12 @@ pub(crate) fn run_a2a_send(args: SlimA2ASendArgs) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn run_a2a_collaborate(args: SlimA2ACollaborateArgs) -> Result<(), String> {
+    let detail = run_a2a_collaborate_once(&args)?;
+    println!("{}", detail);
+    Ok(())
+}
+
 pub(crate) fn parse_shell_a2a_echo_peer_args(
     args: &[&str],
 ) -> Result<SlimA2AEchoPeerArgs, String> {
@@ -447,6 +455,55 @@ pub(crate) fn parse_shell_a2a_send_args(args: &[&str]) -> Result<SlimA2ASendArgs
     Ok(parsed)
 }
 
+/// `--message` value collection reuses `collect_message_value` (and its
+/// `is_send_flag` stop-list), since every flag `a2a-collaborate` accepts
+/// (`--endpoint`, `--agent-id`, `--timeout[-seconds]`) is already in that list.
+pub(crate) fn parse_shell_a2a_collaborate_args(
+    args: &[&str],
+) -> Result<SlimA2ACollaborateArgs, String> {
+    let (peer_agent_ids, rest) = args
+        .split_first()
+        .ok_or_else(|| SHELL_A2A_COLLABORATE_USAGE.to_string())?;
+
+    let mut parsed = SlimA2ACollaborateArgs {
+        endpoint: None,
+        agent_id: "avatar".to_string(),
+        peer_agent_ids: peer_agent_ids.to_string(),
+        message: "hello from SHADI A2A".to_string(),
+        timeout_seconds: 20,
+    };
+
+    let mut index = 0;
+    while index < rest.len() {
+        match rest[index] {
+            "--endpoint" => {
+                parsed.endpoint =
+                    Some(next_value(rest, &mut index, SHELL_A2A_COLLABORATE_USAGE)?.to_string());
+            }
+            "--agent-id" => {
+                parsed.agent_id =
+                    next_value(rest, &mut index, SHELL_A2A_COLLABORATE_USAGE)?.to_string();
+            }
+            "--message" => {
+                let (message, next_index) = collect_message_value(rest, index + 1)?;
+                parsed.message = message;
+                index = next_index;
+                continue;
+            }
+            "--timeout" | "--timeout-seconds" => {
+                let value = next_value(rest, &mut index, SHELL_A2A_COLLABORATE_USAGE)?;
+                parsed.timeout_seconds = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid timeout value: {value}"))?;
+            }
+            _ => return Err(SHELL_A2A_COLLABORATE_USAGE.to_string()),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
 fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
     let auth = resolve_slim_auth(&args.agent_id)?;
@@ -529,6 +586,153 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
         local_name,
         response_detail
     ))
+}
+
+/// Broadcast one A2A `Message` to a SLIM group of `peer_agent_ids` via the
+/// `Collaborate` operation, while also listening for whatever the *other*
+/// members independently broadcast to this agent — a group is many-to-many, so
+/// every member plays both roles (see the SLIMRPC collaborative channel
+/// extension spec). Runs for `--timeout-seconds` before shutting down.
+fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, String> {
+    let endpoint = resolve_endpoint(args.endpoint.as_deref());
+    let auth = resolve_slim_auth(&args.agent_id)?;
+    let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
+    let local_name = slim_name(&args.agent_id);
+
+    let peer_names: Vec<Arc<Name>> = args
+        .peer_agent_ids
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| parse_name(&slim_name(id)).map(Arc::new))
+        .collect::<Result<_, _>>()?;
+    if peer_names.is_empty() {
+        return Err("--peer-agent-ids must list at least one peer".to_string());
+    }
+
+    let service = Service::new(format!("shadictl-a2a-collab-{}", std::process::id()));
+    let connection_id = service
+        .connect(build_client_config_for_endpoint(&endpoint, &client_tls))
+        .map_err(format_slim_error)?;
+    let local_name_ref = Arc::new(parse_name(&local_name)?);
+    let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
+        .map_err(format_slim_error)?;
+    app.subscribe(local_name_ref.clone(), Some(connection_id))
+        .map_err(format_slim_error)?;
+
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
+
+    let received: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received_for_handler = received.clone();
+
+    let mut session = SessionContext::new(&args.agent_id, "shadictl-a2a-collaborate");
+    session.verified = true;
+    let verifier: Arc<dyn AgentVerifier> = Arc::new(VerifiedSessionVerifier);
+
+    // Both the listener's Server and the initiator's group Channel capture
+    // `tokio::runtime::Handle::current()` at construction, so build them inside
+    // this runtime's context (same fix as the P2P a2a-send path).
+    let (server, channel) = {
+        let _enter = runtime.enter();
+        let server = Arc::new(Server::new_with_shared_rx_and_connection(
+            app.inner(),
+            app.name().as_slim_name(),
+            None,
+            app.notification_receiver(),
+            Some(runtime.handle().clone()),
+        ));
+        shadi_a2a::register_collaborate(server.as_ref(), move |message| {
+            // `register_collaborate`'s listener path has no per-message sender
+            // attribution today (see a2a-slimrpc's Collaborate limitations) — only
+            // `collaborate()`'s own client-observer stream gets `slim-src` via
+            // MulticastItem. The message content itself states the sender, so
+            // just surface the text.
+            let text = readable_message_text(&message);
+            received_for_handler.lock().unwrap().push(text);
+        });
+
+        let channel = A2AGroupChannelBuilder::new(app.clone(), peer_names.clone(), verifier, session)
+            .connection_id(connection_id)
+            .build()
+            .map_err(|err| format!("failed to build group channel: {err}"))?;
+
+        (server, channel)
+    };
+
+    let intro = Message::new(Role::Agent, vec![Part::text(args.message.clone())]);
+    let outbound = futures::stream::once(async move { intro });
+    let received_for_replies = received.clone();
+
+    runtime.block_on(async {
+        let server_task = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                let _ = server.serve().await;
+            })
+        };
+        // Give every group member's own listener time to finish subscribing
+        // before broadcasting — `Channel::new_group`'s self-invite dance has no
+        // built-in retry, so an invite that lands before the peer is ready can be
+        // missed. Every member typically starts around the same time (as in the
+        // demo), so this is a generous, shared settle window, not per-peer.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Unlike the listener above, this is *our own* initiated session, so
+        // replies here (if any participant isn't listen-only) carry proper
+        // `slim-src` attribution via MulticastItem — surface it.
+        let replies = channel
+            .collaborate(outbound, Some(Duration::from_secs(args.timeout_seconds)))
+            .map_err(|err| format!("failed to broadcast message: {err}"))?;
+        futures::pin_mut!(replies);
+        while let Some(reply) = futures::StreamExt::next(&mut replies).await {
+            if let Ok(message) = reply {
+                let sender = message
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get(SLIM_SRC_METADATA_KEY))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                let text = readable_message_text(&message);
+                received_for_replies
+                    .lock()
+                    .unwrap()
+                    .push(format!("{sender}: {text}"));
+            }
+        }
+
+        // Keep listening for other members' independently-initiated broadcasts
+        // for the rest of the timeout window.
+        tokio::time::sleep(Duration::from_secs(args.timeout_seconds)).await;
+
+        server.shutdown().await;
+        let _ = server_task.await;
+        Ok::<(), String>(())
+    })?;
+
+    let _ = app.unsubscribe(local_name_ref, Some(connection_id));
+    let _ = service.disconnect(connection_id);
+    let _ = service.shutdown();
+
+    let received = received.lock().unwrap();
+    Ok(if received.is_empty() {
+        format!(
+            "broadcast {:?} to {} peer(s); received nothing within {}s",
+            args.message,
+            peer_names.len(),
+            args.timeout_seconds
+        )
+    } else {
+        format!(
+            "broadcast {:?} to {} peer(s); received:\n  {}",
+            args.message,
+            peer_names.len(),
+            received.join("\n  ")
+        )
+    })
 }
 
 fn resolve_endpoint(override_value: Option<&str>) -> String {

@@ -213,6 +213,11 @@ pub(crate) enum SlimCommand {
         about = "Send a unary or streaming A2A request over SLIMRPC"
     )]
     A2ASend(SlimA2ASendArgs),
+    #[command(
+        name = "a2a-collaborate",
+        about = "Broadcast an A2A message to a SLIM group channel and listen for others' (Collaborate)"
+    )]
+    A2ACollaborate(SlimA2ACollaborateArgs),
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -258,6 +263,25 @@ pub(crate) struct SlimA2ASendArgs {
 
     #[arg(long, default_value = "shadictl-a2a-session")]
     pub(crate) session_id: String,
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct SlimA2ACollaborateArgs {
+    #[arg(long, env = "SLIM_ENDPOINT", value_name = "ENDPOINT")]
+    pub(crate) endpoint: Option<String>,
+
+    #[arg(long, env = "SHADI_AGENT_ID", default_value = "avatar")]
+    pub(crate) agent_id: String,
+
+    /// Comma-separated agent ids of the other group members.
+    #[arg(long, value_name = "ID1,ID2,...")]
+    pub(crate) peer_agent_ids: String,
+
+    #[arg(long, default_value = "hello from SHADI A2A")]
+    pub(crate) message: String,
+
+    #[arg(long, default_value_t = 20)]
+    pub(crate) timeout_seconds: u64,
 }
 
 #[derive(Subcommand, Debug)]

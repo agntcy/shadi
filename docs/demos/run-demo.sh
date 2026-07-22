@@ -2,9 +2,11 @@
 # One-command DID agent-group demo (see did-agent-group.md).
 #
 # Orchestrates the whole flow so you don't have to hand-coordinate terminals:
-#   moderator (avatar) starts a node, creates a channel, invites claude-code /
-#   codex / copilot / cursor-agent (each a DID derived from one human key), the
-#   agents join, and the moderator broadcasts a message that the agents receive.
+#   moderator (avatar) starts a node, creates a channel, and invites claude-code /
+#   codex / copilot / cursor-agent (each a DID derived from one human key) — this
+#   shows off the DID/moderator role UX. Then all five members run
+#   `/slim a2a-collaborate` — an A2A operation backed by SLIM's group channel — to
+#   broadcast an intro and collect everyone else's (a roll-call full mesh).
 #
 # Run from the repo root:  bash docs/demos/run-demo.sh
 set -uo pipefail
@@ -24,41 +26,66 @@ bash tools/generate_slim_mtls_certs.sh "$SHADI_TMP_DIR/shadi-slim-mtls" >/dev/nu
 
 CH="agntcy/shadi/dev-room"
 LOG="$SHADI_TMP_DIR/logs"; mkdir -p "$LOG"
+ALL_AGENTS=(avatar claude-code codex copilot cursor-agent)
 
-# Four coding-agent CLIs: join, introduce themselves to the group, then collect
-# everyone else's introductions (roll call).
+# One SLIM node spans both parts below; only killed at the very end.
+"$BIN" slim start-node >"$LOG/node.log" 2>&1 &
+NODE_PID=$!
+sleep 2
+
+# --- Part 1: DID/moderator role UX (create/invite/join) -------------------
+
+# Four coding-agent CLIs join the channel and report their role.
+SHELL_PIDS=()
 for a in claude-code codex copilot cursor-agent; do
-  ( sleep 3
+  ( sleep 2
     echo "/slim join $CH --timeout 60"
     echo "/slim whoami"
     sleep 6                                   # let every member finish joining
-    echo "/slim send Hi, I am $a — reporting in"
-    for _ in 1 2 3 4 5; do echo "/slim recv --timeout 8"; done
     echo "/exit"
   ) | env SHADI_AGENT_ID="$a" "$BIN" shell >"$LOG/$a.log" 2>&1 &
+  SHELL_PIDS+=($!)
 done
 
-# Moderator (avatar): node, channel, invite all four, greet, then collect the roll call.
-( echo "/slim start node"; sleep 2
-  echo "/slim create $CH"; sleep 4
+# Moderator (avatar): create the channel, invite all four.
+( echo "/slim create $CH"; sleep 4
   for a in claude-code codex copilot cursor-agent; do echo "/slim invite agntcy/shadi/$a"; done
   echo "/slim whoami"
   sleep 6
-  echo "/slim send Welcome — moderator here; please introduce yourselves"
-  for _ in 1 2 3 4 5; do echo "/slim recv --timeout 8"; done
   echo "/exit"
 ) | env SHADI_AGENT_ID=avatar "$BIN" shell >"$LOG/avatar.log" 2>&1 &
+SHELL_PIDS+=($!)
 
-wait
+for p in "${SHELL_PIDS[@]}"; do wait "$p"; done
 pkill -f "$BIN shell" 2>/dev/null
+
+# --- Part 2: roll call over A2A's Collaborate op (SLIM group channel underneath) ---
+
+sleep 1
+COLLAB_PIDS=()
+for a in "${ALL_AGENTS[@]}"; do
+  others=""
+  for p in "${ALL_AGENTS[@]}"; do
+    [ "$p" != "$a" ] && others="${others:+$others,}$p"
+  done
+  env SHADI_AGENT_ID="$a" "$BIN" slim a2a-collaborate --agent-id "$a" --peer-agent-ids "$others" \
+    --message "Hi, I am $a — reporting in" --timeout-seconds 15 >"$LOG/$a-collaborate.log" 2>&1 &
+  COLLAB_PIDS+=($!)
+done
+for p in "${COLLAB_PIDS[@]}"; do wait "$p"; done
+
+kill "$NODE_PID" 2>/dev/null
+pkill -f "target/debug/shadictl" 2>/dev/null
 
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 echo
 echo "================ MODERATOR (avatar) ================"
-strip <"$LOG/avatar.log" | grep -iE "created channel|invited|sent to|role:|did:|human:|received:"
+strip <"$LOG/avatar.log" | grep -iE "created channel|invited|role:|did:|human:"
+strip <"$LOG/avatar-collaborate.log" | grep -iE "^broadcast|^  "
 for a in claude-code codex copilot cursor-agent; do
   echo "================ $a ================"
-  strip <"$LOG/$a.log" | grep -iE "joined|role:|did:|human:|sent to|received:"
+  strip <"$LOG/$a.log" | grep -iE "joined|role:|did:|human:"
+  strip <"$LOG/$a-collaborate.log" | grep -iE "^broadcast|^  "
 done
 echo
 echo "logs: $LOG"

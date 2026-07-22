@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-a2a"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.88"
 description = "A2A channel support for SHADI over SLIMRPC."
@@ -15,7 +15,8 @@ agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", pat
 a2a = { package = "a2a-lf", version = "0.3.0" }
 a2a-client = { package = "a2a-client-lf", version = "0.2.1" }
 a2a-server = { package = "a2a-server-lf", version = "0.4.1" }
-a2a-slimrpc = { package = "a2a-slimrpc", version = "0.2.2" }
+a2a-slimrpc = { package = "a2a-slimrpc", version = "0.2.3" }
+async-stream = "0.3"
 async-trait = "0.1"
 futures = "0.3"
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }

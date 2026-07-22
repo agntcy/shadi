@@ -9,11 +9,11 @@ tell which human an agent belongs to.
 It uses only `shadictl` shell commands. You can run it two ways:
 
 - **One command (recommended):** `bash docs/demos/run-demo.sh` orchestrates the whole
-  flow — node, moderator, four agents, invites, and a broadcast message — and prints
-  the result. Best for a quick, reliable demo.
+  flow — node, moderator, four agents, invites, and an A2A roll-call broadcast — and
+  prints the result. Best for a quick, reliable demo.
 - **By hand:** drive the `shadictl` shell across a terminal per agent (steps 1–6
-  below). Best for exploring; note `/slim join` and `/slim recv` block, so mind the
-  choreography and use generous `--timeout` values.
+  below). Best for exploring; note `/slim join` blocks, so mind the choreography and
+  use generous `--timeout` values.
 
 ## What this shows
 
@@ -25,6 +25,9 @@ It uses only `shadictl` shell commands. You can run it two ways:
   join and are admitted against a DID allow-list.
 - **Role-visible UX** — `create`, `invite`, and `whoami` surface the DID, the human
   it belongs to, and the moderator/participant role.
+- **A2A-native group messaging** — `/slim a2a-collaborate` broadcasts and receives
+  through A2A's `Message` type (SLIM's group/multicast is used underneath A2A via
+  the SLIMRPC `Collaborate` RPC, not instead of it), with `slim-src` attribution.
 
 ## Prerequisites
 
@@ -151,26 +154,28 @@ identified by a `did:key` admitted against the shared allow-list.
 
 ## 6. Roll call — every agent introduces itself
 
-Any member can broadcast to the channel with `/slim send`, and any member can wait
-for the next message with `/slim recv`. Once everyone has joined, have each agent
-announce itself; every other member (moderator included) receives it.
+Messaging always goes through **A2A**, not raw SLIM bytes: `/slim a2a-collaborate`
+drives the SLIMRPC `Collaborate` RPC — an A2A operation that broadcasts each
+`Message` you send to every other member of a SLIM group channel, and streams back
+everyone else's messages with `metadata["slim-src"]` identifying the sender. Every
+member (moderator included) both sends its own intro and listens for everyone
+else's, in one call — no `/slim create`/`invite`/`join` needed for this step, since
+`Collaborate` forms its own group session (it's independent of the moderator/role
+session from steps 3–5 above).
 
-**Each agent terminal (e.g. claude-code):**
+**Each terminal — moderator and all four agents — runs the same shape (e.g. claude-code):**
 ```text
-/slim send Hi, I am claude-code — reporting in
-sent to agntcy/shadi/dev-room: Hi, I am claude-code — reporting in
+/slim a2a-collaborate codex,copilot,cursor-agent,avatar --message Hi, I am claude-code — reporting in --timeout 15
+broadcast "Hi, I am claude-code — reporting in" to 4 peer(s); received:
+  Hi, I am codex — reporting in
+  Hi, I am copilot — reporting in
+  Hi, I am cursor-agent — reporting in
+  Hi, I am avatar — reporting in
 ```
 
-**Every other terminal — moderator and the other three agents — prints:**
-```text
-received: Hi, I am claude-code — reporting in
-```
-
-Repeat for `codex`, `copilot`, and `cursor-agent`; `recv` is one-shot and
-blocking, so call it once per expected message (`run-demo.sh` calls it five times
-per terminal — once per peer plus the moderator's own greeting — to collect the
-full roll call). This is a genuine mesh: every member can reach every other
-member, not just moderator → members.
+Give every terminal the peer-list of the *other* four members and start them all
+within the timeout window — this is a genuine mesh: every member reaches every
+other member directly, not just moderator → members.
 
 ## How admission works (under the hood)
 
@@ -185,11 +190,18 @@ member, not just moderator → members.
 
 ## Notes / limitations
 
-- `/slim join` and `/slim recv` **block** (listening for an invite / a message) — an
-  agent terminal will appear to "hang" until the moderator invites it, or a message
-  arrives, or the timeout elapses. That is expected.
-- `/slim recv` is one-shot: it returns the next single message. Call it again for the
-  next one. (No background subscriber loop yet.)
+- `/slim join` **blocks** (listening for the moderator's invite) — an agent terminal
+  will appear to "hang" until invited, or the timeout elapses. That is expected.
+- `/slim a2a-collaborate` also blocks for its `--timeout`, since it stays listening
+  for other members' broadcasts for that whole window after sending its own intro.
+- Verified live with the full 5-member group (moderator + 4 coding-agent CLIs):
+  every member reliably receives all four peers' intros, in either order, across
+  repeated runs.
+- Server-side listener attribution is a known gap in the current SLIMRPC
+  `Collaborate` implementation: a member's *own* broadcast gets proper `slim-src`
+  attribution on its reply-observer stream, but messages surfaced purely through the
+  passive listener path have no per-message sender tag yet (the message text itself
+  states the sender, which is enough for this demo).
 - The four agent names match the `agentbridge` coding-agent adapters
   (`claude_code`, `codex`, `copilot`, `cursor_agent`). This demo forms the DID group
   and passes messages; wiring the actual agent binaries in via `agentbridge` is the

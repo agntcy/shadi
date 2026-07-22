@@ -170,36 +170,6 @@ impl SlimShellState {
         ))
     }
 
-    /// Broadcast a text message to the active group session (all members receive it).
-    pub(crate) fn send_group_message(&mut self, text: &str) -> Result<String, String> {
-        let session = self.active_session.clone().ok_or_else(|| {
-            "no active SLIM session; create or join a channel first".to_string()
-        })?;
-        session
-            .publish(text.as_bytes().to_vec(), None, Some(HashMap::new()))
-            .map_err(format_slim_error)?;
-        let channel = self
-            .active_channel
-            .clone()
-            .unwrap_or_else(|| "<unknown>".to_string());
-        Ok(format!("sent to {channel}: {text}"))
-    }
-
-    /// Block up to `timeout` for the next message on the active group session.
-    pub(crate) fn receive_group_message(
-        &mut self,
-        timeout: Option<Duration>,
-    ) -> Result<String, String> {
-        let session = self.active_session.clone().ok_or_else(|| {
-            "no active SLIM session; create or join a channel first".to_string()
-        })?;
-        let message = session.get_message(timeout).map_err(format_slim_error)?;
-        Ok(format!(
-            "received: {}",
-            String::from_utf8_lossy(&message.payload)
-        ))
-    }
-
     pub(crate) fn join_group_session(
         &mut self,
         channel: &str,
@@ -1442,10 +1412,20 @@ mod tests {
             .expect("join group session");
         assert!(join_message.contains("joined group session"));
 
-        let sent_message = state
-            .send_group_message("hello from participant")
+        // Regression check for the participant->channel route fix in
+        // join_group_session: without it, a participant's own publish routes
+        // back to the moderator's own session instead of fanning out, so this
+        // would never reach the moderator below.
+        state
+            .active_session
+            .as_ref()
+            .expect("active session after join")
+            .publish(
+                b"hello from participant".to_vec(),
+                None,
+                Some(HashMap::new()),
+            )
             .expect("participant broadcast to the group");
-        assert!(sent_message.contains("sent to"));
 
         let status = state.status().expect("status after join");
         let joined_session_id = status.active_session_id.expect("joined session id");
