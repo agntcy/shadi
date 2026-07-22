@@ -4164,6 +4164,27 @@ members = [{{ did = "shadi://{}", role = "human" }}]
     }
 
     #[test]
+    fn run_slim_command_dispatches_controller_variant() {
+        // Empty connect args fail validation before any network I/O, so this
+        // exercises the SlimCommand::Controller match arm in run_slim_command
+        // (not just the run_controller_command helper it delegates to).
+        let args = SlimControllerConnectArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            create_connection: Vec::new(),
+            delete_connection: Vec::new(),
+            set_route: Vec::new(),
+            delete_route: Vec::new(),
+            timeout_seconds: 1,
+        };
+        let code = run_slim_command(SlimCli {
+            command: SlimCommand::Controller {
+                command: ControllerCommand::Connect(args),
+            },
+        });
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
     fn run_controller_command_dispatches_connect_and_surfaces_errors() {
         // Empty connect args fail validation before any network I/O, so this
         // exercises the dispatch match arm and error path without needing a
@@ -4180,6 +4201,34 @@ members = [{{ did = "shadi://{}", role = "human" }}]
             run_controller_command(ControllerCommand::Connect(args)),
             ExitCode::from(1)
         );
+    }
+
+    fn restore_env_var(name: &str, previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    #[test]
+    fn restore_env_var_covers_some_and_none() {
+        let _guard = trace_env_lock();
+        let previous = std::env::var_os("SHADI_TEST_RESTORE_ENV_VAR");
+
+        std::env::set_var("SHADI_TEST_RESTORE_ENV_VAR", "before");
+        restore_env_var(
+            "SHADI_TEST_RESTORE_ENV_VAR",
+            Some(std::ffi::OsString::from("restored")),
+        );
+        assert_eq!(
+            std::env::var("SHADI_TEST_RESTORE_ENV_VAR").as_deref(),
+            Ok("restored")
+        );
+
+        restore_env_var("SHADI_TEST_RESTORE_ENV_VAR", None);
+        assert!(std::env::var_os("SHADI_TEST_RESTORE_ENV_VAR").is_none());
+
+        restore_env_var("SHADI_TEST_RESTORE_ENV_VAR", previous);
     }
 
     #[test]
@@ -4201,18 +4250,9 @@ members = [{{ did = "shadi://{}", role = "human" }}]
         };
         let code = run_controller_command(ControllerCommand::ListRoutes(args));
 
-        match previous_cert {
-            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
-            None => std::env::remove_var("SLIM_TLS_CERT"),
-        }
-        match previous_key {
-            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
-            None => std::env::remove_var("SLIM_TLS_KEY"),
-        }
-        match previous_ca {
-            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
-            None => std::env::remove_var("SLIM_TLS_CA"),
-        }
+        restore_env_var("SLIM_TLS_CERT", previous_cert);
+        restore_env_var("SLIM_TLS_KEY", previous_key);
+        restore_env_var("SLIM_TLS_CA", previous_ca);
 
         assert_eq!(code, ExitCode::from(1));
     }
@@ -4233,18 +4273,9 @@ members = [{{ did = "shadi://{}", role = "human" }}]
         };
         let code = run_controller_command(ControllerCommand::ListConnections(args));
 
-        match previous_cert {
-            Some(value) => std::env::set_var("SLIM_TLS_CERT", value),
-            None => std::env::remove_var("SLIM_TLS_CERT"),
-        }
-        match previous_key {
-            Some(value) => std::env::set_var("SLIM_TLS_KEY", value),
-            None => std::env::remove_var("SLIM_TLS_KEY"),
-        }
-        match previous_ca {
-            Some(value) => std::env::set_var("SLIM_TLS_CA", value),
-            None => std::env::remove_var("SLIM_TLS_CA"),
-        }
+        restore_env_var("SLIM_TLS_CERT", previous_cert);
+        restore_env_var("SLIM_TLS_KEY", previous_key);
+        restore_env_var("SLIM_TLS_CA", previous_ca);
 
         assert_eq!(code, ExitCode::from(1));
     }
