@@ -139,11 +139,12 @@ fn send_and_await(
         .build()
         .map_err(|err| format!("failed to create tokio runtime: {err}"))?;
 
-    // rustls needs a process-level CryptoProvider installed once; slim_bindings
-    // does this internally elsewhere in shadictl, but this is the first path
-    // that drives tonic/rustls directly, so it isn't installed by the time we
-    // get here otherwise. A second install (from any other path) is a no-op.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // rustls needs a process-level CryptoProvider installed once. Use
+    // slim_config's own installer (aws-lc-rs, `Once`-guarded) rather than
+    // installing a different backend ourselves — the rest of the SLIM stack
+    // assumes aws-lc-rs, and having two backends racing to install first can
+    // break other rustls-based connections elsewhere in the same process.
+    slim_config::tls::provider::initialize_crypto_provider();
 
     runtime.block_on(async move {
         let client_config = build_core_client_config(endpoint)?;
@@ -412,5 +413,4 @@ mod tests {
         let name = ProtoName::from_strings(["org", "ns", "agent"]).with_id(42u128);
         assert_eq!(describe_proto_name(&name), "org/ns/agent/42");
     }
-
 }

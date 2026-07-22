@@ -264,7 +264,6 @@ dependencies = [
  "hkdf",
  "libc",
  "reqwest 0.12.28",
- "rustls",
  "rustyline",
  "sequoia-openpgp",
  "serde",
