@@ -4162,3 +4162,22 @@ members = [{{ did = "shadi://{}", role = "human" }}]
 
         assert_eq!(run_memory_command(cli), ExitCode::from(1));
     }
+
+    #[test]
+    fn run_controller_command_dispatches_connect_and_surfaces_errors() {
+        // Empty connect args fail validation before any network I/O, so this
+        // exercises the dispatch match arm and error path without needing a
+        // live controller endpoint.
+        let args = SlimControllerConnectArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            create_connection: Vec::new(),
+            delete_connection: Vec::new(),
+            set_route: Vec::new(),
+            delete_route: Vec::new(),
+            timeout_seconds: 1,
+        };
+        assert_eq!(
+            run_controller_command(ControllerCommand::Connect(args)),
+            ExitCode::from(1)
+        );
+    }
