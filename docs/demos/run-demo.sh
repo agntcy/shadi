@@ -8,8 +8,9 @@
 #   `/slim a2a-collaborate` — an A2A operation backed by SLIM's group channel — to
 #   broadcast an intro and collect everyone else's (a roll-call full mesh). Finally,
 #   claude-code/codex/copilot register as `agentbridge` adapters backed by the real
-#   installed CLI binaries, and the moderator delegates an actual task to each over
-#   the same SLIM node — real messages reaching real coding-agent processes.
+#   installed CLI binaries, and the moderator chains a real task across them: codex
+#   reports real disk usage, copilot ranks real processes by CPU, and claude-code
+#   synthesizes both into an operational report — real work, not a canned reply.
 #
 # Run from the repo root:  bash docs/demos/run-demo.sh
 set -uo pipefail
@@ -90,11 +91,14 @@ done
 for p in "${COLLAB_PIDS[@]}"; do wait "$p"; done
 step "Part 2 done."
 
-# --- Part 3: delegate a real task to the real coding-agent CLIs (agentbridge) ---
+# --- Part 3: chain a real task across the real coding-agent CLIs (agentbridge) ---
 # claude-code, codex, copilot register as live A2A/SLIM adapters backed by the
 # actual installed CLI binary — the same DID identity from Part 1 carries over
 # automatically (agentbridge checks the same SHADI_SLIM_AUTH=did env). cursor-agent
 # has no `agentbridge register` listener yet, so it's skipped here.
+# codex checks real disk usage, copilot ranks real processes by CPU, and
+# claude-code is given both real outputs and asked to synthesize a report — each
+# step depends on the previous agent's real result, not a canned reply.
 # A failed delegate below usually means that CLI isn't installed/authenticated on
 # this machine, not a SHADI bug — the script continues regardless.
 
@@ -107,18 +111,38 @@ for a in claude-code codex copilot; do
 done
 sleep 3
 
-for a in claude-code codex copilot; do
-  step "Part 3: delegating a real task to $a (this really runs the $a CLI, can take up to ~30s)..."
-  env SHADI_AGENT_ID=avatar "$AB" delegate "Reply with exactly the single word: PONG" --to "$a" \
-    --agent-id avatar --endpoint "$SLIM_ENDPOINT" >"$LOG/$a-delegate.log" 2>&1
-done
+step "Part 3: delegating a disk-usage check to codex (real CLI call, can take ~30s)..."
+env SHADI_AGENT_ID=avatar "$AB" delegate \
+  "Run a disk usage check on this machine (e.g. df -h) and report the real output. Return only the command output, no commentary." \
+  --to codex --agent-id avatar --endpoint "$SLIM_ENDPOINT" >"$LOG/codex-delegate.log" 2>&1
+DISK_REPORT=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG/codex-delegate.log" | sed -n '/^Response from/,$p' | tail -n +2)
+
+step "Part 3: delegating a top-CPU-processes check to copilot (real CLI call, can take ~30s)..."
+env SHADI_AGENT_ID=avatar "$AB" delegate \
+  "Rank the top 10 processes on this machine by CPU usage (e.g. ps aux sorted by %CPU) and report the real output. Return only the command output, no commentary." \
+  --to copilot --agent-id avatar --endpoint "$SLIM_ENDPOINT" >"$LOG/copilot-delegate.log" 2>&1
+CPU_REPORT=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG/copilot-delegate.log" | sed -n '/^Response from/,$p' | tail -n +2)
+
+step "Part 3: delegating report synthesis to claude-code (real CLI call, can take ~30s)..."
+REPORT_PROMPT="You are given two real system-health snippets gathered by other agents on this machine. Write a short operational report (a few sentences plus key numbers) summarizing disk usage and CPU load, and flag anything that looks concerning.
+
+=== Disk usage (from codex) ===
+$DISK_REPORT
+
+=== Top CPU processes (from copilot) ===
+$CPU_REPORT"
+env SHADI_AGENT_ID=avatar "$AB" delegate "$REPORT_PROMPT" --to claude-code \
+  --agent-id avatar --endpoint "$SLIM_ENDPOINT" >"$LOG/claude-code-delegate.log" 2>&1
 step "Part 3 done."
 
 for p in "${REGISTER_PIDS[@]}"; do kill -INT "$p" 2>/dev/null; wait "$p" 2>/dev/null; done
 
+# Every process this script spawned is already tracked and reaped above (SHELL_PIDS,
+# COLLAB_PIDS, REGISTER_PIDS, NODE_PID) — deliberately NOT using a blanket
+# `pkill -f target/debug/shadictl|agentbridge` here, since that would also kill any
+# other run-demo.sh instance running concurrently on this machine.
 kill "$NODE_PID" 2>/dev/null
-pkill -f "target/debug/shadictl" 2>/dev/null
-pkill -f "target/debug/agentbridge" 2>/dev/null
+wait "$NODE_PID" 2>/dev/null
 
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 echo
@@ -131,10 +155,14 @@ for a in claude-code codex copilot cursor-agent; do
   strip <"$LOG/$a-collaborate.log" | grep -iE "^broadcast|^  "
 done
 echo
-echo "================ agentbridge: real task delegation ================"
-for a in claude-code codex copilot; do
-  echo "-- $a --"
-  strip <"$LOG/$a-delegate.log" | grep -A1 -iE "^Response from"
-done
+echo "================ agentbridge: chained real task delegation ================"
+echo "-- codex: disk usage --"
+strip <"$LOG/codex-delegate.log" | sed -n '/^Response from/,$p'
+echo
+echo "-- copilot: top CPU processes --"
+strip <"$LOG/copilot-delegate.log" | sed -n '/^Response from/,$p'
+echo
+echo "-- claude-code: synthesized report --"
+strip <"$LOG/claude-code-delegate.log" | sed -n '/^Response from/,$p'
 echo
 echo "logs: $LOG"

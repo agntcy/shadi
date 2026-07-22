@@ -232,6 +232,29 @@ The listener terminal prints the same round trip from its side:
 └─────────────────────────────────────────────────────────
 ```
 
+**Chaining a real task across agents** — `run-demo.sh` does this for real: it
+delegates a disk-usage check to `codex`, a top-CPU-processes check to `copilot`,
+then hands *both real outputs* to `claude-code` and asks it to synthesize an
+operational report — each step genuinely depends on the previous agent's result,
+not a canned reply. By hand, that's three `delegate` calls chained through shell
+variables:
+
+```bash
+DISK=$(target/debug/agentbridge delegate \
+  "Run a disk usage check on this machine (e.g. df -h) and report the real output." \
+  --to codex --agent-id avatar --endpoint "$SLIM_ENDPOINT")
+CPU=$(target/debug/agentbridge delegate \
+  "Rank the top 10 processes on this machine by CPU usage (e.g. ps aux) and report the real output." \
+  --to copilot --agent-id avatar --endpoint "$SLIM_ENDPOINT")
+target/debug/agentbridge delegate \
+  "Summarize these two real system-health snippets into a short report, flagging anything concerning:\n\n$DISK\n\n$CPU" \
+  --to claude-code --agent-id avatar --endpoint "$SLIM_ENDPOINT"
+```
+
+`claude-code`'s response is a real report — e.g. flagging a disk volume nearing
+capacity or a process with unexpectedly high CPU — built from the other two
+agents' real command output.
+
 This is a genuinely live `claude`/`copilot` process handling the prompt — swap the
 message for any real coding task to see it delegated end to end. `codex`'s success
 depends on your local `codex` CLI/model configuration (an unsupported default model
