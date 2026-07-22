@@ -33,12 +33,20 @@ CH="agntcy/shadi/dev-room"
 LOG="$SHADI_TMP_DIR/logs"; mkdir -p "$LOG"
 ALL_AGENTS=(avatar claude-code codex copilot cursor-agent)
 
+step() { echo "[$(date +%H:%M:%S)] $*"; }
+
+step "logs: $LOG"
+step "watch live progress in another terminal:  bash docs/demos/watch-demo.sh"
+
 # One SLIM node spans both parts below; only killed at the very end.
+step "starting SLIM node..."
 "$BIN" slim start-node >"$LOG/node.log" 2>&1 &
 NODE_PID=$!
 sleep 2
 
 # --- Part 1: DID/moderator role UX (create/invite/join) -------------------
+
+step "Part 1: agents joining, moderator creating channel + inviting..."
 
 # Four coding-agent CLIs join the channel and report their role.
 SHELL_PIDS=()
@@ -63,9 +71,11 @@ SHELL_PIDS+=($!)
 
 for p in "${SHELL_PIDS[@]}"; do wait "$p"; done
 pkill -f "$BIN shell" 2>/dev/null
+step "Part 1 done."
 
 # --- Part 2: roll call over A2A's Collaborate op (SLIM group channel underneath) ---
 
+step "Part 2: roll call — every member broadcasting via /slim a2a-collaborate..."
 sleep 1
 COLLAB_PIDS=()
 for a in "${ALL_AGENTS[@]}"; do
@@ -78,6 +88,7 @@ for a in "${ALL_AGENTS[@]}"; do
   COLLAB_PIDS+=($!)
 done
 for p in "${COLLAB_PIDS[@]}"; do wait "$p"; done
+step "Part 2 done."
 
 # --- Part 3: delegate a real task to the real coding-agent CLIs (agentbridge) ---
 # claude-code, codex, copilot register as live A2A/SLIM adapters backed by the
@@ -87,6 +98,7 @@ for p in "${COLLAB_PIDS[@]}"; do wait "$p"; done
 # A failed delegate below usually means that CLI isn't installed/authenticated on
 # this machine, not a SHADI bug — the script continues regardless.
 
+step "Part 3: registering claude-code/codex/copilot as real agentbridge adapters..."
 REGISTER_PIDS=()
 for a in claude-code codex copilot; do
   env SHADI_AGENT_ID="$a" "$AB" register --tool "$a" --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
@@ -96,9 +108,11 @@ done
 sleep 3
 
 for a in claude-code codex copilot; do
+  step "Part 3: delegating a real task to $a (this really runs the $a CLI, can take up to ~30s)..."
   env SHADI_AGENT_ID=avatar "$AB" delegate "Reply with exactly the single word: PONG" --to "$a" \
     --agent-id avatar --endpoint "$SLIM_ENDPOINT" >"$LOG/$a-delegate.log" 2>&1
 done
+step "Part 3 done."
 
 for p in "${REGISTER_PIDS[@]}"; do kill -INT "$p" 2>/dev/null; wait "$p" 2>/dev/null; done
 
