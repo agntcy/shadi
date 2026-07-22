@@ -420,6 +420,8 @@ impl Completer for ShellHelper {
                 "invite",
                 "join",
                 "whoami",
+                "send",
+                "recv",
             ];
             for sub in subs {
                 if sub.starts_with(sub_input) {
@@ -604,9 +606,11 @@ impl ShellSession {
                 "invite" => self.cmd_slim_invite(&parts[2..]),
                 "join" => self.cmd_slim_join(&parts[2..]),
                 "whoami" => self.cmd_slim_whoami(),
+                "send" => self.cmd_slim_send(&parts[2..]),
+                "recv" => self.cmd_slim_recv(&parts[2..]),
                 _ => {
                     eprintln!("unknown slim subcommand: {}", parts[1]);
-                    eprintln!("  available: status, start node, a2a-echo-peer, a2a-send, create, invite, join, whoami");
+                    eprintln!("  available: status, start node, a2a-echo-peer, a2a-send, create, invite, join, whoami, send, recv");
                     LoopAction::Continue
                 }
             },
@@ -1128,6 +1132,49 @@ impl ShellSession {
         match self.slim.whoami() {
             Ok(message) => println!("{}", message),
             Err(err) => eprintln!("error resolving SLIM identity: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_send(&mut self, args: &[&str]) -> LoopAction {
+        if args.is_empty() {
+            eprintln!("usage: /slim send <message ...>");
+            return LoopAction::Continue;
+        }
+        let text = args.join(" ");
+        match self.slim.send_group_message(&text) {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error sending SLIM message: {}", err),
+        }
+        LoopAction::Continue
+    }
+
+    fn cmd_slim_recv(&mut self, args: &[&str]) -> LoopAction {
+        let mut timeout = Some(Duration::from_secs(30));
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--timeout" if i + 1 < args.len() => {
+                    match args[i + 1].parse::<u64>() {
+                        Ok(0) => timeout = None,
+                        Ok(seconds) => timeout = Some(Duration::from_secs(seconds)),
+                        Err(_) => {
+                            eprintln!("invalid timeout value: {}", args[i + 1]);
+                            return LoopAction::Continue;
+                        }
+                    }
+                    i += 2;
+                }
+                other => {
+                    eprintln!("usage: /slim recv [--timeout SECONDS]");
+                    eprintln!("  unexpected argument: {}", other);
+                    return LoopAction::Continue;
+                }
+            }
+        }
+        match self.slim.receive_group_message(timeout) {
+            Ok(message) => println!("{}", message),
+            Err(err) => eprintln!("error receiving SLIM message: {}", err),
         }
         LoopAction::Continue
     }

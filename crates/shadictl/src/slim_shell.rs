@@ -170,6 +170,36 @@ impl SlimShellState {
         ))
     }
 
+    /// Broadcast a text message to the active group session (all members receive it).
+    pub(crate) fn send_group_message(&mut self, text: &str) -> Result<String, String> {
+        let session = self.active_session.clone().ok_or_else(|| {
+            "no active SLIM session; create or join a channel first".to_string()
+        })?;
+        session
+            .publish(text.as_bytes().to_vec(), None, Some(HashMap::new()))
+            .map_err(format_slim_error)?;
+        let channel = self
+            .active_channel
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        Ok(format!("sent to {channel}: {text}"))
+    }
+
+    /// Block up to `timeout` for the next message on the active group session.
+    pub(crate) fn receive_group_message(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<String, String> {
+        let session = self.active_session.clone().ok_or_else(|| {
+            "no active SLIM session; create or join a channel first".to_string()
+        })?;
+        let message = session.get_message(timeout).map_err(format_slim_error)?;
+        Ok(format!(
+            "received: {}",
+            String::from_utf8_lossy(&message.payload)
+        ))
+    }
+
     pub(crate) fn join_group_session(
         &mut self,
         channel: &str,
@@ -177,7 +207,13 @@ impl SlimShellState {
     ) -> Result<String, String> {
         let expected = parse_name(channel)?;
         self.ensure_channel_subscription(channel)?;
+        let connection_id = self.ensure_connection()?;
         let app = self.ensure_app()?;
+        // Subscribing only enables *receiving*. To broadcast to the group, a member
+        // also needs a route to the channel — otherwise its `/slim send` never
+        // reaches the other members.
+        app.set_route(Arc::new(parse_name(channel)?), connection_id)
+            .map_err(format_slim_error)?;
         let session = app
             .listen_for_session(timeout)
             .map_err(format_slim_error)?;
@@ -1351,7 +1387,7 @@ mod tests {
         let endpoint_for_moderator = endpoint.clone();
         let participant_name_for_thread = participant_name.clone();
         let channel_name_for_thread = channel_name.clone();
-        let moderator_handle = thread::spawn(move || -> Result<u32, String> {
+        let moderator_handle = thread::spawn(move || -> Result<(u32, String), String> {
             let moderator_service =
                 Service::new(format!("shadictl-test-moderator-{}", std::process::id()));
             let moderator_name = Arc::new(parse_name("agntcy/shadi/avatar").expect("moderator name"));
@@ -1382,12 +1418,21 @@ mod tests {
                 .invite_and_wait(participant_name_for_thread)
                 .map_err(format_slim_error)?;
 
+            // Regression check for the participant->channel route fix in
+            // join_group_session: without it, a participant's broadcast never
+            // reaches the moderator (it has nowhere to route to but back to the
+            // moderator's own session).
+            let received = session
+                .get_message(Some(Duration::from_secs(15)))
+                .map_err(format_slim_error)?;
+            let payload = String::from_utf8_lossy(&received.payload).to_string();
+
             let _ = moderator_app.delete_session_and_wait(session);
             moderator_service
                 .disconnect(connection_id)
                 .map_err(format_slim_error)?;
             moderator_service.shutdown().map_err(format_slim_error)?;
-            Ok(session_id)
+            Ok((session_id, payload))
         });
 
         start_tx.send(()).expect("start moderator flow");
@@ -1397,14 +1442,20 @@ mod tests {
             .expect("join group session");
         assert!(join_message.contains("joined group session"));
 
+        let sent_message = state
+            .send_group_message("hello from participant")
+            .expect("participant broadcast to the group");
+        assert!(sent_message.contains("sent to"));
+
         let status = state.status().expect("status after join");
         let joined_session_id = status.active_session_id.expect("joined session id");
-        let moderator_session_id = moderator_handle
+        let (moderator_session_id, moderator_received) = moderator_handle
             .join()
             .expect("moderator thread panicked")
-            .expect("moderator session id");
+            .expect("moderator session id and received payload");
 
         assert_eq!(joined_session_id, moderator_session_id);
+        assert_eq!(moderator_received, "hello from participant");
         state.shutdown();
     }
 
