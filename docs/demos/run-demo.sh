@@ -6,7 +6,10 @@
 #   codex / copilot / cursor-agent (each a DID derived from one human key) — this
 #   shows off the DID/moderator role UX. Then all five members run
 #   `/slim a2a-collaborate` — an A2A operation backed by SLIM's group channel — to
-#   broadcast an intro and collect everyone else's (a roll-call full mesh).
+#   broadcast an intro and collect everyone else's (a roll-call full mesh). Finally,
+#   claude-code/codex/copilot register as `agentbridge` adapters backed by the real
+#   installed CLI binaries, and the moderator delegates an actual task to each over
+#   the same SLIM node — real messages reaching real coding-agent processes.
 #
 # Run from the repo root:  bash docs/demos/run-demo.sh
 set -uo pipefail
@@ -14,6 +17,8 @@ cd "$(dirname "$0")/../.."   # repo root
 
 BIN=target/debug/shadictl
 [ -x "$BIN" ] || { echo "building shadictl…"; cargo build -p agntcy-shadi-cli || exit 1; }
+AB=target/debug/agentbridge
+[ -x "$AB" ] || { echo "building agentbridge…"; cargo build -p agntcy-agentbridge-cli || exit 1; }
 
 # Fresh, isolated run dir + endpoint; clear any stale shells holding the port.
 export SHADI_TMP_DIR="$(mktemp -d /tmp/shadi-did-demo.XXXXXX)"
@@ -74,8 +79,32 @@ for a in "${ALL_AGENTS[@]}"; do
 done
 for p in "${COLLAB_PIDS[@]}"; do wait "$p"; done
 
+# --- Part 3: delegate a real task to the real coding-agent CLIs (agentbridge) ---
+# claude-code, codex, copilot register as live A2A/SLIM adapters backed by the
+# actual installed CLI binary — the same DID identity from Part 1 carries over
+# automatically (agentbridge checks the same SHADI_SLIM_AUTH=did env). cursor-agent
+# has no `agentbridge register` listener yet, so it's skipped here.
+# A failed delegate below usually means that CLI isn't installed/authenticated on
+# this machine, not a SHADI bug — the script continues regardless.
+
+REGISTER_PIDS=()
+for a in claude-code codex copilot; do
+  env SHADI_AGENT_ID="$a" "$AB" register --tool "$a" --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
+    >"$LOG/$a-agent.log" 2>&1 &
+  REGISTER_PIDS+=($!)
+done
+sleep 3
+
+for a in claude-code codex copilot; do
+  env SHADI_AGENT_ID=avatar "$AB" delegate "Reply with exactly the single word: PONG" --to "$a" \
+    --agent-id avatar --endpoint "$SLIM_ENDPOINT" >"$LOG/$a-delegate.log" 2>&1
+done
+
+for p in "${REGISTER_PIDS[@]}"; do kill -INT "$p" 2>/dev/null; wait "$p" 2>/dev/null; done
+
 kill "$NODE_PID" 2>/dev/null
 pkill -f "target/debug/shadictl" 2>/dev/null
+pkill -f "target/debug/agentbridge" 2>/dev/null
 
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 echo
@@ -86,6 +115,12 @@ for a in claude-code codex copilot cursor-agent; do
   echo "================ $a ================"
   strip <"$LOG/$a.log" | grep -iE "joined|role:|did:|human:"
   strip <"$LOG/$a-collaborate.log" | grep -iE "^broadcast|^  "
+done
+echo
+echo "================ agentbridge: real task delegation ================"
+for a in claude-code codex copilot; do
+  echo "-- $a --"
+  strip <"$LOG/$a-delegate.log" | grep -A1 -iE "^Response from"
 done
 echo
 echo "logs: $LOG"
