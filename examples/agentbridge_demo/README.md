@@ -124,4 +124,4 @@ agentbridge coordinate \
   --require-human
 ```
 
-See [docs/agentbridge.md](../../docs/agentbridge.md) for architecture and roadmap.
+See [docs/content/agentbridge.md](../../docs/content/agentbridge.md) for architecture and roadmap.

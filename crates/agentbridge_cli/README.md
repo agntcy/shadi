@@ -164,7 +164,7 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 > ⚠️ **Security:** `register`, `delegate`, and `coordinate` (for `slim:` agent
 > specs) authenticate to the SLIM mesh via DID/keys only — set
 > `SHADI_SLIM_AUTH=did`, `SLIM_HUMAN_SEED`, and `SLIM_MEMBER_DIDS` (see
-> [`docs/demos/demo-env.sh`](../../docs/demos/demo-env.sh)). Shared secrets are
+> [`docs/content/demos/demo-env.sh`](../../docs/content/demos/demo-env.sh)). Shared secrets are
 > not supported: a `register` listener forwards incoming A2A tasks to the local
 > CLI tool, so admission must be cryptographic, not a symmetric secret compiled
 > into every demo script.

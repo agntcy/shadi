@@ -8,11 +8,11 @@ tell which human an agent belongs to.
 
 It uses only `shadictl` shell commands. You can run it two ways:
 
-- **One command (recommended):** `bash docs/demos/run-demo.sh` orchestrates the whole
+- **One command (recommended):** `bash docs/content/demos/run-demo.sh` orchestrates the whole
   flow — node, moderator, four agents, invites, an A2A roll-call broadcast, and real
   task delegation to claude-code/codex/copilot — and prints the result. Best for a
   quick, reliable demo. It prints its log dir immediately and echoes a one-line
-  status per phase as it runs; in a second terminal, `bash docs/demos/watch-demo.sh`
+  status per phase as it runs; in a second terminal, `bash docs/content/demos/watch-demo.sh`
   tails every per-agent log live (including ones from later phases, as they're
   created) so you can watch progress in real time instead of waiting for the final
   summary.
@@ -55,7 +55,7 @@ The whole group shares one human root secret and one allow-list, provided in
 below:
 
 ```bash
-source docs/demos/demo-env.sh
+source docs/content/demos/demo-env.sh
 ```
 
 It sets `SHADI_SLIM_AUTH=did`, `SLIM_HUMAN_SEED`, `SLIM_HUMAN_DID`, `SHADI_TMP_DIR`,

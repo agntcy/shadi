@@ -7,12 +7,12 @@
 # haven't been created yet (later phases), which `tail -F` picks up as soon
 # as run-demo.sh creates them.
 #
-# Usage:  bash docs/demos/watch-demo.sh
+# Usage:  bash docs/content/demos/watch-demo.sh
 set -uo pipefail
 
 DIR="$(ls -dt /tmp/shadi-did-demo.*/logs 2>/dev/null | head -1)"
 if [ -z "$DIR" ]; then
-  echo "No run-demo.sh run found yet — start one with 'bash docs/demos/run-demo.sh' first." >&2
+  echo "No run-demo.sh run found yet — start one with 'bash docs/content/demos/run-demo.sh' first." >&2
   exit 1
 fi
 
