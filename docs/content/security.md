@@ -192,13 +192,70 @@ Controls:
 - Run bridged tools inside the SHADI [sandbox](sandbox.md) so tool execution is
   confined by OS policy. See [AgentBridge → Security model](agentbridge.md#security-model).
 
-!!! warning "Non-goals"
+## Threat model
 
-    - Protecting against a fully compromised host OS.
-    - Metadata privacy beyond message content when using SLIM/MLS.
+### Secrets and credential theft
+- **Stopped**: Reading secrets without verification.
+- **Stopped**: Exfiltration of secrets from disk when keystore access is denied.
+- **Stopped**: Accidental logging of secrets by non-verified sessions.
+- **Mitigated**: In-memory exposure via zeroization and limited lifetime.
+
+### Identity spoofing / provenance ambiguity
+- **Stopped**: Undetected key substitution when `verify-agent-identity` is used.
+- **Mitigated**: Agent ownership ambiguity via stored `human_did` binding + verification.
+
+### Filesystem abuse
+- **Stopped**: Accessing paths outside allowlists (kernel enforcement).
+- **Stopped**: Writing to disallowed paths in sandboxed processes.
+- **Mitigated**: Destructive commands via CLI blocklist.
+
+### Network abuse
+- **Stopped**: Network access when `net_block` is enabled.
+- **Mitigated**: Unapproved endpoints with best-effort `net_allow` guard for
+  Python sandbox runners.
+
+### Agent-to-agent data leakage
+- **Stopped**: Unverified peers joining a session; DID-JWT authentication and
+  (for groups) an explicit member allow-list gate admission.
+- **Stopped**: Unauthorized peers reading messages; MLS provides confidentiality
+  on point-to-point and group SLIM sessions.
+- **Stopped**: Message tampering; MLS provides integrity/authentication.
+
+### Privilege escalation
+- **Mitigated**: Prompt-level or path-level agent reasoning by applying sandbox policy before launch.
+- **Mitigated**: Running blocked commands via CLI blocklist when that feature is used.
+- **Mitigated**: Kernel-level constraints remain even if the agent tries to evade application-layer logic.
+
+### Threat-to-control mapping
+
+| Threat | Control | Outcome |
+| --- | --- | --- |
+| Unverified secret access | DID/VC verifier + `AgentSecretAccess` | Blocked |
+| Secret theft at rest | OS keystore storage | Blocked |
+| Secret exfiltration in sandbox | OS sandbox + net block | Blocked |
+| Unauthorized file access | Seatbelt/AppContainer allowlists | Blocked |
+| Destructive commands | CLI blocklist | Mitigated |
+| Peer/agent impersonation on SLIM | DID-JWT auth + member allow-list | Blocked |
+| Message interception | MLS in SLIM | Blocked |
+| Message tampering | MLS integrity | Blocked |
+| Agent identity substitution | HKDF derivation + verify-agent-identity | Blocked (with verification) |
+| Process escape | Kernel enforcement | Mitigated |
+
+!!! warning "Non-goals and residual risks"
+
+    - Protecting against a fully compromised host OS or kernel-level malware.
+    - Metadata privacy beyond message content when using SLIM/MLS, or network traffic metadata (timing, sizes, endpoints) in general.
+    - ACL changes on Windows could be interrupted before rollback in a crash.
+    - Application-level path deny rules are weaker than OS-enforced sandbox restrictions; do not rely on path matching alone for high-assurance policy.
+
+!!! tip "Deployment guidance"
+
+    - Prefer running agents under the sandbox with a JSON policy file.
+    - Use explicit disclosure only when a demo or workload truly needs the secret in the parent process, and prefer process-scoped or delegated trusted delivery where possible.
+    - Rotate secrets and use short-lived tokens whenever possible.
 
 ## Next steps
 
-- See the full system model in [Architecture](architecture.md).
+- See the high-level system model in [Architecture](architecture.md).
 - Put this into practice with [Sandbox and Policies](sandbox.md).
 - Review agentbridge's specific threat model in [AgentBridge → Security model](agentbridge.md#security-model).
