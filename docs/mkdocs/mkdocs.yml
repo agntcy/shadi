@@ -1,8 +1,17 @@
+# MkDocs config lives in docs/mkdocs/; paths below are relative to this file.
+# Build: just docs-build   or: mkdocs build --site-dir ../../site (from docs/mkdocs)
+
 site_name: SHADI
 site_description: Secure Host Agentic AI Dynamic Instantiation
-site_url: https://agntcy.github.io/shadi
+# Local `mkdocs serve` must use a site_url *without* a path segment, or only /shadi/... URLs work (404 at /).
+# CI sets MKDOCS_SITE_URL for production builds. Default: local dev server root.
+site_url: !ENV [MKDOCS_SITE_URL, 'http://127.0.0.1:8000/']
+
+docs_dir: ../content
+
 repo_url: https://github.com/agntcy/shadi
 repo_name: shadi
+edit_uri: edit/main/docs/content/
 
 extra:
   copyright: >
@@ -10,6 +19,14 @@ extra:
 
 extra_css:
   - stylesheets/custom.css
+  - stylesheets/shadi-landing.css
+  - stylesheets/shadictl-terminal.css
+
+extra_javascript:
+  - javascripts/card-links.js
+  - javascripts/external-links.js
+  - javascripts/shadictl-demo-data.js
+  - javascripts/shadictl-terminal.js
 
 theme:
   name: material
@@ -53,8 +70,9 @@ theme:
     - toc.follow
 
 nav:
+  - Home: index.md
   - Introduction:
-      - Overview: index.md
+      - Overview: overview.md
       - Architecture: architecture.md
       - Security Notes: security.md
       - Design Overview: design.md
@@ -71,14 +89,19 @@ nav:
       - Mobile: mobile_integration.md
   - Reference:
       - CLI Reference: cli.md
+  - Community: community.md
 
 exclude_docs: |
   README.md
 
 markdown_extensions:
   - admonition
+  - attr_list
   - md_in_html
   - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.superfences:

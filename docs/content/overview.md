@@ -1,4 +1,4 @@
-# SHADI
+# SHADI Overview
 
 ## Runtime Safety Infrastructure for Agentic Systems
 

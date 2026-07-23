@@ -70,12 +70,12 @@ windows-integration:
 [group('docs')]
 [doc('Build the MkDocs site locally.')]
 docs-build:
-  mkdocs build
+  cd docs/mkdocs && mkdocs build --site-dir ../../site
 
 [group('docs')]
 [doc('Serve the MkDocs site locally.')]
 docs-serve:
-  mkdocs serve
+  cd docs/mkdocs && mkdocs serve
 
 [group('profiles')]
 [doc('Print the strict built-in security profile.')]

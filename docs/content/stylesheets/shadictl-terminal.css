@@ -1,0 +1,254 @@
+/* Copyright SHADI Contributors */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* Interactive shadictl terminal on the home page */
+
+.shadictl-terminal-section {
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.shadictl-terminal-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 2rem;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.shadictl-terminal-main {
+  flex: 1 1 52%;
+  min-width: 0;
+}
+
+.shadictl-terminal-side {
+  flex: 1 1 42%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1rem;
+  container-type: inline-size;
+  container-name: shadictl-terminal-side;
+}
+
+.shadictl-terminal-intro-group {
+  width: 100%;
+  text-align: left;
+}
+
+.md-typeset .md-content__inner > .shadictl-terminal-intro-group {
+  display: none;
+}
+
+.shadictl-terminal-side > .shadictl-terminal-intro-group {
+  display: block;
+}
+
+.shadictl-terminal-intro {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  margin: 0 0 1rem;
+}
+
+.shadictl-terminal-intro a {
+  color: var(--md-accent-fg-color);
+}
+
+.shadictl-terminal {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  text-align: left;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--shadictl-terminal-height, 20rem);
+  min-height: var(--shadictl-terminal-height, 20rem);
+  background: var(--md-code-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+}
+
+[data-md-color-scheme="slate"] .shadictl-terminal {
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+.shadictl-terminal-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.35rem 0.4rem 0.35rem 0.85rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  background: var(--md-default-bg-color--light);
+}
+
+.shadictl-terminal-title {
+  color: var(--md-default-fg-color--light);
+  font-family: var(--md-code-font, "Roboto Mono"), ui-monospace, monospace;
+  font-size: 0.75rem;
+}
+
+.shadictl-terminal-controls {
+  display: flex;
+  gap: 1px;
+}
+
+.shadictl-terminal-control {
+  width: 1.75rem;
+  height: 1.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: default;
+  padding: 0;
+  pointer-events: none;
+  user-select: none;
+}
+
+.md-typeset .shadictl-terminal-output {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  margin: 0;
+  padding: 1rem 0.9rem;
+  overflow-x: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-family: var(--md-code-font, "Roboto Mono"), ui-monospace, monospace;
+  font-size: 0.82rem;
+  line-height: 1.65;
+  color: var(--md-default-fg-color);
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-overflow-scrolling: touch;
+}
+
+.md-typeset .shadictl-terminal-output .shadictl-terminal-cmd {
+  color: var(--md-accent-fg-color);
+}
+
+.md-typeset .shadictl-terminal-output .shadictl-terminal-out {
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .shadictl-terminal-output .shadictl-terminal-comment {
+  color: var(--md-default-fg-color--light);
+  font-style: italic;
+}
+
+.md-typeset .shadictl-terminal-output .shadictl-terminal-err {
+  color: #c62828;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .shadictl-terminal-output .shadictl-terminal-err {
+  color: #ef9a9a;
+}
+
+.shadictl-terminal-cursor {
+  display: inline-block;
+  width: 0.55em;
+  color: var(--md-accent-fg-color);
+  animation: shadictl-terminal-blink 1s step-end infinite;
+}
+
+@keyframes shadictl-terminal-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shadictl-terminal-cursor {
+    animation: none;
+  }
+}
+
+.shadictl-terminal-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.35rem;
+  justify-content: flex-start;
+  align-items: center;
+  width: 100%;
+}
+
+.shadictl-terminal-actions .shadictl-terminal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--md-text-font, "Roboto"), sans-serif;
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--shadi-action-btn-color);
+  background: var(--shadi-action-btn-bg);
+  border: 2px solid var(--shadi-action-btn-border);
+  border-radius: 50px;
+  padding: calc(0.4rem - 1px) calc(0.9rem - 1px);
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.shadictl-terminal-actions .shadictl-terminal-btn:not(.is-active):hover {
+  border-color: var(--md-accent-fg-color);
+}
+
+.shadictl-terminal-actions .shadictl-terminal-btn.is-active {
+  border: 2px solid transparent;
+  background:
+    linear-gradient(var(--shadi-action-btn-bg-active), var(--shadi-action-btn-bg-active)) padding-box,
+    var(--shadi-hero-gradient) border-box;
+}
+
+.shadictl-terminal-intro[hidden] {
+  display: none !important;
+}
+
+@container shadictl-terminal-side (max-width: 22rem) {
+  .shadictl-terminal-actions {
+    flex-direction: column;
+    align-items: flex-start;
+    flex-wrap: nowrap;
+  }
+}
+
+@media (max-width: 768px) {
+  .shadictl-terminal-layout {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1rem;
+  }
+
+  .shadictl-terminal-side {
+    align-items: stretch;
+  }
+
+  .shadictl-terminal-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 600px) {
+  .shadictl-terminal {
+    --shadictl-terminal-height: 18rem;
+  }
+
+  .md-typeset .shadictl-terminal-output {
+    font-size: 0.78rem;
+  }
+}

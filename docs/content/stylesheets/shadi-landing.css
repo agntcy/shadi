@@ -1,0 +1,557 @@
+/* Copyright SHADI Contributors */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* Landing page (home). Matches slim.agntcy.org / dir.agntcy.org hero layout,
+   reusing shadi's existing AGNTCY brand palette from stylesheets/custom.css. */
+
+:root {
+  --shadi-dark: rgb(0, 20, 43);
+  --shadi-accent: rgb(251, 175, 70);
+  --shadi-text-inverse: rgb(232, 233, 234);
+  --shadi-hero-btn-bg: rgb(243, 246, 253);
+  --shadi-hero-gradient: linear-gradient(
+    101.5deg,
+    rgb(251, 171, 44) 0%,
+    rgb(24, 122, 220) 53%,
+    rgb(0, 20, 43) 100%
+  );
+  --shadi-hero-chrome-top: calc(var(--md-header-height, 2.4rem) + var(--shadi-tabs-row-height, 3rem));
+  --shadi-hero-pad-block: 3.75rem;
+  --shadi-action-btn-bg: rgb(239, 243, 252);
+  --shadi-action-btn-bg-active: rgb(255, 255, 255);
+  --shadi-action-btn-color: var(--shadi-dark);
+  --shadi-action-btn-border: rgb(213, 223, 247);
+  --shadi-border: rgb(213, 223, 247);
+  --shadi-card-shadow: 0 4px 40px rgba(207, 222, 255, 0.3);
+  --shadi-feature-card-bg: var(--md-default-bg-color--lightest);
+  --shadi-feature-card-border: var(--shadi-border);
+  --shadi-feature-card-shadow: var(--shadi-card-shadow);
+  --shadi-feature-icon-bg: rgb(255, 255, 255);
+  --shadi-feature-icon-border: var(--shadi-border);
+  --shadi-section-max-width: 72rem;
+  --shadi-section-pad-inline: 1rem;
+}
+
+[data-md-color-scheme="slate"] {
+  --shadi-action-btn-bg: rgb(0, 42, 77);
+  --shadi-action-btn-bg-active: rgb(12, 31, 54);
+  --shadi-action-btn-color: rgb(227, 227, 227);
+  --shadi-action-btn-border: rgb(13, 39, 77);
+  --shadi-feature-card-bg: var(--md-code-bg-color);
+  --shadi-feature-card-border: rgb(13, 39, 77);
+  --shadi-feature-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+  --shadi-feature-icon-bg: var(--md-primary-fg-color);
+  --shadi-feature-icon-border: rgb(13, 39, 77);
+}
+
+/* Home page only: MkDocs chrome adjustments for full-bleed hero. */
+body:has(.shadi-landing) .md-tabs__item--active .md-tabs__link {
+  border-bottom-color: transparent;
+}
+
+.md-content:has(.shadi-landing) .md-content__button {
+  display: none;
+}
+
+.md-main__inner:has(.shadi-landing) {
+  margin-top: 0;
+}
+
+.md-content:has(.shadi-landing) .md-content__inner {
+  padding-top: 0;
+}
+
+.md-content:has(.shadi-landing) .md-content__inner::before {
+  display: none;
+}
+
+.md-main:has(.shadi-landing) {
+  overflow-x: hidden;
+}
+
+body:has(.shadi-landing) .md-footer__inner {
+  display: none;
+}
+
+body:has(.shadi-landing) .md-footer-meta {
+  padding-bottom: 1.75rem;
+}
+
+body:has(.shadi-landing) .md-main__inner {
+  margin-bottom: 1.5rem;
+}
+
+/* Shared content shell */
+.shadi-page-body {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--shadi-section-max-width);
+  margin-inline: auto;
+  padding-inline: var(--shadi-section-pad-inline);
+}
+
+.shadi-page-body > section {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  margin: 0 0 3.5rem;
+  padding: 0;
+}
+
+.shadi-page-body > .shadi-why,
+.shadi-page-body > .shadi-quickstart,
+.shadi-page-body > .shadi-community {
+  max-width: none;
+  margin-inline: 0;
+  padding-inline: 0;
+}
+
+.md-typeset .shadi-why .shadi-section-title,
+.md-typeset .shadi-quickstart .shadi-section-title,
+.md-typeset .shadi-community .shadi-section-title,
+.md-typeset .shadi-page-body .shadi-section-title {
+  margin: 0 0 1.75rem;
+  font-weight: 300;
+  font-size: 1.6rem;
+  line-height: 1.25;
+  text-align: left;
+  color: var(--md-default-fg-color);
+}
+
+/* ----------------------------------------------------------------------------
+   Why SHADI (feature cards)
+---------------------------------------------------------------------------- */
+
+.shadi-features {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.25rem;
+  width: 100%;
+  max-width: 100%;
+}
+
+.md-typeset .shadi-feature-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 1rem;
+  min-width: 0;
+  padding: 1.625rem 1.125rem;
+  border-radius: 10px;
+  background: var(--shadi-feature-card-bg);
+  border: 1px solid var(--shadi-feature-card-border);
+  box-shadow: var(--shadi-feature-card-shadow);
+}
+
+.shadi-feature-card__art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 12px;
+  background: var(--shadi-feature-icon-bg);
+  border: 1px solid var(--shadi-feature-icon-border);
+}
+
+.md-typeset .shadi-feature-card__art img {
+  display: block;
+  height: 1.375rem;
+  width: 1.375rem;
+  max-width: 100%;
+}
+
+.md-typeset .shadi-feature-card__title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .shadi-feature-card__text {
+  margin: 0;
+  font-size: 0.825rem;
+  line-height: 1.55;
+  color: var(--md-default-fg-color--light);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .shadi-feature-card__text {
+  color: rgba(227, 227, 227, 0.82);
+}
+
+@media screen and (max-width: 76.1875em) {
+  .shadi-features {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .md-typeset .shadi-feature-card {
+    padding: 1.5rem 1rem;
+  }
+}
+
+@media screen and (max-width: 59.9375em) {
+  .shadi-features {
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+  }
+
+  .md-typeset .shadi-feature-card {
+    padding: 1.625rem 1.125rem;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   Community
+---------------------------------------------------------------------------- */
+
+.md-typeset .shadi-community__lede {
+  margin: -0.75rem 0 1.75rem;
+  max-width: 42rem;
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: var(--md-default-fg-color--light);
+}
+
+.md-typeset .shadi-community__lede a {
+  color: var(--md-typeset-a-color);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.shadi-community-social {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin-bottom: 1.75rem;
+}
+
+.md-typeset .shadi-community-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  min-width: 0;
+  min-height: 100%;
+  padding: 1rem 1.05rem;
+  border-radius: 10px;
+  background: var(--shadi-feature-card-bg);
+  border: 1px solid var(--shadi-feature-card-border);
+  box-shadow: var(--shadi-feature-card-shadow);
+  color: inherit;
+  text-decoration: none;
+  transition:
+    transform 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.md-typeset .shadi-community-card:hover,
+.md-typeset .shadi-community-card:focus-visible {
+  color: inherit;
+  transform: translateY(-1px);
+  border-color: rgb(2, 81, 175);
+  box-shadow: 0 8px 24px rgba(2, 81, 175, 0.12);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .shadi-community-card:hover,
+[data-md-color-scheme="slate"] .md-typeset .shadi-community-card:focus-visible {
+  border-color: rgb(251, 175, 70);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.md-typeset .shadi-community-card:focus-visible {
+  outline: 2px solid var(--md-primary-fg-color);
+  outline-offset: 3px;
+}
+
+.shadi-community-card__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 10px;
+  background: var(--shadi-feature-icon-bg);
+  border: 1px solid var(--shadi-feature-icon-border);
+}
+
+.shadi-community-card__icon svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  fill: rgb(24, 122, 220);
+}
+
+[data-md-color-scheme="slate"] .shadi-community-card__icon svg {
+  fill: rgb(251, 175, 70);
+}
+
+.shadi-community-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.md-typeset .shadi-community-card__title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .shadi-community-card__text {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--md-default-fg-color--light);
+}
+
+.shadi-community-contribute {
+  display: block;
+  padding: 1.35rem 1.5rem;
+  border-radius: 12px;
+  background: var(--shadi-feature-card-bg);
+  border: 1px solid var(--shadi-feature-card-border);
+  box-shadow: var(--shadi-feature-card-shadow);
+}
+
+.md-typeset .shadi-community-contribute__title {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .shadi-community-contribute__text p {
+  margin: 0 0 1.1rem;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--md-default-fg-color--light);
+}
+
+.shadi-community-contribute__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.md-typeset .shadi-community-contribute__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 1.1rem;
+  border-radius: 50px;
+  background: rgb(24, 122, 220);
+  color: rgb(255, 255, 255);
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.md-typeset .shadi-community-contribute__btn:hover,
+.md-typeset .shadi-community-contribute__btn:focus-visible {
+  color: rgb(255, 255, 255);
+  background: rgb(2, 81, 175);
+  transform: translateY(-1px);
+}
+
+@media screen and (max-width: 59.9375em) {
+  .shadi-community-social {
+    grid-template-columns: 1fr;
+  }
+
+  .shadi-community-contribute {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   Hero
+---------------------------------------------------------------------------- */
+.md-typeset .shadi-hero,
+.shadi-landing .shadi-hero {
+  position: relative;
+  width: 100vw;
+  max-width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  margin-top: calc(-1 * var(--shadi-hero-chrome-top) - 1px);
+  margin-bottom: 3rem;
+  border-radius: 0;
+  background: var(--shadi-hero-gradient);
+  padding: calc(var(--shadi-hero-chrome-top) + 1px) 0 0;
+  overflow: hidden;
+}
+
+.shadi-hero__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 1.5rem;
+  max-width: 58rem;
+  margin: 0 auto;
+  padding-block: var(--shadi-hero-pad-block);
+  padding-inline: 2rem;
+}
+
+.md-typeset .shadi-hero__title {
+  margin: 0;
+  font-weight: 300;
+  font-size: 2.5rem;
+  line-height: 1.1;
+  color: var(--shadi-text-inverse);
+}
+
+.shadi-hero__partner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.shadi-hero__partner-text {
+  font-size: 0.9rem;
+  color: var(--shadi-text-inverse);
+}
+
+.md-typeset .shadi-hero__partner-logo {
+  display: block;
+  width: auto;
+  max-width: none;
+  height: 1rem;
+}
+
+.md-typeset .shadi-hero__tagline {
+  margin: 0;
+  max-width: 40rem;
+  font-weight: 300;
+  font-size: 1.4rem;
+  line-height: 1.3;
+  color: var(--shadi-text-inverse);
+}
+
+.md-typeset .shadi-hero__lede {
+  margin: 0;
+  max-width: 52rem;
+  font-weight: 300;
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--shadi-text-inverse);
+}
+
+.md-typeset .shadi-hero__lede strong {
+  font-weight: 600;
+}
+
+.md-typeset .shadi-hero__lede a {
+  color: var(--shadi-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.md-typeset .shadi-hero__lede a:hover {
+  color: rgb(255, 255, 255);
+}
+
+.shadi-hero__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+.shadi-hero__actions-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.md-typeset .shadi-hero__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.65rem 1.8rem;
+  border-radius: 50px;
+  background: var(--shadi-hero-btn-bg);
+  color: var(--shadi-dark);
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-decoration: none;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.md-typeset .shadi-hero__btn:hover,
+.md-typeset .shadi-hero__btn:focus-visible {
+  color: var(--shadi-accent);
+  background: rgb(255, 255, 255);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0, 20, 43, 0.25);
+}
+
+.md-typeset .shadi-hero__btn:focus-visible {
+  outline: 2px solid rgb(255, 255, 255);
+  outline-offset: 3px;
+}
+
+.md-typeset .shadi-hero__btn svg {
+  fill: currentColor;
+  height: 1.1em;
+  width: 1.1em;
+  flex-shrink: 0;
+}
+
+@media screen and (max-width: 59.9375em) {
+  :root {
+    --shadi-hero-pad-block: 2.75rem;
+  }
+
+  .shadi-hero__inner {
+    padding-inline: 1.25rem;
+  }
+
+  .md-typeset .shadi-hero__title {
+    font-size: 2rem;
+  }
+
+  .md-typeset .shadi-hero__tagline {
+    font-size: 1.2rem;
+  }
+
+  .md-typeset .shadi-hero__partner-logo {
+    height: 1.7rem;
+  }
+
+  .shadi-hero__actions {
+    width: 100%;
+    max-width: 22rem;
+  }
+
+  .shadi-hero__actions-main {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .md-typeset .shadi-hero__btn {
+    justify-content: center;
+  }
+}

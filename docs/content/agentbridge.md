@@ -409,5 +409,5 @@ cargo run -p agentbridge_demo -- --scenario handoff
 cargo run -p agentbridge_demo -- --scenario bridge
 ```
 
-See [examples/agentbridge_demo/README.md](../examples/agentbridge_demo/README.md)
+See [examples/agentbridge_demo/README.md](../../examples/agentbridge_demo/README.md)
 for step-by-step instructions and the live 4-terminal SLIM demo.
