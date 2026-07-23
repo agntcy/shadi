@@ -1,7 +1,9 @@
 # SHADI Sandbox (MVP)
 
 SHADI includes a kernel-enforced sandbox launcher to run agent processes with a
-restricted capability set.
+restricted capability set. This page covers the CLI, launcher profiles, the
+JSON policy format, Git-backed audit snapshots, secret-delivery modes, and
+runtime policy updates for long-running workloads.
 
 - **Linux**: Landlock LSM (kernel 5.13+) for filesystem isolation, with network
   filtering on ABI V4+ (kernel 5.19+). `PR_SET_NO_NEW_PRIVS` prevents privilege
@@ -325,15 +327,15 @@ Each axis of a policy patch returns one of:
 | `unchanged` | No change was requested for this axis. |
 | `rejected` | The change was invalid or denied. |
 
-### Platform limitations
+!!! warning "Platform limitations"
 
-macOS Seatbelt profiles are compiled once at process launch via `sandbox_init`.
-Filesystem and network rules **cannot** be widened at runtime. These axes are
-staged (reported as `pending_restart`) and require relaunching the agent with
-the updated policy to take effect.
+    macOS Seatbelt profiles are compiled once at process launch via `sandbox_init`.
+    Filesystem and network rules **cannot** be widened at runtime. These axes are
+    staged (reported as `pending_restart`) and require relaunching the agent with
+    the updated policy to take effect.
 
-Command allow/block lists are enforced in user space by `shadictl` and can
-always be updated immediately.
+    Command allow/block lists are enforced in user space by `shadictl` and can
+    always be updated immediately.
 
 ### Process group cleanup (macOS / Linux)
 
@@ -366,35 +368,49 @@ Unix-domain sockets can still be selectively allowed.
 - Command blocking is enforced before launch in the CLI.
 - Git snapshots are metadata capture only. They do not commit, stage, or rewrite Git history.
 - On macOS, policy paths are resolved to absolute paths before Seatbelt rules are emitted; relative subpaths are not reliable enforcement inputs.
-- The demo launchers may still pre-read secrets outside the sandbox when a workload requires explicit disclosure or when the optional 1Password backend cannot be accessed safely inside the sandbox.
-- Windows: ACL allowlists are applied to the specified paths for the AppContainer
-  SID and automatically reverted when the sandboxed process exits. SHADI now
-  journals the original DACLs to disk before mutation and will replay any stale
-  rollback journals on the next Windows sandbox startup if a prior process
-  crashed before cleanup. Journal files are stored in a restricted directory
-  (owner + SYSTEM only) and each entry is HMAC-SHA256 authenticated with
-  a per-session key; tampered or unsigned journals are rejected on recovery.
-  Network access is controlled by AppContainer capabilities.
 
-### Sandbox boundary guidance
+!!! warning "Demo launchers may pre-read secrets outside the sandbox"
 
-Use the sandbox as the security boundary, not application-level path deny rules.
-Path-matching controls are useful for operator ergonomics, but they are weaker
-than OS-enforced policy because the agent can reason about alternate paths and
-wrappers. SHADI resolves and applies the effective sandbox policy before launch,
-which is the property you should rely on for enforcement.
+    This happens when a workload requires explicit disclosure or when the
+    optional 1Password backend cannot be accessed safely inside the sandbox.
 
-## Windows integration test
+!!! note "Windows ACL journaling and crash recovery"
 
-The Windows AppContainer sandbox has an opt-in integration test. Run it on
-Windows with:
+    ACL allowlists are applied to the specified paths for the AppContainer SID
+    and automatically reverted when the sandboxed process exits. SHADI journals
+    the original DACLs to disk before mutation and replays any stale rollback
+    journals on the next Windows sandbox startup if a prior process crashed
+    before cleanup. Journal files are stored in a restricted directory (owner +
+    SYSTEM only) and each entry is HMAC-SHA256 authenticated with a per-session
+    key; tampered or unsigned journals are rejected on recovery. Network access
+    is controlled by AppContainer capabilities.
 
-```bash
-SHADI_WINDOWS_INTEGRATION=1 cargo test -p agntcy-shadi-sandbox
-```
+!!! tip "Sandbox boundary guidance"
 
-Or via Just:
+    Use the sandbox as the security boundary, not application-level path deny
+    rules. Path-matching controls are useful for operator ergonomics, but they
+    are weaker than OS-enforced policy because the agent can reason about
+    alternate paths and wrappers. SHADI resolves and applies the effective
+    sandbox policy before launch, which is the property you should rely on for
+    enforcement.
 
-```bash
-just windows-integration
-```
+??? note "Windows integration test (opt-in, contributors only)"
+
+    The Windows AppContainer sandbox has an opt-in integration test. Run it on
+    Windows with:
+
+    ```bash
+    SHADI_WINDOWS_INTEGRATION=1 cargo test -p agntcy-shadi-sandbox
+    ```
+
+    Or via Just:
+
+    ```bash
+    just windows-integration
+    ```
+
+## Next steps
+
+- See the full flag/command reference in the [CLI Reference](cli.md).
+- Understand how this fits the overall security model in [Security Notes](security.md).
+- Review the runtime layers in [Architecture](architecture.md).

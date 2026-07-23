@@ -80,10 +80,12 @@ launch a child tool rather than directly hold the credential.
 ## agentbridge listeners
 
 `agentbridge register` exposes a local coding tool as an A2A service over SLIM.
-Every incoming task is forwarded to that tool's subprocess, so a registered
-listener is a **remote code-execution surface**: any peer that can reach
-`agntcy/shadi/<tool>-a2a` can drive the local tool (some adapters, such as
-`copilot`, run with `--allow-all-tools`).
+Every incoming task is forwarded to that tool's subprocess.
+
+!!! danger "Registered listeners are a remote code-execution surface"
+
+    Any peer that can reach `agntcy/shadi/<tool>-a2a` can drive the local tool
+    (some adapters, such as `copilot`, run with `--allow-all-tools`).
 
 Controls:
 
@@ -98,6 +100,13 @@ Controls:
 - Run bridged tools inside the SHADI [sandbox](sandbox.md) so tool execution is
   confined by OS policy. See [AgentBridge → Security model](agentbridge.md#security-model).
 
-## Non-goals
-- Protecting against a fully compromised host OS.
-- Metadata privacy beyond message content when using SLIM/MLS.
+!!! warning "Non-goals"
+
+    - Protecting against a fully compromised host OS.
+    - Metadata privacy beyond message content when using SLIM/MLS.
+
+## Next steps
+
+- See the full system model in [Architecture](architecture.md).
+- Put this into practice with [Sandbox and Policies](sandbox.md).
+- Review agentbridge's specific threat model in [AgentBridge → Security model](agentbridge.md#security-model).

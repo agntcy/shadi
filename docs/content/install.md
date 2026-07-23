@@ -81,3 +81,10 @@ install or upgrade with:
 winget install --id AGNTCY.shadictl -e
 winget upgrade --id AGNTCY.shadictl -e
 ```
+
+## Next steps
+
+Once `shadictl` is installed, continue to [Getting Started](getting_started.md)
+to build from source, inspect the sandbox policy, and run your first
+sandboxed command.
+```

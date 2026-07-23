@@ -76,3 +76,8 @@ shadictl trace --file .shadi/traces.jsonl summary
   tracing is a no-op.
 - Service naming is standardized under the `service.namespace=shadi` resource attribute
   so core runtime and SecOps spans can be correlated.
+
+## Next steps
+
+- See the full `trace` command reference in the [CLI Reference](cli.md).
+- Return to the operator workflow in [Operations](operations.md).

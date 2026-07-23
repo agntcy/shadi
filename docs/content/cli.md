@@ -1,11 +1,15 @@
 # CLI Reference
 
-This page documents the command-line tools shipped with SHADI:
-
-- `shadictl` (binary name `shadi`): sandbox runner, key management, memory, and MAS helpers.
+This page documents the command-line tools shipped with SHADI. `shadictl`
+(binary name `shadi`) covers four distinct surfaces, each its own section
+below: sandboxed execution + secrets + identity ([`shadictl`](#shadictl-shadi)),
+encrypted memory ([`shadictl memory`](#shadictl-memory-shadictl-memory)),
+native SLIM/A2A helpers ([`shadictl slim`](#shadictl-slim-shadictl-slim)), and
+SLIM group membership rules ([`shadictl slim-mas`](#shadictl-slim-mas-shadictl-slim-mas)).
 
 Most agents use the Python bindings (`shadi` module) for secrets, SQLCipher
-memory, and sandbox execution. The CLI remains useful for ops and debugging.
+memory, and sandbox execution — see [API Guide → Language Bindings](api_integration.md#language-bindings).
+The CLI remains useful for ops and debugging.
 
 ## shadictl (`shadi`)
 
@@ -26,19 +30,22 @@ cargo run -p agntcy-shadi-cli -- [FLAGS] -- [COMMAND]
 - `--net-allow HOST[:PORT]`: Allow network access to a specific host (repeatable).
 - `--allow-command CMD`: Allow a command that is blocked by default (repeatable).
 - `--inject-keychain KEY=ENV`: Read a secret and inject it as an env var before launch (repeatable).
-- `--trusted-secret KEY=NAME`: Configure a direct trusted-secret delivery mapping (advanced compatibility/testing path).
-- `--trusted-secret-exec NAME=PROGRAM`: Bind a trusted-secret mapping to an exact executable path.
-- `--trusted-secret-fd-env NAME=ENV`: Set the endpoint env name for a trusted-secret mapping.
 - `--list-keychain`: List secrets in the SHADI store.
 - `--list-prefix PREFIX`: Optional prefix filter for `--list-keychain`.
 - `--print-policy`: Print the resolved policy and exit.
-- `--git-snapshot`: Capture Git state before and after the sandboxed run.
-- `--git-snapshot-dir DIR`: Write snapshot artifacts under DIR instead of `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
-- `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the snapshot artifact.
-- `--watch-policy`: Watch the policy file for changes and hot-reload it (see [Sandbox and Policies](sandbox.md#dynamic-policy-updates)).
-- `--slim-channel NAME`, `--slim-destination NAME`, `--slim-timeout SECONDS`, `--slim-payload-type TYPE`, `--slim-allow-empty`: Configure the built-in SLIM sandbox-session bridge.
-- `--name NAME`: Human-readable name for this sandbox session; the control socket is created at `$TMPDIR/shadi-ctl-<name>.sock` instead of `$TMPDIR/shadi-ctl-<pid>.sock`, so it can be attached by name (`/attach <name>`). Letters, digits, hyphens, and underscores only.
-- `--record REF`: OASF record reference (CID, `name`, `name:version`, or `name:version@cid`) printed to stderr on session start, linking this run to a published Agent Directory record.
+
+??? note "Advanced flags (trusted-secret compatibility, Git snapshots, SLIM bridge, session naming)"
+
+    - `--trusted-secret KEY=NAME`: Configure a direct trusted-secret delivery mapping (advanced compatibility/testing path).
+    - `--trusted-secret-exec NAME=PROGRAM`: Bind a trusted-secret mapping to an exact executable path.
+    - `--trusted-secret-fd-env NAME=ENV`: Set the endpoint env name for a trusted-secret mapping.
+    - `--git-snapshot`: Capture Git state before and after the sandboxed run.
+    - `--git-snapshot-dir DIR`: Write snapshot artifacts under DIR instead of `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
+    - `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the snapshot artifact.
+    - `--watch-policy`: Watch the policy file for changes and hot-reload it (see [Sandbox and Policies](sandbox.md#dynamic-policy-updates)).
+    - `--slim-channel NAME`, `--slim-destination NAME`, `--slim-timeout SECONDS`, `--slim-payload-type TYPE`, `--slim-allow-empty`: Configure the built-in SLIM sandbox-session bridge.
+    - `--name NAME`: Human-readable name for this sandbox session; the control socket is created at `$TMPDIR/shadi-ctl-<name>.sock` instead of `$TMPDIR/shadi-ctl-<pid>.sock`, so it can be attached by name (`/attach <name>`). Letters, digits, hyphens, and underscores only.
+    - `--record REF`: OASF record reference (CID, `name`, `name:version`, or `name:version@cid`) printed to stderr on session start, linking this run to a published Agent Directory record.
 
 ### Secret backend selection
 
@@ -51,7 +58,11 @@ By default `shadictl` uses the OS keychain. To use 1Password instead, set:
 | `SHADI_OP_ACCOUNT` | 1Password account (for multi-account setups) | auto |
 
 The 1Password backend requires the `op` CLI to be installed and authenticated.
-For CI, export `OP_SERVICE_ACCOUNT_TOKEN`.
+
+!!! tip "CI / headless"
+
+    Export `OP_SERVICE_ACCOUNT_TOKEN` — it's never stored by SHADI, only
+    consumed directly by `op`.
 
 ### Config and policy introspection
 
@@ -89,82 +100,82 @@ sandboxed session over its control socket (`policy query --socket ...` /
 [Sandbox and Policies → Dynamic Policy Updates](sandbox.md#dynamic-policy-updates)
 for the full flag set and patch-axis semantics.
 
-#### Practical examples
+??? example "Practical examples"
 
-Show effective config with explicit overrides:
+    Show effective config with explicit overrides:
 
-```bash
-cargo run -p agntcy-shadi-cli -- \
-  config show \
-  --profile connected \
-  --policy ./sandbox.json \
-  --allow . \
-  --read /tmp \
-  --allow-command curl \
-  --format json
-```
+    ```bash
+    cargo run -p agntcy-shadi-cli -- \
+      config show \
+      --profile connected \
+      --policy ./sandbox.json \
+      --allow . \
+      --read /tmp \
+      --allow-command curl \
+      --format json
+    ```
 
-Expected JSON fields include:
+    Expected JSON fields include:
 
-```json
-{
-  "profile": "connected",
-  "policy_file": "./sandbox.json",
-  "secret_backend": {
-    "selected": "keychain"
-  },
-  "overrides": {
-    "allow_command": ["curl"]
-  },
-  "effective_policy": {
-    "net_block": false
-  }
-}
-```
+    ```json
+    {
+      "profile": "connected",
+      "policy_file": "./sandbox.json",
+      "secret_backend": {
+        "selected": "keychain"
+      },
+      "overrides": {
+        "allow_command": ["curl"]
+      },
+      "effective_policy": {
+        "net_block": false
+      }
+    }
+    ```
 
-Explain policy source inputs and inspect only the source section:
+    Explain policy source inputs and inspect only the source section:
 
-```bash
-cargo run -p agntcy-shadi-cli -- \
-  policy explain \
-  --profile balanced \
-  --policy ./sandbox.json \
-  --allow . \
-  --format json
-```
+    ```bash
+    cargo run -p agntcy-shadi-cli -- \
+      policy explain \
+      --profile balanced \
+      --policy ./sandbox.json \
+      --allow . \
+      --format json
+    ```
 
-```bash
-cargo run -q -p agntcy-shadi-cli -- \
-  policy explain --policy ./sandbox.json --format json \
-  | jq '.sources'
-```
+    ```bash
+    cargo run -q -p agntcy-shadi-cli -- \
+      policy explain --policy ./sandbox.json --format json \
+      | jq '.sources'
+    ```
 
-Diff current effective policy against a baseline policy file:
+    Diff current effective policy against a baseline policy file:
 
-```bash
-cargo run -p agntcy-shadi-cli -- \
-  policy diff \
-  --policy ./sandbox.json \
-  --allow . \
-  --against file:./policies/demo/secops-a.json \
-  --format json
-```
+    ```bash
+    cargo run -p agntcy-shadi-cli -- \
+      policy diff \
+      --policy ./sandbox.json \
+      --allow . \
+      --against file:./policies/demo/secops-a.json \
+      --format json
+    ```
 
-Inspect only changed fields from the diff payload:
+    Inspect only changed fields from the diff payload:
 
-```bash
-cargo run -q -p agntcy-shadi-cli -- \
-  policy diff --against profile:strict --format json \
-  | jq '.diff.changed_fields'
-```
+    ```bash
+    cargo run -q -p agntcy-shadi-cli -- \
+      policy diff --against profile:strict --format json \
+      | jq '.diff.changed_fields'
+    ```
 
-Invalid baseline targets return exit code `2` with an error message. Accepted
-`--against` values are:
+    Invalid baseline targets return exit code `2` with an error message. Accepted
+    `--against` values are:
 
-- `profile:strict`
-- `profile:balanced`
-- `profile:connected`
-- `file:<path>`
+    - `profile:strict`
+    - `profile:balanced`
+    - `profile:connected`
+    - `file:<path>`
 
 ### Sandbox execution
 
@@ -191,80 +202,83 @@ default, and `--print-policy` / `config show` / `policy explain` now surface
 that as `platform_profile: "minimal"`.
 
 Policy files can scope secrets to exact launched executables instead of
-treating them as ambient runtime configuration. The current secret policy
-framework has three rule types:
+treating them as ambient runtime configuration, via three rule types:
+`process_inject_keychain`, `process_trusted_secret`, and
+`process_secret_policy`.
 
-- `process_inject_keychain`: array of `{ "program", "key", "env" }`
-- `process_trusted_secret`: array of `{ "program", "key", "name", "fd_env", "exec_sha256?" }`
-- `process_secret_policy`: array of `{ "program", "secret", "actions", ... }`
+??? note "Secret-scoped policy rules (JSON shape, semantics, and platform notes)"
 
-Example:
+    - `process_inject_keychain`: array of `{ "program", "key", "env" }`
+    - `process_trusted_secret`: array of `{ "program", "key", "name", "fd_env", "exec_sha256?" }`
+    - `process_secret_policy`: array of `{ "program", "secret", "actions", ... }`
 
-```json
-{
-  "allow": ["."],
-  "process_inject_keychain": [
+    Example:
+
+    ```json
     {
-      "program": "/Users/example/bin/secops-agent",
-      "key": "secops/api-token",
-      "env": "SECOPS_TOKEN"
+      "allow": ["."],
+      "process_inject_keychain": [
+        {
+          "program": "/Users/example/bin/secops-agent",
+          "key": "secops/api-token",
+          "env": "SECOPS_TOKEN"
+        }
+      ],
+      "process_trusted_secret": [
+        {
+          "program": "/Users/example/bin/avatar-agent",
+          "key": "avatar/session-key",
+          "name": "avatar-session",
+          "fd_env": "AVATAR_SESSION_FD",
+          "exec_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ],
+      "process_secret_policy": [
+        {
+          "program": "/Users/example/bin/secops-agent",
+          "secret": "secops/github_token",
+          "actions": ["delegate-to-child"],
+          "children": ["/usr/bin/curl"],
+          "child_sha256": ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+          "name": "github-token",
+          "fd_env": "GITHUB_TOKEN_FD"
+        }
+      ]
     }
-  ],
-  "process_trusted_secret": [
-    {
-      "program": "/Users/example/bin/avatar-agent",
-      "key": "avatar/session-key",
-      "name": "avatar-session",
-      "fd_env": "AVATAR_SESSION_FD",
-      "exec_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    }
-  ],
-  "process_secret_policy": [
-    {
-      "program": "/Users/example/bin/secops-agent",
-      "secret": "secops/github_token",
-      "actions": ["delegate-to-child"],
-      "children": ["/usr/bin/curl"],
-      "child_sha256": ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
-      "name": "github-token",
-      "fd_env": "GITHUB_TOKEN_FD"
-    }
-  ]
-}
-```
+    ```
 
-These rules are matched against the exact resolved executable path for the
-launched command. Unmatched rules are ignored for that run.
+    These rules are matched against the exact resolved executable path for the
+    launched command. Unmatched rules are ignored for that run.
 
-Meaning of the rule types:
+    Meaning of the rule types:
 
-- `process_inject_keychain`: explicit env disclosure to the launched process.
-- `process_trusted_secret`: process-scoped direct trusted-secret delivery to the launched process.
-- `process_secret_policy`: action-based delivery semantics. On Unix/macOS, `delegate-to-child` is implemented as final-consumer delivery to a verified child process without disclosing the secret to the parent.
+    - `process_inject_keychain`: explicit env disclosure to the launched process.
+    - `process_trusted_secret`: process-scoped direct trusted-secret delivery to the launched process.
+    - `process_secret_policy`: action-based delivery semantics. On Unix/macOS, `delegate-to-child` is implemented as final-consumer delivery to a verified child process without disclosing the secret to the parent.
 
-For `process_trusted_secret`, the `fd_env` field is now a protocol-specific
-endpoint environment variable rather than a hard promise that the value is a raw
-file descriptor. On Unix/macOS the current protocol is a parent-mediated one-shot
-fetch flow bound to the launched process identity, so the direct child can fetch
-the secret but a later exec into a different executable does not retain that
-fetch capability.
+    For `process_trusted_secret`, the `fd_env` field is now a protocol-specific
+    endpoint environment variable rather than a hard promise that the value is a raw
+    file descriptor. On Unix/macOS the current protocol is a parent-mediated one-shot
+    fetch flow bound to the launched process identity, so the direct child can fetch
+    the secret but a later exec into a different executable does not retain that
+    fetch capability.
 
-`process_trusted_secret` now also supports optional `exec_sha256` pinning. When
-present, SHADI hashes the resolved launched executable and rejects the launch if
-the digest does not match. This adds a second trust check beyond path matching
-for direct trusted-secret delivery (including Windows compatibility mode).
+    `process_trusted_secret` now also supports optional `exec_sha256` pinning. When
+    present, SHADI hashes the resolved launched executable and rejects the launch if
+    the digest does not match. This adds a second trust check beyond path matching
+    for direct trusted-secret delivery (including Windows compatibility mode).
 
-For `process_secret_policy`, delegated child delivery on Unix/macOS adds two
-important checks beyond executable-path matching:
+    For `process_secret_policy`, delegated child delivery on Unix/macOS adds two
+    important checks beyond executable-path matching:
 
-- SHADI can require an optional `child_sha256` per authorized child executable.
-- the child must present the launch-scoped nonce exposed via `<fd_env>_NONCE`
-  before the broker releases the secret.
+    - SHADI can require an optional `child_sha256` per authorized child executable.
+    - the child must present the launch-scoped nonce exposed via `<fd_env>_NONCE`
+      before the broker releases the secret.
 
-Current platform notes:
+    Current platform notes:
 
-- Unix/macOS: `process_trusted_secret` and `delegate-to-child` use a one-shot broker endpoint with process verification and nonce binding.
-- Windows: direct trusted-secret delivery currently uses a compatibility handle protocol (`consume-close-v1`).
+    - Unix/macOS: `process_trusted_secret` and `delegate-to-child` use a one-shot broker endpoint with process verification and nonce binding.
+    - Windows: direct trusted-secret delivery currently uses a compatibility handle protocol (`consume-close-v1`).
 
 Inject a secret into the command environment (explicit disclosure mode):
 
@@ -304,37 +318,39 @@ timestamps, `HEAD`, `git status --porcelain`, `git diff --binary`, and optional
 untracked inventory. By default artifacts are written to
 `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
 
-If the working tree contains nested Git repositories, the snapshot artifact now
-records them separately under `git.repositories`. The top-level `git.before`,
-`git.after`, and `git.comparison` fields remain pinned to the primary repo at
-the sandbox working directory for backward compatibility, while
-`git.changed_repositories` and `git.any_repo_changed` summarize whether any
-tracked repo changed during the sandboxed run.
+??? note "Git snapshot artifact details (nested repos, stable layout, hashes)"
 
-The layout is stable for downstream tooling:
+    If the working tree contains nested Git repositories, the snapshot artifact
+    records them separately under `git.repositories`. The top-level `git.before`,
+    `git.after`, and `git.comparison` fields remain pinned to the primary repo at
+    the sandbox working directory for backward compatibility, while
+    `git.changed_repositories` and `git.any_repo_changed` summarize whether any
+    tracked repo changed during the sandboxed run.
 
-- `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/runs/<artifact_id>/snapshot.json`: canonical per-run artifact.
-- `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/latest.json`: copy of the most recent snapshot.
+    The layout is stable for downstream tooling:
 
-Each repo state in the artifact now includes SHA-256 hashes for `HEAD`, the
-porcelain status payload, the raw binary diff payload, optional untracked
-inventory, and a combined state hash. The artifact also includes a comparison
-section with `head_changed`, `status_changed`, `diff_changed`,
-`untracked_changed`, and `overall_changed` so other systems can tell whether
-the sandboxed command changed the working tree without reprocessing Git output.
+    - `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/runs/<artifact_id>/snapshot.json`: canonical per-run artifact.
+    - `${SHADI_TMP_DIR:-./.tmp}/git-snapshots/latest.json`: copy of the most recent snapshot.
 
-For nested repos, each entry under `git.repositories` includes:
+    Each repo state in the artifact includes SHA-256 hashes for `HEAD`, the
+    porcelain status payload, the raw binary diff payload, optional untracked
+    inventory, and a combined state hash. The artifact also includes a comparison
+    section with `head_changed`, `status_changed`, `diff_changed`,
+    `untracked_changed`, and `overall_changed` so other systems can tell whether
+    the sandboxed command changed the working tree without reprocessing Git output.
 
-- `repo_root`: absolute path to the tracked repo root.
-- `relative_path`: path relative to the sandbox working directory (`.` for the primary repo).
-- `before` and `after` Git state for that specific repo.
-- `diff_summary` and `comparison` for that repo.
+    For nested repos, each entry under `git.repositories` includes:
 
-This matters for agent workflows that operate on multiple repositories from one
-workspace, such as a SecOps agent cloning or updating remediation targets under
-its current working folder. A nested repo commit can leave the outer repo
-unchanged while still appearing as `head_changed: true` and
-`overall_changed: true` on that nested repo entry.
+    - `repo_root`: absolute path to the tracked repo root.
+    - `relative_path`: path relative to the sandbox working directory (`.` for the primary repo).
+    - `before` and `after` Git state for that specific repo.
+    - `diff_summary` and `comparison` for that repo.
+
+    This matters for agent workflows that operate on multiple repositories from
+    one workspace, such as a SecOps agent cloning or updating remediation targets
+    under its current working folder. A nested repo commit can leave the outer
+    repo unchanged while still appearing as `head_changed: true` and
+    `overall_changed: true` on that nested repo entry.
 
 ### Key, DID, and identity provenance
 
@@ -551,6 +567,12 @@ The A2A commands reuse the same SLIM mTLS assets as the rest of the native SLIM 
 - Server certs from the default `.tmp/shadi-slim-mtls/server.crt|server.key|ca.crt` when `--start-local-node` is used.
 - Shared secret from `SLIM_SHARED_SECRET`, or from the SHADI secret store key `secops/slim_shared_secret` by default. Override the key name with `SHADI_SLIM_SHARED_SECRET_KEY`.
 
+!!! note
+
+    This shared-secret fallback is specific to these `shadictl slim` commands.
+    `agentbridge` requires DID auth exclusively — see
+    [AgentBridge → DID authentication](agentbridge.md#did-authentication).
+
 ### Commands
 
 Run the local native SLIM node until interrupted:
@@ -664,3 +686,8 @@ Exit codes:
 - `0`: allow / success
 - `3`: deny (member not allowed)
 - `2`: error
+
+## Next steps
+
+- Walk through a full example in [Sandbox and Policies](sandbox.md) or the [Secure Agent Group Demo](demos/did-agent-group.md).
+- See the underlying security model in [Security Notes](security.md).

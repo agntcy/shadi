@@ -63,161 +63,165 @@ Most applications integrate SHADI in three layers:
 2. **Secrets access**: gate reads and writes to the secret store.
 3. **Sandbox execution** (optional): run agents with OS-level restrictions.
 
-## Rust API
+## Language Bindings
 
-The Rust integration surface lives in `agent_secrets`.
+SHADI exposes the same secrets, session, and sandbox surface to both Rust and Python.
 
-### Core traits and types
+=== "Rust"
 
-- `SecretStore`: storage backend (platform keychain by default).
-- `AgentVerifier`: verifies a session before secret access.
-- `SessionContext`: session metadata used by `AgentVerifier`.
-- `AgentSecretAccess`: gatekeeper for per-session secret access.
-- `SecretPolicy`: per-secret policy metadata (currently default only).
-- `SecretBytes`: zeroizing wrapper for secret material.
+    The Rust integration surface lives in `agent_secrets`.
 
-### Example: verify then access secrets
+    #### Core traits and types
 
-```rust
-use agent_secrets::{
-    AgentSecretAccess, AgentVerifier, SecretError, SecretPolicy, SessionContext,
-};
+    - `SecretStore`: storage backend (platform keychain by default).
+    - `AgentVerifier`: verifies a session before secret access.
+    - `SessionContext`: session metadata used by `AgentVerifier`.
+    - `AgentSecretAccess`: gatekeeper for per-session secret access.
+    - `SecretPolicy`: per-secret policy metadata (currently default only).
+    - `SecretBytes`: zeroizing wrapper for secret material.
 
-struct AllowVerifier;
+    #### Example: verify then access secrets
 
-impl AgentVerifier for AllowVerifier {
-    fn verify(&self, session: &SessionContext) -> Result<(), SecretError> {
-        if session.verified {
-            Ok(())
-        } else {
-            Err(SecretError::NotAuthorized)
+    ```rust
+    use agent_secrets::{
+        AgentSecretAccess, AgentVerifier, SecretError, SecretPolicy, SessionContext,
+    };
+
+    struct AllowVerifier;
+
+    impl AgentVerifier for AllowVerifier {
+        fn verify(&self, session: &SessionContext) -> Result<(), SecretError> {
+            if session.verified {
+                Ok(())
+            } else {
+                Err(SecretError::NotAuthorized)
+            }
         }
     }
-}
 
-fn main() -> Result<(), SecretError> {
-    let store = agent_secrets::default_store();
-    let verifier = AllowVerifier;
-    let access = AgentSecretAccess::new(store.as_ref(), &verifier);
+    fn main() -> Result<(), SecretError> {
+        let store = agent_secrets::default_store();
+        let verifier = AllowVerifier;
+        let access = AgentSecretAccess::new(store.as_ref(), &verifier);
 
-    let mut session = SessionContext::new("agent-1", "session-1");
-    session.verified = true;
+        let mut session = SessionContext::new("agent-1", "session-1");
+        session.verified = true;
 
-    access.put_for_session(&session, "app/config", b"secret", SecretPolicy::default())?;
-    let secret = access.get_for_session(&session, "app/config")?;
-    let value = secret.expose(|bytes| bytes.to_vec());
+        access.put_for_session(&session, "app/config", b"secret", SecretPolicy::default())?;
+        let secret = access.get_for_session(&session, "app/config")?;
+        let value = secret.expose(|bytes| bytes.to_vec());
 
-    println!("secret len: {}", value.len());
-    Ok(())
-}
-```
+        println!("secret len: {}", value.len());
+        Ok(())
+    }
+    ```
 
-### SessionContext fields
+    #### SessionContext fields
 
-`SessionContext` includes:
+    `SessionContext` includes:
 
-- `agent_id`: logical agent identifier
-- `session_id`: per-session identifier
-- `verified`: whether verification succeeded
-- `claims`: list of DID/VC claims
-- `did`: the session's derived agent DID, if identity verification set one
+    - `agent_id`: logical agent identifier
+    - `session_id`: per-session identifier
+    - `verified`: whether verification succeeded
+    - `claims`: list of DID/VC claims
+    - `did`: the session's derived agent DID, if identity verification set one
 
-Your verifier should set `verified` after validating a DID/VC presentation.
+    Your verifier should set `verified` after validating a DID/VC presentation.
 
-## Python API
+=== "Python"
 
-The Python bindings are provided by `shadi_py` and expose `ShadiStore`,
-`PySessionContext`, `SqlCipherMemoryStore`, `SandboxPolicyHandle`, and
-`run_sandboxed`.
+    The Python bindings are provided by `shadi_py` and expose `ShadiStore`,
+    `PySessionContext`, `SqlCipherMemoryStore`, `SandboxPolicyHandle`, and
+    `run_sandboxed`.
 
-### Installing the bindings
+    #### Installing the bindings
 
-Install the extension module into the current Python environment with maturin:
+    Install the extension module into the current Python environment with maturin:
 
-```bash
-uv run maturin develop --manifest-path crates/shadi_py/Cargo.toml
-```
+    ```bash
+    uv run maturin develop --manifest-path crates/shadi_py/Cargo.toml
+    ```
 
-For Rust-only builds, use:
+    For Rust-only builds, use:
 
-```bash
-just build
-```
+    ```bash
+    just build
+    ```
 
-### Example: Python secret access
+    #### Example: Python secret access
 
-```python
-from shadi import ShadiStore, PySessionContext
+    ```python
+    from shadi import ShadiStore, PySessionContext
 
-store = ShadiStore()
+    store = ShadiStore()
 
-# Provide a verification callback.
-# It receives: agent_id, session_id, presentation_bytes, claims.
-store.set_verifier(lambda agent_id, session_id, presentation, claims: True)
+    # Provide a verification callback.
+    # It receives: agent_id, session_id, presentation_bytes, claims.
+    store.set_verifier(lambda agent_id, session_id, presentation, claims: True)
 
-session = PySessionContext("agent-1", "session-1")
-store.verify_session(session, b"didvc-presentation")
+    session = PySessionContext("agent-1", "session-1")
+    store.verify_session(session, b"didvc-presentation")
 
-store.put(session, "app/config", b"secret")
-print(store.get(session, "app/config"))
-store.delete(session, "app/config")
-```
+    store.put(session, "app/config", b"secret")
+    print(store.get(session, "app/config"))
+    store.delete(session, "app/config")
+    ```
 
-### Example: integrate with an app session
+    #### Example: integrate with an app session
 
-```python
-from shadi import ShadiStore, PySessionContext
+    ```python
+    from shadi import ShadiStore, PySessionContext
 
-def verify_didvc(agent_id, session_id, presentation, claims):
-  # Replace with real DID/VC validation.
-  return True
+    def verify_didvc(agent_id, session_id, presentation, claims):
+      # Replace with real DID/VC validation.
+      return True
 
-store = ShadiStore()
-store.set_verifier(verify_didvc)
+    store = ShadiStore()
+    store.set_verifier(verify_didvc)
 
-session = PySessionContext("agent-1", "session-1")
-ok = store.verify_session(session, b"presentation-bytes")
-if not ok:
-  raise RuntimeError("verification failed")
+    session = PySessionContext("agent-1", "session-1")
+    ok = store.verify_session(session, b"presentation-bytes")
+    if not ok:
+      raise RuntimeError("verification failed")
 
-# Secrets are now gated by the verified session.
-store.put(session, "app/config", b"value")
-```
+    # Secrets are now gated by the verified session.
+    store.put(session, "app/config", b"value")
+    ```
 
-### Verification flow
+    #### Verification flow
 
-- `set_verifier(callable)` installs a DID/VC verifier callback.
-- `verify_session(session, presentation)` calls the verifier and sets
-  `session.verified = True` if the callback returns truthy.
-- `put/get/delete/list_keys` require a verified session.
+    - `set_verifier(callable)` installs a DID/VC verifier callback.
+    - `verify_session(session, presentation)` calls the verifier and sets
+      `session.verified = True` if the callback returns truthy.
+    - `put/get/delete/list_keys` require a verified session.
 
-### Example: SQLCipher memory (Python)
+    #### Example: SQLCipher memory (Python)
 
-```python
-from shadi import SqlCipherMemoryStore
+    ```python
+    from shadi import SqlCipherMemoryStore
 
-store = SqlCipherMemoryStore(
-  db_path="./.tmp/shadi-app/app_memory.db",
-  key_name="app/memory_key",
-)
+    store = SqlCipherMemoryStore(
+      db_path="./.tmp/shadi-app/app_memory.db",
+      key_name="app/memory_key",
+    )
 
-store.put("app", "latest_state", "{\"status\":\"ok\"}")
-latest = store.get_latest("app", "latest_state")
-print(latest.payload if latest else "no entry")
-```
+    store.put("app", "latest_state", "{\"status\":\"ok\"}")
+    latest = store.get_latest("app", "latest_state")
+    print(latest.payload if latest else "no entry")
+    ```
 
-### Example: sandboxed execution (Python)
+    #### Example: sandboxed execution (Python)
 
-```python
-from shadi import SandboxPolicyHandle, run_sandboxed
+    ```python
+    from shadi import SandboxPolicyHandle, run_sandboxed
 
-policy = SandboxPolicyHandle()
-policy.allow_read_path(".")
-policy.allow_write_path("./.tmp")
-policy.block_network(False)
+    policy = SandboxPolicyHandle()
+    policy.allow_read_path(".")
+    policy.allow_write_path("./.tmp")
+    policy.block_network(False)
 
-run_sandboxed(["/usr/bin/env", "python", "-V"], policy)
-```
+    run_sandboxed(["/usr/bin/env", "python", "-V"], policy)
+    ```
 
 ## Key provisioning for agents
 
@@ -350,3 +354,9 @@ In Python, these errors are reported as `RuntimeError` with the same message.
 4. Set `session.verified = true` only after verification succeeds.
 5. Use `AgentSecretAccess` (Rust) or `ShadiStore` (Python) to access secrets.
 6. Run the agent under a sandbox policy if needed.
+
+## Next steps
+
+- See the full flag/command reference in the [CLI Reference](cli.md).
+- Review sandbox profiles and policy files in [Sandbox and Policies](sandbox.md).
+- Connect agents to each other via [SLIM and A2A](slim_a2a.md).

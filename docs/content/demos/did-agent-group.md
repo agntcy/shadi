@@ -291,3 +291,9 @@ issue, not a bug in this wiring.
   listener yet. A `delegate` failure usually means the target CLI itself errored
   (auth, unsupported model, etc.), not the SLIM/A2A wiring — the response text
   includes the real error from that CLI so it's easy to tell apart.
+
+## Next steps
+
+- Read the concept-level model behind this demo in [SLIM and A2A](../slim_a2a.md).
+- See [AgentBridge](../agentbridge.md) for the full CLI coding-agent interconnect this demo exercises.
+- Look up exact `shadictl`/`agentbridge` flags in the [CLI Reference](../cli.md).

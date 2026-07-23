@@ -57,11 +57,13 @@ theme:
   logo_dark: assets/img/logo-dark.svg
   features:
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.expand
     - navigation.footer
     - navigation.top
     - navigation.tracking
+    - content.action.edit
     - content.code.copy
     - content.tabs.link
     - search.highlight

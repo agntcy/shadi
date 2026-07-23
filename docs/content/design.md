@@ -19,3 +19,8 @@ Platform-specific backends live under agent_secrets/src/platform.
 ## Documentation
 The documentation site is built with MkDocs. See docs/README.md for running it
 locally.
+
+## Next steps
+
+- See how these crates fit together in [Architecture](architecture.md).
+- Start using the runtime with [Getting Started](getting_started.md).
