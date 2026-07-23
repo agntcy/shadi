@@ -4162,3 +4162,126 @@ members = [{{ did = "shadi://{}", role = "human" }}]
 
         assert_eq!(run_memory_command(cli), ExitCode::from(1));
     }
+
+    #[test]
+    fn run_slim_command_dispatches_controller_variant() {
+        // Empty connect args fail validation before any network I/O, so this
+        // exercises the SlimCommand::Controller match arm in run_slim_command
+        // (not just the run_controller_command helper it delegates to).
+        let args = SlimControllerConnectArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            create_connection: Vec::new(),
+            delete_connection: Vec::new(),
+            set_route: Vec::new(),
+            delete_route: Vec::new(),
+            timeout_seconds: 1,
+        };
+        let code = run_slim_command(SlimCli {
+            command: SlimCommand::Controller {
+                command: ControllerCommand::Connect(args),
+            },
+        });
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_controller_command_dispatches_connect_and_surfaces_errors() {
+        // Empty connect args fail validation before any network I/O, so this
+        // exercises the dispatch match arm and error path without needing a
+        // live controller endpoint.
+        let args = SlimControllerConnectArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            create_connection: Vec::new(),
+            delete_connection: Vec::new(),
+            set_route: Vec::new(),
+            delete_route: Vec::new(),
+            timeout_seconds: 1,
+        };
+        assert_eq!(
+            run_controller_command(ControllerCommand::Connect(args)),
+            ExitCode::from(1)
+        );
+    }
+
+    fn restore_env_var(name: &str, previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    #[test]
+    fn restore_env_var_covers_some_and_none() {
+        let _guard = trace_env_lock();
+        let previous = std::env::var_os("SHADI_TEST_RESTORE_ENV_VAR");
+
+        std::env::set_var("SHADI_TEST_RESTORE_ENV_VAR", "before");
+        restore_env_var(
+            "SHADI_TEST_RESTORE_ENV_VAR",
+            Some(std::ffi::OsString::from("restored")),
+        );
+        assert_eq!(
+            std::env::var("SHADI_TEST_RESTORE_ENV_VAR").as_deref(),
+            Ok("restored")
+        );
+
+        restore_env_var("SHADI_TEST_RESTORE_ENV_VAR", None);
+        assert!(std::env::var_os("SHADI_TEST_RESTORE_ENV_VAR").is_none());
+
+        restore_env_var("SHADI_TEST_RESTORE_ENV_VAR", previous);
+    }
+
+    #[test]
+    fn run_controller_command_dispatches_list_routes_and_surfaces_errors() {
+        let _guard = trace_env_lock();
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        // No client TLS material is configured, so TLS resolution fails
+        // before any network I/O — exercising the ListRoutes dispatch arm
+        // and error path without needing a live controller endpoint.
+        let args = SlimControllerListArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            timeout_seconds: 1,
+        };
+        let code = run_controller_command(ControllerCommand::ListRoutes(args));
+
+        restore_env_var("SLIM_TLS_CERT", previous_cert);
+        restore_env_var("SLIM_TLS_KEY", previous_key);
+        restore_env_var("SLIM_TLS_CA", previous_ca);
+
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_controller_command_dispatches_list_connections_and_surfaces_errors() {
+        let _guard = trace_env_lock();
+        let previous_cert = std::env::var_os("SLIM_TLS_CERT");
+        let previous_key = std::env::var_os("SLIM_TLS_KEY");
+        let previous_ca = std::env::var_os("SLIM_TLS_CA");
+        std::env::remove_var("SLIM_TLS_CERT");
+        std::env::remove_var("SLIM_TLS_KEY");
+        std::env::remove_var("SLIM_TLS_CA");
+
+        let args = SlimControllerListArgs {
+            endpoint: "127.0.0.1:1".to_string(),
+            timeout_seconds: 1,
+        };
+        let code = run_controller_command(ControllerCommand::ListConnections(args));
+
+        restore_env_var("SLIM_TLS_CERT", previous_cert);
+        restore_env_var("SLIM_TLS_KEY", previous_key);
+        restore_env_var("SLIM_TLS_CA", previous_ca);
+
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn exit_code_for_maps_ok_and_err() {
+        assert_eq!(exit_code_for(Ok(())), ExitCode::from(0));
+        assert_eq!(exit_code_for(Err("boom".to_string())), ExitCode::from(1));
+    }

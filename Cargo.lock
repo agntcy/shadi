@@ -251,6 +251,8 @@ dependencies = [
  "agntcy-shadi-slim-mas",
  "agntcy-shadi-telemetry",
  "agntcy-slim-bindings",
+ "agntcy-slim-config",
+ "agntcy-slim-proto",
  "agntcy-slim-rpc",
  "async-trait",
  "base64 0.22.1",
@@ -270,9 +272,11 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tokio",
+ "tonic 0.14.5",
  "tracing",
  "uds_windows",
  "unicode-width",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 
