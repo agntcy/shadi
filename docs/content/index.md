@@ -186,7 +186,7 @@ hide:
           <p class="shadictl-terminal-intro" data-intro-level="collaborate">
             Create a moderator-owned SLIM channel, invite coding agents by DID, and broadcast to
             the whole group with A2A Collaborate. See the
-            <a href="demos/did-agent-group/">Secure Agent Group Demo</a> for the full walkthrough.
+            <a href="demos/did-agent-group.md">Secure Agent Group Demo</a> for the full walkthrough.
           </p>
           <p class="shadictl-terminal-intro" data-intro-level="sandbox" hidden>
             Launch a real command inside SHADI's sandbox, with a secret released only to the

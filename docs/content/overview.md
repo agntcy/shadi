@@ -44,10 +44,9 @@ SHADI presents the runtime as four product layers:
 - Python bindings for secrets, memory, and sandboxed execution.
 - CLI workflows for policy, identity, key management, and sandbox execution.
 - Example agents and demos, including a SecOps workflow against real GitHub signals.
-- **agentbridge**: general-purpose agent interconnect over A2A, SLIM, and DIR
-  with autonomous coordination toward a shared goal — ships today with
-  adapters for Claude Code, Copilot, Codex, Cursor Agent, and other CLI
-  coding tools.
+- **agentbridge**: interconnect Claude Code, Copilot, Codex, Cursor Agent, and
+  other CLI coding tools via A2A, SLIM, and DIR with autonomous coordination
+  toward a shared goal.
 - **Secure agent groups**: moderator-invited SLIM channels admitted against a
   per-agent DID allow-list, with many-to-many A2A Collaborate broadcast
   messaging between every member.

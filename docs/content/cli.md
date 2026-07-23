@@ -633,53 +633,19 @@ cargo run -p agntcy-shadi-cli -- slim a2a-collaborate \
 - `--message`: text to broadcast (default `"hello from SHADI A2A"`).
 - `--timeout-seconds`: how long to keep listening for others' broadcasts after sending (default `20`).
 
-Create a group whose members are *discovered* from the Agent Directory
-instead of named by hand, then hand off into the interactive shell as its
-moderator — see [Agent Directory Discovery Demo](demos/dir-group-discovery.md)
-for a full walkthrough:
-
-```bash
-cargo run -p agntcy-shadi-cli -- slim create-group \
-  --members "skill:agent_orchestration/agent_coordination" \
-  --members "did:did:key:z6Mk..." \
-  --members "explicit:trusted-bot=did:key:z6Mk...@10.0.0.5:47560" \
-  --dir-server 127.0.0.1:8888 \
-  --write-config /tmp/mas.toml \
-  agntcy/shadi/dir-room
-```
-
-- `--members SPEC` (repeatable): `skill:<skill>` (Directory search by skill),
-  `did:<did>` (Directory search by author DID), or
-  `explicit:<name>=<did>[@<endpoint>]` (no Directory round trip). Every
-  resolved candidate's DID is unioned into the group's trust set.
-- `--dir-server`: Agent Directory address (default `prod.gateway.ads.outshift.io:443`).
-- `--gh-token` / `--limit`: DIR auth token and max results per source.
-- `--write-config PATH`: persist the resolved trust set as a `slim_mas`
-  `GroupConfig` TOML — see [`shadictl slim-mas`](#shadictl-slim-mas-shadictl-slim-mas) below.
-
-Requires `SHADI_SLIM_AUTH=did` — a discovered trust set is meaningless under
-shared-secret auth.
-
 ### Secure agent groups (interactive shell)
 
 Group membership — as opposed to the one-shot `a2a-collaborate` broadcast
-above — is managed through `shadictl shell`, not a clap subcommand
-(`slim create-group` above is the one exception: it's a clap subcommand that
-hands off *into* this same shell once its discovered group is created):
+above — is managed through `shadictl shell`, not a clap subcommand:
 
 - `/slim create <org/namespace/app>`: creates a channel; the caller becomes its moderator.
 - `/slim invite <org/namespace/app>`: moderator-only, invites a participant into the channel.
-- `/slim invite-from <spec>`: moderator-only, re-resolves one `skill:`/`did:`/`explicit:` spec
-  live and invites whichever matches are already in the group's trust set — the way to pull a
-  newly-discovered agent into an already-running group.
 - `/slim join <org/namespace/app> [--timeout SECONDS]`: blocks until invited; caller becomes a participant.
 - `/slim whoami`: prints agent name, auth mode, role, and (under DID auth) the agent and human DIDs.
 
 See [SLIM and A2A](slim_a2a.md#secure-agent-groups-identity-moderator-role-and-admission)
-for the admission model, the [Secure Agent Group Demo](demos/did-agent-group.md)
-for a full walkthrough with real coding-agent CLIs and a hand-written allow-list, and the
-[Agent Directory Discovery Demo](demos/dir-group-discovery.md) for the discovery-driven
-equivalent of `create`/`invite`.
+for the admission model, and the [Secure Agent Group Demo](demos/did-agent-group.md)
+for a full walkthrough with real coding-agent CLIs.
 
 ## shadictl slim-mas (`shadictl slim-mas`)
 
