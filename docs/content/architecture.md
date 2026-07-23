@@ -223,6 +223,9 @@ on the paths that matter most when reading or operating the system.
 
 ### 1) Identity, secret storage, and memory bootstrap
 
+How a human identity turns into an agent identity, and how that identity
+gates later secret and memory access:
+
 ```mermaid
 flowchart LR
   Source[Human identity source] --> Derive[Derive agent identity]
@@ -241,6 +244,9 @@ This is the trust bootstrap path:
 4. The SQLCipher memory key is retrieved through the same secret-control path rather than living in plaintext config.
 
 ### 2) Policy resolution and sandbox launch
+
+How profile defaults, a policy file, and CLI overrides merge into the policy
+that's actually enforced before a process starts:
 
 ```mermaid
 flowchart LR
@@ -261,6 +267,9 @@ This launch path matters because the agent does not get to reinterpret the polic
 - Runtime policy is expanded only as needed, for example to allow a temporary broker endpoint or local Unix socket transport.
 
 ### 3) Trusted secret delivery and delegated child flow
+
+How a secret reaches a launched child tool without ever passing through the
+parent process:
 
 ```mermaid
 sequenceDiagram
@@ -291,6 +300,9 @@ This is the main architecture change in the PR series:
 - On Unix/macOS, SHADI verifies the final child consumer before releasing the secret.
 
 ### 4) Runtime workload flow
+
+Once launched, a workload's access to secrets, memory, and transport all stay
+gated by the same runtime contract established at launch:
 
 ```mermaid
 flowchart LR
@@ -358,16 +370,18 @@ Agent workloads sit on top of the same runtime contract:
 | Agent identity substitution | HKDF derivation + verify-agent-identity | Blocked (with verification) |
 | Process escape | Kernel enforcement | Mitigated |
 
-## Residual risks
-- Host OS compromise or kernel-level malware can bypass sandbox controls.
-- Metadata leakage (timing, sizes, endpoints) is not fully addressed in v1.
-- ACL changes on Windows could be interrupted before rollback in a crash.
-- Application-level path deny rules are weaker than OS-enforced sandbox restrictions; do not rely on path matching alone for high-assurance policy.
+!!! warning "Residual risks"
 
-## Deployment guidance
-- Prefer running agents under the sandbox with a JSON policy file.
-- Use explicit disclosure only when a demo or workload truly needs the secret in the parent process, and prefer process-scoped or delegated trusted delivery where possible.
-- Rotate secrets and use short-lived tokens whenever possible.
+    - Host OS compromise or kernel-level malware can bypass sandbox controls.
+    - Metadata leakage (timing, sizes, endpoints) is not fully addressed in v1.
+    - ACL changes on Windows could be interrupted before rollback in a crash.
+    - Application-level path deny rules are weaker than OS-enforced sandbox restrictions; do not rely on path matching alone for high-assurance policy.
+
+!!! tip "Deployment guidance"
+
+    - Prefer running agents under the sandbox with a JSON policy file.
+    - Use explicit disclosure only when a demo or workload truly needs the secret in the parent process, and prefer process-scoped or delegated trusted delivery where possible.
+    - Rotate secrets and use short-lived tokens whenever possible.
 
 ## Policy examples
 
@@ -434,6 +448,9 @@ tools as A2A agents and orchestrates them via SLIM + DIR.
 
 ### Architecture
 
+How agentbridge wraps CLI coding tools as A2A agents and coordinates them
+through `shadi_mas`:
+
 ```mermaid
 flowchart TB
   subgraph devenv["Developer environment"]
@@ -482,7 +499,9 @@ the context-handoff path (`handoff`).
 
 For full details and sequence diagrams see [agentbridge](agentbridge.md).
 
-- Review the full threat model, secret-delivery rationale, and residual risks in [Security Notes](security.md).
+## Next steps
+
+- Review the concrete security guarantees and threat model in [Security Notes](security.md).
 - Put this into practice with [Sandbox and Policies](sandbox.md) and the [CLI Reference](cli.md).
 - Integrate into an agent or app via the [API Guide](api_integration.md).
-- See the multi-agent coordination layer and general-purpose A2A agent interconnect in [AgentBridge](agentbridge.md).
+

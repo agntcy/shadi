@@ -77,3 +77,9 @@ agentbridge — see the [Secure Agent Group Demo](demos/did-agent-group.md).
 2. Group admission is enforced against an explicit per-agent DID allow-list.
 3. MLS provides content confidentiality between group members.
 4. Secrets are accessed only after verification succeeds.
+
+## Next steps
+
+- Walk through a full multi-agent example in the [Secure Agent Group Demo](demos/did-agent-group.md).
+- See how CLI coding agents use this transport in [AgentBridge](agentbridge.md).
+- Look up exact flags in the [CLI Reference](cli.md).

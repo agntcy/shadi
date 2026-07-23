@@ -54,6 +54,28 @@ cargo run -p agentbridge_demo -- --scenario bridge
 See [examples/agentbridge_demo/README.md](../../examples/agentbridge_demo/README.md)
 for step-by-step instructions and the live 4-terminal SLIM demo.
 
+## Quick start
+
+The self-contained demo needs no infrastructure — it runs all scenarios
+against an in-process SLIM node:
+
+```bash
+# Run the self-contained demo (all scenarios, no infrastructure required)
+cargo run -p agentbridge_demo
+
+# Run the 4-agent coordination scenario
+cargo run -p agentbridge_demo -- --scenario coordination
+
+# Run the context handoff scenario
+cargo run -p agentbridge_demo -- --scenario handoff
+
+# Run the CliAdapter → ToolAdapter bridge scenario
+cargo run -p agentbridge_demo -- --scenario bridge
+```
+
+See [examples/agentbridge_demo/README.md](../../examples/agentbridge_demo/README.md)
+for step-by-step instructions and the live 4-terminal SLIM demo.
+
 ## Architecture
 
 ### Deployment topology
@@ -396,29 +418,29 @@ corrupting the state machine.
 
     ### What is implemented
 
-| Requirement | Status | Detail |
-|-------------|--------|--------|
-| Architecture design | ✅ | Full A2A + SLIM + DIR stack documented |
-| Coordination backbone | ✅ | `shadi_mas` migrated + `DevelopmentEngine` added |
-| `CliAdapter` trait | ✅ | Unified interface for any coding tool |
-| `ContextPacket` | ✅ | Portable session snapshot with JSON serde |
-| Generic subprocess adapter | ✅ | `GenericStdioAdapter` — newline-delimited JSON protocol |
-| Native adapters | ✅ | `ClaudeCodeAdapter`, `CopilotAdapter`, `CodexAdapter`, `CursorAgentAdapter` |
-| `CliToolAdapter` bridge | ✅ | Any `CliAdapter` → `shadi_mas::ToolAdapter` |
-| DIR registration | ✅ | OASF record builder + `dirctl push/search` via subprocess |
-| `agentbridge` library | ✅ | `crates/agentbridge` |
-| CLI binary | ✅ | `agentbridge register \| list \| handoff \| delegate \| coordinate` |
-| Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register` and `coordinate` |
-| Quorum-vote finalization | ✅ | `DevelopmentEngine` — autonomous, no human required |
-| SLIM group relay | ✅ | `shadictl slim a2a-collaborate` (SLIMRPC `Collaborate` RPC via `shadi_a2a::A2AGroupChannel`) — see [SLIM and A2A](slim_a2a.md) |
-| DID-identified secure groups | ✅ | Moderator-invited channels admitted against a per-agent DID allow-list — see the [Secure Agent Group Demo](demos/did-agent-group.md) |
+    | Requirement | Status | Detail |
+    |-------------|--------|--------|
+    | Architecture design | ✅ | Full A2A + SLIM + DIR stack documented |
+    | Coordination backbone | ✅ | `shadi_mas` migrated + `DevelopmentEngine` added |
+    | `CliAdapter` trait | ✅ | Unified interface for any coding tool |
+    | `ContextPacket` | ✅ | Portable session snapshot with JSON serde |
+    | Generic subprocess adapter | ✅ | `GenericStdioAdapter` — newline-delimited JSON protocol |
+    | Native adapters | ✅ | `ClaudeCodeAdapter`, `CopilotAdapter`, `CodexAdapter`, `CursorAgentAdapter` |
+    | `CliToolAdapter` bridge | ✅ | Any `CliAdapter` → `shadi_mas::ToolAdapter` |
+    | DIR registration | ✅ | OASF record builder + `dirctl push/search` via subprocess |
+    | `agentbridge` library | ✅ | `crates/agentbridge` |
+    | CLI binary | ✅ | `agentbridge register \| list \| handoff \| delegate \| coordinate` |
+    | Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register` and `coordinate` |
+    | Quorum-vote finalization | ✅ | `DevelopmentEngine` — autonomous, no human required |
+    | SLIM group relay | ✅ | `shadictl slim a2a-collaborate` (SLIMRPC `Collaborate` RPC via `shadi_a2a::A2AGroupChannel`) — see [SLIM and A2A](slim_a2a.md) |
+    | DID-identified secure groups | ✅ | Moderator-invited channels admitted against a per-agent DID allow-list — see the [Secure Agent Group Demo](demos/did-agent-group.md) |
 
     ### What remains
 
-| Requirement | Detail |
-|-------------|--------|
-| `shadi_memory` ContextPacket persistence | `SqlCipherStore` wire-up in `crates/shadi_memory/` |
-| `register --tool cursor-agent` | Not yet implemented; `cursor-agent` is currently reachable only via `coordinate` |
+    | Requirement | Detail |
+    |-------------|--------|
+    | `shadi_memory` ContextPacket persistence | `SqlCipherStore` wire-up in `crates/shadi_memory/` |
+    | `register --tool cursor-agent` | Not yet implemented; `cursor-agent` is currently reachable only via `coordinate` |
 
     ### Does the existing middleware help?
 
@@ -441,8 +463,7 @@ corrupting the state machine.
         src/
           adapter.rs           ← CliAdapter trait + CliToolAdapter
           context.rs           ← ContextPacket, CodeContext, ArtifactPayload
-          dir_registry.rs      ← AgentCard → OASF module wrapping + dirctl integration
-          member_source.rs     ← MemberSource (skill/DID/explicit) group-discovery trait
+          dir_registry.rs      ← OASF record builder + dirctl integration
           adapters/
             generic_stdio.rs   ← subprocess JSON protocol adapter
             claude_code.rs     ← Claude Code native adapter
@@ -474,6 +495,5 @@ corrupting the state machine.
 ## Next steps
 
 - Try the [Secure Agent Group Demo](demos/did-agent-group.md) for a full multi-agent, DID-identified walkthrough.
-- Try the [Agent Directory Discovery Demo](demos/dir-group-discovery.md) to form and grow a group by discovering members in DIR instead of naming them by hand.
 - Review the transport layer in [SLIM and A2A](slim_a2a.md).
 - See sandboxing guidance for running bridged tools in [Sandbox and Policies](sandbox.md).

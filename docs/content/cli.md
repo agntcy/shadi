@@ -33,13 +33,19 @@ cargo run -p agntcy-shadi-cli -- [FLAGS] -- [COMMAND]
 - `--list-keychain`: List secrets in the SHADI store.
 - `--list-prefix PREFIX`: Optional prefix filter for `--list-keychain`.
 - `--print-policy`: Print the resolved policy and exit.
-- `--git-snapshot`: Capture Git state before and after the sandboxed run.
-- `--git-snapshot-dir DIR`: Write snapshot artifacts under DIR instead of `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
-- `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the snapshot artifact.
-- `--watch-policy`: Watch the policy file for changes and hot-reload it (see [Sandbox and Policies](sandbox.md#dynamic-policy-updates)).
-- `--slim-channel NAME`, `--slim-destination NAME`, `--slim-timeout SECONDS`, `--slim-payload-type TYPE`, `--slim-allow-empty`: Configure the built-in SLIM sandbox-session bridge.
-- `--name NAME`: Human-readable name for this sandbox session; the control socket is created at `$TMPDIR/shadi-ctl-<name>.sock` instead of `$TMPDIR/shadi-ctl-<pid>.sock`, so it can be attached by name (`/attach <name>`). Letters, digits, hyphens, and underscores only.
-- `--record REF`: OASF record reference (CID, `name`, `name:version`, or `name:version@cid`) printed to stderr on session start, linking this run to a published Agent Directory record.
+
+??? note "Advanced flags (trusted-secret compatibility, Git snapshots, SLIM bridge, session naming)"
+
+    - `--trusted-secret KEY=NAME`: Configure a direct trusted-secret delivery mapping (advanced compatibility/testing path).
+    - `--trusted-secret-exec NAME=PROGRAM`: Bind a trusted-secret mapping to an exact executable path.
+    - `--trusted-secret-fd-env NAME=ENV`: Set the endpoint env name for a trusted-secret mapping.
+    - `--git-snapshot`: Capture Git state before and after the sandboxed run.
+    - `--git-snapshot-dir DIR`: Write snapshot artifacts under DIR instead of `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
+    - `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the snapshot artifact.
+    - `--watch-policy`: Watch the policy file for changes and hot-reload it (see [Sandbox and Policies](sandbox.md#dynamic-policy-updates)).
+    - `--slim-channel NAME`, `--slim-destination NAME`, `--slim-timeout SECONDS`, `--slim-payload-type TYPE`, `--slim-allow-empty`: Configure the built-in SLIM sandbox-session bridge.
+    - `--name NAME`: Human-readable name for this sandbox session; the control socket is created at `$TMPDIR/shadi-ctl-<name>.sock` instead of `$TMPDIR/shadi-ctl-<pid>.sock`, so it can be attached by name (`/attach <name>`). Letters, digits, hyphens, and underscores only.
+    - `--record REF`: OASF record reference (CID, `name`, `name:version`, or `name:version@cid`) printed to stderr on session start, linking this run to a published Agent Directory record.
 
 ### Secret backend selection
 
@@ -93,8 +99,6 @@ sandboxed session over its control socket (`policy query --socket ...` /
 `policy patch --socket ... --add-allow-command ... --add-read ...`) — see
 [Sandbox and Policies → Dynamic Policy Updates](sandbox.md#dynamic-policy-updates)
 for the full flag set and patch-axis semantics.
-
-#### Practical examples
 
 ??? example "Practical examples"
 
@@ -686,5 +690,4 @@ Exit codes:
 ## Next steps
 
 - Walk through a full example in [Sandbox and Policies](sandbox.md) or the [Secure Agent Group Demo](demos/did-agent-group.md).
-- Try the discovery-driven equivalent in the [Agent Directory Discovery Demo](demos/dir-group-discovery.md).
 - See the underlying security model in [Security Notes](security.md).
