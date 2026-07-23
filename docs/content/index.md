@@ -117,6 +117,48 @@ hide:
   </div>
 </section>
 
+<section class="shadi-bridge">
+  <h2 class="shadi-section-title">Bring Your Own Coding Agent</h2>
+  <p class="shadi-bridge__lede">
+    <strong>agentbridge</strong> lets Claude Code, Codex, GitHub Copilot, Cursor Agent — and any
+    other CLI coding tool, including Gemini CLI, via a generic adapter — hand off context,
+    delegate tasks, and coordinate autonomously with each other over A2A on SLIM. Zero trust
+    throughout: every agent authenticates with its own DID, never a shared secret.
+  </p>
+  <div class="shadi-bridge__harnesses">
+    <span class="shadi-bridge__harness">Claude Code</span>
+    <span class="shadi-bridge__harness">Codex</span>
+    <span class="shadi-bridge__harness">GitHub Copilot</span>
+    <span class="shadi-bridge__harness">Cursor Agent</span>
+    <span class="shadi-bridge__harness">Gemini CLI</span>
+    <span class="shadi-bridge__harness shadi-bridge__harness--more">+ any CLI tool</span>
+  </div>
+  <div class="shadi-bridge__zero-trust">
+    <div class="shadi-bridge__zt-item">
+      <span class="shadi-bridge__zt-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" role="img"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1.2 14.6L6.6 11.4l1.4-1.4 2.8 2.8 5.8-5.8 1.4 1.4-7.2 7.2z"/></svg>
+      </span>
+      <span>Every agent authenticates with its own DID — no shared secrets, ever.</span>
+    </div>
+    <div class="shadi-bridge__zt-item">
+      <span class="shadi-bridge__zt-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" role="img"><path d="M12 17a2 2 0 0 0 2-2 2 2 0 0 0-2-2 2 2 0 0 0-2 2 2 2 0 0 0 2 2zm6-9h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zM8.9 6a3.1 3.1 0 0 1 6.2 0v2H8.9V6z"/></svg>
+      </span>
+      <span>mTLS-protected, MLS-encrypted transport over SLIM, end to end.</span>
+    </div>
+    <div class="shadi-bridge__zt-item">
+      <span class="shadi-bridge__zt-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" role="img"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+      </span>
+      <span>Explicit member allow-list — only verified agents can join.</span>
+    </div>
+  </div>
+  <a class="shadi-community-contribute__btn" href="agentbridge.md">
+    Learn about agentbridge
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>
+  </a>
+</section>
+
 <section class="shadi-quickstart">
   <h2 class="shadi-section-title" id="see-shadictl-in-action">See shadictl in Action</h2>
 

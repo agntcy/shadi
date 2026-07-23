@@ -99,6 +99,7 @@ body:has(.shadi-landing) .md-main__inner {
 }
 
 .shadi-page-body > .shadi-why,
+.shadi-page-body > .shadi-bridge,
 .shadi-page-body > .shadi-quickstart,
 .shadi-page-body > .shadi-community {
   max-width: none;
@@ -107,6 +108,7 @@ body:has(.shadi-landing) .md-main__inner {
 }
 
 .md-typeset .shadi-why .shadi-section-title,
+.md-typeset .shadi-bridge .shadi-section-title,
 .md-typeset .shadi-quickstart .shadi-section-title,
 .md-typeset .shadi-community .shadi-section-title,
 .md-typeset .shadi-page-body .shadi-section-title {
@@ -199,6 +201,95 @@ body:has(.shadi-landing) .md-main__inner {
 
   .md-typeset .shadi-feature-card {
     padding: 1.625rem 1.125rem;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   Bring Your Own Coding Agent (agentbridge)
+---------------------------------------------------------------------------- */
+
+.md-typeset .shadi-bridge__lede {
+  margin: -0.75rem 0 1.5rem;
+  max-width: 48rem;
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: var(--md-default-fg-color--light);
+}
+
+.shadi-bridge__harnesses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 1.75rem;
+}
+
+.md-typeset .shadi-bridge__harness {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.4rem 1rem;
+  border-radius: 50px;
+  background: var(--shadi-feature-card-bg);
+  border: 1px solid var(--shadi-feature-card-border);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .shadi-bridge__harness--more {
+  color: var(--md-default-fg-color--light);
+  font-weight: 400;
+  font-style: italic;
+  background: transparent;
+  border-style: dashed;
+}
+
+.shadi-bridge__zero-trust {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.25rem;
+  margin-bottom: 1.75rem;
+}
+
+.md-typeset .shadi-bridge__zt-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 1rem 1.05rem;
+  border-radius: 10px;
+  background: var(--shadi-feature-card-bg);
+  border: 1px solid var(--shadi-feature-card-border);
+  box-shadow: var(--shadi-feature-card-shadow);
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--md-default-fg-color--light);
+}
+
+.shadi-bridge__zt-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  background: var(--shadi-feature-icon-bg);
+  border: 1px solid var(--shadi-feature-icon-border);
+}
+
+.shadi-bridge__zt-icon svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: rgb(24, 122, 220);
+}
+
+[data-md-color-scheme="slate"] .shadi-bridge__zt-icon svg {
+  fill: rgb(251, 175, 70);
+}
+
+@media screen and (max-width: 59.9375em) {
+  .shadi-bridge__zero-trust {
+    grid-template-columns: 1fr;
   }
 }
 
