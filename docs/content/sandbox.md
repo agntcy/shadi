@@ -45,6 +45,28 @@ tooling, but stops adding an implicit root read allowlist for `balanced` and
 `connected`. Add explicit `--read` or `--allow` paths when a workload needs
 extra filesystem access beyond the workspace.
 
+How profile defaults, a policy file, and CLI overrides merge into the policy
+that's actually enforced before a process starts:
+
+```mermaid
+flowchart LR
+  Profiles[Launcher profiles] --> Resolve[Resolve effective policy]
+  Policy[Policy file] --> Resolve
+  Overrides[CLI overrides] --> Resolve
+  Resolve --> SecretPolicy[Resolve secret delivery intent]
+  SecretPolicy --> Runtime[Prepare runtime guardrails]
+  Runtime --> Launch[Launch protected process]
+```
+
+This launch path matters because the agent does not get to reinterpret the
+policy from inside the session:
+
+- Profile defaults establish the baseline (`strict`, `balanced`, or `connected`).
+- Policy JSON adds exact executable rules and file/network allowances.
+- CLI flags override or extend the result.
+- Secret rules are resolved before spawn so SHADI knows whether a secret is being disclosed, directly trusted-delivered, or delegated to a child.
+- Runtime policy is expanded only as needed, for example to allow a temporary broker endpoint or local Unix socket transport.
+
 ### Starter profile matrix
 
 Use this matrix as a baseline when selecting a profile:

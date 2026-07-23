@@ -325,7 +325,38 @@ agent-specific fallback, or a generic fallback (see
 with `tools/generate_slim_mtls_certs.sh` and keep the CA private to the peers you
 trust.
 
-## `DevelopmentEngine` — the coordination core
+## Multi-agent coordination layer (`shadi_mas`)
+
+`shadi_mas` is the coordination runtime that sits above the transport layer,
+consumed by `agentbridge coordinate`. It provides epoch-disciplined state
+machines that can drive any multi-agent pattern to a deterministic
+finalization outcome.
+
+```
+SemanticEvent  ──►  CoordinationEngine  ──►  EventOutcome
+(proposal,          (PreferenceEngine,        (Applied,
+ vote, tool          DevelopmentEngine,         Finalized,
+ result, …)          …)                         Rejected,
+                                               Deferred)
+```
+
+Engines are wrapped in `MasRuntime<E>` which tracks the full history of applied
+transitions and exposes `engine()` / `engine_mut()` for inspection.
+
+| Engine | Pattern | Finalization criterion |
+|--------|---------|----------------------|
+| `PreferenceEngine` | Consensus on a scalar value | Median of proposals when quorum is met |
+| `DevelopmentEngine` | Consensus on a code artifact | Most-endorsed artifact when quorum is met |
+
+Three adapter traits connect the runtime to real infrastructure:
+
+| Trait | Implementation | Purpose |
+|-------|---------------|---------|
+| `MessagingAdapter` | `RecordingMessagingAdapter` / `LiveSlimMessagingAdapter` | Publish events to SLIM |
+| `TaskAdapter` | `RecordingTaskAdapter` / `LiveA2ATaskAdapter` | Dispatch A2A tasks |
+| `ToolAdapter` | `RecordingToolAdapter` / `CommandToolAdapter` / `CliToolAdapter` | Invoke LLMs / CLI tools |
+
+### `DevelopmentEngine` — the coordination core
 
 `DevelopmentEngine` is a `CoordinationEngine` that coordinates code artifacts
 rather than scalar numeric values (unlike `PreferenceEngine`).
