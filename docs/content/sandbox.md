@@ -27,7 +27,7 @@ cargo run -p agntcy-shadi-cli -- \
 without platform-specific Bash/PowerShell wrappers:
 
 ```bash
-cargo run -p agntcy-shadi-cli -- --profile strict -- -- ./your-agent
+cargo run -p agntcy-shadi-cli -- --profile strict -- ./your-agent
 ```
 
 Profiles:

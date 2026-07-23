@@ -111,7 +111,7 @@ hide:
       </div>
       <p class="shadi-feature-card__title">Secure Transport</p>
       <p class="shadi-feature-card__text">
-        MLS-backed messaging between agents via SLIM and A2A, authenticated end to end.
+        DID-authenticated, MLS-encrypted messaging between agents via SLIM and A2A.
       </p>
     </div>
   </div>
@@ -144,7 +144,7 @@ hide:
       <span class="shadi-bridge__zt-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" role="img"><path d="M12 17a2 2 0 0 0 2-2 2 2 0 0 0-2-2 2 2 0 0 0-2 2 2 2 0 0 0 2 2zm6-9h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zM8.9 6a3.1 3.1 0 0 1 6.2 0v2H8.9V6z"/></svg>
       </span>
-      <span>mTLS-protected, MLS-encrypted transport over SLIM, end to end.</span>
+      <span>mTLS-protected transport over SLIM, end to end.</span>
     </div>
     <div class="shadi-bridge__zt-item">
       <span class="shadi-bridge__zt-icon" aria-hidden="true">

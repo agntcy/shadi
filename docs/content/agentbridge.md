@@ -30,13 +30,13 @@ same machine). SLIM is the authenticated transport bus between them.
 flowchart LR
   subgraph reg["agentbridge register  (one per agent)"]
     direction TB
-    tool["CLI tool\nclaude-code | copilot | codex | cursor-agent"]
+    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex"]
     ca["CliAdapter\nexecute_prompt(prompt) → text"]
     srv["A2A server\nAgentBridgeRequestHandler\nInMemoryTaskStore"]
     tool -- "stdin / stdout" --> ca --> srv
   end
 
-  slim{{"SLIM node\nagntcy/shadi/&lt;tool&gt;-a2a\nmTLS · shared secret"}}
+  slim{{"SLIM node\nagntcy/shadi/&lt;tool&gt;-a2a\nmTLS · DID auth"}}
 
   subgraph coord["agentbridge coordinate"]
     direction TB
@@ -49,6 +49,9 @@ flowchart LR
   srv <-- "A2A tasks  (text/plain)" --> slim
   slim <-- "A2A tasks  (text/plain)" --> laa
 ```
+
+`cursor-agent` doesn't have a `register` listener yet (`register --tool cursor-agent`
+is not implemented) — it participates as a `coordinate` peer only (see below).
 
 ### Coordination loop
 
@@ -216,10 +219,11 @@ certificate bundle once with `tools/generate_slim_mtls_certs.sh`.
 ```
 register --slim-endpoint 127.0.0.1:47357
   │
-  ├─ Service::connect()      connect to SLIM node (TLS 1.3)
-  ├─ create_app_with_secret() authenticate with shared secret
-  ├─ app.subscribe()         subscribe to agntcy/shadi/<tool>-a2a
-  ├─ Server::serve_async()   start the A2A/SLIMRPC event loop
+  ├─ service.connect()               connect to SLIM node (TLS 1.3)
+  ├─ shadi_identity::require_did_auth_from_env()
+  │    + shadi_identity::create_app() authenticate with this agent's DID
+  ├─ app.subscribe()                 subscribe to agntcy/shadi/<tool>-a2a
+  ├─ srv.serve()                     start the A2A/SLIMRPC event loop
   │
   │  [agentbridge] ready — listening on agntcy/shadi/<tool>-a2a
   │
@@ -271,19 +275,18 @@ Controls:
 - Keep the SLIM node on loopback (`127.0.0.1`) for local demos; only bind a
   routable address when the peer set is trusted and authenticated.
 
-### Shared secret
+### DID authentication
 
-SLIM apps authenticate with a shared secret (`create_app_with_secret`). For the
-loopback demo, `register`, `delegate`, and `coordinate` fall back to a built-in
-default secret (`my_shared_secret_for_testing_purposes_only`) when
-`SLIM_SHARED_SECRET` is unset.
+SLIM apps authenticate with a per-agent DID, not a shared secret. Set
+`SHADI_SLIM_AUTH=did` and `SLIM_HUMAN_SEED` (the human root key every agent's
+DID is derived from), plus `SLIM_MEMBER_DIDS` — the allow-list of DIDs
+permitted to participate. `shadi_identity::require_did_auth_from_env` enforces
+this: it errors out if `SHADI_SLIM_AUTH` isn't `did`, so `register`,
+`delegate`, and `coordinate` cannot silently fall back to a shared secret.
 
-!!! danger "The default secret provides no authentication"
-    The default is compiled into the binary and is public. It is safe **only**
-    for a loopback demo. The commands emit a security warning when the default
-    is used, and warn more loudly when the endpoint is not loopback. Always set
-    `SLIM_SHARED_SECRET` (or `--slim-shared-secret`) to a private value before
-    exposing the SLIM node.
+See the [Secure Agent Group Demo](demos/did-agent-group.md) for a full
+worked example, including how DID admission is verified against the
+allow-list.
 
 ### Transport authentication
 
@@ -335,13 +338,15 @@ corrupting the state machine.
 | CLI binary | ✅ | `agentbridge register \| list \| handoff \| delegate \| coordinate` |
 | Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register` and `coordinate` |
 | Quorum-vote finalization | ✅ | `DevelopmentEngine` — autonomous, no human required |
+| SLIM group relay | ✅ | `shadictl slim a2a-collaborate` (SLIMRPC `Collaborate` RPC via `shadi_a2a::A2AGroupChannel`) — see [SLIM and A2A](slim_a2a.md) |
+| DID-identified secure groups | ✅ | Moderator-invited channels admitted against a per-agent DID allow-list — see the [Secure Agent Group Demo](demos/did-agent-group.md) |
 
 ### What remains
 
 | Requirement | Detail |
 |-------------|--------|
 | `shadi_memory` ContextPacket persistence | `SqlCipherStore` wire-up in `crates/shadi_memory/` |
-| SLIM group relay | `LiveSlimGroupConfig` + `LiveSlimMessagingAdapter::group()` for broadcast |
+| `register --tool cursor-agent` | Not yet implemented; `cursor-agent` is currently reachable only via `coordinate` |
 
 ### Does the existing middleware help?
 

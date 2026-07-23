@@ -87,10 +87,12 @@ listener is a **remote code-execution surface**: any peer that can reach
 
 Controls:
 
-- SLIM peers authenticate with a shared secret. The built-in default secret is
-  public and for loopback demos only — set `SLIM_SHARED_SECRET` to a private
-  value before binding a routable address. The CLI warns when the default is in
-  use and warns more loudly for non-loopback endpoints.
+- SLIM peers authenticate with a per-agent DID (`SHADI_SLIM_AUTH=did`,
+  `SLIM_HUMAN_SEED`), verified against an explicit `SLIM_MEMBER_DIDS`
+  allow-list — shared secrets are not accepted for agentbridge listeners
+  (`shadi_identity::require_did_auth_from_env` rejects anything else). See the
+  [Secure Agent Group Demo](demos/did-agent-group.md) for the full admission
+  model.
 - Transport is mutually authenticated with SLIMRPC over TLS; keep the CA bundle
   private to trusted peers.
 - Run bridged tools inside the SHADI [sandbox](sandbox.md) so tool execution is

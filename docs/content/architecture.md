@@ -9,7 +9,8 @@ actions and prevent unauthorized data access or exfiltration.
 - Run dynamic, interactive agents with least-privilege access.
 - Protect secrets at rest and limit access to verified sessions.
 - Enforce kernel-level restrictions so unauthorized operations are blocked by the OS.
-- Provide secure, low-latency agent-to-agent messaging via MLS.
+- Provide secure, low-latency agent-to-agent messaging via SLIM/A2A,
+  DID-authenticated and MLS-encrypted.
 - Keep platform support across macOS, Windows, and mobile targets.
 
 ## Non-goals
@@ -89,7 +90,8 @@ The system can be read as four presentation layers:
 - `crates/agent_secrets/src/platform`: platform keychain backends.
 - `crates/agent_secrets/src/platform/macos.rs`: Keychain storage + key registry for listing.
 - `crates/agent_secrets/src/platform/onepassword.rs`: 1Password backend via `op` CLI.
-- `crates/shadictl/src/main.rs`: OpenPGP ingestion, DID derivation, and secret store helpers.
+- `crates/shadictl/src/identity_command.rs`: OpenPGP/GPG ingestion and DID derivation commands.
+- `crates/shadictl/src/secrets_command.rs`: secret store list/get helpers.
 
 ### 1b) Identity derivation and provenance
 - **Deterministic derivation**: Agent keys are derived from human identity material
@@ -103,8 +105,8 @@ The system can be read as four presentation layers:
   and compares with stored values; can also enforce human DID binding checks.
 
 #### Key modules
-- `crates/shadictl/src/main.rs`: `derive-agent-did`, `derive-agent-identity`,
-  `verify-agent-identity`, and derivation helpers.
+- `crates/shadictl/src/identity_command.rs`: `derive-agent-did`, `derive-agent-identity`,
+  `verify-agent-identity`, and derivation helpers, delegating to `shadi_identity::AgentIdentity::derive`.
 
 ### 2) Sandbox layer
 - **macOS**: Seatbelt profile enforcement for filesystem and network policies.
@@ -118,7 +120,8 @@ The system can be read as four presentation layers:
 #### Key modules
 - `crates/shadi_sandbox/src/policy.rs`: policy model and helpers.
 - `crates/shadi_sandbox/src/platform`: OS-specific sandbox enforcement.
-- `crates/shadictl/src/main.rs`: CLI parsing, policy resolution, and key listing.
+- `crates/shadictl/src/cli_types.rs`: CLI arg parsing.
+- `crates/shadictl/src/policy_helpers.rs`: profile defaults and policy resolution.
 
 ### 3) Memory layer
 - **Local encrypted store**: SQLCipher-backed SQLite for portable, on-device memory.
@@ -127,11 +130,17 @@ The system can be read as four presentation layers:
 
 #### Key modules
 - `crates/shadi_memory/src/lib.rs`: SQLCipher store and query helpers.
-- `crates/shadictl/src/main.rs`: `shadictl memory` helper.
+- `crates/shadictl/src/memory_command.rs`: `shadictl memory` helper.
 - `crates/shadi_py/src/lib.rs`: SQLCipher bindings.
 
 ### 4) Transport layer
-- **SLIM/A2A**: MLS provides confidentiality and integrity between agents.
+- **Identity**: `shadi_identity` authenticates every SLIM peer with a per-agent
+  DID-JWT (`SHADI_SLIM_AUTH=did`) instead of a shared secret; group admission
+  is checked against an explicit DID allow-list.
+- **SLIM/A2A**: point-to-point and moderator/participant group sessions
+  additionally enable MLS session encryption for confidentiality and
+  integrity between agents (`agent_transport_slim`, `shadictl slim create`/
+  `invite`/`join`).
 - **Verified sessions**: Messages are only sent/received after DID/VC checks.
 
 #### Key modules
@@ -421,7 +430,10 @@ Agent workloads sit on top of the same runtime contract:
   Python sandbox runners.
 
 ### Agent-to-agent data leakage
-- **Stopped**: Unauthorized peers reading messages; MLS provides confidentiality.
+- **Stopped**: Unverified peers joining a session; DID-JWT authentication and
+  (for groups) an explicit member allow-list gate admission.
+- **Stopped**: Unauthorized peers reading messages; MLS provides confidentiality
+  on point-to-point and group SLIM sessions.
 - **Stopped**: Message tampering; MLS provides integrity/authentication.
 
 ### Privilege escalation
@@ -438,6 +450,7 @@ Agent workloads sit on top of the same runtime contract:
 | Secret exfiltration in sandbox | OS sandbox + net block | Blocked |
 | Unauthorized file access | Seatbelt/AppContainer allowlists | Blocked |
 | Destructive commands | CLI blocklist | Mitigated |
+| Peer/agent impersonation on SLIM | DID-JWT auth + member allow-list | Blocked |
 | Message interception | MLS in SLIM | Blocked |
 | Message tampering | MLS integrity | Blocked |
 | Agent identity substitution | HKDF derivation + verify-agent-identity | Blocked (with verification) |

@@ -120,6 +120,7 @@ fn main() -> Result<(), SecretError> {
 - `session_id`: per-session identifier
 - `verified`: whether verification succeeded
 - `claims`: list of DID/VC claims
+- `did`: the session's derived agent DID, if identity verification set one
 
 Your verifier should set `verified` after validating a DID/VC presentation.
 
@@ -334,6 +335,7 @@ cargo run -p agntcy-shadi-cli -- \
 
 Rust APIs return `SecretError`:
 
+- `NotSupported`: operation not supported by the selected backend
 - `NotAuthorized`: session verification failed
 - `InvalidInput`: key does not exist or malformed input
 - `StorageFailure`: backend failure or OS error

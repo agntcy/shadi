@@ -26,7 +26,7 @@ Each layer builds on the previous one to reduce blast radius and make behavior a
 2. **Secrets Gate**: keychain-backed secrets with optional 1Password integration.
 3. **Kernel Sandbox**: OS-enforced policies with portable profiles and JSON policy support.
 4. **Encrypted Memory**: SQLCipher-backed local state for agent memory.
-5. **Secure Transport**: MLS-backed messaging via SLIM and A2A.
+5. **Secure Transport**: DID-authenticated, MLS-encrypted messaging via SLIM and A2A.
 
 ## Architecture Snapshot
 
@@ -90,7 +90,7 @@ SHADI presents the runtime as four product layers:
 2. Secrets are released only to verified sessions and only through the policy-approved disclosure or trusted-delivery path.
 3. Sandbox policy and secret-delivery policy are resolved before process start and enforced by the OS plus SHADI launch mediation.
 4. Local memory stays encrypted at rest.
-5. Inter-agent transport is protected by MLS-backed messaging.
+5. Inter-agent transport is DID-authenticated and MLS-encrypted.
 
 The current policy framework distinguishes three secret-delivery modes:
 

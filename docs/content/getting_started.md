@@ -75,7 +75,9 @@ cargo run -p agntcy-shadi-cli -- --profile balanced --print-policy
 Use these defaults as your baseline:
 
 - `strict`: local workspace only, network blocked
-- `balanced`: workspace plus common system reads, network blocked
+- `balanced`: workspace access, network blocked (on macOS/Linux, the minimal
+  platform profile supplies only the runtime reads needed to start common
+  tooling — no implicit root read allowlist)
 - `connected`: balanced plus network access
 
 !!! info
