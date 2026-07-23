@@ -37,3 +37,6 @@ ignore:
   - "crates/agentbridge_cli/src/commands/list.rs"
   # Live A2A/SLIM transport task adapter — the send path needs a running node.
   - "crates/shadi_mas/src/experiments/mod.rs"
+  # SLIM controller client — needs a live controller endpoint (see PR #99);
+  # pure logic (arg parsing, route name construction/formatting) is unit-tested.
+  - "crates/shadictl/src/slim_controller.rs"
