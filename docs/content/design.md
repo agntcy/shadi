@@ -10,7 +10,7 @@ The workspace contains these crates:
 - shadi_a2a: A2A-over-SLIM wrapper, including secure group (Collaborate) messaging
 - slim_mas: SLIM multi-agent group config and DID allow-list evaluation (a library, consumed by `shadictl slim-mas`, not itself a CLI)
 - shadi_mas: autonomous multi-round agent coordination runtime (proposal/vote/finalize), consumed by `agentbridge coordinate`
-- agentbridge / agentbridge_cli: general-purpose A2A agent interconnect (register, handoff, delegate, coordinate); ships with CLI coding-tool adapters (Claude Code, Copilot, Codex, Cursor Agent) as its flagship use case
+- agentbridge / agentbridge_cli: CLI coding-agent interconnect (register, handoff, delegate, coordinate)
 - agent_transport_slim: transport adapter for SLIM/A2A and stdio bridge for SHADI-managed sessions
 - shadi_telemetry: OpenTelemetry tracing/metrics initialization
 

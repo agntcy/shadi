@@ -120,11 +120,11 @@ SHADI exposes the same secrets, session, and sandbox surface to both Rust and Py
 
     `SessionContext` includes:
 
-    - `agent_id`: logical agent identifier
-    - `session_id`: per-session identifier
-    - `verified`: whether verification succeeded
-    - `claims`: list of DID/VC claims
-    - `did`: the session's derived agent DID, if identity verification set one
+- `agent_id`: logical agent identifier
+- `session_id`: per-session identifier
+- `verified`: whether verification succeeded
+- `claims`: list of DID/VC claims
+- `did`: the session's derived agent DID, if identity verification set one
 
     Your verifier should set `verified` after validating a DID/VC presentation.
 
