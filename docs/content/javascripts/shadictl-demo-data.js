@@ -4,9 +4,40 @@
 /* Scripted demo lines and canned CLI responses for the home-page terminal. */
 window.ShadictlDemoData = {
   demoTitles: {
+    collaborate: "avatar@shadi:~",
     sandbox: "user@shadi:~",
     policy: "user@shadi:~",
   },
+
+  collaborateDemoScript: [
+    { type: "command", text: "shadictl shell" },
+    { type: "pause", ms: 400 },
+    { type: "shell", text: "/slim create agntcy/shadi/dev-room" },
+    {
+      type: "output",
+      text:
+        "created channel agntcy/shadi/dev-room as moderator agntcy/shadi/avatar\n" +
+        "  (did:key:z6Mkix7t…) — human did:key:z6MkhVT…",
+    },
+    { type: "pause", ms: 1400 },
+    { type: "shell", text: "/slim invite agntcy/shadi/claude-code" },
+    { type: "output", text: "invited agntcy/shadi/claude-code to agntcy/shadi/dev-room" },
+    { type: "shell", text: "/slim invite agntcy/shadi/codex" },
+    { type: "output", text: "invited agntcy/shadi/codex to agntcy/shadi/dev-room" },
+    { type: "pause", ms: 1400 },
+    {
+      type: "shell",
+      text: '/slim a2a-collaborate claude-code,codex --message "status check" --timeout 15',
+    },
+    {
+      type: "output",
+      text:
+        'broadcast "status check" to 2 peer(s); received:\n' +
+        "  All systems normal\n" +
+        "  Ready to collaborate",
+    },
+    { type: "pause", ms: 4000 },
+  ],
 
   sandboxDemoScript: [
     {

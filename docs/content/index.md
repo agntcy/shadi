@@ -167,7 +167,7 @@ hide:
       <div class="shadictl-terminal-main">
         <div class="shadictl-terminal" data-mode="demo">
           <div class="shadictl-terminal-bar">
-            <span class="shadictl-terminal-title">user@shadi:~</span>
+            <span class="shadictl-terminal-title">avatar@shadi:~</span>
             <div class="shadictl-terminal-controls" aria-hidden="true">
               <span class="shadictl-terminal-control">&#8211;</span>
               <span class="shadictl-terminal-control shadictl-terminal-control-close">&#10005;</span>
@@ -183,6 +183,11 @@ hide:
       </div>
       <div class="shadictl-terminal-side">
         <div class="shadictl-terminal-intro-group" id="shadictl-terminal-intros">
+          <p class="shadictl-terminal-intro" data-intro-level="collaborate">
+            Create a moderator-owned SLIM channel, invite coding agents by DID, and broadcast to
+            the whole group with A2A Collaborate. See the
+            <a href="demos/did-agent-group.md">Secure Agent Group Demo</a> for the full walkthrough.
+          </p>
           <p class="shadictl-terminal-intro" data-intro-level="sandbox" hidden>
             Launch a real command inside SHADI's sandbox, with a secret released only to the
             verified session. See the <a href="cli.md">CLI Reference</a> for the full flag set.
@@ -193,7 +198,8 @@ hide:
           </p>
         </div>
         <div class="shadictl-terminal-actions">
-          <button type="button" class="shadictl-terminal-btn is-active" data-demo-level="sandbox">Run Sandboxed</button>
+          <button type="button" class="shadictl-terminal-btn is-active" data-demo-level="collaborate">Secure Group</button>
+          <button type="button" class="shadictl-terminal-btn" data-demo-level="sandbox">Run Sandboxed</button>
           <button type="button" class="shadictl-terminal-btn" data-demo-level="policy">Inspect Policy</button>
         </div>
       </div>

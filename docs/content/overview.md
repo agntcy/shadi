@@ -47,6 +47,9 @@ SHADI presents the runtime as four product layers:
 - **agentbridge**: interconnect Claude Code, Copilot, Codex, Cursor Agent, and
   other CLI coding tools via A2A, SLIM, and DIR with autonomous coordination
   toward a shared goal.
+- **Secure agent groups**: moderator-invited SLIM channels admitted against a
+  per-agent DID allow-list, with many-to-many A2A Collaborate broadcast
+  messaging between every member.
 
 ## Start Here
 

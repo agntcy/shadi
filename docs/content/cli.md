@@ -583,6 +583,37 @@ cargo run -p agntcy-shadi-cli -- slim a2a-send \
   --stream
 ```
 
+Broadcast an A2A message to every other member of a SLIM group channel and
+listen for theirs (Collaborate) — see [SLIM and A2A](slim_a2a.md#group-messaging-a2a-collaborate)
+for how the group itself is formed and admitted:
+
+```bash
+cargo run -p agntcy-shadi-cli -- slim a2a-collaborate \
+  --agent-id claude-code \
+  --peer-agent-ids codex,copilot,cursor-agent,avatar \
+  --message "Hi, I am claude-code — reporting in" \
+  --timeout-seconds 15
+```
+
+- `--agent-id`: this agent's id (also reads `SHADI_AGENT_ID`; default `avatar`).
+- `--peer-agent-ids`: comma-separated ids of the other group members.
+- `--message`: text to broadcast (default `"hello from SHADI A2A"`).
+- `--timeout-seconds`: how long to keep listening for others' broadcasts after sending (default `20`).
+
+### Secure agent groups (interactive shell)
+
+Group membership — as opposed to the one-shot `a2a-collaborate` broadcast
+above — is managed through `shadictl shell`, not a clap subcommand:
+
+- `/slim create <org/namespace/app>`: creates a channel; the caller becomes its moderator.
+- `/slim invite <org/namespace/app>`: moderator-only, invites a participant into the channel.
+- `/slim join <org/namespace/app> [--timeout SECONDS]`: blocks until invited; caller becomes a participant.
+- `/slim whoami`: prints agent name, auth mode, role, and (under DID auth) the agent and human DIDs.
+
+See [SLIM and A2A](slim_a2a.md#secure-agent-groups-identity-moderator-role-and-admission)
+for the admission model, and the [Secure Agent Group Demo](demos/did-agent-group.md)
+for a full walkthrough with real coding-agent CLIs.
+
 ## shadictl slim-mas (`shadictl slim-mas`)
 
 `shadictl slim-mas` evaluates SLIM multi-agent membership rules from a TOML config.

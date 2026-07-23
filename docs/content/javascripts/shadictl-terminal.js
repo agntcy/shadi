@@ -63,7 +63,7 @@
     section.setAttribute("data-shadictl-bound", "1");
 
     var state = {
-      demoLevel: "sandbox",
+      demoLevel: "collaborate",
       demoTimer: null,
       demoObserver: null,
       demoRunning: false,
@@ -71,24 +71,27 @@
 
     var demoLineMeta = {
       command: { prefix: "$ ", className: "shadictl-terminal-cmd" },
+      shell: { prefix: "> ", className: "shadictl-terminal-cmd" },
       comment: { prefix: "", className: "shadictl-terminal-comment" },
+    };
+
+    var scriptsByLevel = {
+      collaborate: "collaborateDemoScript",
+      sandbox: "sandboxDemoScript",
+      policy: "policyDemoScript",
     };
 
     function getActiveScript() {
       var data = getData();
-      if (state.demoLevel === "policy") {
-        return data.policyDemoScript || [];
-      }
-      return data.sandboxDemoScript || [];
+      var key = scriptsByLevel[state.demoLevel] || scriptsByLevel.collaborate;
+      return data[key] || [];
     }
 
     function updateDemoChrome() {
       var data = getData();
       var titles = data.demoTitles || {};
       if (titleEl) {
-        titleEl.textContent =
-          (state.demoLevel === "policy" ? titles.policy : titles.sandbox) ||
-          "user@shadi:~";
+        titleEl.textContent = titles[state.demoLevel] || "user@shadi:~";
       }
 
       introEls.forEach(function (el) {
