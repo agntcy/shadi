@@ -153,7 +153,7 @@ hide:
       <span>Explicit member allow-list — only verified agents can join.</span>
     </div>
   </div>
-  <a class="shadi-community-contribute__btn" href="agentbridge.md">
+  <a class="shadi-community-contribute__btn" href="agentbridge/">
     Learn about agentbridge
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>
   </a>
@@ -186,7 +186,7 @@ hide:
           <p class="shadictl-terminal-intro" data-intro-level="collaborate">
             Create a moderator-owned SLIM channel, invite coding agents by DID, and broadcast to
             the whole group with A2A Collaborate. See the
-            <a href="demos/did-agent-group.md">Secure Agent Group Demo</a> for the full walkthrough.
+            <a href="demos/did-agent-group/">Secure Agent Group Demo</a> for the full walkthrough.
           </p>
           <p class="shadictl-terminal-intro" data-intro-level="sandbox" hidden>
             Launch a real command inside SHADI's sandbox, with a secret released only to the
