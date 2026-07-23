@@ -42,7 +42,7 @@ hide:
     </p>
     <div class="shadi-hero__actions">
       <div class="shadi-hero__actions-main">
-        <a class="shadi-hero__btn" href="getting_started.md">
+        <a class="shadi-hero__btn" href="getting_started/">
           Get Started
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>
         </a>
@@ -153,7 +153,7 @@ hide:
       <span>Explicit member allow-list — only verified agents can join.</span>
     </div>
   </div>
-  <a class="shadi-community-contribute__btn" href="agentbridge.md">
+  <a class="shadi-community-contribute__btn" href="agentbridge/">
     Learn about agentbridge
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>
   </a>
@@ -186,15 +186,15 @@ hide:
           <p class="shadictl-terminal-intro" data-intro-level="collaborate">
             Create a moderator-owned SLIM channel, invite coding agents by DID, and broadcast to
             the whole group with A2A Collaborate. See the
-            <a href="demos/did-agent-group.md">Secure Agent Group Demo</a> for the full walkthrough.
+            <a href="demos/did-agent-group/">Secure Agent Group Demo</a> for the full walkthrough.
           </p>
           <p class="shadictl-terminal-intro" data-intro-level="sandbox" hidden>
             Launch a real command inside SHADI's sandbox, with a secret released only to the
-            verified session. See the <a href="cli.md">CLI Reference</a> for the full flag set.
+            verified session. See the <a href="cli/">CLI Reference</a> for the full flag set.
           </p>
           <p class="shadictl-terminal-intro" data-intro-level="policy" hidden>
             Inspect and diff the resolved sandbox and secret-delivery policy before a process ever
-            launches. See <a href="operations.md">Operations</a> for day-to-day workflows.
+            launches. See <a href="operations/">Operations</a> for day-to-day workflows.
           </p>
         </div>
         <div class="shadictl-terminal-actions">
@@ -211,7 +211,7 @@ hide:
   <h2 class="shadi-section-title">Community</h2>
   <p class="shadi-community__lede">
     Connect with AGNTCY contributors, join working group meetings, and help shape secure agent
-    runtimes. For more information, see the <a href="community.md">community page</a>.
+    runtimes. For more information, see the <a href="community/">community page</a>.
   </p>
 
   <div class="shadi-community-social">
