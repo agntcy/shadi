@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::cli_types::{
     ConfigCli, ConfigCommand, ConfigShowArgs, OutputFormat, PolicyCli, PolicyCommand,
-    PolicyDiffArgs, PolicyExplainArgs, ShellArgs,
+    PolicyDiffArgs, PolicyExplainArgs, ShellArgs, SlimCreateGroupArgs,
 };
 use crate::introspection_command::{run_config_command, run_policy_command};
 use crate::policy_watch;
@@ -48,6 +48,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/slim a2a-send", "Send a unary or streaming A2A request over SLIMRPC"),
     ("/slim create", "Create a SLIM group session for a channel name"),
     ("/slim invite", "Invite a participant into the active SLIM group session"),
+    ("/slim invite-from", "Re-resolve a member spec live and invite matches already in the trust set"),
     ("/slim join", "Wait for and join an invited SLIM group session"),
     ("/snapshot list", "List git snapshot artifacts"),
     ("/snapshot show", "Show details of a git snapshot"),
@@ -192,6 +193,19 @@ Invite a participant into the active SLIM group session.
 Examples:
     /slim invite agntcy/shadi/avatar
     /slim invite acme/ops/oncall-bot"),
+        ("/slim invite-from", "\
+Usage: /slim invite-from <skill:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>
+
+Re-resolve one member-source spec live (same syntax as `shadictl slim
+create-group --members`) and invite whichever resolved candidates are already
+inside this group's trust set (SLIM_MEMBER_DIDS). A candidate whose DID isn't
+in the trust set is skipped with an explicit message rather than a silent
+failure — recreate the group with a broader --members set to include it.
+
+Examples:
+    /slim invite-from skill:code_generation/implementation
+    /slim invite-from did:did:key:z6Mk...
+    /slim invite-from explicit:copilot=did:key:z6Mk...@127.0.0.1:47357"),
         ("/slim join", "\
 Usage: /slim join <organization/namespace/application> [--timeout SECONDS]
 
@@ -419,6 +433,7 @@ impl Completer for ShellHelper {
                 "a2a-collaborate",
                 "create",
                 "invite",
+                "invite-from",
                 "join",
                 "whoami",
             ];
@@ -604,18 +619,19 @@ impl ShellSession {
                 "a2a-collaborate" => self.cmd_slim_a2a_collaborate(&parts[2..]),
                 "create" => self.cmd_slim_create(&parts[2..]),
                 "invite" => self.cmd_slim_invite(&parts[2..]),
+                "invite-from" => self.cmd_slim_invite_from(&parts[2..]),
                 "join" => self.cmd_slim_join(&parts[2..]),
                 "whoami" => self.cmd_slim_whoami(),
                 _ => {
                     eprintln!("unknown slim subcommand: {}", parts[1]);
                     eprintln!(
-                        "  available: status, start node, a2a-echo-peer, a2a-send, a2a-collaborate, create, invite, join, whoami"
+                        "  available: status, start node, a2a-echo-peer, a2a-send, a2a-collaborate, create, invite, invite-from, join, whoami"
                     );
                     LoopAction::Continue
                 }
             },
             "/slim" => {
-                eprintln!("usage: /slim <status|start node|a2a-echo-peer|a2a-send|create|invite|join>");
+                eprintln!("usage: /slim <status|start node|a2a-echo-peer|a2a-send|create|invite|invite-from|join>");
                 LoopAction::Continue
             }
             "/snapshot" if parts.len() >= 2 => match parts[1] {
@@ -1140,6 +1156,66 @@ impl ShellSession {
         LoopAction::Continue
     }
 
+    /// `/slim invite-from <spec>` — re-resolve one `MemberSource` spec live
+    /// (the same `skill:`/`did:`/`explicit:` syntax as `shadictl slim
+    /// create-group --members`) and invite whichever resolved candidates are
+    /// already inside this group's trust set (`SLIM_MEMBER_DIDS`). This is
+    /// the "pull a newly-discovered agent into an already-running group"
+    /// path — `/slim invite <name>` (unchanged, above) remains the manual
+    /// equivalent for a moderator who already knows exactly who they want.
+    fn cmd_slim_invite_from(&mut self, args: &[&str]) -> LoopAction {
+        if args.len() != 1 {
+            eprintln!(
+                "usage: /slim invite-from <skill:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>"
+            );
+            return LoopAction::Continue;
+        }
+        let spec = args[0];
+
+        let dir = agentbridge::member_source::DirLookupOptions {
+            server_addr: std::env::var("SHADI_DIR_SERVER")
+                .unwrap_or_else(|_| "prod.gateway.ads.outshift.io:443".to_string()),
+            gh_token: std::env::var("DIRECTORY_CLIENT_GITHUB_TOKEN").ok(),
+            limit: 20,
+        };
+
+        let source = match agentbridge::member_source::parse_member_spec(spec, &dir) {
+            Ok(source) => source,
+            Err(err) => {
+                eprintln!("{}", err);
+                return LoopAction::Continue;
+            }
+        };
+        let candidates = match source.resolve() {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                eprintln!("error resolving {}: {}", spec, err);
+                return LoopAction::Continue;
+            }
+        };
+        if candidates.is_empty() {
+            println!("no candidates resolved for {}", spec);
+            return LoopAction::Continue;
+        }
+
+        let trust = trusted_dids_from_env();
+        for candidate in &candidates {
+            if !trust.contains(&candidate.did) {
+                eprintln!(
+                    "skipping {} ({}): not in this group's trust set — recreate the group with a broader --members set to include it",
+                    candidate.name, candidate.did
+                );
+                continue;
+            }
+            let target = format!("agntcy/shadi/{}-a2a", candidate.name);
+            match self.slim.invite_participant(&target) {
+                Ok(message) => println!("{}", message),
+                Err(err) => eprintln!("error inviting {}: {}", target, err),
+            }
+        }
+        LoopAction::Continue
+    }
+
     fn cmd_slim_whoami(&mut self) -> LoopAction {
         match self.slim.whoami() {
             Ok(message) => println!("{}", message),
@@ -1425,6 +1501,14 @@ fn handle_shell_line(session: &mut ShellSession, line: &str) -> Option<LoopActio
 }
 
 pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
+    run_shell_command_with_initial(args, &[])
+}
+
+/// Like [`run_shell_command`], but runs `initial_lines` (as if typed by the
+/// user) right after the banner and before the interactive loop starts —
+/// used by `shadictl slim create-group` to auto-create the group, then hand
+/// off into a normal shell session as its moderator.
+pub(crate) fn run_shell_command_with_initial(args: ShellArgs, initial_lines: &[String]) -> ExitCode {
     let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let stdin = io::stdin();
     let stdin_is_terminal = std::io::IsTerminal::is_terminal(&stdin);
@@ -1446,6 +1530,17 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
         }
     }
     println!();
+
+    for line in initial_lines {
+        println!("shadi> {}", line);
+        match handle_shell_line(&mut session, line) {
+            Some(LoopAction::Continue) | None => {}
+            Some(LoopAction::Exit) => {
+                session.slim.shutdown();
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
 
     if !stdin_is_terminal {
         for line in stdin.lock().lines() {
@@ -1543,6 +1638,115 @@ pub(crate) fn run_shell_command(args: ShellArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// `shadictl slim create-group` — resolve `--members` specs into a DID trust
+/// superset, fold it into `SLIM_MEMBER_DIDS` for this process, optionally
+/// persist it as a `slim_mas` `GroupConfig` TOML, then create the channel and
+/// hand off into the normal interactive shell as its moderator. `/slim
+/// create`/`/slim invite`/`/slim join` are not touched by any of this — a
+/// moderator who already knows exactly who they want still uses those
+/// directly, unchanged.
+pub(crate) fn run_slim_create_group_command(args: SlimCreateGroupArgs) -> ExitCode {
+    if !std::env::var("SHADI_SLIM_AUTH")
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("did")
+    {
+        eprintln!(
+            "error: `slim create-group` requires DID auth (set SHADI_SLIM_AUTH=did, SLIM_HUMAN_SEED) \
+             — a group's trust set is meaningless under shared-secret auth"
+        );
+        return ExitCode::from(2);
+    }
+
+    let dir = agentbridge::member_source::DirLookupOptions {
+        server_addr: args.dir_server.clone(),
+        gh_token: args.gh_token.clone(),
+        limit: args.limit,
+    };
+
+    let candidates = match agentbridge::member_source::resolve_members(&args.members, &dir) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            eprintln!("error resolving --members: {}", err);
+            return ExitCode::from(2);
+        }
+    };
+
+    println!("Resolved {} candidate member(s):", candidates.len());
+    for c in &candidates {
+        match &c.slim_endpoint {
+            Some(endpoint) => println!("  {}  did={}  slim://{}", c.name, c.did, endpoint),
+            None => println!("  {}  did={}  (no SLIM endpoint)", c.name, c.did),
+        }
+    }
+
+    // Union with any pre-existing SLIM_MEMBER_DIDS the operator already set —
+    // create-group only ever broadens a trust set, never narrows one.
+    let mut trust_dids = trusted_dids_from_env();
+    for c in &candidates {
+        trust_dids.insert(c.did.clone());
+    }
+    if trust_dids.is_empty() {
+        eprintln!(
+            "error: no trusted DIDs resolved and SLIM_MEMBER_DIDS is empty — nobody would be admittable"
+        );
+        return ExitCode::from(2);
+    }
+    let trust_dids: Vec<String> = {
+        let mut v: Vec<String> = trust_dids.into_iter().collect();
+        v.sort();
+        v
+    };
+    std::env::set_var("SLIM_MEMBER_DIDS", trust_dids.join(","));
+
+    if let Some(path) = &args.write_config {
+        let agent_id = std::env::var("SHADI_AGENT_ID").unwrap_or_else(|_| "agent".to_string());
+        let moderator_did = std::env::var("SLIM_HUMAN_SEED")
+            .ok()
+            .and_then(|seed| shadi_identity::AgentIdentity::derive(seed.as_bytes(), &agent_id).ok())
+            .map(|agent| agent.did());
+
+        let mut groups = std::collections::BTreeMap::new();
+        groups.insert(
+            args.channel.clone(),
+            slim_mas::GroupConfig {
+                moderator_did,
+                members: trust_dids
+                    .iter()
+                    .map(|did| slim_mas::MemberConfig { did: did.clone(), role: None })
+                    .collect(),
+            },
+        );
+        let config = slim_mas::MasConfig {
+            mas: Some(slim_mas::MasSettings { default_group: Some(args.channel.clone()) }),
+            groups,
+        };
+        match slim_mas::save_config(&config, path) {
+            Ok(()) => println!("wrote group config to {}", path.display()),
+            Err(err) => eprintln!("warning: failed to write group config: {}", err),
+        }
+    }
+
+    let initial = vec![format!("/slim create {}", args.channel)];
+    run_shell_command_with_initial(ShellArgs { socket: None, attach: None }, &initial)
+}
+
+/// The DIDs this process's SLIM app currently trusts, parsed from
+/// `SLIM_MEMBER_DIDS` (the same comma-separated allow-list
+/// `shadi_identity::did_auth_from_env` reads for `create_app`). Used by
+/// `/slim invite-from` to check a discovered candidate is actually
+/// admittable before inviting it — inviting a DID outside this set would
+/// fail at the SLIM layer anyway, but checking here gives a clear message
+/// instead of an opaque session error.
+fn trusted_dids_from_env() -> std::collections::HashSet<String> {
+    std::env::var("SLIM_MEMBER_DIDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn short_socket_name(path: &Path) -> String {
@@ -2003,6 +2207,79 @@ mod tests {
     #[test]
     fn given_session_when_slim_invite_with_extra_args_then_continues() {
         assert_continues(&mut session(), "/slim invite agntcy/shadi/avatar extra");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_from_without_target_then_continues() {
+        assert_continues(&mut session(), "/slim invite-from");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_from_with_extra_args_then_continues() {
+        assert_continues(&mut session(), "/slim invite-from skill:x extra");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_from_invalid_spec_then_continues() {
+        assert_continues(&mut session(), "/slim invite-from bogus:whatever");
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_from_explicit_untrusted_did_is_skipped() {
+        let _lock = crate::lock_test_env();
+        // No SLIM_MEMBER_DIDS set — the resolved DID is never in the trust
+        // set, so this must hit the "skip" path, not attempt an invite.
+        let _trust = ScopedEnvVar::unset("SLIM_MEMBER_DIDS");
+        assert_continues(
+            &mut session(),
+            "/slim invite-from explicit:copilot=did:key:untrusted",
+        );
+    }
+
+    #[test]
+    fn given_session_when_slim_invite_from_explicit_trusted_did_attempts_invite() {
+        let _lock = crate::lock_test_env();
+        // DID is in the trust set this time, so cmd_slim_invite_from proceeds
+        // to call invite_participant — which then fails for the ordinary
+        // "no active session" reason, still LoopAction::Continue either way.
+        let _trust = ScopedEnvVar::set("SLIM_MEMBER_DIDS", "did:key:trusted");
+        assert_continues(
+            &mut session(),
+            "/slim invite-from explicit:copilot=did:key:trusted@127.0.0.1:47357",
+        );
+    }
+
+    #[test]
+    fn trusted_dids_from_env_parses_comma_separated_list_and_trims_whitespace() {
+        let _lock = crate::lock_test_env();
+        let _trust = ScopedEnvVar::set("SLIM_MEMBER_DIDS", " did:key:a, did:key:b ,,did:key:c");
+        let trusted = trusted_dids_from_env();
+        assert_eq!(trusted.len(), 3);
+        assert!(trusted.contains("did:key:a"));
+        assert!(trusted.contains("did:key:b"));
+        assert!(trusted.contains("did:key:c"));
+    }
+
+    #[test]
+    fn trusted_dids_from_env_is_empty_when_unset() {
+        let _lock = crate::lock_test_env();
+        let _trust = ScopedEnvVar::unset("SLIM_MEMBER_DIDS");
+        assert!(trusted_dids_from_env().is_empty());
+    }
+
+    #[test]
+    fn run_slim_create_group_command_requires_did_auth() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
+        let args = SlimCreateGroupArgs {
+            channel: "agntcy/shadi/room".to_string(),
+            members: vec![],
+            dir_server: "localhost:9999".to_string(),
+            gh_token: None,
+            limit: 10,
+            write_config: None,
+        };
+        assert_eq!(run_slim_create_group_command(args), ExitCode::from(2));
     }
 
     #[test]

@@ -1,74 +1,25 @@
-use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 
-use crate::adapter::CliAdapter;
-
-// --- OASF record builder ----------------------------------------------------
-
-/// Minimal OASF record describing a agentbridge adapter as a DIR agent.
-/// Published to agntcy/dir via `dirctl push`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AdapterOasfRecord {
-    pub name: String,
-    pub description: String,
-    pub version: String,
-    pub schema_version: String,
-    pub skills: Vec<OasfSkill>,
-    pub locators: Vec<OasfLocator>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OasfSkill {
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OasfLocator {
-    #[serde(rename = "type")]
-    pub locator_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
-impl AdapterOasfRecord {
-    /// Build an OASF record for any `CliAdapter`. The record describes the
-    /// adapter's identity and advertises the standard agentbridge skills.
-    pub fn for_adapter(adapter: &dyn CliAdapter, version: &str) -> Self {
-        let id = adapter.agent_id();
-        Self {
-            name: id.0.clone(),
-            description: format!(
-                "agentbridge adapter for '{}'. Supports context handoff, \
-                 task delegation, and autonomous code coordination.",
-                id.0
-            ),
-            version: version.to_string(),
-            schema_version: "1.0.0".to_string(),
-            skills: vec![
-                OasfSkill { name: "code_generation/implementation".to_string() },
-                OasfSkill { name: "agent_orchestration/task_delegation".to_string() },
-                OasfSkill { name: "agent_orchestration/context_handoff".to_string() },
-            ],
-            locators: vec![],
-        }
-    }
-
-    /// Build an OASF record with a SLIM endpoint locator.
-    pub fn with_slim_endpoint(mut self, endpoint: &str, agent_id: &str) -> Self {
-        self.locators.push(OasfLocator {
-            locator_type: "slim".to_string(),
-            url: Some(format!("slim://{endpoint}/agntcy/shadi/{agent_id}-a2a")),
-        });
-        self
-    }
-
-    /// Serialize to JSON bytes.
-    pub fn to_json(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec_pretty(self)
-    }
-}
-
 // --- DIR publish / search via dirctl ----------------------------------------
+
+/// Wrap an A2A `AgentCard` (as JSON) into the OASF record shape DIR expects:
+/// a top-level `authors` list carrying the agent's DID, and a well-known
+/// `integration/a2a` module carrying the card itself, so `dirctl export
+/// --format=a2a` round-trips it and `dirctl search --author <did>` can find
+/// it.
+pub fn wrap_agent_card(card_json: &serde_json::Value, did: Option<&str>) -> serde_json::Value {
+    let authors: Vec<&str> = did.into_iter().collect();
+    serde_json::json!({
+        "authors": authors,
+        "modules": [{
+            "name": "integration/a2a",
+            "data": {
+                "card_data": card_json,
+                "card_schema_version": "v1.0.0",
+            }
+        }]
+    })
+}
 
 const DIRCTL_HINT: &str =
     "Install dirctl:  brew tap agntcy/dir https://github.com/agntcy/dir/ && brew install dirctl";
@@ -93,16 +44,17 @@ impl std::fmt::Display for DirError {
     }
 }
 
-/// Publish an `AdapterOasfRecord` to the agntcy Agent Directory.
+/// Publish an OASF record (e.g. built via [`wrap_agent_card`]) to the agntcy
+/// Agent Directory.
 ///
 /// Writes the record to a temp file then calls `dirctl push --file <path>
 /// --server-addr <addr>`. The CID printed by dirctl is returned on success.
-pub fn publish_adapter(
-    record: &AdapterOasfRecord,
+pub fn publish_record(
+    record: &serde_json::Value,
     server_addr: &str,
     github_token: Option<&str>,
 ) -> Result<String, DirError> {
-    let json = record.to_json().map_err(|e| DirError::Serialize(e.to_string()))?;
+    let json = serde_json::to_vec_pretty(record).map_err(|e| DirError::Serialize(e.to_string()))?;
 
     // Write to a temp file — dirctl expects a file path.
     let tmp = tempfile_path();
@@ -188,8 +140,18 @@ pub fn search_adapters(
 
 // --- Helpers -----------------------------------------------------------------
 
-fn dirctl_binary() -> String {
+pub(crate) fn dirctl_binary() -> String {
     std::env::var("SHADI_DIRCTL_BINARY").unwrap_or_else(|_| "dirctl".to_string())
+}
+
+/// Crate-wide lock serializing `SHADI_DIRCTL_BINARY` mutation across every
+/// test module in this crate — `std::env::set_var` is process-global, so
+/// tests in `dir_registry` and `member_source` that fake out `dirctl` must
+/// not run concurrently with each other.
+#[cfg(test)]
+pub(crate) fn dirctl_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 fn tempfile_path() -> std::path::PathBuf {
@@ -204,63 +166,31 @@ fn tempfile_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::ContextPacket;
-    use shadi_mas::AgentId;
-    use std::sync::{Mutex, OnceLock};
+    use super::dirctl_env_lock as env_lock;
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct StubAdapter(AgentId);
-    impl crate::adapter::CliAdapter for StubAdapter {
-        fn agent_id(&self) -> &AgentId { &self.0 }
-        fn snapshot_context(&self) -> Result<ContextPacket, crate::adapter::CliAdapterError> {
-            Ok(ContextPacket::new(self.0.0.clone()))
-        }
-        fn inject_context(&self, _: &ContextPacket) -> Result<(), crate::adapter::CliAdapterError> { Ok(()) }
-        fn execute_prompt(&self, _: &str) -> Result<String, crate::adapter::CliAdapterError> { Ok(String::new()) }
+    #[test]
+    fn wrap_agent_card_embeds_card_in_a2a_module_with_did_author() {
+        let card = serde_json::json!({"name": "claude-code"});
+        let record = wrap_agent_card(&card, Some("did:key:z6Mk..."));
+        assert_eq!(record["authors"], serde_json::json!(["did:key:z6Mk..."]));
+        assert_eq!(record["modules"][0]["name"], "integration/a2a");
+        assert_eq!(record["modules"][0]["data"]["card_schema_version"], "v1.0.0");
+        assert_eq!(record["modules"][0]["data"]["card_data"], card);
     }
 
     #[test]
-    fn oasf_record_for_adapter_has_correct_name_and_skills() {
-        let adapter = StubAdapter(AgentId("claude-code".to_string()));
-        let record = AdapterOasfRecord::for_adapter(&adapter, "0.1.0");
-        assert_eq!(record.name, "claude-code");
-        assert_eq!(record.version, "0.1.0");
-        assert_eq!(record.skills.len(), 3);
-        assert!(record.skills.iter().any(|s| s.name.contains("code_generation")));
-        assert!(record.skills.iter().any(|s| s.name.contains("context_handoff")));
+    fn wrap_agent_card_omits_authors_entry_without_a_did() {
+        let card = serde_json::json!({"name": "claude-code"});
+        let record = wrap_agent_card(&card, None);
+        assert_eq!(record["authors"], serde_json::json!([]));
     }
 
     #[test]
-    fn with_slim_endpoint_adds_locator() {
-        let adapter = StubAdapter(AgentId("copilot".to_string()));
-        let record = AdapterOasfRecord::for_adapter(&adapter, "0.1.0")
-            .with_slim_endpoint("127.0.0.1:47357", "copilot");
-        assert_eq!(record.locators.len(), 1);
-        assert_eq!(record.locators[0].locator_type, "slim");
-        assert!(record.locators[0].url.as_deref().unwrap().contains("47357"));
-    }
-
-    #[test]
-    fn oasf_record_serializes_to_valid_json() {
-        let adapter = StubAdapter(AgentId("codex".to_string()));
-        let record = AdapterOasfRecord::for_adapter(&adapter, "1.0.0");
-        let json = record.to_json().unwrap();
-        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
-        assert_eq!(parsed["name"], "codex");
-        assert!(parsed["skills"].is_array());
-    }
-
-    #[test]
-    fn publish_adapter_returns_dirctl_not_found_when_missing() {
+    fn publish_record_returns_dirctl_not_found_when_missing() {
         let _g = env_lock().lock().expect("lock");
         std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/dirctl");
-        let adapter = StubAdapter(AgentId("test".to_string()));
-        let record = AdapterOasfRecord::for_adapter(&adapter, "0.1.0");
-        let result = publish_adapter(&record, "localhost:9999", None);
+        let record = wrap_agent_card(&serde_json::json!({"name": "test"}), None);
+        let result = publish_record(&record, "localhost:9999", None);
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         assert!(matches!(result, Err(DirError::DirctlNotFound)));
     }

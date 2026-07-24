@@ -247,6 +247,7 @@ fn run_slim_command(command: SlimCli) -> ExitCode {
             }
         },
         SlimCommand::Controller { command } => run_controller_command(command),
+        SlimCommand::CreateGroup(args) => shell_command::run_slim_create_group_command(args),
     }
 }
 

@@ -25,6 +25,7 @@ shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.1", path = "../shadi_
 shadi_memory = { package = "agntcy-shadi-memory", version = "0.1.1", path = "../shadi_memory" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path = "../shadi_telemetry" }
 slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.1", path = "../slim_mas" }
+agentbridge = { package = "agntcy-agentbridge", version = "0.1.0", path = "../agentbridge" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }
 slim_rpc = { package = "agntcy-slim-rpc", version = "2.0.0-alpha.7" }
 slim_proto = { package = "agntcy-slim-proto", version = "0.4.0" }
