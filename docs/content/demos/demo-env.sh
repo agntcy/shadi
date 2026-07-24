@@ -1,5 +1,5 @@
-# Shared environment for the DID agent-group demo (docs/demos/did-agent-group.md).
-# Source this in EVERY terminal:  source docs/demos/demo-env.sh
+# Shared environment for the DID agent-group demo (docs/content/demos/did-agent-group.md).
+# Source this in EVERY terminal:  source docs/content/demos/demo-env.sh
 #
 # All five member DIDs below are HKDF-derived from SLIM_HUMAN_SEED (salt
 # "shadi-agent-derive") with the agent names avatar / claude-code / codex /

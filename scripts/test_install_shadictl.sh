@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALLER="${ROOT}/docs/install.sh"
+INSTALLER="${ROOT}/docs/content/install.sh"
 TARGET="x86_64-unknown-linux-gnu"
 DOWNLOADS_ROOT=""
 INSTALL_DIR=""

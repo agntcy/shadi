@@ -8,15 +8,9 @@ on:
       - "v*.*.*"
     paths:
       - "docs/**"
-      - "mkdocs.yml"
-      - "overrides/**"
-      - "assets/**"
   pull_request:
     paths:
       - "docs/**"
-      - "mkdocs.yml"
-      - "overrides/**"
-      - "assets/**"
   workflow_dispatch:
 
 permissions:
@@ -67,6 +61,8 @@ jobs:
           tool: just
       - name: Build docs
         run: just docs-build
+        env:
+          MKDOCS_SITE_URL: https://agntcy.github.io/shadi/
       - name: Configure Pages
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5

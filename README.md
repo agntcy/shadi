@@ -22,11 +22,11 @@ SHADI is for teams that want agents to work with real tools and real credentials
 
 ## What You Get
 
-- [`shadictl`](docs/cli.md#shadictl-shadi): the main CLI for policy, sandbox execution, identity, secrets, memory, and shell control.
-- [`shadi_sandbox`](docs/architecture.md#2-sandbox-layer): OS-enforced sandbox policy.
-- [`agent_secrets`](docs/architecture.md#1-secrets-layer): keychain-backed secret storage and verification gates.
-- [`shadi_memory`](docs/architecture.md#3-memory-layer): SQLCipher-backed local memory.
-- [`agent_transport_slim`](docs/architecture.md#4-transport-layer): secure transport and stdio bridge support.
+- [`shadictl`](https://agntcy.github.io/shadi/cli/#shadictl-shadi): the main CLI for policy, sandbox execution, identity, secrets, memory, and shell control.
+- [`shadi_sandbox`](https://agntcy.github.io/shadi/architecture/#2-sandbox-layer): OS-enforced sandbox policy.
+- [`agent_secrets`](https://agntcy.github.io/shadi/architecture/#1-secrets-layer): keychain-backed secret storage and verification gates.
+- [`shadi_memory`](https://agntcy.github.io/shadi/architecture/#3-memory-layer): SQLCipher-backed local memory.
+- [`agent_transport_slim`](https://agntcy.github.io/shadi/architecture/#4-transport-layer): secure transport and stdio bridge support.
 - [`examples/shadi_demo_bot`](examples/shadi_demo_bot/README.md): a Rust demo bot that exercises the main SHADI features, including SLIM messaging.
 
 ## Install the CLI
@@ -38,7 +38,7 @@ curl -fsSL https://agntcy.github.io/shadi/install.sh | bash
 ```
 
 For pinned versions, custom install paths, and installer environment overrides,
-see [docs/install.md](docs/install.md).
+see [Install the CLI](https://agntcy.github.io/shadi/install/).
 
 On macOS, you can install the latest released `shadictl` formula with Homebrew:
 
@@ -72,11 +72,11 @@ The demo bot runs a compact end-to-end check across secrets, memory, sandboxing,
 
 ## Learn More
 
-- Start here: [docs/getting_started.md](docs/getting_started.md)
-- System model: [docs/architecture.md](docs/architecture.md)
-- Security model: [docs/security.md](docs/security.md)
-- CLI reference: [docs/cli.md](docs/cli.md)
-- Sandbox and policy details: [docs/sandbox.md](docs/sandbox.md)
+- Start here: [Getting Started](https://agntcy.github.io/shadi/getting_started/)
+- System model: [Architecture](https://agntcy.github.io/shadi/architecture/)
+- Security model: [Security Notes](https://agntcy.github.io/shadi/security/)
+- CLI reference: [CLI Reference](https://agntcy.github.io/shadi/cli/)
+- Sandbox and policy details: [Sandbox and Policies](https://agntcy.github.io/shadi/sandbox/)
 - Shell and demo workflows: [examples/shell_demo/README.md](examples/shell_demo/README.md) and [examples/shadi_demo_bot/README.md](examples/shadi_demo_bot/README.md)
 
 ## Contributing

@@ -11,7 +11,7 @@ standard OpenTelemetry variables below.
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP/HTTP endpoint for trace export.
   - Example: `http://localhost:4318`
 - `OTEL_SERVICE_NAME`: Override the service name reported by SHADI components.
-  - Defaults: `shadi-core`, `shadi-runtime`, and `shadi-secops`.
+  - Defaults: `shadi-core` (shadictl) and `shadi-runtime` (shadi_py / tools).
 - `SHADI_OTEL_CONSOLE`: Set to `1` to print spans to stdout when no OTLP endpoint is set.
 - `SHADI_OTEL_FILE`: Write JSON trace logs to a local file (one JSON object per line).
 
@@ -62,10 +62,12 @@ shadictl --policy ./policy.json -- echo "hello"
 
 You can inspect the logs with `shadictl`:
 
+`--file` is a flag on `trace` itself, so it comes before the subcommand:
+
 ```bash
-shadictl trace list --file .shadi/traces.jsonl --limit 50
-shadictl trace list --file .shadi/traces.jsonl --name shadi.sandbox.run
-shadictl trace summary --file .shadi/traces.jsonl
+shadictl trace --file .shadi/traces.jsonl list --limit 50
+shadictl trace --file .shadi/traces.jsonl list --name shadi.sandbox.run
+shadictl trace --file .shadi/traces.jsonl summary
 ```
 
 ## Notes
@@ -74,3 +76,8 @@ shadictl trace summary --file .shadi/traces.jsonl
   tracing is a no-op.
 - Service naming is standardized under the `service.namespace=shadi` resource attribute
   so core runtime and SecOps spans can be correlated.
+
+## Next steps
+
+- See the full `trace` command reference in the [CLI Reference](cli.md).
+- Return to the operator workflow in [Operations](operations.md).

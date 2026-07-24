@@ -12,9 +12,9 @@
 #   reports real disk usage, copilot ranks real processes by CPU, and claude-code
 #   synthesizes both into an operational report — real work, not a canned reply.
 #
-# Run from the repo root:  bash docs/demos/run-demo.sh
+# Run from the repo root:  bash docs/content/demos/run-demo.sh
 set -uo pipefail
-cd "$(dirname "$0")/../.."   # repo root
+cd "$(dirname "$0")/../../.."   # repo root
 
 BIN=target/debug/shadictl
 [ -x "$BIN" ] || { echo "building shadictl…"; cargo build -p agntcy-shadi-cli || exit 1; }
@@ -26,7 +26,7 @@ export SHADI_TMP_DIR="$(mktemp -d /tmp/shadi-did-demo.XXXXXX)"
 export SLIM_ENDPOINT="127.0.0.1:47590"
 pkill -f "$BIN shell" 2>/dev/null; sleep 1
 # shellcheck source=/dev/null
-source docs/demos/demo-env.sh
+source docs/content/demos/demo-env.sh
 bash tools/generate_slim_mtls_certs.sh "$SHADI_TMP_DIR/shadi-slim-mtls" >/dev/null 2>&1 \
   || { echo "mTLS generation failed"; exit 1; }
 
@@ -37,7 +37,7 @@ ALL_AGENTS=(avatar claude-code codex copilot cursor-agent)
 step() { echo "[$(date +%H:%M:%S)] $*"; }
 
 step "logs: $LOG"
-step "watch live progress in another terminal:  bash docs/demos/watch-demo.sh"
+step "watch live progress in another terminal:  bash docs/content/demos/watch-demo.sh"
 
 # One SLIM node spans both parts below; only killed at the very end.
 step "starting SLIM node..."

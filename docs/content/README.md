@@ -5,10 +5,17 @@
 [![codecov](https://codecov.io/gh/agntcy/shadi/branch/main/graph/badge.svg)](https://codecov.io/gh/agntcy/shadi)
 [![CI](https://github.com/agntcy/shadi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/ci.yml)
 
-This folder is the source for the SHADI documentation site built with MkDocs.
+This folder holds the content for the SHADI documentation site built with
+MkDocs; the site config lives in [`docs/mkdocs/`](../mkdocs/mkdocs.yml).
 
-Run locally:
+Run locally, from the repo root:
 
 ```bash
-mkdocs serve
+just docs-serve
+```
+
+Or directly with MkDocs:
+
+```bash
+cd docs/mkdocs && mkdocs serve
 ```

@@ -19,6 +19,28 @@ agentbridge solves this using the existing SHADI infrastructure: A2A for task
 delegation, SLIM for transport, DIR for discovery, and `shadi_mas` for
 autonomous multi-round coordination.
 
+## Quick start
+
+The self-contained demo needs no infrastructure — it runs all scenarios
+against an in-process SLIM node:
+
+```bash
+# Run the self-contained demo (all scenarios, no infrastructure required)
+cargo run -p agentbridge_demo
+
+# Run the 4-agent coordination scenario
+cargo run -p agentbridge_demo -- --scenario coordination
+
+# Run the context handoff scenario
+cargo run -p agentbridge_demo -- --scenario handoff
+
+# Run the CliAdapter → ToolAdapter bridge scenario
+cargo run -p agentbridge_demo -- --scenario bridge
+```
+
+See [examples/agentbridge_demo/README.md](../../examples/agentbridge_demo/README.md)
+for step-by-step instructions and the live 4-terminal SLIM demo.
+
 ## Architecture
 
 ### Deployment topology
@@ -30,13 +52,13 @@ same machine). SLIM is the authenticated transport bus between them.
 flowchart LR
   subgraph reg["agentbridge register  (one per agent)"]
     direction TB
-    tool["CLI tool\nclaude-code | copilot | codex | cursor-agent"]
+    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex"]
     ca["CliAdapter\nexecute_prompt(prompt) → text"]
     srv["A2A server\nAgentBridgeRequestHandler\nInMemoryTaskStore"]
     tool -- "stdin / stdout" --> ca --> srv
   end
 
-  slim{{"SLIM node\nagntcy/shadi/&lt;tool&gt;-a2a\nmTLS · shared secret"}}
+  slim{{"SLIM node\nagntcy/shadi/&lt;tool&gt;-a2a\nmTLS · DID auth"}}
 
   subgraph coord["agentbridge coordinate"]
     direction TB
@@ -49,6 +71,9 @@ flowchart LR
   srv <-- "A2A tasks  (text/plain)" --> slim
   slim <-- "A2A tasks  (text/plain)" --> laa
 ```
+
+`cursor-agent` doesn't have a `register` listener yet (`register --tool cursor-agent`
+is not implemented) — it participates as a `coordinate` peer only (see below).
 
 ### Coordination loop
 
@@ -89,6 +114,9 @@ sequenceDiagram
 ```
 
 ### A2A task flow inside a registered adapter
+
+How one incoming task travels from the SLIM node down to the wrapped CLI tool
+and back:
 
 ```mermaid
 sequenceDiagram
@@ -216,10 +244,11 @@ certificate bundle once with `tools/generate_slim_mtls_certs.sh`.
 ```
 register --slim-endpoint 127.0.0.1:47357
   │
-  ├─ Service::connect()      connect to SLIM node (TLS 1.3)
-  ├─ create_app_with_secret() authenticate with shared secret
-  ├─ app.subscribe()         subscribe to agntcy/shadi/<tool>-a2a
-  ├─ Server::serve_async()   start the A2A/SLIMRPC event loop
+  ├─ service.connect()               connect to SLIM node (TLS 1.3)
+  ├─ shadi_identity::require_did_auth_from_env()
+  │    + shadi_identity::create_app() authenticate with this agent's DID
+  ├─ app.subscribe()                 subscribe to agntcy/shadi/<tool>-a2a
+  ├─ srv.serve()                     start the A2A/SLIMRPC event loop
   │
   │  [agentbridge] ready — listening on agntcy/shadi/<tool>-a2a
   │
@@ -258,9 +287,12 @@ shared SLIM bus, so two trust boundaries matter.
 A registered adapter forwards every incoming A2A task straight to the local CLI
 tool (`execute_prompt` → subprocess). Some adapters run their tool with elevated
 permissions — for example, `CopilotAdapter` invokes `copilot --allow-all-tools`
-so it can act non-interactively. **Any peer able to reach
-`agntcy/shadi/<tool>-a2a` on the SLIM node can therefore drive local code
-execution.**
+so it can act non-interactively.
+
+!!! danger "Any peer able to reach the listener can drive local code execution"
+
+    Any peer able to reach `agntcy/shadi/<tool>-a2a` on the SLIM node can drive
+    local code execution through the wrapped CLI tool.
 
 Controls:
 
@@ -271,19 +303,18 @@ Controls:
 - Keep the SLIM node on loopback (`127.0.0.1`) for local demos; only bind a
   routable address when the peer set is trusted and authenticated.
 
-### Shared secret
+### DID authentication
 
-SLIM apps authenticate with a shared secret (`create_app_with_secret`). For the
-loopback demo, `register`, `delegate`, and `coordinate` fall back to a built-in
-default secret (`my_shared_secret_for_testing_purposes_only`) when
-`SLIM_SHARED_SECRET` is unset.
+SLIM apps authenticate with a per-agent DID, not a shared secret. Set
+`SHADI_SLIM_AUTH=did` and `SLIM_HUMAN_SEED` (the human root key every agent's
+DID is derived from), plus `SLIM_MEMBER_DIDS` — the allow-list of DIDs
+permitted to participate. `shadi_identity::require_did_auth_from_env` enforces
+this: it errors out if `SHADI_SLIM_AUTH` isn't `did`, so `register`,
+`delegate`, and `coordinate` cannot silently fall back to a shared secret.
 
-!!! danger "The default secret provides no authentication"
-    The default is compiled into the binary and is public. It is safe **only**
-    for a loopback demo. The commands emit a security warning when the default
-    is used, and warn more loudly when the endpoint is not loopback. Always set
-    `SLIM_SHARED_SECRET` (or `--slim-shared-secret`) to a private value before
-    exposing the SLIM node.
+See the [Secure Agent Group Demo](demos/did-agent-group.md) for a full
+worked example, including how DID admission is verified against the
+allow-list.
 
 ### Transport authentication
 
@@ -294,7 +325,38 @@ agent-specific fallback, or a generic fallback (see
 with `tools/generate_slim_mtls_certs.sh` and keep the CA private to the peers you
 trust.
 
-## `DevelopmentEngine` — the coordination core
+## Multi-agent coordination layer (`shadi_mas`)
+
+`shadi_mas` is the coordination runtime that sits above the transport layer,
+consumed by `agentbridge coordinate`. It provides epoch-disciplined state
+machines that can drive any multi-agent pattern to a deterministic
+finalization outcome.
+
+```
+SemanticEvent  ──►  CoordinationEngine  ──►  EventOutcome
+(proposal,          (PreferenceEngine,        (Applied,
+ vote, tool          DevelopmentEngine,         Finalized,
+ result, …)          …)                         Rejected,
+                                               Deferred)
+```
+
+Engines are wrapped in `MasRuntime<E>` which tracks the full history of applied
+transitions and exposes `engine()` / `engine_mut()` for inspection.
+
+| Engine | Pattern | Finalization criterion |
+|--------|---------|----------------------|
+| `PreferenceEngine` | Consensus on a scalar value | Median of proposals when quorum is met |
+| `DevelopmentEngine` | Consensus on a code artifact | Most-endorsed artifact when quorum is met |
+
+Three adapter traits connect the runtime to real infrastructure:
+
+| Trait | Implementation | Purpose |
+|-------|---------------|---------|
+| `MessagingAdapter` | `RecordingMessagingAdapter` / `LiveSlimMessagingAdapter` | Publish events to SLIM |
+| `TaskAdapter` | `RecordingTaskAdapter` / `LiveA2ATaskAdapter` | Dispatch A2A tasks |
+| `ToolAdapter` | `RecordingToolAdapter` / `CommandToolAdapter` / `CliToolAdapter` | Invoke LLMs / CLI tools |
+
+### `DevelopmentEngine` — the coordination core
 
 `DevelopmentEngine` is a `CoordinationEngine` that coordinates code artifacts
 rather than scalar numeric values (unlike `PreferenceEngine`).
@@ -310,104 +372,93 @@ rather than scalar numeric values (unlike `PreferenceEngine`).
 Epoch discipline prevents duplicate, stale, and future-epoch events from
 corrupting the state machine.
 
-## Goal analysis: what was asked for vs. what is built
+??? note "Goal analysis: what was asked for vs. what is built"
 
-### Original goal
+    ### Original goal
 
-> "Write a new application to interconnect Claude CLI, Copilot CLI, Codex CLI or
-> other similar applications to exchange context or messages, artifacts etc.
-> Use the A2A protocol, SLIM/shadi for transport, and DIR to discover each other.
-> Make agents coordinate with a goal and work in autonomy until the work is achieved."
+    > "Write a new application to interconnect Claude CLI, Copilot CLI, Codex CLI or
+    > other similar applications to exchange context or messages, artifacts etc.
+    > Use the A2A protocol, SLIM/shadi for transport, and DIR to discover each other.
+    > Make agents coordinate with a goal and work in autonomy until the work is achieved."
 
-### What is implemented
+    ### What is implemented
 
-| Requirement | Status | Detail |
-|-------------|--------|--------|
-| Architecture design | ✅ | Full A2A + SLIM + DIR stack documented |
-| Coordination backbone | ✅ | `shadi_mas` migrated + `DevelopmentEngine` added |
-| `CliAdapter` trait | ✅ | Unified interface for any coding tool |
-| `ContextPacket` | ✅ | Portable session snapshot with JSON serde |
-| Generic subprocess adapter | ✅ | `GenericStdioAdapter` — newline-delimited JSON protocol |
-| Native adapters | ✅ | `ClaudeCodeAdapter`, `CopilotAdapter`, `CodexAdapter`, `CursorAgentAdapter` |
-| `CliToolAdapter` bridge | ✅ | Any `CliAdapter` → `shadi_mas::ToolAdapter` |
-| DIR registration | ✅ | OASF record builder + `dirctl push/search` via subprocess |
-| `agentbridge` library | ✅ | `crates/agentbridge` |
-| CLI binary | ✅ | `agentbridge register \| list \| handoff \| delegate \| coordinate` |
-| Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register` and `coordinate` |
-| Quorum-vote finalization | ✅ | `DevelopmentEngine` — autonomous, no human required |
+    | Requirement | Status | Detail |
+    |-------------|--------|--------|
+    | Architecture design | ✅ | Full A2A + SLIM + DIR stack documented |
+    | Coordination backbone | ✅ | `shadi_mas` migrated + `DevelopmentEngine` added |
+    | `CliAdapter` trait | ✅ | Unified interface for any coding tool |
+    | `ContextPacket` | ✅ | Portable session snapshot with JSON serde |
+    | Generic subprocess adapter | ✅ | `GenericStdioAdapter` — newline-delimited JSON protocol |
+    | Native adapters | ✅ | `ClaudeCodeAdapter`, `CopilotAdapter`, `CodexAdapter`, `CursorAgentAdapter` |
+    | `CliToolAdapter` bridge | ✅ | Any `CliAdapter` → `shadi_mas::ToolAdapter` |
+    | DIR registration | ✅ | OASF record builder + `dirctl push/search` via subprocess |
+    | `agentbridge` library | ✅ | `crates/agentbridge` |
+    | CLI binary | ✅ | `agentbridge register \| list \| handoff \| delegate \| coordinate` |
+    | Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register` and `coordinate` |
+    | Quorum-vote finalization | ✅ | `DevelopmentEngine` — autonomous, no human required |
+    | SLIM group relay | ✅ | `shadictl slim a2a-collaborate` (SLIMRPC `Collaborate` RPC via `shadi_a2a::A2AGroupChannel`) — see [SLIM and A2A](slim_a2a.md) |
+    | DID-identified secure groups | ✅ | Moderator-invited channels admitted against a per-agent DID allow-list — see the [Secure Agent Group Demo](demos/did-agent-group.md) |
 
-### What remains
+    ### What remains
 
-| Requirement | Detail |
-|-------------|--------|
-| `shadi_memory` ContextPacket persistence | `SqlCipherStore` wire-up in `crates/shadi_memory/` |
-| SLIM group relay | `LiveSlimGroupConfig` + `LiveSlimMessagingAdapter::group()` for broadcast |
+    | Requirement | Detail |
+    |-------------|--------|
+    | `shadi_memory` ContextPacket persistence | `SqlCipherStore` wire-up in `crates/shadi_memory/` |
+    | `register --tool cursor-agent` | Not yet implemented; `cursor-agent` is currently reachable only via `coordinate` |
 
-### Does the existing middleware help?
+    ### Does the existing middleware help?
 
-**Yes — substantially.** Every component of the target architecture existed or
-was extended from existing SHADI infrastructure:
+    **Yes — substantially.** Every component of the target architecture existed or
+    was extended from existing SHADI infrastructure:
 
-- **A2A**: `shadi_a2a::A2AChannelBuilder` and `a2a-slimrpc` provide identity-verified A2A over SLIMRPC. `LiveA2ATaskAdapter` in `shadi_mas` is a ready-made task dispatcher.
-- **SLIM**: `agent_transport_slim::NativeSlimSession` and `LiveSlimMessagingAdapter` provide group and point-to-point messaging. The `LiveSlimGroupSender` handles multi-agent broadcast with receipt acknowledgements.
-- **DIR**: `shadictl dir` subcommand already integrates with `agntcy/dir`. OASF records are the natural format for adapter agent cards.
-- **shadi_mas**: The `DevelopmentEngine` required a new `PatternKind` and engine implementation, but the runtime, epoch discipline, adapter traits, and test infrastructure were already in place.
-- **shadi_memory**: `SqlCipherStore` provides encrypted `ContextPacket` persistence with no additional code.
+    - **A2A**: `shadi_a2a::A2AChannelBuilder` and `a2a-slimrpc` provide identity-verified A2A over SLIMRPC. `LiveA2ATaskAdapter` in `shadi_mas` is a ready-made task dispatcher.
+    - **SLIM**: `agent_transport_slim::NativeSlimSession` and `LiveSlimMessagingAdapter` provide group and point-to-point messaging. The `LiveSlimGroupSender` handles multi-agent broadcast with receipt acknowledgements.
+    - **DIR**: `shadictl dir` subcommand already integrates with `agntcy/dir`. OASF records are the natural format for adapter agent cards.
+    - **shadi_mas**: The `DevelopmentEngine` required a new `PatternKind` and engine implementation, but the runtime, epoch discipline, adapter traits, and test infrastructure were already in place.
+    - **shadi_memory**: `SqlCipherStore` provides encrypted `ContextPacket` persistence with no additional code.
 
-The middleware was designed for exactly this use case. The agentbridge application is an adapter layer on top of an existing, tested coordination stack.
+    The middleware was designed for exactly this use case. The agentbridge application is an adapter layer on top of an existing, tested coordination stack.
 
-## File map
+??? note "File map"
 
-```
-crates/
-  agentbridge/              ← library
-    src/
-      adapter.rs           ← CliAdapter trait + CliToolAdapter
-      context.rs           ← ContextPacket, CodeContext, ArtifactPayload
-      dir_registry.rs      ← OASF record builder + dirctl integration
-      adapters/
-        generic_stdio.rs   ← subprocess JSON protocol adapter
-        claude_code.rs     ← Claude Code native adapter
-        copilot.rs         ← GitHub Copilot CLI adapter
-        codex.rs           ← OpenAI Codex CLI adapter
-        cursor_agent.rs    ← Cursor Agent adapter
-  agentbridge_cli/          ← binary (agentbridge)
-    src/
-      main.rs
-      commands/
-        register.rs        ← register + SLIM A2A listener
-        list.rs
-        handoff.rs
-        delegate.rs        ← single-shot A2A dispatch
-        coordinate.rs      ← MasRuntime<DevelopmentEngine> loop
-  shadi_mas/               ← coordination runtime
-    src/
-      engines/
-        development.rs     ← DevelopmentEngine
-        preference.rs      ← PreferenceEngine (existing)
-      experiments/
-        mod.rs             ← live adapters + experiment runners
-    tests/
-      integration_slim.rs  ← SLIM node integration tests (run with --include-ignored)
-examples/
-  agentbridge_demo/         ← self-contained demo (no infrastructure needed)
-```
+    ```
+    crates/
+      agentbridge/              ← library
+        src/
+          adapter.rs           ← CliAdapter trait + CliToolAdapter
+          context.rs           ← ContextPacket, CodeContext, ArtifactPayload
+          dir_registry.rs      ← OASF record builder + dirctl integration
+          adapters/
+            generic_stdio.rs   ← subprocess JSON protocol adapter
+            claude_code.rs     ← Claude Code native adapter
+            copilot.rs         ← GitHub Copilot CLI adapter
+            codex.rs           ← OpenAI Codex CLI adapter
+            cursor_agent.rs    ← Cursor Agent adapter
+      agentbridge_cli/          ← binary (agentbridge)
+        src/
+          main.rs
+          commands/
+            register.rs        ← register + SLIM A2A listener
+            list.rs
+            handoff.rs
+            delegate.rs        ← single-shot A2A dispatch
+            coordinate.rs      ← MasRuntime<DevelopmentEngine> loop
+      shadi_mas/               ← coordination runtime
+        src/
+          engines/
+            development.rs     ← DevelopmentEngine
+            preference.rs      ← PreferenceEngine (existing)
+          experiments/
+            mod.rs             ← live adapters + experiment runners
+        tests/
+          integration_slim.rs  ← SLIM node integration tests (run with --include-ignored)
+    examples/
+      agentbridge_demo/         ← self-contained demo (no infrastructure needed)
+    ```
 
-## Quick start
+## Next steps
 
-```bash
-# Run the self-contained demo (all scenarios, no infrastructure required)
-cargo run -p agentbridge_demo
-
-# Run the 4-agent coordination scenario
-cargo run -p agentbridge_demo -- --scenario coordination
-
-# Run the context handoff scenario
-cargo run -p agentbridge_demo -- --scenario handoff
-
-# Run the CliAdapter → ToolAdapter bridge scenario
-cargo run -p agentbridge_demo -- --scenario bridge
-```
-
-See [examples/agentbridge_demo/README.md](../examples/agentbridge_demo/README.md)
-for step-by-step instructions and the live 4-terminal SLIM demo.
+- Try the [Secure Agent Group Demo](demos/did-agent-group.md) for a full multi-agent, DID-identified walkthrough.
+- Review the transport layer in [SLIM and A2A](slim_a2a.md).
+- See sandboxing guidance for running bridged tools in [Sandbox and Policies](sandbox.md).

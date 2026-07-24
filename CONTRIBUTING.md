@@ -134,7 +134,7 @@ Rust crate releases are driven by `.github/workflows/release-rust.yml` using
    release automatically unless `SHADI_VERSION` is set, so normal CLI releases
    do not require a per-release installer update. Only changes to asset names,
    supported Linux targets, or the hosting location require updates to
-   `docs/install.sh` and `docs/install.md`.
+   `docs/content/install.sh` and `docs/content/install.md`.
 - WinGet publication uses the released Windows archive
    `shadictl-v<version>-x86_64-pc-windows-msvc.zip` plus its `.sha256` sidecar
    as the source of truth for the WinGet installer manifest.
