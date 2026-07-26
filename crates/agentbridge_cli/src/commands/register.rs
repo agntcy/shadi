@@ -417,21 +417,23 @@ fn build_agent_card(agent_id: &str, slim_endpoint: Option<&str>) -> AgentCard {
     }
 }
 
-/// The standard agentbridge skill set: context handoff, task delegation,
-/// and code generation. Shared by every adapter's `AgentCard`.
+/// The standard agentbridge skill set: task delegation, agent coordination,
+/// and generating output. Shared by every adapter's `AgentCard`. Each `id` is
+/// a real OASF skill taxonomy class (confirmed against a live Directory's
+/// schema validator) — arbitrary strings are rejected by `dirctl push`.
 fn default_skills() -> Vec<AgentSkill> {
     [
         (
-            "code_generation/implementation",
-            "Implements code changes and generates code on request.",
+            "agent_orchestration/task_decomposition",
+            "Breaks down and delegates coding tasks to other coding agents.",
         ),
         (
-            "agent_orchestration/task_delegation",
-            "Delegates coding tasks to other coding agents.",
+            "agent_orchestration/agent_coordination",
+            "Coordinates and hands off task context between coding agents.",
         ),
         (
-            "agent_orchestration/context_handoff",
-            "Hands off and receives task context between coding agents.",
+            "natural_language_processing/natural_language_generation/text_completion",
+            "Generates code and text completions on request.",
         ),
     ]
     .into_iter()
@@ -709,8 +711,9 @@ mod tests {
     fn build_agent_card_includes_default_skills() {
         let card = build_agent_card("codex", None);
         assert_eq!(card.skills.len(), 3);
-        assert!(card.skills.iter().any(|s| s.id.contains("code_generation")));
-        assert!(card.skills.iter().any(|s| s.id.contains("context_handoff")));
+        assert!(card.skills.iter().any(|s| s.id.contains("task_decomposition")));
+        assert!(card.skills.iter().any(|s| s.id.contains("agent_coordination")));
+        assert!(card.skills.iter().any(|s| s.id.contains("text_completion")));
     }
 
     #[test]

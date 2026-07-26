@@ -21,7 +21,7 @@ pub fn run(
     println!("Searching Agent Directory ({server_addr}) for agentbridge adapters...\n");
 
     let source = SkillSearchSource {
-        skill: "agent_orchestration/context_handoff".to_string(),
+        skill: "agent_orchestration/agent_coordination".to_string(),
         dir: DirLookupOptions {
             server_addr: server_addr.to_string(),
             gh_token: github_token.map(str::to_string),

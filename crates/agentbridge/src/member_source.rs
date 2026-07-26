@@ -397,6 +397,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_member_spec_rejects_empty_skill_name() {
+        let err = parse_member_spec("skill:", &test_dir()).err().unwrap();
+        assert!(err.contains("needs a skill name"));
+    }
+
+    #[test]
+    fn parse_member_spec_rejects_empty_did() {
+        let err = parse_member_spec("did:", &test_dir()).err().unwrap();
+        assert!(err.contains("needs a DID"));
+    }
+
+    #[test]
+    fn parse_member_spec_rejects_explicit_with_empty_name() {
+        let err = parse_member_spec("explicit:=did:key:human", &test_dir()).err().unwrap();
+        assert!(err.contains("needs a name"));
+    }
+
+    #[test]
+    fn parse_member_spec_rejects_explicit_with_empty_did() {
+        let err = parse_member_spec("explicit:avatar=", &test_dir()).err().unwrap();
+        assert!(err.contains("needs a DID"));
+    }
+
+    #[test]
     fn resolve_members_concatenates_multiple_specs() {
         let specs = vec![
             "explicit:avatar=did:key:human".to_string(),
@@ -458,6 +482,44 @@ esac
         (path, dir)
     }
 
+    /// A fake `dirctl` where `search` always reports one CID, but the
+    /// caller controls what `pull` does with it — exits with `pull_exit`,
+    /// printing `pull_stdout`. Used to exercise `pull_record_json`'s and
+    /// `resolve_via_dirctl_query`'s failure/skip branches.
+    #[cfg(unix)]
+    fn fake_dirctl_script_pull_behavior(
+        cid: &str,
+        pull_exit: i32,
+        pull_stdout: &str,
+    ) -> (std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fake_dirctl.sh");
+        let script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  search) echo '"{cid}"' ;;
+  pull) echo '{pull_stdout}'; exit {pull_exit} ;;
+  *) exit 1 ;;
+esac
+"#
+        );
+        std::fs::write(&path, script).expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (path, dir)
+    }
+
+    /// A fake `dirctl` where `search` itself fails (nonzero exit).
+    #[cfg(unix)]
+    fn fake_dirctl_script_search_fails() -> (std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fake_dirctl.sh");
+        std::fs::write(&path, "#!/bin/sh\necho 'boom' >&2\nexit 1\n").expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (path, dir)
+    }
+
     #[test]
     #[cfg(unix)]
     fn skill_search_source_resolves_candidate_via_search_then_pull() {
@@ -470,7 +532,7 @@ esac
             skill: "code_generation/implementation".to_string(),
             dir: DirLookupOptions {
                 server_addr: "localhost:9999".to_string(),
-                gh_token: None,
+                gh_token: Some("tok".to_string()),
                 limit: 10,
             },
         };
@@ -481,6 +543,52 @@ esac
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "copilot");
         assert_eq!(candidates[0].did, "did:key:z6Mk...");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn search_cids_returns_err_when_search_exits_nonzero() {
+        let _guard = env_lock().lock().expect("lock");
+        let (script, _dir) = fake_dirctl_script_search_fails();
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+
+        let result = search_cids(&["--skill", "x"], &test_dir());
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        let err = result.unwrap_err();
+        assert!(err.contains("boom"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_via_dirctl_query_skips_a_cid_that_pulls_but_has_no_usable_card() {
+        let _guard = env_lock().lock().expect("lock");
+        // Pull succeeds, but the record has neither `authors` nor an
+        // `integration/a2a` module — extract_candidate returns None, so
+        // this CID is skipped rather than producing a bogus candidate.
+        let (script, _dir) = fake_dirctl_script_pull_behavior("bafkreiempty", 0, "{}");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+
+        let candidates = resolve_via_dirctl_query(&["--skill", "x"], &test_dir()).expect("resolve");
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_via_dirctl_query_skips_a_cid_whose_pull_fails() {
+        let _guard = env_lock().lock().expect("lock");
+        let (script, _dir) = fake_dirctl_script_pull_behavior("bafkreifail", 1, "pull boom");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+
+        let candidates = resolve_via_dirctl_query(&["--skill", "x"], &test_dir()).expect("resolve");
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert!(candidates.is_empty());
     }
 
     #[test]
