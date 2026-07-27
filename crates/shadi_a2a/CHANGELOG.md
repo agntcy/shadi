@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.1.1...agntcy-shadi-a2a-v0.1.2) - 2026-07-27
+
+### Added
+
+- *(slim)* DID agent-group demo + A2A Collaborate group messaging ([#96](https://github.com/agntcy/shadi/pull/96))
+- *(identity)* DID identity & admission building blocks for SLIM v2 ([#94](https://github.com/agntcy/shadi/pull/94))
+- *(slim)* [**breaking**] migrate SHADI onto SLIM v2 ([#91](https://github.com/agntcy/shadi/pull/91))
+
+### Fixed
+
+- *(slim)* adopt #1869 MLS fix; drop require_header_mac workaround ([#93](https://github.com/agntcy/shadi/pull/93))
+
 ## [0.1.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.1.0...agntcy-shadi-a2a-v0.1.1) - 2026-04-20
 
 ### Other

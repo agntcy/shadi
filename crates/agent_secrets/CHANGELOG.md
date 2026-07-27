@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-secrets-v0.1.1...agntcy-shadi-agent-secrets-v0.2.0) - 2026-07-27
+
+### Added
+
+- *(identity)* DID identity & admission building blocks for SLIM v2 ([#94](https://github.com/agntcy/shadi/pull/94))
+
 ## [0.1.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-secrets-v0.1.0...agntcy-shadi-agent-secrets-v0.1.1) - 2026-04-20
 
 ### Other
