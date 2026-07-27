@@ -245,6 +245,11 @@ def render_default_locale_manifest(
     repository_url: str,
     license_id: str,
 ) -> str:
+    # textwrap.dedent() strips the *common* leading whitespace across every
+    # line. Interpolating a multi-line block whose own lines start at column 0
+    # (as YAML block-sequence items must) breaks that common-prefix
+    # computation and leaves every other line indented. Dedent the template
+    # with a single-line placeholder first, then splice the tags block in.
     tags = "\n".join(
         [
             "Tags:",
@@ -255,7 +260,7 @@ def render_default_locale_manifest(
             "- slim",
         ]
     )
-    return textwrap.dedent(
+    template = textwrap.dedent(
         f"""\
         # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.{MANIFEST_VERSION}.schema.json
 
@@ -272,7 +277,7 @@ def render_default_locale_manifest(
         LicenseUrl: {repository_url}/blob/{tag}/LICENSE.md
         ShortDescription: {description}
         Moniker: {moniker}
-        {tags}
+        __TAGS__
         Documentations:
         - DocumentLabel: Documentation
           DocumentUrl: {DOCS_URL}
@@ -281,6 +286,7 @@ def render_default_locale_manifest(
         ManifestVersion: {MANIFEST_VERSION}
         """
     )
+    return template.replace("__TAGS__", tags)
 
 
 def render_installer_manifest(
