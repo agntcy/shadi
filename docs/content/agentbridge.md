@@ -18,9 +18,10 @@ tools; a bridge for any other class of agent looks the same.
 
 ## Motivation
 
-Every major coding assistant operates in isolation. When a developer switches
-tools (e.g., from Claude Code to Copilot), all conversation history, open files,
-and accumulated context is lost. There is no standard way to:
+The concrete problem that motivated agentbridge: every major coding assistant
+operates in isolation. When a developer switches tools (e.g., from Claude Code
+to Copilot), all conversation history, open files, and accumulated context is
+lost. There was no standard way to:
 
 - Hand off an in-progress session from one tool to another,
 - Ask one agent to generate a specific artifact for another agent's task, or
@@ -28,7 +29,8 @@ and accumulated context is lost. There is no standard way to:
 
 agentbridge solves this using the existing SHADI infrastructure: A2A for task
 delegation, SLIM for transport, DIR for discovery, and `shadi_mas` for
-autonomous multi-round coordination.
+autonomous multi-round coordination — the same general-purpose stack that
+would bridge any other kind of agent, applied here to coding tools first.
 
 ## Quick start
 
@@ -440,7 +442,7 @@ corrupting the state machine.
         src/
           adapter.rs           ← CliAdapter trait + CliToolAdapter
           context.rs           ← ContextPacket, CodeContext, ArtifactPayload
-          dir_registry.rs      ← OASF record builder + dirctl integration
+          dir_registry.rs      ← AgentCard → OASF module wrapping + dirctl integration
           member_source.rs     ← MemberSource (skill/DID/explicit list) group-discovery trait
           adapters/
             generic_stdio.rs   ← subprocess JSON protocol adapter
