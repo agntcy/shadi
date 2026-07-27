@@ -119,3 +119,7 @@ markdown_extensions:
 
 plugins:
   - search
+
+# Extra paths for `mkdocs serve` live reload (relative to this file).
+watch:
+  - overrides
