@@ -2,6 +2,7 @@
 name = "agntcy-shadi-identity"
 version = "0.1.0"
 edition = "2021"
+description = "Ed25519 did:key agent identity primitives for SHADI."
 license.workspace = true
 repository.workspace = true
 
