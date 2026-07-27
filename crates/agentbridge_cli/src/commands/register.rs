@@ -15,7 +15,7 @@ use agentbridge::{
         copilot::CopilotAdapter,
         generic_stdio::GenericStdioAdapter,
     },
-    dir_registry::{AdapterOasfRecord, DirError},
+    dir_registry::DirError,
     CliAdapter,
 };
 use async_trait::async_trait;
@@ -28,15 +28,25 @@ use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
 
+/// Agent Directory server + auth to publish this adapter's `AgentCard` to.
+pub struct DirPublishOptions<'a> {
+    pub server: &'a str,
+    pub gh_token: Option<&'a str>,
+}
+
 /// Start a registered adapter server for a named tool.
 ///
 /// When `slim_endpoint` is provided the adapter is also exposed as an A2A
-/// service over SLIMRPC, reachable at `agntcy/shadi/<tool>-a2a`.
+/// service over SLIMRPC, reachable at `agntcy/shadi/<tool>-a2a`. When
+/// `dir_publish` is provided, the adapter's real `AgentCard` — with its SLIM
+/// endpoint and DID, if a SLIM listener is running — is published to the
+/// Agent Directory before the adapter starts serving.
 pub fn run(
     tool: &str,
     command: Option<&str>,
     args: &[String],
     slim_endpoint: Option<&str>,
+    dir_publish: Option<DirPublishOptions>,
 ) -> anyhow::Result<()> {
     match tool {
         "generic-stdio" => {
@@ -48,8 +58,12 @@ pub fn run(
             println!("Registered adapter '{}' (agent id: {})", tool, adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
-                run_slim_listener(tool, adapter, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
+                run_slim_listener(tool, adapter, endpoint, dir_publish.as_ref())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
+                if let Some(opts) = dir_publish.as_ref() {
+                    publish_card_to_dir(tool, None, best_effort_did(tool).as_deref(), opts)?;
+                }
                 println!("Adapter is running. Press Ctrl-C to stop.");
                 std::thread::park();
             }
@@ -66,9 +80,12 @@ pub fn run(
             );
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/claude-code-a2a ...");
-                run_slim_listener("claude-code", adapter, endpoint)
+                run_slim_listener("claude-code", adapter, endpoint, dir_publish.as_ref())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
+                if let Some(opts) = dir_publish.as_ref() {
+                    publish_card_to_dir("claude-code", None, best_effort_did("claude-code").as_deref(), opts)?;
+                }
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
         }
@@ -80,8 +97,12 @@ pub fn run(
             println!("Registered Copilot adapter (agent id: {})", adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/copilot-a2a ...");
-                run_slim_listener("copilot", adapter, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
+                run_slim_listener("copilot", adapter, endpoint, dir_publish.as_ref())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
+                if let Some(opts) = dir_publish.as_ref() {
+                    publish_card_to_dir("copilot", None, best_effort_did("copilot").as_deref(), opts)?;
+                }
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
         }
@@ -93,8 +114,12 @@ pub fn run(
             println!("Registered Codex adapter (agent id: {})", adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/codex-a2a ...");
-                run_slim_listener("codex", adapter, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
+                run_slim_listener("codex", adapter, endpoint, dir_publish.as_ref())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
+                if let Some(opts) = dir_publish.as_ref() {
+                    publish_card_to_dir("codex", None, best_effort_did("codex").as_deref(), opts)?;
+                }
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
         }
@@ -106,6 +131,16 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// Best-effort DID for `agent_id` when no SLIM listener is running to supply
+/// one: `Some(did)` iff DID auth is actually configured in the environment,
+/// `None` otherwise (the card is then published without an `authors` entry).
+fn best_effort_did(agent_id: &str) -> Option<String> {
+    match shadi_identity::did_auth_from_env(agent_id) {
+        Some(Ok(shadi_identity::SlimAuth::Did { did, .. })) => Some(did),
+        _ => None,
+    }
 }
 
 // ─── SLIM A2A listener ────────────────────────────────────────────────────────
@@ -226,16 +261,25 @@ impl AgentExecutor for AgentBridgeExecutor {
 struct AgentBridgeRequestHandler {
     inner: DefaultRequestHandler,
     ready: Arc<Notify>,
+    agent_id: String,
+    slim_endpoint: Option<String>,
 }
 
 impl AgentBridgeRequestHandler {
-    fn new(adapter: Arc<dyn CliAdapter>, _agent_name: &str, ready: Arc<Notify>) -> Self {
+    fn new(
+        adapter: Arc<dyn CliAdapter>,
+        agent_id: &str,
+        slim_endpoint: Option<&str>,
+        ready: Arc<Notify>,
+    ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
                 AgentBridgeExecutor { adapter },
                 InMemoryTaskStore::new(),
             ),
             ready,
+            agent_id: agent_id.to_string(),
+            slim_endpoint: slim_endpoint.map(str::to_string),
         }
     }
 }
@@ -329,28 +373,81 @@ impl RequestHandler for AgentBridgeRequestHandler {
         _params: &A2AServiceParams,
         _req: GetExtendedAgentCardRequest,
     ) -> Result<AgentCard, A2AError> {
-        Ok(AgentCard {
-            name: "agentbridge adapter".to_string(),
-            description: "agentbridge CLI adapter over SLIMRPC".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            supported_interfaces: Vec::new(),
-            capabilities: AgentCapabilities {
-                streaming: Some(true),
-                push_notifications: Some(false),
-                extensions: None,
-                extended_agent_card: Some(false),
-            },
-            default_input_modes: vec!["text/plain".to_string()],
-            default_output_modes: vec!["text/plain".to_string()],
-            skills: Vec::new(),
-            provider: None,
-            documentation_url: None,
-            icon_url: None,
-            security_schemes: None,
-            security_requirements: None,
-            signatures: None,
-        })
+        Ok(build_agent_card(&self.agent_id, self.slim_endpoint.as_deref()))
     }
+}
+
+/// Build the real, connectable `AgentCard` for an agentbridge adapter.
+///
+/// Used both to answer local `get_extended_agent_card` A2A calls and as the
+/// card published to the Agent Directory — one source of truth for what
+/// this adapter's card looks like.
+fn build_agent_card(agent_id: &str, slim_endpoint: Option<&str>) -> AgentCard {
+    let supported_interfaces = match slim_endpoint {
+        Some(endpoint) => vec![AgentInterface::new(
+            format!("slim://{endpoint}/agntcy/shadi/{agent_id}-a2a"),
+            TRANSPORT_PROTOCOL_SLIMRPC,
+        )],
+        None => Vec::new(),
+    };
+
+    AgentCard {
+        name: agent_id.to_string(),
+        description: format!(
+            "agentbridge adapter for '{agent_id}'. Supports context handoff, \
+             task delegation, and autonomous code coordination."
+        ),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        supported_interfaces,
+        capabilities: AgentCapabilities {
+            streaming: Some(true),
+            push_notifications: Some(false),
+            extensions: None,
+            extended_agent_card: Some(false),
+        },
+        default_input_modes: vec!["text/plain".to_string()],
+        default_output_modes: vec!["text/plain".to_string()],
+        skills: default_skills(),
+        provider: None,
+        documentation_url: None,
+        icon_url: None,
+        security_schemes: None,
+        security_requirements: None,
+        signatures: None,
+    }
+}
+
+/// The standard agentbridge skill set: task delegation, agent coordination,
+/// and generating output. Shared by every adapter's `AgentCard`. Each `id` is
+/// a real OASF skill taxonomy class (confirmed against a live Directory's
+/// schema validator) — arbitrary strings are rejected by `dirctl push`.
+fn default_skills() -> Vec<AgentSkill> {
+    [
+        (
+            "agent_orchestration/task_decomposition",
+            "Breaks down and delegates coding tasks to other coding agents.",
+        ),
+        (
+            "agent_orchestration/agent_coordination",
+            "Coordinates and hands off task context between coding agents.",
+        ),
+        (
+            "natural_language_processing/natural_language_generation/text_completion",
+            "Generates code and text completions on request.",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, description)| AgentSkill {
+        id: id.to_string(),
+        name: id.to_string(),
+        description: description.to_string(),
+        tags: Vec::new(),
+        examples: None,
+        input_modes: None,
+        output_modes: None,
+        security_requirements: None,
+    })
+    .collect()
 }
 
 /// Start a SLIM A2A listener that forwards incoming tasks to `adapter`.
@@ -362,6 +459,7 @@ fn run_slim_listener(
     agent_id: &str,
     adapter: Arc<dyn CliAdapter>,
     endpoint: &str,
+    dir_publish: Option<&DirPublishOptions>,
 ) -> Result<(), String> {
     let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
 
@@ -386,6 +484,16 @@ fn run_slim_listener(
     app.subscribe(name_ref.clone(), Some(connection_id))
         .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
 
+    if let Some(opts) = dir_publish {
+        let did = match &auth {
+            shadi_identity::SlimAuth::Did { did, .. } => Some(did.as_str()),
+            shadi_identity::SlimAuth::SharedSecret(_) => None,
+        };
+        if let Err(e) = publish_card_to_dir(agent_id, Some(endpoint), did, opts) {
+            eprintln!("[agentbridge] DIR publish failed: {e}");
+        }
+    }
+
     let server = Arc::new(Server::new_with_shared_rx_and_connection(
         app.inner(),
         app.name().as_slim_name(),
@@ -394,7 +502,12 @@ fn run_slim_listener(
         Some(slim_bindings::get_runtime()),
     ));
     let ready = Arc::new(Notify::new());
-    let handler = Arc::new(AgentBridgeRequestHandler::new(adapter, &agent_name, ready));
+    let handler = Arc::new(AgentBridgeRequestHandler::new(
+        adapter,
+        agent_id,
+        Some(endpoint),
+        ready,
+    ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -526,28 +639,21 @@ fn extract_text(message: &Message) -> String {
 
 // ─── DIR publish ──────────────────────────────────────────────────────────────
 
-/// Publish an OASF record for the given tool to the Agent Directory.
-pub fn publish_to_dir(
-    tool: &str,
-    dir_server: &str,
-    gh_token: Option<&str>,
+/// Publish `agent_id`'s real `AgentCard` — wrapped in DIR's `integration/a2a`
+/// OASF module shape, with `did` (if known) as the record's `authors` entry —
+/// to the Agent Directory.
+fn publish_card_to_dir(
+    agent_id: &str,
+    slim_endpoint: Option<&str>,
+    did: Option<&str>,
+    opts: &DirPublishOptions,
 ) -> anyhow::Result<()> {
-    let stub_id = shadi_mas::AgentId(tool.to_string());
-    struct StubAdapter(agentbridge::shadi_mas::AgentId);
-    impl CliAdapter for StubAdapter {
-        fn agent_id(&self) -> &shadi_mas::AgentId { &self.0 }
-        fn snapshot_context(&self) -> Result<agentbridge::ContextPacket, agentbridge::CliAdapterError> {
-            Ok(agentbridge::ContextPacket::new(self.0.0.clone()))
-        }
-        fn inject_context(&self, _: &agentbridge::ContextPacket) -> Result<(), agentbridge::CliAdapterError> { Ok(()) }
-        fn execute_prompt(&self, _: &str) -> Result<String, agentbridge::CliAdapterError> { Ok(String::new()) }
-    }
+    let card = build_agent_card(agent_id, slim_endpoint);
+    let card_json = serde_json::to_value(&card)?;
+    let record = agentbridge::dir_registry::wrap_agent_card(&card_json, did);
 
-    let adapter = StubAdapter(stub_id);
-    let record = AdapterOasfRecord::for_adapter(&adapter, env!("CARGO_PKG_VERSION"));
-
-    println!("Publishing OASF record for '{}' to {dir_server}...", tool);
-    match agentbridge::dir_registry::publish_adapter(&record, dir_server, gh_token) {
+    println!("Publishing AgentCard for '{agent_id}' to {}...", opts.server);
+    match agentbridge::dir_registry::publish_record(&record, opts.server, opts.gh_token) {
         Ok(cid) => println!("Published. CID: {cid}"),
         Err(DirError::DirctlNotFound) => {
             println!("dirctl not found — skipping DIR publish.");
@@ -583,6 +689,31 @@ mod tests {
     fn parse_name_accepts_qualified_and_rejects_bare() {
         assert!(parse_name("agntcy/shadi/copilot-a2a").is_ok());
         assert!(parse_name("bare").is_err());
+    }
+
+    #[test]
+    fn build_agent_card_sets_slim_interface_when_endpoint_given() {
+        let card = build_agent_card("copilot", Some("127.0.0.1:47357"));
+        assert_eq!(card.name, "copilot");
+        assert_eq!(card.supported_interfaces.len(), 1);
+        let iface = &card.supported_interfaces[0];
+        assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_SLIMRPC);
+        assert_eq!(iface.url, "slim://127.0.0.1:47357/agntcy/shadi/copilot-a2a");
+    }
+
+    #[test]
+    fn build_agent_card_has_no_interfaces_without_endpoint() {
+        let card = build_agent_card("copilot", None);
+        assert!(card.supported_interfaces.is_empty());
+    }
+
+    #[test]
+    fn build_agent_card_includes_default_skills() {
+        let card = build_agent_card("codex", None);
+        assert_eq!(card.skills.len(), 3);
+        assert!(card.skills.iter().any(|s| s.id.contains("task_decomposition")));
+        assert!(card.skills.iter().any(|s| s.id.contains("agent_coordination")));
+        assert!(card.skills.iter().any(|s| s.id.contains("text_completion")));
     }
 
     #[test]

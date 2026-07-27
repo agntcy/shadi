@@ -81,5 +81,6 @@ agentbridge — see the [Secure Agent Group Demo](demos/did-agent-group.md).
 ## Next steps
 
 - Walk through a full multi-agent example in the [Secure Agent Group Demo](demos/did-agent-group.md).
+- See how a group's membership can be discovered instead of hand-named in the [Agent Directory Discovery Demo](demos/dir-group-discovery.md).
 - See how CLI coding agents use this transport in [AgentBridge](agentbridge.md).
 - Look up exact flags in the [CLI Reference](cli.md).

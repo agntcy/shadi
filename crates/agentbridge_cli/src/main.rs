@@ -147,12 +147,17 @@ fn main() {
 
     let result = match cli.command {
         Cmd::Register { tool, command, args, dir_publish, dir_server, gh_token, slim_endpoint } => {
-            let r = commands::register::run(&tool, command.as_deref(), &args, slim_endpoint.as_deref());
-            if r.is_ok() && dir_publish {
-                commands::register::publish_to_dir(&tool, &dir_server, gh_token.as_deref())
-            } else {
-                r
-            }
+            let publish_opts = dir_publish.then(|| commands::register::DirPublishOptions {
+                server: dir_server.as_str(),
+                gh_token: gh_token.as_deref(),
+            });
+            commands::register::run(
+                &tool,
+                command.as_deref(),
+                &args,
+                slim_endpoint.as_deref(),
+                publish_opts,
+            )
         }
         Cmd::List { local, dir_server, gh_token } => {
             commands::list::run(local, &dir_server, gh_token.as_deref())

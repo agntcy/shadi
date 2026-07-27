@@ -1,9 +1,12 @@
-use agentbridge::dir_registry::{search_adapters, DirError};
+use agentbridge::member_source::{DirLookupOptions, MemberSource, SkillSearchSource};
 
 /// List registered agentbridge adapters.
 ///
 /// `--local` queries the running SLIM node (Phase 2+).
-/// Without `--local`, queries the agntcy Agent Directory via `dirctl search`.
+/// Without `--local`, queries the agntcy Agent Directory for adapters
+/// advertising the standard agentbridge skills, resolving each match to a
+/// real `{name, did, slim_endpoint}` via [`SkillSearchSource`] — the same
+/// discovery technique a SLIM group moderator uses to pull in members.
 pub fn run(
     local: bool,
     server_addr: &str,
@@ -17,22 +20,26 @@ pub fn run(
 
     println!("Searching Agent Directory ({server_addr}) for agentbridge adapters...\n");
 
-    match search_adapters("agent_orchestration/context_handoff", server_addr, 20, github_token) {
-        Ok(json) => {
-            if json.trim().is_empty() || json.trim() == "[]" || json.trim() == "null" {
-                println!("No agentbridge adapters found in DIR.");
-                println!("Register one with: agentbridge register --tool <name> --dir-publish");
-            } else {
-                println!("{json}");
+    let source = SkillSearchSource {
+        skill: "agent_orchestration/agent_coordination".to_string(),
+        dir: DirLookupOptions {
+            server_addr: server_addr.to_string(),
+            gh_token: github_token.map(str::to_string),
+            limit: 20,
+        },
+    };
+
+    let candidates = source.resolve().map_err(|e| anyhow::anyhow!("DIR search failed: {e}"))?;
+
+    if candidates.is_empty() {
+        println!("No agentbridge adapters found in DIR.");
+        println!("Register one with: agentbridge register --tool <name> --dir-publish");
+    } else {
+        for c in &candidates {
+            match &c.slim_endpoint {
+                Some(endpoint) => println!("{}  did={}  slim://{}", c.name, c.did, endpoint),
+                None => println!("{}  did={}  (no SLIM endpoint)", c.name, c.did),
             }
-        }
-        Err(DirError::DirctlNotFound) => {
-            println!("dirctl not found in PATH — DIR discovery unavailable.");
-            println!("Install: brew tap agntcy/dir https://github.com/agntcy/dir/ && brew install dirctl");
-            println!("\nAlternatively, use --local to query the running SLIM node.");
-        }
-        Err(e) => {
-            anyhow::bail!("DIR search failed: {e}");
         }
     }
 

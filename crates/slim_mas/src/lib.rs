@@ -2,28 +2,28 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use agent_secrets::{AgentVerifier, SecretError, SecretResult, SessionContext};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MasConfig {
     pub mas: Option<MasSettings>,
     #[serde(default)]
     pub groups: BTreeMap<String, GroupConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MasSettings {
     pub default_group: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupConfig {
     pub moderator_did: Option<String>,
     #[serde(default)]
     pub members: Vec<MemberConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberConfig {
     pub did: String,
     pub role: Option<String>,
@@ -43,6 +43,20 @@ pub fn load_config(path: &Path) -> Result<MasConfig, String> {
     let data = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
     toml::from_str(&data).map_err(|err| format!("invalid config {}: {}", path.display(), err))
+}
+
+/// Serialize `config` to TOML, in [`load_config`]'s format — the write-side
+/// counterpart used to persist a dynamically-resolved [`GroupConfig`] (e.g.
+/// from Agent Directory discovery) so `shadictl slim-mas list-members`/
+/// `validate` can audit it like any hand-written `mas.toml`.
+pub fn to_toml_string(config: &MasConfig) -> Result<String, String> {
+    toml::to_string_pretty(config).map_err(|err| format!("failed to serialize config: {}", err))
+}
+
+/// Write `config` as TOML to `path` (see [`to_toml_string`]).
+pub fn save_config(config: &MasConfig, path: &Path) -> Result<(), String> {
+    let data = to_toml_string(config)?;
+    std::fs::write(path, data).map_err(|err| format!("failed to write {}: {}", path.display(), err))
 }
 
 pub fn resolve_group<'a>(config: &'a MasConfig, group: Option<&'a str>) -> Result<&'a str, String> {
@@ -140,6 +154,52 @@ mod tests {
         let file = tempfile::NamedTempFile::new().expect("tempfile");
         std::fs::write(file.path(), contents).expect("write config");
         file
+    }
+
+    #[test]
+    fn to_toml_string_round_trips_through_load_config() {
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "discovered-room".to_string(),
+            GroupConfig {
+                moderator_did: Some("did:key:moderator".to_string()),
+                members: vec![
+                    MemberConfig { did: "did:key:a".to_string(), role: None },
+                    MemberConfig { did: "did:key:b".to_string(), role: Some("agent".to_string()) },
+                ],
+            },
+        );
+        let config = MasConfig {
+            mas: Some(MasSettings { default_group: Some("discovered-room".to_string()) }),
+            groups,
+        };
+
+        let toml_text = to_toml_string(&config).expect("serialize");
+        let file = write_config(&toml_text);
+        let reloaded = load_config(file.path()).expect("reload");
+
+        assert_eq!(reloaded.default_group(), Some("discovered-room"));
+        let group = reloaded.group("discovered-room").expect("group");
+        assert_eq!(group.moderator_did.as_deref(), Some("did:key:moderator"));
+        assert_eq!(group.members.len(), 2);
+        assert_eq!(group.members[1].role.as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn save_config_writes_a_file_load_config_can_read_back() {
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "room".to_string(),
+            GroupConfig { moderator_did: None, members: vec![] },
+        );
+        let config = MasConfig { mas: None, groups };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mas.toml");
+        save_config(&config, &path).expect("save");
+
+        let reloaded = load_config(&path).expect("load");
+        assert!(reloaded.group("room").is_some());
     }
 
     #[test]

@@ -211,7 +211,7 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::VerifyAgentIdentity(command) => run_verify_agent_identity_command(command),
         Commands::PutKey(command) => run_put_key_command(command),
         Commands::Slim(command) => run_slim_command(command),
-        Commands::Shell(args) => run_shell_command(args),
+        Commands::Shell(args) => run_shell_command(args, &[]),
         Commands::Dir(command) => run_dir_command(command),
     }
 }
@@ -247,6 +247,7 @@ fn run_slim_command(command: SlimCli) -> ExitCode {
             }
         },
         SlimCommand::Controller { command } => run_controller_command(command),
+        SlimCommand::CreateGroup(args) => shell_command::run_slim_create_group_command(args),
     }
 }
 

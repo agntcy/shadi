@@ -226,6 +226,12 @@ pub(crate) enum SlimCommand {
         #[command(subcommand)]
         command: ControllerCommand,
     },
+    #[command(
+        name = "create-group",
+        about = "Create a SLIM group with members resolved from Agent Directory discovery \
+                 and/or named explicitly, then drop into the interactive shell as its moderator"
+    )]
+    CreateGroup(SlimCreateGroupArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -342,6 +348,37 @@ pub(crate) struct SlimA2ACollaborateArgs {
 
     #[arg(long, default_value_t = 20)]
     pub(crate) timeout_seconds: u64,
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct SlimCreateGroupArgs {
+    /// Channel to create, e.g. agntcy/shadi/my-room.
+    pub(crate) channel: String,
+
+    /// Member source spec, repeatable: skill:<skill> | did:<did> |
+    /// explicit:<name>=<did>[@<endpoint>]. Resolved candidates' DIDs are
+    /// unioned into this group's trust set (SLIM_MEMBER_DIDS) — resolving a
+    /// candidate does not by itself invite it into the live session; use
+    /// `/slim invite <name>` or `/slim invite-from <spec>` for that.
+    #[arg(long = "members", value_name = "SPEC")]
+    pub(crate) members: Vec<String>,
+
+    /// Agent Directory server address (used by skill:/did: member specs).
+    #[arg(long, default_value = "prod.gateway.ads.outshift.io:443")]
+    pub(crate) dir_server: String,
+
+    /// GitHub token for DIR authentication (or set DIRECTORY_CLIENT_GITHUB_TOKEN).
+    #[arg(long)]
+    pub(crate) gh_token: Option<String>,
+
+    /// Max results per resolved skill:/did: member source.
+    #[arg(long, default_value_t = 20)]
+    pub(crate) limit: usize,
+
+    /// Write the resolved trust set as a slim_mas GroupConfig TOML file, so
+    /// `shadictl slim-mas --config <path> list-members/validate` can audit it.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) write_config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
