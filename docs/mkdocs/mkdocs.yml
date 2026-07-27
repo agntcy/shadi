@@ -53,6 +53,7 @@ theme:
       toggle:
         icon: material/toggle-switch-off
         name: Switch to system preference
+  favicon: assets/agntcy/favicon.ico
   logo_light: assets/img/logo-light.svg
   logo_dark: assets/img/logo-dark.svg
   features:
