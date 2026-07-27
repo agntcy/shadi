@@ -1,4 +1,4 @@
-# agentbridge — Autonomous CLI Coding-Agent Interconnect
+# agentbridge — General-Purpose Agent Interconnect over A2A
 
 agentbridge is the layer of SHADI that bridges agents over the
 [A2A protocol](slim_a2a.md) — via SLIM transport, DID identity, DIR
