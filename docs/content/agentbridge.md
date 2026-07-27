@@ -1,27 +1,15 @@
-# agentbridge — General-Purpose Agent Interconnect over A2A
+# agentbridge — Autonomous CLI Coding-Agent Interconnect
 
-agentbridge is the layer of SHADI that bridges agents over the
-[A2A protocol](slim_a2a.md) — via SLIM transport, DID identity, DIR
-discovery, and `shadi_mas` for autonomous multi-round coordination — so they
-can exchange context, delegate tasks to each other, and coordinate
-autonomously toward a shared goal. Nothing in that mechanism is specific to
-any one kind of agent: any agent that speaks A2A, or the simpler agentbridge
-subprocess protocol (`GenericStdioAdapter`), can be bridged this way.
-
-Today's built-in adapters happen to target CLI coding tools — Claude Code,
-GitHub Copilot CLI, OpenAI Codex CLI, Cursor Agent — because interconnecting
-coding assistants was the motivating use case this was first built for, and
-they remain the flagship, most-exercised example throughout this page and the
-demos. The `CliAdapter` trait, the A2A/SLIM transport, and the coordination
-runtime underneath them don't know or care that they're wrapping coding
-tools; a bridge for any other class of agent looks the same.
+agentbridge is the layer of SHADI that connects CLI coding tools — Claude Code,
+GitHub Copilot CLI, OpenAI Codex CLI, Cursor Agent, or any tool that speaks the
+agentbridge subprocess protocol — so they can exchange context, delegate tasks to
+each other, and coordinate autonomously until a programming goal is achieved.
 
 ## Motivation
 
-The concrete problem that motivated agentbridge: every major coding assistant
-operates in isolation. When a developer switches tools (e.g., from Claude Code
-to Copilot), all conversation history, open files, and accumulated context is
-lost. There was no standard way to:
+Every major coding assistant operates in isolation. When a developer switches
+tools (e.g., from Claude Code to Copilot), all conversation history, open files,
+and accumulated context is lost. There is no standard way to:
 
 - Hand off an in-progress session from one tool to another,
 - Ask one agent to generate a specific artifact for another agent's task, or
@@ -29,30 +17,7 @@ lost. There was no standard way to:
 
 agentbridge solves this using the existing SHADI infrastructure: A2A for task
 delegation, SLIM for transport, DIR for discovery, and `shadi_mas` for
-autonomous multi-round coordination — the same general-purpose stack that
-would bridge any other kind of agent, applied here to coding tools first.
-
-## Quick start
-
-The self-contained demo needs no infrastructure — it runs all scenarios
-against an in-process SLIM node:
-
-```bash
-# Run the self-contained demo (all scenarios, no infrastructure required)
-cargo run -p agentbridge_demo
-
-# Run the 4-agent coordination scenario
-cargo run -p agentbridge_demo -- --scenario coordination
-
-# Run the context handoff scenario
-cargo run -p agentbridge_demo -- --scenario handoff
-
-# Run the CliAdapter → ToolAdapter bridge scenario
-cargo run -p agentbridge_demo -- --scenario bridge
-```
-
-See [examples/agentbridge_demo/README.md](../../examples/agentbridge_demo/README.md)
-for step-by-step instructions and the live 4-terminal SLIM demo.
+autonomous multi-round coordination.
 
 ## Quick start
 
