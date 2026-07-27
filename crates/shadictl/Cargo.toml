@@ -19,12 +19,12 @@ a2a-server = { package = "a2a-server-lf", version = "0.4.1" }
 async-trait = "0.1"
 futures = "0.3"
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.0", path = "../shadi_sandbox" }
-agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.1.2", path = "../agent_transport_slim" }
-agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.1.1", path = "../agent_secrets", features = ["onepassword"] }
-shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.1", path = "../shadi_a2a" }
-shadi_memory = { package = "agntcy-shadi-memory", version = "0.1.1", path = "../shadi_memory" }
+agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.2.0", path = "../agent_transport_slim" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.0", path = "../agent_secrets", features = ["onepassword"] }
+shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.2", path = "../shadi_a2a" }
+shadi_memory = { package = "agntcy-shadi-memory", version = "0.1.2", path = "../shadi_memory" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path = "../shadi_telemetry" }
-slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.1", path = "../slim_mas" }
+slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.2", path = "../slim_mas" }
 agentbridge = { package = "agntcy-agentbridge", version = "0.1.0", path = "../agentbridge" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }
 slim_rpc = { package = "agntcy-slim-rpc", version = "2.0.0-alpha.7" }

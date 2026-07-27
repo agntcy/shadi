@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-agent-secrets"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "security-framework 2.11.1",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-agent-transport-slim"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-memory"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "rusqlite",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-py"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-memory",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-slim-mas"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "serde",
