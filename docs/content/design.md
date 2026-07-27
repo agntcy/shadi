@@ -1,6 +1,7 @@
 # Design Overview
 
 The workspace contains these crates:
+
 - agent_secrets: secret storage and access control
 - shadictl: CLI for sandboxing, key management, identity, and policy resolution
 - shadi_memory: SQLCipher-backed encrypted memory store
@@ -17,6 +18,7 @@ The workspace contains these crates:
 Platform-specific backends live under agent_secrets/src/platform.
 
 ## Documentation
+
 The documentation site is built with MkDocs. See docs/README.md for running it
 locally.
 
