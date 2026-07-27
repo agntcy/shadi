@@ -3,7 +3,7 @@ name = "agntcy-agentbridge"
 version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
-description = "CLI coding-agent interconnect built on shadi_mas."
+description = "General-purpose agent interconnect over A2A, built on shadi_mas."
 license.workspace = true
 repository.workspace = true
 

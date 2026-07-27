@@ -3,6 +3,11 @@ name: Publish WinGet Manifests
 on:
   workflow_call:
     inputs:
+      cli:
+        description: Which CLI to render WinGet manifests for (shadictl or agentbridge)
+        required: false
+        type: string
+        default: shadictl
       release_tag:
         description: CLI release tag to render into WinGet manifests
         required: true
@@ -14,6 +19,11 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      cli:
+        description: Which CLI to render WinGet manifests for (shadictl or agentbridge)
+        required: false
+        type: string
+        default: shadictl
       release_tag:
         description: CLI release tag to render into WinGet manifests
         required: true
@@ -25,6 +35,7 @@ jobs:
     permissions:
       contents: read
     env:
+      CLI: ${{ inputs.cli }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       APP_AUTH_CONFIGURED: ${{ secrets.PROJECT_APP_ID != '' && secrets.PROJECT_APP_KEY != '' }}
     steps:
@@ -42,6 +53,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python scripts/render_winget_manifests.py \
+            --cli "$CLI" \
             --tag "$RELEASE_TAG" \
             --output-dir dist/winget \
             --github-output "$GITHUB_OUTPUT"
@@ -99,7 +111,7 @@ jobs:
           rm -rf /tmp/winget-pkgs
           GH_TOKEN="$WINGET_PKGS_TOKEN" gh repo clone "$fork_owner/winget-pkgs" /tmp/winget-pkgs -- --depth 1
 
-          branch="automation/winget-shadictl-$PACKAGE_VERSION"
+          branch="automation/winget-$CLI-$PACKAGE_VERSION"
 
           cd /tmp/winget-pkgs
           if git remote get-url upstream >/dev/null 2>&1; then
@@ -123,7 +135,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "release: add WinGet manifest for shadictl v$PACKAGE_VERSION"
+          git commit -m "release: add WinGet manifest for $CLI v$PACKAGE_VERSION"
           git push --force --set-upstream origin "$branch"
 
           pr_number=$(GH_TOKEN="$WINGET_PKGS_TOKEN" gh pr list --repo microsoft/winget-pkgs --head "$fork_owner:$branch" --base master --state open --json number --jq 'first(.[].number) // ""')

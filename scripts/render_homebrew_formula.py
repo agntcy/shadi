@@ -15,9 +15,28 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_MANIFEST = ROOT / "Cargo.toml"
-CLI_MANIFEST = ROOT / "crates" / "shadictl" / "Cargo.toml"
-DEFAULT_OUTPUT = ROOT / "Formula" / "shadictl.rb"
-TAG_PATTERN = re.compile(r"^agntcy-shadi-cli-v(?P<version>[0-9A-Za-z.+-]+)$")
+
+CLI_CONFIGS = {
+    "shadictl": {
+        "manifest": ROOT / "crates" / "shadictl" / "Cargo.toml",
+        "tag_pattern": re.compile(r"^agntcy-shadi-cli-v(?P<version>[0-9A-Za-z.+-]+)$"),
+        "default_output": ROOT / "Formula" / "shadictl.rb",
+        "class_name": "Shadictl",
+        "crate_path": "crates/shadictl",
+        "binary_name": "shadictl",
+    },
+    "agentbridge": {
+        "manifest": ROOT / "crates" / "agentbridge_cli" / "Cargo.toml",
+        "tag_pattern": re.compile(
+            r"^agntcy-agentbridge-cli-v(?P<version>[0-9A-Za-z.+-]+)$"
+        ),
+        "default_output": ROOT / "Formula" / "agentbridge.rb",
+        "class_name": "Agentbridge",
+        "crate_path": "crates/agentbridge_cli",
+        "binary_name": "agentbridge",
+    },
+}
+
 FORMULA_HEADER = textwrap.dedent(
     """\
     # Copyright AGNTCY Contributors (https://github.com/agntcy)
@@ -29,18 +48,24 @@ FORMULA_HEADER = textwrap.dedent(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render the Homebrew formula for the released shadictl CLI tag."
+        description="Render the Homebrew formula for a released CLI tag."
+    )
+    parser.add_argument(
+        "--cli",
+        choices=sorted(CLI_CONFIGS),
+        default="shadictl",
+        help="Which CLI to render a formula for (default: shadictl).",
     )
     parser.add_argument(
         "--tag",
         required=True,
-        help="Release tag in the form agntcy-shadi-cli-v<version>",
+        help="Release tag, e.g. agntcy-shadi-cli-v<version> or agntcy-agentbridge-cli-v<version>",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"Formula output path (default: {DEFAULT_OUTPUT})",
+        default=None,
+        help="Formula output path (default: Formula/<cli>.rb)",
     )
     return parser.parse_args()
 
@@ -75,13 +100,14 @@ def ruby_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def render_formula(tag: str) -> str:
-    match = TAG_PATTERN.match(tag)
+def render_formula(cli: str, tag: str) -> str:
+    config = CLI_CONFIGS[cli]
+    match = config["tag_pattern"].match(tag)
     if not match:
-        raise SystemExit(f"expected agntcy-shadi-cli-v<version> tag, got: {tag}")
+        raise SystemExit(f"expected {config['tag_pattern'].pattern} tag, got: {tag}")
 
     workspace = load_toml(WORKSPACE_MANIFEST)
-    cli_manifest = load_toml(CLI_MANIFEST)
+    cli_manifest = load_toml(config["manifest"])
     workspace_package = workspace["workspace"]["package"]
     package = cli_manifest["package"]
 
@@ -91,10 +117,13 @@ def render_formula(tag: str) -> str:
     source_url = f"{homepage}/archive/refs/tags/{tag}.tar.gz"
     source_sha256 = fetch_sha256(source_url)
     git_url = homepage if homepage.endswith(".git") else f"{homepage}.git"
+    class_name = config["class_name"]
+    crate_path = config["crate_path"]
+    binary_name = config["binary_name"]
 
     formula_body = textwrap.dedent(
         f"""\
-        class Shadictl < Formula
+        class {class_name} < Formula
           desc \"{ruby_string(description)}\"
           homepage \"{ruby_string(homepage)}\"
           url \"{ruby_string(source_url)}\"
@@ -112,11 +141,11 @@ def render_formula(tag: str) -> str:
             ENV[\"OPENSSL_DIR\"] = Formula[\"openssl@3\"].opt_prefix
             ENV[\"PYO3_PYTHON\"] = Formula[\"python@3.12\"].opt_bin/\"python3.12\"
 
-            system \"cargo\", \"install\", \"--locked\", \"--path\", \"crates/shadictl\", *std_cargo_args
+            system \"cargo\", \"install\", \"--locked\", \"--path\", \"{crate_path}\", *std_cargo_args
           end
 
           test do
-            assert_match \"shadictl\", shell_output("#{{bin}}/shadictl --help")
+            assert_match \"{binary_name}\", shell_output("#{{bin}}/{binary_name} --help")
           end
         end
         """
@@ -127,9 +156,10 @@ def render_formula(tag: str) -> str:
 
 def main() -> int:
     args = parse_args()
-    formula = render_formula(args.tag)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(formula, encoding="utf-8")
+    output = args.output or CLI_CONFIGS[args.cli]["default_output"]
+    formula = render_formula(args.cli, args.tag)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(formula, encoding="utf-8")
     return 0
 
 

@@ -6,14 +6,24 @@ on:
       - published
   workflow_dispatch:
     inputs:
+      cli:
+        description: Which CLI to render a formula for (shadictl or agentbridge)
+        required: false
+        type: string
+        default: shadictl
       tag:
-        description: CLI release tag to render into Formula/shadictl.rb
+        description: CLI release tag to render into Formula/<cli>.rb
         required: true
         type: string
 
 jobs:
   refresh-homebrew-formula:
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'agntcy-shadi-cli-v') }}
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        startsWith(github.event.release.tag_name, 'agntcy-shadi-cli-v') ||
+        startsWith(github.event.release.tag_name, 'agntcy-agentbridge-cli-v')
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,35 +51,47 @@ jobs:
 
           case "$tag" in
             agntcy-shadi-cli-v*)
+              cli="shadictl"
               version="${tag#agntcy-shadi-cli-v}"
               ;;
+            agntcy-agentbridge-cli-v*)
+              cli="agentbridge"
+              version="${tag#agntcy-agentbridge-cli-v}"
+              ;;
             *)
-              echo "::error::expected an agntcy-shadi-cli-v* tag, got $tag"
+              echo "::error::expected an agntcy-shadi-cli-v* or agntcy-agentbridge-cli-v* tag, got $tag"
               exit 1
               ;;
           esac
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "cli=$cli" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Render Homebrew formula
-        run: python3 scripts/render_homebrew_formula.py --tag "${{ steps.release.outputs.tag }}" --output Formula/shadictl.rb
+        run: |
+          python3 scripts/render_homebrew_formula.py \
+            --cli "${{ steps.release.outputs.cli }}" \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --output "Formula/${{ steps.release.outputs.cli }}.rb"
 
       - name: Open formula refresh PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLI: ${{ steps.release.outputs.cli }}
+          FORMULA_PATH: Formula/${{ steps.release.outputs.cli }}.rb
         run: |
-          if git diff --quiet -- Formula/shadictl.rb; then
+          if git diff --quiet -- "$FORMULA_PATH"; then
             echo "Formula already up to date for ${{ steps.release.outputs.tag }}"
             exit 0
           fi
 
-          branch="automation/homebrew-shadictl-${{ steps.release.outputs.version }}"
+          branch="automation/homebrew-$CLI-${{ steps.release.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$branch"
-          git add Formula/shadictl.rb
-          git commit -m "release: update Homebrew formula for shadictl v${{ steps.release.outputs.version }}"
+          git add "$FORMULA_PATH"
+          git commit -m "release: update Homebrew formula for $CLI v${{ steps.release.outputs.version }}"
           git push --force --set-upstream origin "$branch"
 
           pr_number=$(gh pr list --repo agntcy/shadi --head "$branch" --base main --state open --json number --jq 'first(.[].number) // ""')
@@ -79,7 +101,7 @@ jobs:
           fi
 
           cat > /tmp/homebrew-formula-pr-body.md <<EOF
-          Update Formula/shadictl.rb for ${{ steps.release.outputs.tag }}.
+          Update $FORMULA_PATH for ${{ steps.release.outputs.tag }}.
 
           - refreshes the source tarball SHA256
           - keeps the Homebrew install path aligned with the latest CLI release
@@ -91,5 +113,5 @@ jobs:
             --repo agntcy/shadi \
             --base main \
             --head "$branch" \
-            --title "release: update Homebrew formula for shadictl v${{ steps.release.outputs.version }}" \
+            --title "release: update Homebrew formula for $CLI v${{ steps.release.outputs.version }}" \
             --body-file /tmp/homebrew-formula-pr-body.md

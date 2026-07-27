@@ -40,24 +40,29 @@ curl -fsSL https://agntcy.github.io/shadi/install.sh | bash
 For pinned versions, custom install paths, and installer environment overrides,
 see [Install the CLI](https://agntcy.github.io/shadi/install/).
 
-On macOS, you can install the latest released `shadictl` formula with Homebrew:
+On macOS, you can install the latest released `shadictl` or `agentbridge`
+formula with Homebrew:
 
 ```bash
 brew tap agntcy/shadi https://github.com/agntcy/shadi
 brew install agntcy/shadi/shadictl
+brew install agntcy/shadi/agentbridge
 ```
 
 On Windows, once the matching WinGet manifest has landed in the default source,
-you can install or upgrade `shadictl` with:
+you can install or upgrade either CLI with:
 
 ```powershell
 winget install --id AGNTCY.shadictl -e
+winget install --id AGNTCY.agentbridge -e
 winget upgrade --id AGNTCY.shadictl -e
+winget upgrade --id AGNTCY.agentbridge -e
 ```
 
-The Homebrew formula builds from the published `agntcy-shadi-cli` release tag.
-Published `agntcy-shadi-cli` releases also include prebuilt archives for Linux
-(`x86_64` and `aarch64`), macOS (`arm64` and `x86_64`), and Windows (`x86_64`).
+Each Homebrew formula builds from its own published release tag
+(`agntcy-shadi-cli` for `shadictl`, `agntcy-agentbridge-cli` for `agentbridge`).
+Both releases also include prebuilt archives for Linux (`x86_64` and
+`aarch64`), macOS (`arm64` and `x86_64`), and Windows (`x86_64`).
 For unreleased changes or any other host, use the source build flow below.
 
 ## Quick Start
