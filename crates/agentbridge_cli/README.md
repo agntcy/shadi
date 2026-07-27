@@ -1,10 +1,10 @@
 # agentbridge CLI
 
-`agentbridge` is the command-line interface for the agentbridge coding-agent
-interconnect. It registers CLI coding tools (Claude Code, Copilot, Codex, Cursor
-Agent, or any subprocess that speaks the agentbridge JSON protocol) as live A2A
-services, lists them via DIR discovery, hands off context between them, and
-coordinates them autonomously toward a shared programming goal.
+`agentbridge` is the command-line interface for the agentbridge general-purpose
+agent interconnect. It registers agents (CLI coding tools like Claude Code,
+Copilot, Codex, Cursor Agent, or any subprocess that speaks the agentbridge
+JSON protocol) as live A2A services, lists them via DIR discovery, hands off
+context between them, and coordinates them autonomously toward a shared goal.
 
 ## Install
 

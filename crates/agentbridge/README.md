@@ -1,10 +1,15 @@
 # agentbridge
 
-`agentbridge` is the CLI coding-agent adapter library. It bridges individual
-coding tools (Claude Code, GitHub Copilot, OpenAI Codex, or any CLI that speaks
-the agentbridge JSON protocol) into the `shadi_mas` coordination runtime so they
-can exchange context, delegate tasks, and coordinate autonomously toward a shared
-programming goal.
+`agentbridge` is a general-purpose agent adapter library. It bridges any agent
+that speaks the `CliAdapter` trait or the agentbridge JSON subprocess protocol
+into the `shadi_mas` coordination runtime so they can exchange context, delegate
+tasks, and coordinate autonomously toward a shared goal.
+
+Today's built-in adapters target CLI coding tools (Claude Code, GitHub
+Copilot, OpenAI Codex, Cursor Agent) since interconnecting coding assistants
+was the motivating use case this was first built for, and they remain the
+flagship example below — but nothing in `CliAdapter` or the coordination
+runtime is specific to coding tools.
 
 ## How it fits into SHADI
 
