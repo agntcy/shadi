@@ -15,7 +15,7 @@ edit_uri: edit/main/docs/content/
 
 extra:
   copyright: >
-    Copyright SHADI Contributors.
+    © 2026, Agntcy, a Series of LF Projects, LLC. All rights reserved.
 
 extra_css:
   - stylesheets/custom.css
@@ -48,11 +48,12 @@ theme:
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: black
+      primary: indigo
       accent: indigo
       toggle:
         icon: material/toggle-switch-off
         name: Switch to system preference
+  favicon: assets/agntcy/favicon.ico
   logo_light: assets/img/logo-light.svg
   logo_dark: assets/img/logo-dark.svg
   features:
@@ -88,7 +89,6 @@ nav:
       - API Guide: api_integration.md
       - SLIM and A2A: slim_a2a.md
       - Secure Agent Group Demo: demos/did-agent-group.md
-      - Agent Directory Discovery Demo: demos/dir-group-discovery.md
       - AgentBridge: agentbridge.md
       - Mobile: mobile_integration.md
   - Reference:
@@ -120,3 +120,7 @@ markdown_extensions:
 
 plugins:
   - search
+
+# Extra paths for `mkdocs serve` live reload (relative to this file).
+watch:
+  - overrides

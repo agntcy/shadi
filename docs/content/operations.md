@@ -28,14 +28,12 @@ entry point that tells you where to go and in what order.
 
 ## Choose a Workflow
 
-=== "Sandboxed Execution"
+Use [Sandbox and Policies](sandbox.md) when you need to:
 
-	Use [Sandbox and Policies](sandbox.md) when you need to:
-
-	- choose between `strict`, `balanced`, and `connected`
-	- combine JSON policy with CLI overrides
-	- broker secrets into the process environment before sandboxing
-	- reason about the enforcement boundary on macOS and Windows
+- choose between `strict`, `balanced`, and `connected`
+- combine JSON policy with CLI overrides
+- broker secrets into the process environment before sandboxing
+- reason about the enforcement boundary on macOS and Windows
 
 ## Suggested Operator Flow
 

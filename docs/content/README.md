@@ -17,5 +17,9 @@ just docs-serve
 Or directly with MkDocs:
 
 ```bash
-cd docs/mkdocs && mkdocs serve
+cd docs/mkdocs && mkdocs serve --livereload --dirty
 ```
+
+The dev server rebuilds changed pages automatically and refreshes the browser.
+Keep it running while you edit files under `docs/content/`; you do not need
+`just docs-build` for day-to-day writing.

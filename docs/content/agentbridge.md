@@ -23,9 +23,9 @@ operates in isolation. When a developer switches tools (e.g., from Claude Code
 to Copilot), all conversation history, open files, and accumulated context is
 lost. There was no standard way to:
 
-- hand off an in-progress session from one tool to another,
-- ask one agent to generate a specific artifact for another agent's task, or
-- have multiple agents propose solutions and converge on the best one without human mediation.
+- Hand off an in-progress session from one tool to another,
+- Ask one agent to generate a specific artifact for another agent's task, or
+- Have multiple agents propose solutions and converge on the best one without human mediation.
 
 agentbridge solves this using the existing SHADI infrastructure: A2A for task
 delegation, SLIM for transport, DIR for discovery, and `shadi_mas` for
@@ -51,7 +51,7 @@ cargo run -p agentbridge_demo -- --scenario handoff
 cargo run -p agentbridge_demo -- --scenario bridge
 ```
 
-See [examples/agentbridge_demo/README.md](../../examples/agentbridge_demo/README.md)
+See [examples/agentbridge_demo/README.md](https://github.com/agntcy/shadi/blob/main/examples/agentbridge_demo/README.md)
 for step-by-step instructions and the live 4-terminal SLIM demo.
 
 ## Architecture
@@ -302,7 +302,7 @@ tool (`execute_prompt` → subprocess). Some adapters run their tool with elevat
 permissions — for example, `CopilotAdapter` invokes `copilot --allow-all-tools`
 so it can act non-interactively.
 
-!!! danger "Any peer able to reach the listener can drive local code execution"
+!!! warning "Any peer able to reach the listener can drive local code execution"
 
     Any peer able to reach `agntcy/shadi/<tool>-a2a` on the SLIM node can drive
     local code execution through the wrapped CLI tool.
@@ -443,7 +443,7 @@ corrupting the state machine.
           adapter.rs           ← CliAdapter trait + CliToolAdapter
           context.rs           ← ContextPacket, CodeContext, ArtifactPayload
           dir_registry.rs      ← AgentCard → OASF module wrapping + dirctl integration
-          member_source.rs     ← MemberSource (skill/DID/explicit) group-discovery trait
+          member_source.rs     ← MemberSource (skill/DID/explicit list) group-discovery trait
           adapters/
             generic_stdio.rs   ← subprocess JSON protocol adapter
             claude_code.rs     ← Claude Code native adapter
