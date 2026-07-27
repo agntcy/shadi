@@ -196,4 +196,4 @@ The CLI combines profile defaults, policy file settings, and explicit flags:
 - Review the full threat model, secret-delivery rationale, and residual risks in [Security Notes](security.md).
 - Put this into practice with [Sandbox and Policies](sandbox.md) and the [CLI Reference](cli.md).
 - Integrate into an agent or app via the [API Guide](api_integration.md).
-- See the multi-agent coordination layer and CLI coding-agent interconnect in [AgentBridge](agentbridge.md).
+- See the multi-agent coordination layer and general-purpose A2A agent interconnect in [AgentBridge](agentbridge.md).

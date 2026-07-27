@@ -44,9 +44,10 @@ SHADI presents the runtime as four product layers:
 - Python bindings for secrets, memory, and sandboxed execution.
 - CLI workflows for policy, identity, key management, and sandbox execution.
 - Example agents and demos, including a SecOps workflow against real GitHub signals.
-- **agentbridge**: interconnect Claude Code, Copilot, Codex, Cursor Agent, and
-  other CLI coding tools via A2A, SLIM, and DIR with autonomous coordination
-  toward a shared goal.
+- **agentbridge**: general-purpose agent interconnect over A2A, SLIM, and DIR
+  with autonomous coordination toward a shared goal — ships today with
+  adapters for Claude Code, Copilot, Codex, Cursor Agent, and other CLI
+  coding tools.
 - **Secure agent groups**: moderator-invited SLIM channels admitted against a
   per-agent DID allow-list, with many-to-many A2A Collaborate broadcast
   messaging between every member.
@@ -58,7 +59,7 @@ SHADI presents the runtime as four product layers:
 - Need the system model? Read [Architecture](architecture.md) and [Security Notes](security.md).
 - Integrating into an agent or app? Start with the [API Guide](api_integration.md).
 - Looking for flags and commands? See the [CLI Reference](cli.md).
-- Connecting CLI coding tools autonomously? Start with [AgentBridge](agentbridge.md).
+- Interconnecting agents over A2A autonomously? Start with [AgentBridge](agentbridge.md).
 
 ## By Role
 
@@ -71,7 +72,7 @@ SHADI presents the runtime as four product layers:
 - [Architecture](architecture.md)
 - [API Guide](api_integration.md)
 - [SLIM and A2A](slim_a2a.md)
-- [agentbridge — CLI coding-agent interconnect](agentbridge.md)
+- [agentbridge — general-purpose A2A agent interconnect](agentbridge.md)
 
 **Security Engineering**
 - [Security Notes](security.md)
