@@ -8,3 +8,8 @@ publish_timeout = "30m"
 name = "shadi_demo_bot"
 publish = false
 release = false
+
+[[package]]
+name = "agentbridge_demo"
+publish = false
+release = false

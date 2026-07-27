@@ -5,6 +5,7 @@ edition = "2021"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [[bin]]
 name = "agentbridge_demo"
