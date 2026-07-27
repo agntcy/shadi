@@ -73,9 +73,9 @@ docs-build:
   cd docs/mkdocs && mkdocs build --site-dir ../../site
 
 [group('docs')]
-[doc('Serve the MkDocs site locally.')]
+[doc('Serve the MkDocs site locally with live reload.')]
 docs-serve:
-  cd docs/mkdocs && mkdocs serve
+  cd docs/mkdocs && mkdocs serve --livereload --dirty
 
 [group('profiles')]
 [doc('Print the strict built-in security profile.')]
