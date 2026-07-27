@@ -403,7 +403,8 @@ corrupting the state machine.
     | Generic subprocess adapter | ✅ | `GenericStdioAdapter` — newline-delimited JSON protocol |
     | Native adapters | ✅ | `ClaudeCodeAdapter`, `CopilotAdapter`, `CodexAdapter`, `CursorAgentAdapter` |
     | `CliToolAdapter` bridge | ✅ | Any `CliAdapter` → `shadi_mas::ToolAdapter` |
-    | DIR registration | ✅ | OASF record builder + `dirctl push/search` via subprocess |
+    | DIR registration | ✅ | Real AgentCard (skills + SLIM endpoint) published to DIR's `integration/a2a` OASF module, DID carried in `authors` |
+    | DIR-driven group discovery | ✅ | `MemberSource` (skill search / DID lookup / explicit list) resolves SLIM group trust sets from Directory — see the [Agent Directory Discovery Demo](demos/dir-group-discovery.md) |
     | `agentbridge` library | ✅ | `crates/agentbridge` |
     | CLI binary | ✅ | `agentbridge register \| list \| handoff \| delegate \| coordinate` |
     | Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register` and `coordinate` |
@@ -440,6 +441,7 @@ corrupting the state machine.
           adapter.rs           ← CliAdapter trait + CliToolAdapter
           context.rs           ← ContextPacket, CodeContext, ArtifactPayload
           dir_registry.rs      ← OASF record builder + dirctl integration
+          member_source.rs     ← MemberSource (skill/DID/explicit list) group-discovery trait
           adapters/
             generic_stdio.rs   ← subprocess JSON protocol adapter
             claude_code.rs     ← Claude Code native adapter
@@ -471,5 +473,6 @@ corrupting the state machine.
 ## Next steps
 
 - Try the [Secure Agent Group Demo](demos/did-agent-group.md) for a full multi-agent, DID-identified walkthrough.
+- Try the [Agent Directory Discovery Demo](demos/dir-group-discovery.md) to form and grow a group by discovering members in DIR instead of naming them by hand.
 - Review the transport layer in [SLIM and A2A](slim_a2a.md).
 - See sandboxing guidance for running bridged tools in [Sandbox and Policies](sandbox.md).
