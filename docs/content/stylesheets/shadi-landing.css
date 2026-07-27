@@ -219,28 +219,32 @@ body:has(.shadi-landing) .md-main__inner {
 .shadi-bridge__harnesses {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.6rem;
+  gap: 0.5rem;
   margin-bottom: 1.75rem;
+  font-size: 0.9rem;
+  line-height: 1.85;
 }
 
 .md-typeset .shadi-bridge__harness {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.4rem 1rem;
-  border-radius: 50px;
-  background: var(--shadi-feature-card-bg);
-  border: 1px solid var(--shadi-feature-card-border);
-  font-size: 0.85rem;
+  display: inline-block;
+  padding: 0.12em 0.45em;
+  border-radius: 4px;
+  background: rgba(2, 81, 175, 0.08);
+  font-size: inherit;
   font-weight: 500;
-  color: var(--md-default-fg-color);
+  color: rgb(2, 81, 175);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .shadi-bridge__harness {
+  background: rgba(251, 175, 70, 0.12);
+  color: rgb(251, 175, 70);
 }
 
 .md-typeset .shadi-bridge__harness--more {
+  background: transparent;
   color: var(--md-default-fg-color--light);
   font-weight: 400;
   font-style: italic;
-  background: transparent;
-  border-style: dashed;
 }
 
 .shadi-bridge__zero-trust {
