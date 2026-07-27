@@ -6,6 +6,7 @@ identity, and kernel-enforced sandboxing to reduce the blast radius of agent
 actions and prevent unauthorized data access or exfiltration.
 
 ## Goals
+
 - Run dynamic, interactive agents with least-privilege access.
 - Protect secrets at rest and limit access to verified sessions.
 - Enforce kernel-level restrictions so unauthorized operations are blocked by the OS.
@@ -13,11 +14,11 @@ actions and prevent unauthorized data access or exfiltration.
   DID-authenticated and MLS-encrypted.
 - Keep platform support across macOS, Windows, and mobile targets.
 
-!!! warning "Non-goals"
+The following are not within the scope of SHADI:
 
-    - Protect against a fully compromised host OS or kernel.
-    - Provide complete metadata privacy for network traffic in v1.
-    - Replace upstream MLS or OS keystore implementations.
+- Protect against a fully compromised host OS or kernel.
+- Provide complete metadata privacy for network traffic in v1.
+- Replace upstream MLS or OS keystore implementations.
 
 ## Architecture overview
 
@@ -77,7 +78,7 @@ The system can be read as four presentation layers:
 
 ## Core components
 
-### 1) Secrets layer
+### Secrets layer
 - **OS keystores**: Keychain (macOS/iOS), DPAPI/CNG (Windows), Keystore (Android),
   Secret Service (Linux).
 - **1Password backend** (optional): Cross-platform secret storage via the `op` CLI.
@@ -87,7 +88,7 @@ The system can be read as four presentation layers:
 - **Memory safety**: Secrets are wrapped in `SecretBytes` and zeroized on drop.
 - **OpenPGP parsing**: `shadictl` uses `sequoia-openpgp` to ingest keys without calling OS `gpg`.
 
-### 1b) Identity derivation and provenance
+#### Identity derivation and provenance
 - **Deterministic derivation**: Agent keys are derived from human identity material
   through a fixed KDF pipeline.
 - **KDF details**: HKDF-SHA256 with salt `shadi-agent-derive`, IKM from human
@@ -98,7 +99,7 @@ The system can be read as four presentation layers:
 - **Verification command**: `verify-agent-identity` recomputes derived key + DID
   and compares with stored values; can also enforce human DID binding checks.
 
-### 2) Sandbox layer
+### Sandbox layer
 - **macOS**: Seatbelt profile enforcement for filesystem and network policies.
 - **Windows**: AppContainer + ACL allowlists + Job Objects (kill-on-close).
 - **CLI**: `shadi` provides JSON policy loading, profile defaults, optional command blocklists, process-scoped secret disclosure, and trusted secret delivery.
@@ -107,12 +108,12 @@ The system can be read as four presentation layers:
 - **Launch-time enforcement**: Policy is resolved before the agent process starts, so the sandbox is not a prompt-level suggestion that the agent can rewrite from inside the session.
 - **Operational hardening**: macOS launcher support now resolves relative paths before emitting Seatbelt rules and accounts for required local IPC paths such as 1Password, SLIM runtime state, and temporary trusted-secret broker endpoints.
 
-### 3) Memory layer
+### Memory layer
 - **Local encrypted store**: SQLCipher-backed SQLite for portable, on-device memory.
 - **Key management**: Encryption keys live in SHADI secrets (keychain backed).
 - **Agent usage**: workloads running on SHADI can persist local state in the encrypted store.
 
-### 4) Transport layer
+### Transport layer
 - **Identity**: `shadi_identity` authenticates every SLIM peer with a per-agent
   DID-JWT (`SHADI_SLIM_AUTH=did`) instead of a shared secret; group admission
   is checked against an explicit DID allow-list.
@@ -122,7 +123,7 @@ The system can be read as four presentation layers:
   `invite`/`join`).
 - **Verified sessions**: Messages are only sent/received after DID/VC checks.
 
-### 5) Secret delivery and policy framework
+### Secret delivery and policy framework
 
 SHADI has a launch-time secret-delivery framework with exact executable
 matching: `process_inject_keychain` (explicit disclosure), `process_trusted_secret`

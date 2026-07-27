@@ -44,8 +44,8 @@ Install the local tooling SHADI expects:
 
 !!! note
 
-  If you only want to validate the launcher and CLI path, you do not need to
-  configure the full SecOps demo yet. That comes later in [Operations](operations.md).
+    If you only want to validate the launcher and CLI path, you do not need to
+    configure the full SecOps demo yet. That comes later in [Operations](operations.md).
 
 ## Build the Workspace
 
@@ -53,15 +53,15 @@ Build the workspace with either Cargo directly or the repo task runner.
 
 === "Cargo"
 
-  ```bash
-  cargo build --workspace
-  ```
+    ```bash
+    cargo build --workspace
+    ```
 
 === "Just"
 
-  ```bash
-  just build
-  ```
+    ```bash
+    just build
+    ```
 
 ## Inspect the Launcher Policy
 
@@ -82,8 +82,8 @@ Use these defaults as your baseline:
 
 !!! info
 
-  For the full policy model, profile merge rules, and platform-specific
-  behavior, continue to [Sandbox and Policies](sandbox.md).
+    For the full policy model, profile merge rules, and platform-specific
+    behavior, continue to [Sandbox and Policies](sandbox.md).
 
 ## Run Your First Sandboxed Command
 

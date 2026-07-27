@@ -7,7 +7,14 @@ for agents operating near real credentials, local data, and developer tooling.
 It enforces launch-time policy through verified identity, gated secret access,
 OS-level sandboxing, encrypted local memory, and secure transport.
 
-[Get Started](getting_started.md) | [Read the Docs](architecture.md)
+## Start Here
+
+- New to SHADI? Start with [Getting Started](getting_started.md).
+- Running or debugging live agent workflows? Use [Operations](operations.md).
+- Need the system model? Read [Architecture](architecture.md) and [Security Notes](security.md).
+- Integrating into an agent or app? Start with the [API Guide](api_integration.md).
+- Looking for flags and commands? See the [CLI Reference](cli.md).
+- Connecting CLI coding tools autonomously? Start with [AgentBridge](agentbridge.md).
 
 ## Why SHADI
 
@@ -50,39 +57,6 @@ SHADI presents the runtime as four product layers:
 - **Secure agent groups**: moderator-invited SLIM channels admitted against a
   per-agent DID allow-list, with many-to-many A2A Collaborate broadcast
   messaging between every member.
-
-## Start Here
-
-- New to SHADI? Start with [Getting Started](getting_started.md).
-- Running or debugging live agent workflows? Use [Operations](operations.md).
-- Need the system model? Read [Architecture](architecture.md) and [Security Notes](security.md).
-- Integrating into an agent or app? Start with the [API Guide](api_integration.md).
-- Looking for flags and commands? See the [CLI Reference](cli.md).
-- Connecting CLI coding tools autonomously? Start with [AgentBridge](agentbridge.md).
-
-## By Role
-
-**Operator**
-- [Getting Started](getting_started.md)
-- [Operations](operations.md)
-- [Security Notes](security.md)
-
-**Agent or Platform Engineer**
-- [Architecture](architecture.md)
-- [API Guide](api_integration.md)
-- [SLIM and A2A](slim_a2a.md)
-- [agentbridge — CLI coding-agent interconnect](agentbridge.md)
-
-**Security Engineering**
-- [Security Notes](security.md)
-- [Design Overview](design.md)
-
-## Documentation Map
-
-- Introduction: framing, architecture, security, and design intent.
-- Guides: onboarding and operational flows for setup, sandboxing, and demos.
-- Integrations: API usage, transport, framework integration, and agentbridge.
-- Reference: commands and flags for `shadictl` and `agentbridge`.
 
 ## Runtime Model (At a Glance)
 

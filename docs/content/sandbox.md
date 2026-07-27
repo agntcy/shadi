@@ -33,6 +33,7 @@ cargo run -p agntcy-shadi-cli -- --profile strict -- ./your-agent
 ```
 
 Profiles:
+
 - `strict`: local workspace only, network blocked.
 - `balanced` (default): workspace access with network blocked.
 - `connected`: workspace access with network allowed.
@@ -147,22 +148,27 @@ For delegated child delivery, SHADI also adds only the temporary runtime
 allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 
 ### Flags
-- `--policy FILE`: Load policy settings from a JSON file.
-- `--profile PROFILE`: Built-in launcher profile (`strict`, `balanced`, `connected`).
-- `--allow PATH`: Allow read+write under the path.
-- `--read PATH`: Allow read-only access under the path.
-- `--write PATH`: Allow write access under the path.
-- `--net-block`: Block network access.
-- `--allow-command CMD`: Override default command blocklist.
-- `--inject-keychain KEY=ENV`: Read a keychain secret and inject it as an env var before sandboxing.
-- `--trusted-secret KEY=NAME`: Configure direct trusted-secret delivery.
-- `--trusted-secret-exec NAME=PROGRAM`: Bind a trusted secret to an exact executable.
-- `--trusted-secret-fd-env NAME=ENV`: Set the endpoint env name for a trusted secret mapping.
-- `--git-snapshot`: Capture before/after Git state for the current working tree.
-- `--git-snapshot-dir DIR`: Override the default snapshot root at `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`.
-- `--git-snapshot-untracked`: Include an explicit untracked-file inventory in the artifact.
 
-`net_allow` is honored by the Python sandbox runner. It injects a `sitecustomize.py` hook that blocks connections outside the allowlist (best-effort; not OS-enforced).
+| Flag | Description |
+| --- | --- |
+| `--policy FILE` | Load policy settings from a JSON file. |
+| `--profile PROFILE` | Built-in launcher profile (`strict`, `balanced`, `connected`). |
+| `--allow PATH` | Allow read+write under the path. |
+| `--read PATH` | Allow read-only access under the path. |
+| `--write PATH` | Allow write access under the path. |
+| `--net-block` | Block network access. |
+| `--allow-command CMD` | Override default command blocklist. |
+| `--inject-keychain KEY=ENV` | Read a keychain secret and inject it as an env var before sandboxing. |
+| `--trusted-secret KEY=NAME` | Configure direct trusted-secret delivery. |
+| `--trusted-secret-exec NAME=PROGRAM` | Bind a trusted secret to an exact executable. |
+| `--trusted-secret-fd-env NAME=ENV` | Set the endpoint env name for a trusted secret mapping. |
+| `--git-snapshot` | Capture before/after Git state for the current working tree. |
+| `--git-snapshot-dir DIR` | Override the default snapshot root at `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`. |
+| `--git-snapshot-untracked` | Include an explicit untracked-file inventory in the artifact. |
+
+!!! note
+
+    `net_allow` is honored by the Python sandbox runner. It injects a `sitecustomize.py` hook that blocks connections outside the allowlist (best-effort; not OS-enforced).
 
 ## Git-backed snapshots
 
@@ -184,13 +190,13 @@ cargo run -p agntcy-shadi-cli -- \
 
 What gets captured:
 
-- repository detection based on the current working directory
-- discovery of nested Git repositories under the sandbox working directory
-- pre-run and post-run `HEAD`
+- Repository detection based on the current working directory
+- Discovery of nested Git repositories under the sandbox working directory
+- Pre-run and post-run `HEAD`
 - `git status --porcelain=v1 --untracked-files=all`
 - `git diff --binary`
-- optional untracked inventory via `git ls-files --others --exclude-standard`
-- a derived comparison block so operators can tell whether `HEAD`, status,
+- Optional untracked inventory via `git ls-files --others --exclude-standard`
+- A derived comparison block so operators can tell whether `HEAD`, status,
   diff, or untracked state changed
 - SHA-256 hashes for the captured Git payloads and a combined state hash
 
@@ -214,6 +220,7 @@ but the nested repo entry will still show the change through its own
 `comparison` block and will increment `git.changed_repositories`.
 
 ### Key utilities
+
 `shadictl` also manages OpenPGP keys and agent DIDs without invoking OS `gpg`:
 
 ```bash
@@ -228,9 +235,9 @@ cargo run -p agntcy-shadi-cli -- \
 
 SHADI supports three different secret-delivery modes at launch time:
 
-- explicit env disclosure via `--inject-keychain` or `process_inject_keychain`
-- process-scoped direct trusted delivery via `process_trusted_secret`
-- delegated child delivery via `process_secret_policy`
+- Explicit env disclosure via `--inject-keychain` or `process_inject_keychain`
+- Process-scoped direct trusted delivery via `process_trusted_secret`
+- Delegated child delivery via `process_secret_policy`
 
 ### Explicit disclosure
 
@@ -257,10 +264,10 @@ ambient env var.
 
 On Unix/macOS this is a one-shot broker fetch path protected by:
 
-- exact executable matching
-- process identity verification
-- launch-scoped nonce presentation
-- one-shot consumption semantics
+- Exact executable matching
+- Process identity verification
+- Launch-scoped nonce presentation
+- One-shot consumption semantics
 
 On Windows, direct trusted-secret delivery remains a compatibility handle path.
 
@@ -269,10 +276,10 @@ On Windows, direct trusted-secret delivery remains a compatibility handle path.
 `process_secret_policy` adds action-based secret rules. The implemented secure
 path today is `delegate-to-child` on Unix/macOS:
 
-- the parent process is allowed to request delivery to a specific child tool
-- the parent does not receive the secret value itself
+- The parent process is allowed to request delivery to a specific child tool
+- The parent does not receive the secret value itself
 - SHADI verifies the child executable, optional child SHA-256 constraint, and nonce
-- the child receives the secret directly as the final authorized consumer
+- The child receives the secret directly as the final authorized consumer
 
 ## Dynamic Policy Updates
 
@@ -383,6 +390,7 @@ support domain-level or port-level allowlists. `net_blocked` disables all TCP/IP
 Unix-domain sockets can still be selectively allowed.
 
 ## Notes
+
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
   to execute processes are allowed for read access.
 - On macOS, the built-in launcher profiles use the minimal Seatbelt platform

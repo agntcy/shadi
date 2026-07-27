@@ -248,44 +248,44 @@ Generated keys and DID artifacts are stored under:
 This flow starts from a human's GitHub GPG identity and produces a collection
 of agent DIDs and key material stored in the SHADI secret store.
 
-1) Fetch the public OpenPGP key from GitHub and create a DID document:
+1. Fetch the public OpenPGP key from GitHub and create a DID document:
 
-```bash
-cargo run -p agntcy-shadi-cli -- \
-  did-from-github --user alice --out human.did.json
-```
+    ```bash
+    cargo run -p agntcy-shadi-cli -- \
+      did-from-github --user alice --out human.did.json
+    ```
 
-This stores the human DID and DID document under:
+    This stores the human DID and DID document under:
 
-- `github/alice/did`
-- `github/alice/diddoc`
+    - `github/alice/did`
+    - `github/alice/diddoc`
 
-2) Import the human OpenPGP secret key locally (private material never comes
+2. Import the human OpenPGP secret key locally (private material never comes
 from GitHub):
 
-```bash
-cargo run -p agntcy-shadi-cli -- \
-  put-key --key human/gpg --in /path/to/human-secret.asc
-```
+    ```bash
+    cargo run -p agntcy-shadi-cli -- \
+      put-key --key human/gpg --in /path/to/human-secret.asc
+    ```
 
-3) Derive agent identities and keys from the human secret key:
+3. Derive agent identities and keys from the human secret key:
 
-```bash
-cargo run -p agntcy-shadi-cli -- \
-  derive-agent-did --secret human/gpg --name agent-a --prefix agents
+    ```bash
+    cargo run -p agntcy-shadi-cli -- \
+      derive-agent-did --secret human/gpg --name agent-a --prefix agents
 
-cargo run -p agntcy-shadi-cli -- \
-  derive-agent-did --secret human/gpg --name agent-b --prefix agents
-```
+    cargo run -p agntcy-shadi-cli -- \
+      derive-agent-did --secret human/gpg --name agent-b --prefix agents
+    ```
 
-Each derived agent writes keys and DID artifacts to:
+    Each derived agent writes keys and DID artifacts to:
 
-- `agents/<agent>/private`
-- `agents/<agent>/public`
-- `agents/<agent>/did`
-- `agents/<agent>/diddoc`
+    - `agents/<agent>/private`
+    - `agents/<agent>/public`
+    - `agents/<agent>/did`
+    - `agents/<agent>/diddoc`
 
-4) In your app, verify sessions using the human DID/VC and then grant secrets
+4. In your app, verify sessions using the human DID/VC and then grant secrets
 access to the agent sessions.
 
 ## Secret store naming in Rust vs Python
