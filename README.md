@@ -23,6 +23,7 @@ SHADI is for teams that want agents to work with real tools and real credentials
 ## What You Get
 
 - [`shadictl`](https://agntcy.github.io/shadi/cli/#shadictl-shadi): the main CLI for policy, sandbox execution, identity, secrets, memory, and shell control.
+- [`agentbridge`](https://agntcy.github.io/shadi/agentbridge/): a general-purpose agent interconnect over A2A — coding CLIs (Claude Code, Copilot, Codex, Cursor Agent) are the flagship use case.
 - [`shadi_sandbox`](https://agntcy.github.io/shadi/architecture/#2-sandbox-layer): OS-enforced sandbox policy.
 - [`agent_secrets`](https://agntcy.github.io/shadi/architecture/#1-secrets-layer): keychain-backed secret storage and verification gates.
 - [`shadi_memory`](https://agntcy.github.io/shadi/architecture/#3-memory-layer): SQLCipher-backed local memory.
