@@ -1,4 +1,4 @@
-name: Build shadictl Release Artifacts
+name: Build CLI Release Artifacts
 
 on:
   pull_request:
@@ -74,11 +74,12 @@ jobs:
           "OPENSSL_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENSSL_INCLUDE_DIR=$opensslDir\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Resolve release metadata
+      - name: Resolve shadictl release metadata
         id: metadata
         shell: bash
         run: |
           python scripts/resolve_shadictl_release_metadata.py \
+            --cli shadictl \
             --event-name "${{ github.event_name }}" \
             --release-tag "" \
             --target "${{ matrix.target }}" \
@@ -87,7 +88,7 @@ jobs:
       - name: Build shadictl
         run: cargo build -p agntcy-shadi-cli --release --locked --target ${{ matrix.target }}
 
-      - name: Package release archive
+      - name: Package shadictl release archive
         id: package
         shell: bash
         run: |
@@ -95,5 +96,32 @@ jobs:
             --binary "${{ steps.metadata.outputs.binary_path }}" \
             --target "${{ matrix.target }}" \
             --version "${{ steps.metadata.outputs.version }}" \
+            --name "${{ steps.metadata.outputs.binary_name }}" \
+            --output-dir dist \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Resolve agentbridge release metadata
+        id: metadata-agentbridge
+        shell: bash
+        run: |
+          python scripts/resolve_shadictl_release_metadata.py \
+            --cli agentbridge \
+            --event-name "${{ github.event_name }}" \
+            --release-tag "" \
+            --target "${{ matrix.target }}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Build agentbridge
+        run: cargo build -p agntcy-agentbridge-cli --release --locked --target ${{ matrix.target }}
+
+      - name: Package agentbridge release archive
+        id: package-agentbridge
+        shell: bash
+        run: |
+          python scripts/package_shadictl_release.py \
+            --binary "${{ steps.metadata-agentbridge.outputs.binary_path }}" \
+            --target "${{ matrix.target }}" \
+            --version "${{ steps.metadata-agentbridge.outputs.version }}" \
+            --name "${{ steps.metadata-agentbridge.outputs.binary_name }}" \
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"

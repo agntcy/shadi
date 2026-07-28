@@ -165,6 +165,7 @@ jobs:
         shell: bash
         run: |
           python scripts/resolve_shadictl_release_metadata.py \
+            --cli shadictl \
             --event-name release \
             --release-tag "${{ needs.resolve-shadictl-release.outputs.release_tag }}" \
             --target "${{ matrix.target }}" \
@@ -181,6 +182,7 @@ jobs:
             --binary "${{ steps.metadata.outputs.binary_path }}" \
             --target "${{ matrix.target }}" \
             --version "${{ steps.metadata.outputs.version }}" \
+            --name "${{ steps.metadata.outputs.binary_name }}" \
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"
 
@@ -237,6 +239,191 @@ jobs:
           gh workflow run homebrew-formula.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
+            -f tag="$RELEASE_TAG"
+
+  resolve-agentbridge-release:
+    name: Resolve agentbridge release
+    needs: release-crates
+    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - name: Resolve CLI release tag
+        id: release
+        shell: bash
+        env:
+          RELEASES: ${{ needs.release-crates.outputs.releases }}
+        run: |
+          release_tag=$(python - <<'PY'
+          import json
+          import os
+
+          releases = json.loads(os.environ["RELEASES"])
+          for release in releases:
+              if release["package_name"] == "agntcy-agentbridge-cli":
+                  print(release["tag"])
+                  break
+          else:
+              raise SystemExit("agntcy-agentbridge-cli release not found in release-plz outputs")
+          PY
+          )
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+  release-agentbridge-binaries:
+    name: Release agentbridge binaries (${{ matrix.name }})
+    needs:
+      - release-crates
+      - resolve-agentbridge-release
+    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macOS arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - name: macOS x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: Windows x86_64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+    env:
+      PYO3_PYTHON: python
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.88.0
+          targets: ${{ matrix.target }}
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev libssl-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install nettle pkg-config
+
+      - name: Set OpenSSL env vars (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidates = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL", "C:\OpenSSL-Win64")
+          $opensslDir = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $opensslDir) {
+            choco install openssl -y --no-progress
+            $opensslDir = "C:\Program Files\OpenSSL-Win64"
+          }
+          $libDir = if (Test-Path "$opensslDir\lib\VC\x64\MD") { "$opensslDir\lib\VC\x64\MD" } else { "$opensslDir\lib" }
+          "OPENSSL_DIR=$opensslDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_INCLUDE_DIR=$opensslDir\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        run: |
+          python scripts/resolve_shadictl_release_metadata.py \
+            --cli agentbridge \
+            --event-name release \
+            --release-tag "${{ needs.resolve-agentbridge-release.outputs.release_tag }}" \
+            --target "${{ matrix.target }}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Build agentbridge
+        run: cargo build -p agntcy-agentbridge-cli --release --locked --target ${{ matrix.target }}
+
+      - name: Package release archive
+        id: package
+        shell: bash
+        run: |
+          python scripts/package_shadictl_release.py \
+            --binary "${{ steps.metadata.outputs.binary_path }}" \
+            --target "${{ matrix.target }}" \
+            --version "${{ steps.metadata.outputs.version }}" \
+            --name "${{ steps.metadata.outputs.binary_name }}" \
+            --output-dir dist \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "${{ steps.metadata.outputs.release_tag }}" \
+            "${{ steps.package.outputs.archive_path }}" \
+            "${{ steps.package.outputs.checksum_path }}" \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  release-agentbridge-winget:
+    name: Publish agentbridge WinGet manifests
+    needs:
+      - release-crates
+      - resolve-agentbridge-release
+      - release-agentbridge-binaries
+    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-agentbridge-release.outputs.release_tag }}
+    steps:
+      - name: Trigger WinGet manifest workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run winget-manifests.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            -f cli=agentbridge \
+            -f release_tag="$RELEASE_TAG"
+
+  release-agentbridge-homebrew:
+    name: Publish agentbridge Homebrew formula
+    needs:
+      - release-crates
+      - resolve-agentbridge-release
+      - release-agentbridge-binaries
+    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-agentbridge-release.outputs.release_tag }}
+    steps:
+      - name: Trigger Homebrew formula workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run homebrew-formula.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            -f cli=agentbridge \
             -f tag="$RELEASE_TAG"
 
   release-crates-pr:

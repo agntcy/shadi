@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         help="CLI version used in the release archive name.",
     )
     parser.add_argument(
+        "--name",
+        default="shadictl",
+        help="Binary/archive name to package (default: shadictl).",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -105,7 +110,7 @@ def main() -> None:
         if not support_path.is_file():
             raise SystemExit(f"expected support file at {support_path}")
 
-    archive_stem = f"shadictl-v{args.version}-{args.target}"
+    archive_stem = f"{args.name}-v{args.version}-{args.target}"
     output_dir = args.output_dir.resolve()
     staging_dir = output_dir / archive_stem
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -114,7 +119,7 @@ def main() -> None:
         shutil.rmtree(staging_dir)
     staging_dir.mkdir()
 
-    binary_name = "shadictl.exe" if args.target.endswith("windows-msvc") else "shadictl"
+    binary_name = f"{args.name}.exe" if args.target.endswith("windows-msvc") else args.name
     shutil.copy2(binary, staging_dir / binary_name)
     shutil.copy2(args.license, staging_dir / args.license.name)
     shutil.copy2(args.readme, staging_dir / args.readme.name)

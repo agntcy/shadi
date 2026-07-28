@@ -20,22 +20,38 @@ from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_MANIFEST = ROOT / "Cargo.toml"
-CLI_MANIFEST = ROOT / "crates" / "shadictl" / "Cargo.toml"
 DEFAULT_OUTPUT_DIR = ROOT / "dist" / "winget"
 
 MANIFEST_VERSION = "1.12.0"
-PACKAGE_IDENTIFIER = "AGNTCY.shadictl"
 PACKAGE_LOCALE = "en-US"
 PUBLISHER = "AGNTCY"
-PACKAGE_NAME = "shadictl"
-MONIKER = "shadictl"
 WINDOWS_ARCHITECTURE = "x64"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 DOCS_URL = "https://agntcy.github.io/shadi"
-TAG_PATTERN = re.compile(r"^agntcy-shadi-cli-v(?P<version>[0-9A-Za-z.+-]+)$")
 REPOSITORY_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
 )
+
+CLI_CONFIGS = {
+    "shadictl": {
+        "manifest": ROOT / "crates" / "shadictl" / "Cargo.toml",
+        "tag_pattern": re.compile(r"^agntcy-shadi-cli-v(?P<version>[0-9A-Za-z.+-]+)$"),
+        "package_identifier": "AGNTCY.shadictl",
+        "package_name": "shadictl",
+        "moniker": "shadictl",
+        "binary_name": "shadictl",
+    },
+    "agentbridge": {
+        "manifest": ROOT / "crates" / "agentbridge_cli" / "Cargo.toml",
+        "tag_pattern": re.compile(
+            r"^agntcy-agentbridge-cli-v(?P<version>[0-9A-Za-z.+-]+)$"
+        ),
+        "package_identifier": "AGNTCY.agentbridge",
+        "package_name": "agentbridge",
+        "moniker": "agentbridge",
+        "binary_name": "agentbridge",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -50,12 +66,18 @@ class ReleaseAssets:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render WinGet manifests for a released shadictl CLI tag."
+        description="Render WinGet manifests for a released CLI tag."
+    )
+    parser.add_argument(
+        "--cli",
+        choices=sorted(CLI_CONFIGS),
+        default="shadictl",
+        help="Which CLI to render WinGet manifests for (default: shadictl).",
     )
     parser.add_argument(
         "--tag",
         required=True,
-        help="Release tag in the form agntcy-shadi-cli-v<version>",
+        help="Release tag, e.g. agntcy-shadi-cli-v<version> or agntcy-agentbridge-cli-v<version>",
     )
     parser.add_argument(
         "--output-dir",
@@ -142,20 +164,22 @@ def parse_repository_slug(repository_url: str) -> str:
     return f"{match.group('owner')}/{match.group('repo')}"
 
 
-def parse_release_tag(tag: str) -> str:
-    match = TAG_PATTERN.match(tag)
+def parse_release_tag(tag: str, tag_pattern: re.Pattern[str]) -> str:
+    match = tag_pattern.match(tag)
     if not match:
-        raise SystemExit(f"expected agntcy-shadi-cli-v<version> tag, got: {tag}")
+        raise SystemExit(f"expected {tag_pattern.pattern} tag, got: {tag}")
     return match.group("version")
 
 
-def resolve_release_assets(tag: str, repository_slug: str) -> ReleaseAssets:
-    version = parse_release_tag(tag)
+def resolve_release_assets(
+    tag: str, repository_slug: str, tag_pattern: re.Pattern[str], binary_name: str
+) -> ReleaseAssets:
+    version = parse_release_tag(tag, tag_pattern)
     release = fetch_json(
         f"https://api.github.com/repos/{repository_slug}/releases/tags/{tag}"
     )
 
-    installer_name = f"shadictl-v{version}-{WINDOWS_TARGET}.zip"
+    installer_name = f"{binary_name}-v{version}-{WINDOWS_TARGET}.zip"
     checksum_name = f"{installer_name}.sha256"
 
     installer_url = None
@@ -196,12 +220,12 @@ def resolve_release_assets(tag: str, repository_slug: str) -> ReleaseAssets:
     )
 
 
-def render_version_manifest(version: str) -> str:
+def render_version_manifest(package_identifier: str, version: str) -> str:
     return textwrap.dedent(
         f"""\
         # yaml-language-server: $schema=https://aka.ms/winget-manifest.version.{MANIFEST_VERSION}.schema.json
 
-        PackageIdentifier: {PACKAGE_IDENTIFIER}
+        PackageIdentifier: {package_identifier}
         PackageVersion: {version}
         DefaultLocale: {PACKAGE_LOCALE}
         ManifestType: version
@@ -212,12 +236,20 @@ def render_version_manifest(version: str) -> str:
 
 def render_default_locale_manifest(
     *,
+    package_identifier: str,
+    package_name: str,
+    moniker: str,
     tag: str,
     version: str,
     description: str,
     repository_url: str,
     license_id: str,
 ) -> str:
+    # textwrap.dedent() strips the *common* leading whitespace across every
+    # line. Interpolating a multi-line block whose own lines start at column 0
+    # (as YAML block-sequence items must) breaks that common-prefix
+    # computation and leaves every other line indented. Dedent the template
+    # with a single-line placeholder first, then splice the tags block in.
     tags = "\n".join(
         [
             "Tags:",
@@ -228,24 +260,24 @@ def render_default_locale_manifest(
             "- slim",
         ]
     )
-    return textwrap.dedent(
+    template = textwrap.dedent(
         f"""\
         # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.{MANIFEST_VERSION}.schema.json
 
-        PackageIdentifier: {PACKAGE_IDENTIFIER}
+        PackageIdentifier: {package_identifier}
         PackageVersion: {version}
         PackageLocale: {PACKAGE_LOCALE}
         Publisher: {PUBLISHER}
         PublisherUrl: https://github.com/agntcy
         PublisherSupportUrl: {repository_url}/issues
         Author: AGNTCY Contributors
-        PackageName: {PACKAGE_NAME}
+        PackageName: {package_name}
         PackageUrl: {repository_url}
         License: {license_id}
         LicenseUrl: {repository_url}/blob/{tag}/LICENSE.md
         ShortDescription: {description}
-        Moniker: {MONIKER}
-        {tags}
+        Moniker: {moniker}
+        __TAGS__
         Documentations:
         - DocumentLabel: Documentation
           DocumentUrl: {DOCS_URL}
@@ -254,22 +286,25 @@ def render_default_locale_manifest(
         ManifestVersion: {MANIFEST_VERSION}
         """
     )
+    return template.replace("__TAGS__", tags)
 
 
-def render_installer_manifest(release_assets: ReleaseAssets) -> str:
+def render_installer_manifest(
+    *, package_identifier: str, moniker: str, binary_name: str, release_assets: ReleaseAssets
+) -> str:
     relative_file_path = (
-        f"shadictl-v{release_assets.version}-{WINDOWS_TARGET}\\shadictl.exe"
+        f"{binary_name}-v{release_assets.version}-{WINDOWS_TARGET}\\{binary_name}.exe"
     )
     return textwrap.dedent(
         f"""\
         # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.{MANIFEST_VERSION}.schema.json
 
-        PackageIdentifier: {PACKAGE_IDENTIFIER}
+        PackageIdentifier: {package_identifier}
         PackageVersion: {release_assets.version}
         InstallerType: zip
         NestedInstallerType: portable
         Commands:
-        - {MONIKER}
+        - {moniker}
         ReleaseDate: {release_assets.release_date}
         Installers:
         - Architecture: {WINDOWS_ARCHITECTURE}
@@ -277,7 +312,7 @@ def render_installer_manifest(release_assets: ReleaseAssets) -> str:
           InstallerSha256: {release_assets.installer_sha256}
           NestedInstallerFiles:
           - RelativeFilePath: {relative_file_path}
-            PortableCommandAlias: {MONIKER}
+            PortableCommandAlias: {moniker}
         ManifestType: installer
         ManifestVersion: {MANIFEST_VERSION}
         """
@@ -297,9 +332,11 @@ def write_github_output(path: Path, values: dict[str, str]) -> None:
 
 def main() -> int:
     args = parse_args()
+    config = CLI_CONFIGS[args.cli]
+    package_identifier = config["package_identifier"]
 
     workspace = load_toml(WORKSPACE_MANIFEST)
-    cli_manifest = load_toml(CLI_MANIFEST)
+    cli_manifest = load_toml(config["manifest"])
     workspace_package = workspace["workspace"]["package"]
     package = cli_manifest["package"]
 
@@ -308,20 +345,25 @@ def main() -> int:
     description = package["description"]
     license_id = resolve_workspace_value(package, workspace_package, "license")
 
-    release_assets = resolve_release_assets(args.tag, repository_slug)
+    release_assets = resolve_release_assets(
+        args.tag, repository_slug, config["tag_pattern"], config["binary_name"]
+    )
 
     output_dir = args.output_dir.resolve()
-    manifests_dir = manifest_directory(output_dir, PACKAGE_IDENTIFIER, release_assets.version)
+    manifests_dir = manifest_directory(output_dir, package_identifier, release_assets.version)
     if manifests_dir.exists():
         shutil.rmtree(manifests_dir)
     manifests_dir.mkdir(parents=True, exist_ok=True)
 
-    (manifests_dir / f"{PACKAGE_IDENTIFIER}.yaml").write_text(
-        render_version_manifest(release_assets.version),
+    (manifests_dir / f"{package_identifier}.yaml").write_text(
+        render_version_manifest(package_identifier, release_assets.version),
         encoding="utf-8",
     )
-    (manifests_dir / f"{PACKAGE_IDENTIFIER}.locale.{PACKAGE_LOCALE}.yaml").write_text(
+    (manifests_dir / f"{package_identifier}.locale.{PACKAGE_LOCALE}.yaml").write_text(
         render_default_locale_manifest(
+            package_identifier=package_identifier,
+            package_name=config["package_name"],
+            moniker=config["moniker"],
             tag=release_assets.tag,
             version=release_assets.version,
             description=description,
@@ -330,15 +372,20 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
-    (manifests_dir / f"{PACKAGE_IDENTIFIER}.installer.yaml").write_text(
-        render_installer_manifest(release_assets),
+    (manifests_dir / f"{package_identifier}.installer.yaml").write_text(
+        render_installer_manifest(
+            package_identifier=package_identifier,
+            moniker=config["moniker"],
+            binary_name=config["binary_name"],
+            release_assets=release_assets,
+        ),
         encoding="utf-8",
     )
 
     outputs = {
         "manifest_dir": str(manifests_dir),
         "manifest_rel_dir": manifests_dir.relative_to(output_dir).as_posix(),
-        "package_identifier": PACKAGE_IDENTIFIER,
+        "package_identifier": package_identifier,
         "package_version": release_assets.version,
         "release_url": release_assets.release_url,
     }

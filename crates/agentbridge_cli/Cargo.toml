@@ -3,7 +3,7 @@ name = "agntcy-agentbridge-cli"
 version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
-description = "CLI binary for the agentbridge coding-agent interconnect."
+description = "CLI binary for the agentbridge general-purpose agent interconnect."
 license.workspace = true
 repository.workspace = true
 
