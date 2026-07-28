@@ -21,5 +21,7 @@ Participation in security issue coordination processes is at the discretion of t
 ## Security advisories
 
 The project team is committed to transparency in the security issue disclosure
-process. The SHADI team announces security issues via [project GitHub Release notes](https://github.com/agntcy/shadi/releases)
+process. The SHADI team tracks and publishes security advisories in the
+project's [GitHub Security Advisories space](https://github.com/agntcy/shadi/security/advisories),
+and announces them via [project GitHub Release notes](https://github.com/agntcy/shadi/releases)
 and the [RustSec advisory database](https://github.com/RustSec/advisory-db) (i.e. `cargo-audit`).

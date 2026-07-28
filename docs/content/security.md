@@ -3,6 +3,14 @@
 This library targets confidentiality for agent secrets at rest and in memory.
 It does not assume a hostile OS for v1.
 
+!!! info "Reporting a vulnerability"
+
+    Report security issues privately to [security@agntcy.org](mailto:security@agntcy.org),
+    not via the public issue tracker. The project tracks and publishes
+    advisories in the [GitHub Security Advisories space](https://github.com/agntcy/shadi/security/advisories) —
+    see [SECURITY.md](https://github.com/agntcy/shadi/blob/main/SECURITY.md) for
+    the full disclosure and coordination process.
+
 OpenPGP key handling is performed in-process via `sequoia-openpgp` rather than
 shelling out to `gpg`.
 
