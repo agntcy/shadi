@@ -4,8 +4,8 @@
 class Shadictl < Formula
   desc "Command-line interface for SHADI policy, secrets, memory, and SLIM operations."
   homepage "https://github.com/agntcy/shadi"
-  url "https://github.com/agntcy/shadi/archive/refs/tags/agntcy-shadi-cli-v0.1.2.tar.gz"
-  sha256 "b01d1024479170c1cf7990ccb63489aa9cee2dc9535c7a4ca28a83c4317eca3a"
+  url "https://github.com/agntcy/shadi/archive/refs/tags/agntcy-shadi-cli-v0.1.3.tar.gz"
+  sha256 "cc61be057f9cec9029e2b7641d7032ed466cb489ae9583eb4e857853e214a702"
   license "Apache-2.0"
   head "https://github.com/agntcy/shadi.git", branch: "main"
 
