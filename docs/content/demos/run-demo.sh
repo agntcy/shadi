@@ -22,7 +22,12 @@ AB=target/debug/agentbridge
 [ -x "$AB" ] || { echo "building agentbridge…"; cargo build -p agntcy-agentbridge-cli || exit 1; }
 
 # Fresh, isolated run dir + endpoint; clear any stale shells holding the port.
-export SHADI_TMP_DIR="$(mktemp -d /tmp/shadi-did-demo.XXXXXX)"
+# Resolve to the real path (macOS /tmp is a symlink to /private/tmp) so it
+# matches exactly what shadictl's sandbox --read/--write policy resolves to —
+# Seatbelt's subpath rules don't match a path accessed through the /tmp
+# symlink if the rule was generated for the canonicalized /private/tmp form.
+SHADI_TMP_DIR_RAW="$(mktemp -d /tmp/shadi-did-demo.XXXXXX)"
+export SHADI_TMP_DIR="$(cd "$SHADI_TMP_DIR_RAW" && pwd -P)"
 export SLIM_ENDPOINT="127.0.0.1:47590"
 pkill -f "$BIN shell" 2>/dev/null; sleep 1
 # shellcheck source=/dev/null
@@ -99,8 +104,14 @@ step "Part 2 done."
 # codex checks real disk usage, copilot ranks real processes by CPU, and
 # claude-code is given both real outputs and asked to synthesize a report — each
 # step depends on the previous agent's real result, not a canned reply.
-# A failed delegate below usually means that CLI isn't installed/authenticated on
-# this machine, not a SHADI bug — the script continues regardless.
+# A failed delegate below usually means the CLI isn't installed/authenticated
+# on this machine, or that the sandbox --net-block/--read policy above is
+# narrower than what that CLI itself needs (its own API endpoints, install
+# path, or credential/config directory aren't in --net-allow/--read) — not a
+# SHADI bug. The policy here only grants what agentbridge's own SLIM listener
+# needs; add tool-specific --read/--net-allow entries if you want the wrapped
+# CLI's own network/filesystem calls to succeed too. The script continues
+# regardless.
 
 step "Part 3: registering claude-code/codex/copilot as real agentbridge adapters..."
 REGISTER_PIDS=()
@@ -109,7 +120,8 @@ for a in claude-code codex copilot; do
   # sandbox with network blocked by default — Seatbelt/Landlock/AppContainer
   # policies are inherited by child processes, so wrapping it in shadictl is
   # enough to confine whatever CLI tool the adapter spawns to run a task.
-  env SHADI_AGENT_ID="$a" "$BIN" --net-block --net-allow "$SLIM_ENDPOINT" -- \
+  env SHADI_AGENT_ID="$a" "$BIN" --net-block --net-allow "$SLIM_ENDPOINT" \
+    --read "$SHADI_TMP_DIR" -- \
     "$AB" register --tool "$a" --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
     >"$LOG/$a-agent.log" 2>&1 &
   REGISTER_PIDS+=($!)

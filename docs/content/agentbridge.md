@@ -315,10 +315,14 @@ Controls:
   (Linux), and AppContainer + Job Objects (Windows) sandboxes are all
   kernel-enforced and inherited by child processes, so wrapping `agentbridge
   register` in [`shadictl`](sandbox.md) — `shadictl --net-block --net-allow
-  <slim-endpoint> -- agentbridge register ...` — is enough to confine whatever
-  CLI tool the adapter spawns to run a task. agentbridge has no sandboxing code
-  of its own; it leans entirely on the same enforcement `shadictl` already
-  provides.
+  <slim-endpoint> --read <mtls-cert-dir> -- agentbridge register ...` — is
+  enough to confine whatever CLI tool the adapter spawns to run a task.
+  agentbridge has no sandboxing code of its own; it leans entirely on the same
+  enforcement `shadictl` already provides. The `--read` grant needs the SLIM
+  mTLS client certificate directory so the listener itself can still connect;
+  on macOS, resolve it to its real path first (`/tmp` is a symlink to
+  `/private/tmp`, and Seatbelt's rules don't match a path reached through the
+  symlink if generated for the canonicalized form).
 - The listener prints a warning on start-up naming the tool that will execute
   incoming tasks.
 - Only expose the listener to trusted SLIM peers (`SLIM_MEMBER_DIDS` decides

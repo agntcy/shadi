@@ -203,7 +203,8 @@ by child processes, so wrapping it in `shadictl` is enough to constrain whatever
 tool the adapter spawns to run a task, with no extra code:
 
 ```bash
-SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block --net-allow "$SLIM_ENDPOINT" -- \
+SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block --net-allow "$SLIM_ENDPOINT" \
+  --read "$SHADI_TMP_DIR" -- \
   target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT"
 ```

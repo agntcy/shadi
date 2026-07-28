@@ -21,11 +21,17 @@ service so remote callers can reach it.
 
 > **Security:** `register --slim-endpoint` refuses to start unless it's running
 > under a SHADI sandbox with network blocked by default — wrap it in `shadictl`,
-> as shown below. See [Environment variables](#environment-variables).
+> as shown below, and `--read` the directory holding the SLIM mTLS client
+> certificate (`$SHADI_TMP_DIR/shadi-slim-mtls` in the demos) so the listener
+> can still read its own cert under the sandbox. On macOS, resolve
+> `$SHADI_TMP_DIR` to its real path first (`cd "$SHADI_TMP_DIR" && pwd -P`) —
+> `/tmp` is a symlink to `/private/tmp`, and Seatbelt's sandbox rules don't
+> match a path reached through the symlink if the rule was generated for the
+> canonicalized form. See [Environment variables](#environment-variables).
 
 ```bash
 # Wrap any subprocess that speaks the agentbridge JSON protocol
-shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register \
   --tool generic-stdio \
   --command my-tool \
@@ -33,15 +39,15 @@ shadictl --net-block --net-allow 127.0.0.1:47357 -- \
   --slim-endpoint 127.0.0.1:47357
 
 # Start a Claude Code adapter
-shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register --tool claude-code --slim-endpoint 127.0.0.1:47357
 
 # Start a Copilot adapter
-shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register --tool copilot --slim-endpoint 127.0.0.1:47357
 
 # Start a Codex adapter
-shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register --tool codex --slim-endpoint 127.0.0.1:47357
 
 # Publish an OASF record to the Agent Directory after registering

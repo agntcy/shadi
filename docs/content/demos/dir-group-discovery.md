@@ -124,7 +124,8 @@ whatever CLI tool the adapter spawns to run a task, with no extra code:
 source docs/content/demos/demo-env-dir.sh
 export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"
 SHADI_AGENT_ID=copilot target/debug/shadictl --net-block \
-  --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" -- \
+  --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
+  --read "$SHADI_TMP_DIR" -- \
   target/debug/agentbridge register --tool copilot \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
   --dir-publish --dir-server "$SHADI_DIR_SERVER"
@@ -249,7 +250,8 @@ without recreating anything.
 source docs/content/demos/demo-env-dir.sh
 export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"
 SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block \
-  --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" -- \
+  --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
+  --read "$SHADI_TMP_DIR" -- \
   target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
   --dir-publish --dir-server "$SHADI_DIR_SERVER"
