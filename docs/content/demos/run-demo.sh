@@ -105,7 +105,12 @@ step "Part 2 done."
 step "Part 3: registering claude-code/codex/copilot as real agentbridge adapters..."
 REGISTER_PIDS=()
 for a in claude-code codex copilot; do
-  env SHADI_AGENT_ID="$a" "$AB" register --tool "$a" --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
+  # register --slim-endpoint refuses to start unless it's running under a SHADI
+  # sandbox with network blocked by default — Seatbelt/Landlock/AppContainer
+  # policies are inherited by child processes, so wrapping it in shadictl is
+  # enough to confine whatever CLI tool the adapter spawns to run a task.
+  env SHADI_AGENT_ID="$a" "$BIN" --net-block --net-allow "$SLIM_ENDPOINT" -- \
+    "$AB" register --tool "$a" --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
     >"$LOG/$a-agent.log" 2>&1 &
   REGISTER_PIDS+=($!)
 done

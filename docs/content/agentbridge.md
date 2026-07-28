@@ -309,10 +309,20 @@ so it can act non-interactively.
 
 Controls:
 
+- **Enforced**: `register --slim-endpoint` refuses to start unless the process is
+  running under a SHADI sandbox with network blocked by default
+  (`shadi_sandbox::sandbox_enforced_from_env`). Seatbelt (macOS), Landlock
+  (Linux), and AppContainer + Job Objects (Windows) sandboxes are all
+  kernel-enforced and inherited by child processes, so wrapping `agentbridge
+  register` in [`shadictl`](sandbox.md) — `shadictl --net-block --net-allow
+  <slim-endpoint> -- agentbridge register ...` — is enough to confine whatever
+  CLI tool the adapter spawns to run a task. agentbridge has no sandboxing code
+  of its own; it leans entirely on the same enforcement `shadictl` already
+  provides.
 - The listener prints a warning on start-up naming the tool that will execute
   incoming tasks.
-- Only expose the listener to trusted SLIM peers. Run agents inside the SHADI
-  [sandbox](sandbox.md) so tool execution is confined by OS policy.
+- Only expose the listener to trusted SLIM peers (`SLIM_MEMBER_DIDS` decides
+  *who* may send a task; the sandbox decides *what* it can do once it runs).
 - Keep the SLIM node on loopback (`127.0.0.1`) for local demos; only bind a
   routable address when the peer set is trusted and authenticated.
 

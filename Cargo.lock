@@ -186,6 +186,7 @@ dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",
+ "agntcy-shadi-sandbox",
  "agntcy-slim-bindings",
  "agntcy-slim-rpc",
  "anyhow",

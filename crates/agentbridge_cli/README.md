@@ -19,22 +19,30 @@ cargo install --path crates/agentbridge_cli
 Wrap a CLI tool as an agentbridge adapter and keep it running as a SLIM A2A
 service so remote callers can reach it.
 
+> **Security:** `register --slim-endpoint` refuses to start unless it's running
+> under a SHADI sandbox with network blocked by default — wrap it in `shadictl`,
+> as shown below. See [Environment variables](#environment-variables).
+
 ```bash
 # Wrap any subprocess that speaks the agentbridge JSON protocol
-agentbridge register \
+shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+  agentbridge register \
   --tool generic-stdio \
   --command my-tool \
   --arg --agentbridge-mode \
   --slim-endpoint 127.0.0.1:47357
 
 # Start a Claude Code adapter
-agentbridge register --tool claude-code --slim-endpoint 127.0.0.1:47357
+shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+  agentbridge register --tool claude-code --slim-endpoint 127.0.0.1:47357
 
 # Start a Copilot adapter
-agentbridge register --tool copilot --slim-endpoint 127.0.0.1:47357
+shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+  agentbridge register --tool copilot --slim-endpoint 127.0.0.1:47357
 
 # Start a Codex adapter
-agentbridge register --tool codex --slim-endpoint 127.0.0.1:47357
+shadictl --net-block --net-allow 127.0.0.1:47357 -- \
+  agentbridge register --tool codex --slim-endpoint 127.0.0.1:47357
 
 # Publish an OASF record to the Agent Directory after registering
 agentbridge register --tool claude-code --dir-publish
@@ -168,6 +176,14 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 > not supported: a `register` listener forwards incoming A2A tasks to the local
 > CLI tool, so admission must be cryptographic, not a symmetric secret compiled
 > into every demo script.
+>
+> That decides *who* may send a task. It doesn't constrain *what* the task can
+> do once it runs, so `register --slim-endpoint` separately refuses to start
+> unless it's running under a SHADI sandbox with network blocked by default —
+> wrap it in `shadictl --net-block --net-allow <slim-endpoint> --`. Kernel
+> sandboxes (Seatbelt/Landlock/AppContainer) are inherited by child processes,
+> so this confines whatever CLI tool the adapter spawns with no extra code in
+> agentbridge itself.
 
 ## Live SLIM demo (4 terminals)
 
