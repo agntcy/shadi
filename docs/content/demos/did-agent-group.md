@@ -196,10 +196,16 @@ checks `SHADI_SLIM_AUTH=did` the same way `shadictl` does, no separate setup).
 of this step (it still participates in the roll call above).
 
 **Each agent terminal (e.g. claude-code)** — registers a live adapter backed by the
-real CLI, reachable at `agntcy/shadi/claude-code-a2a`:
+real CLI, reachable at `agntcy/shadi/claude-code-a2a`. `agentbridge register
+--slim-endpoint` refuses to start unless it's running under a SHADI sandbox with
+network blocked by default — Seatbelt/Landlock/AppContainer policies are inherited
+by child processes, so wrapping it in `shadictl` is enough to constrain whatever CLI
+tool the adapter spawns to run a task, with no extra code:
 
 ```bash
-SHADI_AGENT_ID=claude-code target/debug/agentbridge register --tool claude-code \
+SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block --net-allow "$SLIM_ENDPOINT" \
+  --read "$SHADI_TMP_DIR" -- \
+  target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT"
 ```
 ```text

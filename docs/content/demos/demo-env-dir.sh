@@ -19,6 +19,12 @@ export SHADI_SLIM_AUTH=did                         # select DID-JWT admission
 export SLIM_HUMAN_SEED="shadi-dir-demo-human-root-secret"
 
 export SHADI_TMP_DIR="${SHADI_TMP_DIR:-/tmp/shadi-dir-demo}"
+mkdir -p "$SHADI_TMP_DIR"
+# Resolve to the real path (macOS /tmp is a symlink to /private/tmp) so it
+# matches exactly what shadictl's sandbox --read/--write policy resolves to —
+# Seatbelt's subpath rules don't match a path accessed through the /tmp
+# symlink if the rule was generated for the canonicalized /private/tmp form.
+export SHADI_TMP_DIR="$(cd "$SHADI_TMP_DIR" && pwd -P)"
 export SLIM_ENDPOINT="${SLIM_ENDPOINT:-127.0.0.1:47660}"
 
 # One transport cert is fine for the demo — identity is the DID, not the TLS CN.

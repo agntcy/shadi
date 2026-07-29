@@ -115,12 +115,18 @@ printf '/slim whoami\n/exit\n' | SHADI_AGENT_ID=avatar target/debug/shadictl she
 ```
 
 **Terminal copilot** and **Terminal codex** — register a real listener and
-publish its AgentCard to the local DIR node:
+publish its AgentCard to the local DIR node. `agentbridge register
+--slim-endpoint` refuses to start unless it's running under a SHADI sandbox with
+network blocked by default — wrapping it in `shadictl` is enough to constrain
+whatever CLI tool the adapter spawns to run a task, with no extra code:
 
 ```bash
 source docs/content/demos/demo-env-dir.sh
 export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"
-SHADI_AGENT_ID=copilot target/debug/agentbridge register --tool copilot \
+SHADI_AGENT_ID=copilot target/debug/shadictl --net-block \
+  --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
+  --read "$SHADI_TMP_DIR" -- \
+  target/debug/agentbridge register --tool copilot \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
   --dir-publish --dir-server "$SHADI_DIR_SERVER"
 ```
@@ -243,7 +249,10 @@ without recreating anything.
 ```bash
 source docs/content/demos/demo-env-dir.sh
 export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"
-SHADI_AGENT_ID=claude-code target/debug/agentbridge register --tool claude-code \
+SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block \
+  --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
+  --read "$SHADI_TMP_DIR" -- \
+  target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
   --dir-publish --dir-server "$SHADI_DIR_SERVER"
 ```

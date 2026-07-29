@@ -194,11 +194,18 @@ Controls:
   allow-list — shared secrets are not accepted for agentbridge listeners
   (`shadi_identity::require_did_auth_from_env` rejects anything else). See the
   [Secure Agent Group Demo](demos/did-agent-group.md) for the full admission
-  model.
+  model. This decides *who* may send a task.
 - Transport is mutually authenticated with SLIMRPC over TLS; keep the CA bundle
   private to trusted peers.
-- Run bridged tools inside the SHADI [sandbox](sandbox.md) so tool execution is
-  confined by OS policy. See [AgentBridge → Security model](agentbridge.md#security-model).
+- **Enforced**: `register --slim-endpoint` refuses to start unless it is running
+  under a SHADI [sandbox](sandbox.md) with network blocked by default
+  (`shadi_sandbox::sandbox_enforced_from_env`). Seatbelt/Landlock/AppContainer
+  sandboxes are kernel-enforced and inherited by child processes, so wrapping
+  `agentbridge register` in `shadictl` confines whatever CLI tool the adapter
+  spawns to run a task — agentbridge has no sandboxing logic of its own, it
+  leans entirely on `shadictl`'s existing enforcement. This decides *what* a
+  task can do once it runs. See
+  [AgentBridge → Security model](agentbridge.md#security-model).
 
 ## Threat model
 

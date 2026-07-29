@@ -450,6 +450,28 @@ fn default_skills() -> Vec<AgentSkill> {
     .collect()
 }
 
+/// Require that this process is running under a SHADI sandbox with network
+/// blocked by default before it may expose a remote-reachable listener.
+///
+/// Seatbelt (macOS), Landlock (Linux), and AppContainer + Job Objects
+/// (Windows) sandboxes are all kernel-enforced and inherited by descendant
+/// processes, so wrapping `agentbridge register` in `shadictl`'s sandbox is
+/// enough to constrain whatever CLI tool an adapter spawns to run a task —
+/// no sandboxing code is needed in agentbridge itself. See
+/// [`shadi_sandbox::sandbox_enforced_from_env`].
+fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String> {
+    if shadi_sandbox::sandbox_enforced_from_env() {
+        return Ok(());
+    }
+    Err(format!(
+        "agentbridge register --slim-endpoint requires running under a SHADI sandbox with \
+         network blocked by default — a remote-reachable listener must not execute tasks \
+         unsandboxed. Launch as:\n\n  \
+         shadictl --net-block --net-allow {endpoint} -- agentbridge register --tool {agent_id} \
+         --slim-endpoint {endpoint} ...\n"
+    ))
+}
+
 /// Start a SLIM A2A listener that forwards incoming tasks to `adapter`.
 ///
 /// Listens indefinitely under `agntcy/shadi/<agent_id>-a2a` until Ctrl-C.
@@ -463,7 +485,12 @@ fn run_slim_listener(
 ) -> Result<(), String> {
     let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
 
-    // Security posture: incoming A2A tasks are executed by the local CLI tool.
+    require_sandbox_enforced(agent_id, endpoint)?;
+
+    // Security posture: incoming A2A tasks are executed by the local CLI tool,
+    // constrained by whatever SHADI sandbox policy wraps this process (required
+    // above). Sandboxing bounds what a task CAN do; SLIM_MEMBER_DIDS still
+    // decides WHO may send one — only expose this listener to trusted SLIM peers.
     eprintln!(
         "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
          CLI tool. Only expose this listener to trusted SLIM peers."
@@ -667,6 +694,32 @@ fn publish_card_to_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn require_sandbox_enforced_rejects_unsandboxed_and_permissive() {
+        // These env vars are touched by no other test in this crate, so a single
+        // sequential test needs no cross-test lock.
+        std::env::remove_var(shadi_sandbox::SANDBOX_ACTIVE_ENV);
+        std::env::remove_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV);
+        let err = require_sandbox_enforced("copilot", "127.0.0.1:47357")
+            .expect_err("must reject when not running under any sandbox");
+        assert!(err.contains("shadictl --net-block"));
+        assert!(err.contains("--tool copilot"));
+        assert!(err.contains("127.0.0.1:47357"));
+
+        std::env::set_var(shadi_sandbox::SANDBOX_ACTIVE_ENV, "1");
+        std::env::set_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV, "0");
+        assert!(
+            require_sandbox_enforced("copilot", "127.0.0.1:47357").is_err(),
+            "an active but network-permissive sandbox must still be rejected"
+        );
+
+        std::env::set_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV, "1");
+        assert!(require_sandbox_enforced("copilot", "127.0.0.1:47357").is_ok());
+
+        std::env::remove_var(shadi_sandbox::SANDBOX_ACTIVE_ENV);
+        std::env::remove_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV);
+    }
 
     #[test]
     fn preview_truncates_to_first_nonblank_line() {

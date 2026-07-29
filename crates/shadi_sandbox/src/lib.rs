@@ -16,6 +16,37 @@ use std::process::{Command, ExitStatus};
 use std::io;
 use tracing::{field, info_span};
 
+/// Set on a sandboxed child's environment by [`spawn_sandboxed`], `"1"` iff
+/// the process is running under a SHADI sandbox at all.
+///
+/// Env vars are inherited by descendants automatically, so a grandchild
+/// spawned by the sandboxed process (e.g. a coding-tool subprocess launched
+/// by an agentbridge adapter) can observe this too — but it does not, on its
+/// own, mean anything is actually restricted. Use [`sandbox_enforced_from_env`]
+/// to check for a *meaningfully* restrictive policy, not just an active one.
+pub const SANDBOX_ACTIVE_ENV: &str = "SHADI_SANDBOX_ACTIVE";
+
+/// Set on a sandboxed child's environment by [`spawn_sandboxed`], `"1"` iff
+/// the enclosing policy blocks network by default ([`SandboxPolicy::net_blocked`]).
+pub const SANDBOX_NET_BLOCKED_ENV: &str = "SHADI_SANDBOX_NET_BLOCKED";
+
+/// Whether the current process is running under a SHADI sandbox that blocks
+/// network by default (exceptions carved out via `net_allow` are fine — the
+/// point is default-deny, not zero connectivity).
+///
+/// Seatbelt (macOS), Landlock (Linux), and AppContainer + Job Objects
+/// (Windows) sandboxes are all kernel-enforced and inherited by descendant
+/// processes, so any subprocess spawned by a sandboxed process — including a
+/// coding-tool subprocess an agentbridge adapter launches — is bound by the
+/// same policy automatically. A remote-reachable listener (or any other
+/// operation that executes attacker-influenceable input) should call this
+/// before starting and refuse to run if it returns `false`, rather than
+/// re-implementing policy enforcement itself.
+pub fn sandbox_enforced_from_env() -> bool {
+    std::env::var(SANDBOX_ACTIVE_ENV).as_deref() == Ok("1")
+        && std::env::var(SANDBOX_NET_BLOCKED_ENV).as_deref() == Ok("1")
+}
+
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let program = command.get_program().to_string_lossy().to_string();
     let args = command
@@ -39,6 +70,12 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
         network.mode = %network_mode,
     );
     let _guard = span.enter();
+
+    command.env(SANDBOX_ACTIVE_ENV, "1");
+    command.env(
+        SANDBOX_NET_BLOCKED_ENV,
+        if policy.net_blocked() { "1" } else { "0" },
+    );
 
     platform::spawn_sandboxed(command, policy)
 }
@@ -225,6 +262,57 @@ mod tests {
         let policy = SandboxPolicy::new().allow_read_path("/usr/bin");
         let mut child = spawn_sandboxed(&mut command, &policy).expect("spawn");
         let _ = child.wait().expect("wait");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn spawn_sandboxed_propagates_sandbox_env_vars_to_child() {
+        use std::process::Stdio;
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("echo ${SANDBOX_ACTIVE_ENV} ${SANDBOX_NET_BLOCKED_ENV}"))
+            .stdout(Stdio::piped());
+        let policy = SandboxPolicy::new()
+            .allow_read_path("/bin")
+            .allow_read_path("/usr/bin")
+            .block_network(true);
+        let mut child = spawn_sandboxed(&mut command, &policy).expect("spawn");
+        let stdout = child.take_stdout().expect("stdout piped");
+        let output = std::io::read_to_string(stdout).expect("read child stdout");
+        child.wait().expect("wait");
+        assert_eq!(output.trim(), "1 1");
+    }
+
+    #[test]
+    fn sandbox_enforced_from_env_requires_both_active_and_net_blocked() {
+        // These env vars are touched by no other test in this crate, so a single
+        // sequential test needs no cross-test lock.
+        std::env::remove_var(SANDBOX_ACTIVE_ENV);
+        std::env::remove_var(SANDBOX_NET_BLOCKED_ENV);
+        assert!(!sandbox_enforced_from_env(), "no sandbox env vars set");
+
+        std::env::set_var(SANDBOX_ACTIVE_ENV, "1");
+        assert!(
+            !sandbox_enforced_from_env(),
+            "active but permissive (network not blocked) must not count as enforced"
+        );
+
+        std::env::set_var(SANDBOX_NET_BLOCKED_ENV, "0");
+        assert!(!sandbox_enforced_from_env());
+
+        std::env::set_var(SANDBOX_NET_BLOCKED_ENV, "1");
+        assert!(sandbox_enforced_from_env());
+
+        std::env::remove_var(SANDBOX_ACTIVE_ENV);
+        assert!(
+            !sandbox_enforced_from_env(),
+            "net-blocked flag alone without the active flag must not count as enforced"
+        );
+
+        std::env::remove_var(SANDBOX_ACTIVE_ENV);
+        std::env::remove_var(SANDBOX_NET_BLOCKED_ENV);
     }
 
     #[cfg(unix)]
