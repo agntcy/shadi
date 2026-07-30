@@ -5,6 +5,7 @@ members = [
   "crates/shadi_a2a",
   "examples/shadi_demo_bot",
   "examples/agentbridge_demo",
+  "apps/shadi_desktop/src-tauri",
   "crates/shadi_mas",
   "crates/agentbridge",
   "crates/agentbridge_cli",
