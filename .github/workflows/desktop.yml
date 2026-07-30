@@ -45,6 +45,11 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          # action-setup looks for packageManager in the repo-root package.json,
+          # not the job's working-directory default — apps/shadi_desktop's is
+          # what's authoritative, so pin it explicitly instead.
+          version: 11.18.0
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
