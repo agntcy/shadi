@@ -60,4 +60,5 @@ jobs:
         run: pnpm build
 
       - name: Check src-tauri
-        run: cargo check -p shadi_desktop --locked
+        working-directory: apps/shadi_desktop/src-tauri
+        run: cargo check --locked
