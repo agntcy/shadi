@@ -32,4 +32,17 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+agentbridge = { package = "agntcy-agentbridge", version = "0.1.1", path = "../../../crates/agentbridge" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.1", path = "../../../crates/shadi_mas" }
+uuid = { version = "1", features = ["v4"] }
+
+# Pinned to exactly what the root SHADI workspace's Cargo.lock already
+# resolves. Without this, this independently-resolved workspace picks up
+# newer alpha releases of these two crates, whose transitive requirement on
+# agntcy-slim-service/agntcy-slim-proto conflicts with a2a-slimrpc's own
+# direct (older) requirement on those same crates — two incompatible
+# versions of each end up in the graph and the build fails to link types.
+slim = { package = "agntcy-slim", version = "=2.0.0-alpha.7" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "=2.0.0-alpha.7" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "=2.0.0-alpha.9" }
 
