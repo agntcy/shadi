@@ -268,8 +268,14 @@ function DelegateForm() {
 }
 
 function CoordinateVisualizer() {
-  const [goal, setGoal] = useState("");
-  const [agentSpecs, setAgentSpecs] = useState("claude-code, codex");
+  // Prefilled with a runnable demo default — matches
+  // examples/agentbridge_demo's own goal, and works with zero extra
+  // infra (no SLIM node, no DID setup) as long as the listed CLIs are
+  // installed locally.
+  const [goal, setGoal] = useState(
+    "Write fibonacci(n: u64) -> u64 with memoization and doctest",
+  );
+  const [agentSpecs, setAgentSpecs] = useState("claude-code, codex, copilot");
   const [quorum, setQuorum] = useState(2);
   const [maxRounds, setMaxRounds] = useState(3);
   const [requireHuman, setRequireHuman] = useState(false);
