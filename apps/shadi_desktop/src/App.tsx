@@ -1,10 +1,11 @@
 import "./App.css";
+import { AgentBridgePanel } from "./panels/AgentBridgePanel";
 
 function App() {
   return (
     <main className="container">
       <h1>SHADI Desktop</h1>
-      <p>Scaffolding only — no panels yet. See agntcy/shadi#112.</p>
+      <AgentBridgePanel />
     </main>
   );
 }

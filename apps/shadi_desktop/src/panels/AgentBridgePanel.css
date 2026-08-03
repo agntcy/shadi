@@ -1,0 +1,143 @@
+.ab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  text-align: left;
+}
+
+.ab-card {
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  background: rgba(127, 127, 127, 0.05);
+}
+
+.ab-card h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.ab-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.ab-input {
+  flex: 1;
+  min-width: 10rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: transparent;
+  color: inherit;
+}
+
+.ab-input-wide {
+  flex: 3;
+}
+
+.ab-input-narrow {
+  width: 4rem;
+  flex: 0;
+  margin-left: 0.4rem;
+}
+
+.ab-textarea {
+  width: 100%;
+  min-height: 4rem;
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  resize: vertical;
+  margin-bottom: 0.5rem;
+}
+
+.ab-error {
+  color: #d64545;
+  font-size: 0.9rem;
+}
+
+.ab-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.ab-table th,
+.ab-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+}
+
+.ab-summary {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+}
+
+.ab-response,
+.ab-result {
+  margin-top: 0.75rem;
+}
+
+.ab-response pre,
+.ab-result pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(127, 127, 127, 0.1);
+  border-radius: 6px;
+  padding: 0.6rem;
+  max-height: 16rem;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+.ab-response-meta {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin: 0.2rem 0;
+}
+
+.ab-timeline {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.ab-round {
+  display: grid;
+  grid-template-columns: 2.5rem 8rem 5rem 1fr;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.ab-round-epoch {
+  opacity: 0.6;
+  font-weight: 600;
+}
+
+.ab-round-agent {
+  font-weight: 600;
+}
+
+.ab-round-finalized {
+  background: rgba(80, 200, 120, 0.18);
+}
