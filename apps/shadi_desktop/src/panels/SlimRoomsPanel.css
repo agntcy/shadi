@@ -1,0 +1,156 @@
+.sl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  text-align: left;
+}
+
+.sl-card {
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  background: rgba(127, 127, 127, 0.05);
+}
+
+.sl-card h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.sl-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.sl-input {
+  flex: 1;
+  min-width: 10rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: transparent;
+  color: inherit;
+}
+
+.sl-input-narrow {
+  width: 4.5rem;
+  flex: 0;
+  margin-left: 0.4rem;
+  min-width: 0;
+}
+
+.sl-error {
+  color: #d64545;
+  font-size: 0.9rem;
+}
+
+.sl-muted {
+  opacity: 0.65;
+  font-size: 0.9rem;
+}
+
+.sl-note {
+  margin-top: 0;
+}
+
+.sl-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.sl-dot-on {
+  background: #3fb950;
+}
+
+.sl-dot-off {
+  background: #8b949e;
+}
+
+.sl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.sl-table th,
+.sl-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+}
+
+.sl-did {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  word-break: break-all;
+  max-width: 18rem;
+}
+
+.sl-room {
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.sl-room-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.sl-role {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.sl-role-moderator {
+  background: rgba(88, 166, 255, 0.22);
+}
+
+.sl-role-participant {
+  background: rgba(127, 127, 127, 0.22);
+}
+
+.sl-kind {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.sl-kind-human {
+  background: rgba(210, 153, 34, 0.25);
+}
+
+.sl-kind-agent {
+  background: rgba(163, 113, 247, 0.25);
+}
+
+.sl-roster {
+  margin-top: 0.4rem;
+}
+
+.sl-invite {
+  margin-top: 0.6rem;
+  margin-bottom: 0;
+}
+
+.sl-remove {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+}

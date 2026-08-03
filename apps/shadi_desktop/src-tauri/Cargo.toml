@@ -45,4 +45,9 @@ uuid = { version = "1", features = ["v4"] }
 slim = { package = "agntcy-slim", version = "=2.0.0-alpha.7" }
 slim_rpc = { package = "agntcy-slim-rpc", version = "=2.0.0-alpha.7" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "=2.0.0-alpha.9" }
+slim_proto = { package = "agntcy-slim-proto", version = "0.4.0" }
+slim_config = { package = "agntcy-slim-config", version = "0.12.6" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.0", path = "../../../crates/shadi_identity" }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+futures = "0.3"
 

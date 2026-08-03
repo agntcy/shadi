@@ -6423,15 +6423,20 @@ name = "shadi_desktop"
 version = "0.1.0"
 dependencies = [
  "agntcy-agentbridge",
+ "agntcy-shadi-identity",
  "agntcy-shadi-mas",
  "agntcy-slim",
  "agntcy-slim-bindings",
+ "agntcy-slim-config 0.12.6",
+ "agntcy-slim-proto",
  "agntcy-slim-rpc",
+ "futures",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tokio",
  "uuid",
 ]
 

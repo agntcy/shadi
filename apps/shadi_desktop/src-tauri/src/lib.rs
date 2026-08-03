@@ -14,6 +14,7 @@ mod commands;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(commands::slim::SlimState::default())
         .invoke_handler(tauri::generate_handler![
             commands::sandbox::sandbox_launch,
             commands::sandbox::sandbox_list_sessions,
@@ -39,6 +40,9 @@ pub fn run() {
             commands::slim::slim_group_create,
             commands::slim::slim_group_invite,
             commands::slim::slim_group_join,
+            commands::slim::slim_group_list,
+            commands::slim::slim_group_roster,
+            commands::slim::slim_group_remove_member,
             commands::slim::slim_controller_list_connections,
             commands::slim::slim_controller_list_routes,
             commands::dir::dir_search,
