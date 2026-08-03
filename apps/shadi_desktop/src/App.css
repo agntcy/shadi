@@ -26,6 +26,27 @@ h1 {
   text-align: center;
 }
 
+.tabs {
+  display: flex;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.tab {
+  padding: 0.35rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.tab-active {
+  background: rgba(127, 127, 127, 0.2);
+  font-weight: 600;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
