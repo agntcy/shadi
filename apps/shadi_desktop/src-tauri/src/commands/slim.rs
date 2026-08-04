@@ -990,9 +990,16 @@ fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
                         .map(|(c, k)| format!("{} + {}", c.display(), k.display()))
                         .collect::<Vec<_>>()
                         .join(", ");
+                    let set_hint = if std::env::var_os("SHADI_TMP_DIR").is_some() {
+                        ""
+                    } else {
+                        " SHADI_TMP_DIR is not set, so these are the default locations."
+                    };
                     format!(
-                        "no SLIM client certificate found; checked {checked}. Set SHADI_AGENT_ID \
-                         or SLIM_TLS_CERT/SLIM_TLS_KEY explicitly"
+                        "no SLIM client certificate found; checked {checked}.{set_hint} Set \
+                         SHADI_TMP_DIR (and SHADI_AGENT_ID), or SLIM_TLS_CERT/SLIM_TLS_KEY \
+                         explicitly, and generate the material with: bash \
+                         tools/generate_slim_mtls_certs.sh \"$SHADI_TMP_DIR/shadi-slim-mtls\""
                     )
                 })?
         }
@@ -1063,18 +1070,48 @@ fn parse_name(raw: &str) -> Result<Name, String> {
     })
 }
 
+/// Directory holding the SLIM mTLS material, always absolute.
+///
+/// A GUI app has no meaningful working directory — launched from Finder or the
+/// Dock it is `/` — so a relative fallback would report a path that means
+/// nothing to the user. Anything relative is resolved against the current
+/// directory here so errors name a real location.
 fn slim_tls_dir() -> PathBuf {
-    std::env::var_os("SHADI_TMP_DIR")
+    let base = std::env::var_os("SHADI_TMP_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".tmp"))
-        .join("shadi-slim-mtls")
+        .unwrap_or_else(|| PathBuf::from(".tmp"));
+    let base = if base.is_absolute() {
+        base
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&base))
+            .unwrap_or(base)
+    };
+    base.join("shadi-slim-mtls")
+}
+
+/// Missing mTLS material is the first thing a new user hits, and the cause is
+/// almost always an unset `SHADI_TMP_DIR` rather than a genuinely absent file —
+/// so say both, and say how to produce it.
+fn tls_material_error(label: &str, path: &Path) -> String {
+    let set_hint = if std::env::var_os("SHADI_TMP_DIR").is_some() {
+        String::new()
+    } else {
+        " SHADI_TMP_DIR is not set, so this is the default location.".to_string()
+    };
+    format!(
+        "{label} not found at {}.{set_hint} Point SHADI_TMP_DIR at the directory \
+         holding shadi-slim-mtls/, and generate the material with: \
+         bash tools/generate_slim_mtls_certs.sh \"$SHADI_TMP_DIR/shadi-slim-mtls\"",
+        path.display()
+    )
 }
 
 fn ensure_file_exists(path: &Path, label: &str) -> Result<(), String> {
     if path.is_file() {
         Ok(())
     } else {
-        Err(format!("{label} not found at {}", path.display()))
+        Err(tls_material_error(label, path))
     }
 }
 
@@ -1354,6 +1391,37 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&store);
+    }
+
+    /// A GUI app's working directory is not the repo — launched from Finder it
+    /// is `/` — so a relative `.tmp` fallback reported a path the user could
+    /// not act on ("not found at .tmp/shadi-slim-mtls/server.crt").
+    #[test]
+    fn tls_dir_is_always_absolute() {
+        let dir = slim_tls_dir();
+        assert!(
+            dir.is_absolute(),
+            "tls dir must be absolute so errors name a real location, got {}",
+            dir.display()
+        );
+        assert!(dir.ends_with("shadi-slim-mtls"));
+    }
+
+    /// The usual cause of missing material is an unset `SHADI_TMP_DIR`, not a
+    /// genuinely absent file, so the error has to name it and say how to
+    /// generate the certs.
+    #[test]
+    fn missing_tls_material_error_is_actionable() {
+        let err = tls_material_error(
+            "SLIM server certificate",
+            Path::new("/somewhere/shadi-slim-mtls/server.crt"),
+        );
+        assert!(err.contains("/somewhere/shadi-slim-mtls/server.crt"));
+        assert!(err.contains("SHADI_TMP_DIR"), "must name the env var: {err}");
+        assert!(
+            err.contains("generate_slim_mtls_certs.sh"),
+            "must say how to generate the material: {err}"
+        );
     }
 
     #[test]
