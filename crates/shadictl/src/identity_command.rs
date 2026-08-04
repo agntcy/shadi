@@ -50,6 +50,16 @@ pub(crate) fn run_did_from_github_command(parsed: DidFromGitHubArgs) -> ExitCode
     }
 }
 
+pub(crate) fn run_did_from_ssh_command(parsed: DidFromSshArgs) -> ExitCode {
+    match run_did_from_ssh(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
 pub(crate) fn run_did_from_gpg_command(parsed: DidFromGpgArgs) -> ExitCode {
     match run_did_from_gpg(parsed) {
         Ok(()) => ExitCode::from(0),
@@ -77,8 +87,18 @@ pub(crate) fn run_did_from_gpg(args: DidFromGpgArgs) -> Result<(), String> {
 }
 
 pub(crate) fn run_did_from_github(args: DidFromGitHubArgs) -> Result<(), String> {
-    let public_key = fetch_github_gpg_key(&args.user)?;
-    let pkey = extract_ed25519_public_key(&public_key)?;
+    let pkey = match args.key_type {
+        GitHubKeyType::Gpg => {
+            let public_key = fetch_github_gpg_key(&args.user)?;
+            extract_ed25519_public_key(&public_key)?
+        }
+        GitHubKeyType::Ssh => {
+            let listing = fetch_github_ssh_keys(&args.user)?;
+            let vk = shadi_identity::ssh::first_ed25519_in_authorized_keys(&listing)
+                .map_err(|err| err.to_string())?;
+            vk.as_bytes().to_vec()
+        }
+    };
 
     let (did, vm_id, doc) = build_did_document(&pkey)?;
     let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
@@ -177,6 +197,12 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
         HumanIdentitySource::Seed => {
             read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
         }
+        HumanIdentitySource::Ssh => read_ssh_seed_input(
+            "--human-secret",
+            args.human_secret.as_deref(),
+            args.input.as_ref(),
+            args.ssh_passphrase_secret.as_deref(),
+        )?,
     };
 
     let human_did = match args.human_did_key.as_deref() {
@@ -241,6 +267,12 @@ pub(crate) fn run_verify_agent_identity(args: VerifyAgentIdentityArgs) -> Result
         HumanIdentitySource::Seed => {
             read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
         }
+        HumanIdentitySource::Ssh => read_ssh_seed_input(
+            "--human-secret",
+            args.human_secret.as_deref(),
+            args.input.as_ref(),
+            args.ssh_passphrase_secret.as_deref(),
+        )?,
     };
 
     let (_private_key, expected_public_key) = derive_agent_keypair(&seed_material, &args.agent_name)?;
@@ -590,4 +622,97 @@ pub(crate) fn extract_ed25519_public_key(openpgp_bytes: &[u8]) -> Result<Vec<u8>
     }
 
     Err("no Ed25519 public key found in OpenPGP certificate".to_string())
+}
+
+/// Resolve an SSH key passphrase without ever taking it as a CLI argument,
+/// which would expose it to anyone able to run `ps`.
+pub(crate) fn resolve_ssh_passphrase(secret_ref: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(secret_ref) = secret_ref {
+        let store = default_secret_store();
+        let secret = store
+            .get(secret_ref)
+            .map_err(|_| format!("keychain lookup failed for {}", secret_ref))?;
+        let bytes = secret.expose(|b| b.to_vec());
+        return Ok(Some(secret_bytes_to_utf8(&bytes)?));
+    }
+    match std::env::var("SHADI_SSH_PASSPHRASE") {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        _ => Ok(None),
+    }
+}
+
+/// Read an OpenSSH private key from the secret store or a file and reduce it to
+/// the 32-byte Ed25519 seed used as the agent-derivation root (agntcy/shadi#140).
+pub(crate) fn read_ssh_seed_input(
+    label: &str,
+    secret_key: Option<&str>,
+    input: Option<&PathBuf>,
+    passphrase_secret: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let key_bytes = read_seed_input(label, secret_key, input)?;
+    let passphrase = resolve_ssh_passphrase(passphrase_secret)?;
+    let seed = shadi_identity::ssh::seed_from_openssh_private_key(&key_bytes, passphrase.as_deref())
+        .map_err(|err| err.to_string())?;
+    Ok(seed.to_vec())
+}
+
+/// `did-from-ssh`: build a human `did:key` from an SSH Ed25519 key.
+///
+/// The input may be a public `ssh-ed25519 AAAA...` line or an OpenSSH private
+/// key; which one is detected from the content, so there is no flag to get wrong.
+pub(crate) fn run_did_from_ssh(args: DidFromSshArgs) -> Result<(), String> {
+    let raw = read_seed_input("--key", args.key_ref.as_deref(), args.input.as_ref())?;
+    let text = String::from_utf8_lossy(&raw);
+
+    let vk = if text.contains("OPENSSH PRIVATE KEY") {
+        let passphrase = resolve_ssh_passphrase(args.passphrase_secret.as_deref())?;
+        shadi_identity::ssh::verifying_key_from_openssh_private_key(&raw, passphrase.as_deref())
+            .map_err(|err| err.to_string())?
+    } else {
+        shadi_identity::ssh::first_ed25519_in_authorized_keys(&text)
+            .map_err(|err| err.to_string())?
+    };
+
+    let (did, vm_id, doc) = build_did_document(vk.as_bytes())?;
+    let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
+    std::fs::write(&args.out_file, format!("{}\n", output))
+        .map_err(|err| format!("failed to write {}: {}", args.out_file.display(), err))?;
+
+    println!("Wrote DID Document: {}", args.out_file.display());
+    println!("DID: {}", did);
+    println!("Verification Method ID: {}", vm_id);
+    Ok(())
+}
+
+/// `github.com/<user>.keys` — the published SSH keys.
+///
+/// Unauthenticated on purpose: unlike `/users/<u>/gpg_keys` this needs no token,
+/// so anyone can verify a human DID against the account that claims it.
+#[cfg(not(test))]
+fn fetch_github_ssh_keys(user: &str) -> Result<String, String> {
+    let url = format!("https://github.com/{}.keys", user);
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static("shadi-shadictl"));
+    let client = Client::builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|err| format!("failed to build HTTP client: {}", err))?;
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|err| format!("GitHub request failed: {}", err))?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub returned {} for {}", response.status(), url));
+    }
+    response
+        .text()
+        .map_err(|err| format!("failed to read GitHub response: {}", err))
+}
+
+#[cfg(test)]
+fn fetch_github_ssh_keys(_user: &str) -> Result<String, String> {
+    let guard = test_github_payload_slot().lock().expect("github payload lock");
+    guard
+        .clone()
+        .ok_or_else(|| "test github payload not set".to_string())
 }

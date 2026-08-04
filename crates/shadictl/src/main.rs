@@ -205,6 +205,7 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::SlimMas(command) => run_slim_mas_command(command),
         Commands::DidFromGpg(command) => run_did_from_gpg_command(command),
         Commands::DidFromGitHub(command) => run_did_from_github_command(command),
+        Commands::DidFromSsh(command) => run_did_from_ssh_command(command),
         Commands::GetSecret(command) => run_get_secret_command(command),
         Commands::DeriveAgentDid(command) => run_derive_agent_did_command(command),
         Commands::DeriveAgentIdentity(command) => run_derive_agent_identity_command(command),

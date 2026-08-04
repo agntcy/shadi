@@ -20,11 +20,42 @@ SHADI derives local agent keys from human identity material using:
 
 - KDF: `HKDF-SHA256`
 - Salt: `shadi-agent-derive`
-- IKM: human source bytes (`gpg` material or generic seed bytes)
+- IKM: human source bytes — see the sources below
 - Info: agent name
 
 The 32-byte HKDF output becomes an Ed25519 private key seed. SHADI stores the
 derived public key and computes `did:key` from that key.
+
+### Human identity sources
+
+| `--source` | IKM | Human DID |
+|---|---|---|
+| `gpg` | OpenPGP secret-key material as stored | `did-from-gpg`, or `did-from-github` (Ed25519 GPG key only) |
+| `ssh` | the key's 32-byte Ed25519 seed | `did-from-ssh`, or `did-from-github --key-type ssh` |
+| `seed` | the stored bytes verbatim | none — the root is not a published key |
+
+Sources are not interchangeable: each produces different agent DIDs for the same
+agent name, because the IKM differs.
+
+The `ssh` source uses the key's **seed** rather than the key file's bytes,
+because the OpenSSH container is not a stable encoding — re-encrypting with a new
+passphrase rewrites the file while the key is unchanged. Deriving from the file
+would silently change every agent DID. (`gpg` predates this and hashes its stored
+material, so re-exporting a GPG key can change its derived agents.)
+
+Only `ssh-ed25519` is accepted. Hardware-backed `sk-ssh-ed25519` keys expose no
+private key and cannot root a derivation.
+
+An SSH passphrase is read from the secret store
+(`--ssh-passphrase-secret <ref>`) or `SHADI_SSH_PASSPHRASE`, never from a command
+-line argument, which would be visible to any local process via `ps`.
+
+Because an SSH key is normally published at `github.com/<user>.keys`, the human
+DID derived from its public half is verifiable by anyone against the account that
+claims it — the private half never leaves the machine. That public binding is
+what "sign in with GitHub" contributes; it is not secret material. What it does
+**not** yet establish is that a given agent belongs to that human at SLIM
+admission time — see the note below.
 
 ## Human-to-agent linkage verification
 
@@ -33,6 +64,11 @@ DID from the same human source and compare them to stored values.
 
 If a human DID binding is stored (`{prefix}/{agent}/human_did`), verification
 can additionally assert that the binding matches a specific human DID key.
+
+This check is local and offline. On the wire, SLIM admission verifies the *agent*
+DID against the `SLIM_MEMBER_DIDS` allow-list; `SLIM_HUMAN_DID` is reported for
+display and is not verified, so a peer cannot currently prove which human an
+agent belongs to. Tracked in agntcy/shadi#141.
 
 This is the trust bootstrap path end to end — from human identity material to
 gated secret and memory access:
