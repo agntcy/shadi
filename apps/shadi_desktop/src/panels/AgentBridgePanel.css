@@ -67,6 +67,37 @@
   font-size: 0.9rem;
 }
 
+.ab-hint {
+  opacity: 0.65;
+  font-size: 0.8rem;
+}
+
+.ab-note {
+  margin-top: -0.25rem;
+  margin-bottom: 0.6rem;
+}
+
+.ab-ok {
+  color: #3fb950;
+  font-size: 0.8rem;
+}
+
+.ab-select {
+  padding: 0.3rem 0.4rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: transparent;
+  color: inherit;
+  max-width: 14rem;
+}
+
+.ab-did {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  word-break: break-all;
+  max-width: 16rem;
+}
+
 .ab-table {
   width: 100%;
   border-collapse: collapse;

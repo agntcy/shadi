@@ -303,17 +303,29 @@ pub async fn slim_group_create(
 ///
 /// A `skill:`/`did:`/`explicit:` spec is resolved through the Directory and
 /// admitted with its DID; a bare `org/ns/app` name is invited directly.
+///
+/// `kind` overrides the human/agent default. Callers that already know what
+/// they are admitting should always pass it: adding a Directory-discovered
+/// agent by its known `{name, did, endpoint}` uses an `explicit:` spec, whose
+/// prefix-based default would otherwise mislabel it as human.
 #[tauri::command]
 pub async fn slim_group_invite(
     state: tauri::State<'_, SlimState>,
     channel: String,
     member_spec: String,
     dir_server: Option<String>,
+    kind: Option<String>,
 ) -> Result<SlimGroupInfo, String> {
-    let resolved = if is_member_spec(&member_spec) {
-        let dir_server = dir_server.ok_or_else(|| {
-            format!("member spec '{member_spec}' needs a Directory server to resolve against")
-        })?;
+    let mut resolved = if is_member_spec(&member_spec) {
+        // Only Directory-backed specs need a server; `explicit:` carries its
+        // own DID and resolves locally.
+        let dir_server = if spec_needs_directory(&member_spec) {
+            dir_server.ok_or_else(|| {
+                format!("member spec '{member_spec}' needs a Directory server to resolve against")
+            })?
+        } else {
+            dir_server.unwrap_or_default()
+        };
         resolve_candidates(std::slice::from_ref(&member_spec), &dir_server)?
     } else {
         vec![(
@@ -328,6 +340,11 @@ pub async fn slim_group_invite(
     };
     if resolved.is_empty() {
         return Err(format!("member spec '{member_spec}' resolved to no candidates"));
+    }
+    if let Some(kind) = kind {
+        for (member, _) in &mut resolved {
+            member.kind = kind.clone();
+        }
     }
     admit_dids_to_trust_set(
         resolved
@@ -589,6 +606,13 @@ fn describe_proto_name(name: &ProtoName) -> String {
 fn is_member_spec(spec: &str) -> bool {
     spec.starts_with("skill:") || spec.starts_with("did:") || spec.starts_with("explicit:")
 }
+
+/// Whether a spec has to be resolved against the Agent Directory. `explicit:`
+/// already names `{name, did, endpoint}`, so it resolves without a server.
+fn spec_needs_directory(spec: &str) -> bool {
+    spec.starts_with("skill:") || spec.starts_with("did:")
+}
+
 
 /// Resolve `--members`-style specs into members. Directory-discovered
 /// candidates are agents; an `explicit:` entry names a member by hand and is
@@ -873,6 +897,50 @@ mod tests {
         assert!(is_member_spec("did:key:z6Mk"));
         assert!(is_member_spec("explicit:alice=did:key:z6Mk"));
         assert!(!is_member_spec("agntcy/shadi/reviewer"));
+    }
+
+    #[test]
+    fn only_directory_backed_specs_need_a_server() {
+        assert!(spec_needs_directory("skill:agent_orchestration/x"));
+        assert!(spec_needs_directory("did:key:z6Mk"));
+        // `explicit:` already carries the DID — requiring a DIR server for it
+        // would block admitting an already-discovered candidate.
+        assert!(!spec_needs_directory("explicit:alice=did:key:z6Mk"));
+        assert!(!spec_needs_directory("agntcy/shadi/reviewer"));
+    }
+
+    /// Guards the wire format the frontend's `explicitMemberSpec`
+    /// (`src/shared/rooms.tsx`) emits when admitting a discovered adapter: it
+    /// must resolve locally, DID and endpoint intact, with no Directory server.
+    /// Keep these literals in step with that function.
+    #[test]
+    fn frontend_explicit_spec_format_resolves_without_a_directory() {
+        use agentbridge::member_source::{parse_member_spec, DirLookupOptions};
+
+        let dir = DirLookupOptions {
+            server_addr: String::new(),
+            gh_token: None,
+            limit: 1,
+        };
+
+        let with_endpoint = "explicit:agntcy/shadi/reviewer=did:key:z6MkTest@127.0.0.1:47357";
+        let resolved = parse_member_spec(with_endpoint, &dir)
+            .expect("spec parses")
+            .resolve()
+            .expect("explicit source resolves locally");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "agntcy/shadi/reviewer");
+        assert_eq!(resolved[0].did, "did:key:z6MkTest");
+        assert_eq!(resolved[0].slim_endpoint.as_deref(), Some("127.0.0.1:47357"));
+
+        // Endpoint is omitted entirely when unknown, not left as a bare `@`.
+        let no_endpoint = "explicit:agntcy/shadi/reviewer=did:key:z6MkTest";
+        let resolved = parse_member_spec(no_endpoint, &dir)
+            .expect("spec parses")
+            .resolve()
+            .expect("explicit source resolves locally");
+        assert_eq!(resolved[0].did, "did:key:z6MkTest");
+        assert!(resolved[0].slim_endpoint.is_none());
     }
 
     #[test]

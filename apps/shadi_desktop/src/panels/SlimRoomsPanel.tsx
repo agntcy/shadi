@@ -1,23 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useRooms } from "../shared/rooms";
+import type { SlimGroupInfo } from "../shared/rooms";
 import "./SlimRoomsPanel.css";
 
 interface SlimNodeStatus {
   running: boolean;
   endpoint: string | null;
-}
-
-interface SlimGroupMember {
-  name: string;
-  did: string;
-  endpoint: string | null;
-  kind: string;
-}
-
-interface SlimGroupInfo {
-  channel: string;
-  role: string;
-  members: SlimGroupMember[];
 }
 
 interface SlimConnection {
@@ -222,7 +211,7 @@ function RoomCard({ room, onChanged }: { room: SlimGroupInfo; onChanged: () => v
 }
 
 function RoomsSection() {
-  const [rooms, setRooms] = useState<SlimGroupInfo[]>([]);
+  const { rooms, error: roomsError, refresh } = useRooms();
   const [error, setError] = useState<string | null>(null);
   const [channel, setChannel] = useState("");
   const [memberSpecs, setMemberSpecs] = useState("");
@@ -230,18 +219,6 @@ function RoomsSection() {
   const [busy, setBusy] = useState(false);
   const [joinChannel, setJoinChannel] = useState("");
   const [joinTimeout, setJoinTimeout] = useState(30);
-
-  const refresh = useCallback(async () => {
-    try {
-      setRooms(await invoke<SlimGroupInfo[]>("slim_group_list"));
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
 
   async function onCreate() {
     setBusy(true);
@@ -341,7 +318,7 @@ function RoomsSection() {
         </button>
       </div>
 
-      <ErrorText message={error} />
+      <ErrorText message={error ?? roomsError} />
 
       {rooms.length === 0 ? (
         <p className="sl-muted">Not in any room.</p>

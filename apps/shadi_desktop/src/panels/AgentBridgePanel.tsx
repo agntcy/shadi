@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { explicitMemberSpec, slimAgentSpec, useRooms } from "../shared/rooms";
+import type { SlimGroupInfo } from "../shared/rooms";
 import "./AgentBridgePanel.css";
 
 interface AdapterInfo {
@@ -40,6 +42,73 @@ interface CoordinateResult {
 function ErrorText({ message }: { message: string | null }) {
   if (!message) return null;
   return <p className="ab-error">{message}</p>;
+}
+
+/**
+ * Admits a discovered adapter into a room without retyping its DID or
+ * endpoint (agntcy/shadi#135). `agentbridge_list_adapters` already returns
+ * `{agent_id, tool: did, endpoint}`, so this builds the `explicit:` spec from
+ * what's in hand — no second Directory round-trip — and passes
+ * `kind: "agent"` so the invite isn't mislabelled human by the spec-prefix
+ * default.
+ */
+function AddToRoom({ adapter }: { adapter: AdapterInfo }) {
+  const { rooms, refresh } = useRooms();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+
+  const moderated = rooms.filter((r) => r.role === "moderator");
+
+  async function add(channel: string) {
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    try {
+      await invoke<SlimGroupInfo>("slim_group_invite", {
+        channel,
+        memberSpec: explicitMemberSpec(
+          adapter.agent_id,
+          adapter.tool,
+          adapter.endpoint,
+        ),
+        dirServer: null,
+        kind: "agent",
+      });
+      setDone(channel);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (moderated.length === 0) {
+    return <span className="ab-hint">no moderated room</span>;
+  }
+
+  return (
+    <>
+      <select
+        className="ab-select"
+        disabled={busy}
+        value=""
+        onChange={(e) => {
+          if (e.target.value) add(e.target.value);
+        }}
+      >
+        <option value="">{busy ? "Adding…" : "Add to…"}</option>
+        {moderated.map((r) => (
+          <option key={r.channel} value={r.channel}>
+            {r.channel}
+          </option>
+        ))}
+      </select>
+      {done && <span className="ab-ok"> ✓ {done}</span>}
+      {error && <span className="ab-error"> {error}</span>}
+    </>
+  );
 }
 
 function AdapterList() {
@@ -107,19 +176,23 @@ function AdapterList() {
               <th>Agent ID</th>
               <th>Tool / DID</th>
               <th>Endpoint</th>
+              <th>Add to room</th>
             </tr>
           </thead>
           <tbody>
             {adapters.map((a) => (
               <tr key={a.agent_id}>
                 <td>{a.agent_id}</td>
-                <td>{a.tool}</td>
+                <td className="ab-did">{a.tool}</td>
                 <td>{a.endpoint ?? "—"}</td>
+                <td>
+                  <AddToRoom adapter={a} />
+                </td>
               </tr>
             ))}
             {adapters.length === 0 && (
               <tr>
-                <td colSpan={3}>No adapters found.</td>
+                <td colSpan={4}>No adapters found.</td>
               </tr>
             )}
           </tbody>
@@ -227,6 +300,10 @@ function DelegateForm() {
   return (
     <section className="ab-card">
       <h2>Delegate</h2>
+      <p className="ab-hint ab-note">
+        Sends one prompt to one peer and shows the reply — a manual probe, not
+        the room's ongoing conversation.
+      </p>
       <textarea
         className="ab-textarea"
         placeholder="Prompt"
@@ -285,10 +362,31 @@ function CoordinateVisualizer() {
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const roundsEndRef = useRef<HTMLDivElement | null>(null);
+  const { rooms } = useRooms();
 
   useEffect(() => {
     roundsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [rounds]);
+
+  /**
+   * Replace the free-typed specs with this room's agent members
+   * (agntcy/shadi#135). Humans are skipped — they participate through their
+   * own harness, not as a coordination tool endpoint.
+   */
+  function applyRoomRoster(channel: string) {
+    const room = rooms.find((r) => r.channel === channel);
+    if (!room) return;
+    const specs = room.members
+      .filter((m) => m.kind !== "human")
+      .map(slimAgentSpec);
+    if (specs.length === 0) {
+      setError(`room ${channel} has no agent members to coordinate`);
+      return;
+    }
+    setError(null);
+    setAgentSpecs(specs.join(", "));
+    setQuorum(Math.min(quorum, specs.length));
+  }
 
   async function onCoordinate() {
     setRunning(true);
@@ -333,6 +431,11 @@ function CoordinateVisualizer() {
   return (
     <section className="ab-card">
       <h2>Coordinate</h2>
+      <p className="ab-hint ab-note">
+        A manual, operator-triggered run for test-driving a set of agents. The
+        sustained exchange between room members happens over SLIM via each
+        member's own harness, continuously — not by re-clicking here.
+      </p>
       <textarea
         className="ab-textarea"
         placeholder="Goal"
@@ -346,6 +449,23 @@ function CoordinateVisualizer() {
           value={agentSpecs}
           onChange={(e) => setAgentSpecs(e.target.value)}
         />
+        {rooms.length > 0 && (
+          <select
+            className="ab-select"
+            value=""
+            onChange={(e) => {
+              if (e.target.value) applyRoomRoster(e.target.value);
+            }}
+          >
+            <option value="">Use room roster…</option>
+            {rooms.map((r) => (
+              <option key={r.channel} value={r.channel}>
+                {r.channel} ({r.members.filter((m) => m.kind !== "human").length}{" "}
+                agents)
+              </option>
+            ))}
+          </select>
+        )}
       </div>
       <div className="ab-row">
         <label>
