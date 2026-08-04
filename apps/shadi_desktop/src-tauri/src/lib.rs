@@ -5,8 +5,9 @@
 //! the SHADI shell. See agntcy/shadi#112 for the epic and panel breakdown.
 //!
 //! The Tauri IPC command contract (agntcy/shadi#114) is defined in
-//! `commands/` — see `../docs/ipc-contract.md`. Every command there is
-//! currently a stub; no feature panels exist yet.
+//! `commands/` — see `../docs/ipc-contract.md`.
+
+use tauri::Manager;
 
 mod commands;
 
@@ -15,6 +16,23 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(commands::slim::SlimState::default())
+        .setup(|app| {
+            // Known rooms are persisted (agntcy/shadi#138); the app data dir is
+            // only resolvable once the app exists. A failure here is reported
+            // and tolerated — a bad room store must not block startup.
+            match app.path().app_data_dir() {
+                Ok(dir) => {
+                    if let Err(err) = app
+                        .state::<commands::slim::SlimState>()
+                        .init_store(dir.join("rooms.json"))
+                    {
+                        eprintln!("warning: could not load saved rooms: {err}");
+                    }
+                }
+                Err(err) => eprintln!("warning: no app data dir, rooms will not persist: {err}"),
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::sandbox::sandbox_launch,
             commands::sandbox::sandbox_list_sessions,
@@ -43,6 +61,7 @@ pub fn run() {
             commands::slim::slim_group_list,
             commands::slim::slim_group_roster,
             commands::slim::slim_group_remove_member,
+            commands::slim::slim_group_forget,
             commands::slim::slim_controller_list_connections,
             commands::slim::slim_controller_list_routes,
             commands::dir::dir_search,

@@ -126,6 +126,32 @@
   background: rgba(127, 127, 127, 0.22);
 }
 
+.sl-room-offline {
+  border-style: dashed;
+}
+
+.sl-conn {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.sl-conn-on {
+  background: rgba(63, 185, 80, 0.2);
+}
+
+.sl-conn-off {
+  background: rgba(127, 127, 127, 0.2);
+  opacity: 0.85;
+}
+
+.sl-forget {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+  margin-left: auto;
+}
+
 .sl-kind {
   font-size: 0.72rem;
   padding: 0.1rem 0.4rem;

@@ -75,6 +75,10 @@ pub struct SlimGroupInfo {
     pub channel: String,
     /// "moderator" | "participant".
     pub role: String,
+    /// Whether a live SLIM session backs this room right now. A known room
+    /// restored from disk is `false` until rejoined: its roster is readable,
+    /// but it cannot be invited into or removed from.
+    pub connected: bool,
     pub members: Vec<SlimGroupMember>,
 }
 
@@ -93,12 +97,26 @@ pub struct SlimRoute {
 // --- Managed state -----------------------------------------------------------
 
 struct Room {
-    session: Arc<Session>,
+    /// `None` for a room that is *known* but not currently *connected* — it was
+    /// restored from disk, or its session hasn't been re-established since
+    /// launch. Invites and removals need a live session; the roster does not.
+    session: Option<Arc<Session>>,
     moderator: bool,
     /// Members this process admitted, keyed by SLIM name. `participants_list`
     /// reports names only, so DID/endpoint/kind are carried here from
-    /// admission-time resolution.
+    /// admission-time resolution — and are what a disconnected room shows.
     admitted: HashMap<String, SlimGroupMember>,
+}
+
+/// The on-disk form of a [`Room`] (agntcy/shadi#138). Only metadata: sessions
+/// and credentials are never written, and a `did:key` is a public key, so
+/// nothing here is secret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedRoom {
+    channel: String,
+    moderator: bool,
+    #[serde(default)]
+    members: Vec<SlimGroupMember>,
 }
 
 #[derive(Default)]
@@ -111,12 +129,48 @@ struct Inner {
     node_started: bool,
     rooms: HashMap<String, Room>,
     subscribed_channels: Vec<String>,
+    /// Where known rooms are persisted. `None` until `lib.rs`'s setup hook
+    /// resolves the app data dir, which also makes this harmless in tests.
+    store_path: Option<PathBuf>,
 }
 
 /// Registered with `.manage(...)` in `lib.rs`; the SLIM node/session lifecycle
 /// spans commands, so unlike the other panels this one cannot be stateless.
 #[derive(Default)]
 pub struct SlimState(Mutex<Inner>);
+
+impl SlimState {
+    /// Point the state at its on-disk room store and load whatever is already
+    /// there. Called once from `lib.rs`'s setup hook, where the app data dir is
+    /// first available. A load failure is reported but not fatal — a corrupt or
+    /// unreadable store must not stop the app from starting.
+    pub fn init_store(&self, path: PathBuf) -> Result<(), String> {
+        let mut inner = self.0.lock().map_err(|_| "SLIM state poisoned")?;
+        inner.store_path = Some(path.clone());
+        if !path.is_file() {
+            return Ok(());
+        }
+        let data = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let stored: Vec<PersistedRoom> = serde_json::from_str(&data)
+            .map_err(|e| format!("invalid room store {}: {e}", path.display()))?;
+        for room in stored {
+            inner.rooms.insert(
+                room.channel,
+                Room {
+                    session: None,
+                    moderator: room.moderator,
+                    admitted: room
+                        .members
+                        .into_iter()
+                        .map(|m| (m.name.clone(), m))
+                        .collect(),
+                },
+            );
+        }
+        Ok(())
+    }
+}
 
 impl Inner {
     fn ensure_connection(&mut self) -> Result<u64, String> {
@@ -181,7 +235,47 @@ impl Inner {
     fn room(&self, channel: &str) -> Result<&Room, String> {
         self.rooms
             .get(channel)
-            .ok_or_else(|| format!("not in room '{channel}'; create or join it first"))
+            .ok_or_else(|| format!("no room '{channel}'; create or join it first"))
+    }
+
+    /// The live session for a room, or an error naming what to do about it —
+    /// a known-but-disconnected room needs rejoining before it can be modified.
+    fn live_session(&self, channel: &str) -> Result<Arc<Session>, String> {
+        self.room(channel)?.session.clone().ok_or_else(|| {
+            format!("room '{channel}' is known but not connected; rejoin it first")
+        })
+    }
+
+    /// Write every known room's metadata to the store. Called after each
+    /// mutation. A write failure is surfaced to the caller rather than
+    /// swallowed — silently losing rooms is what this feature exists to stop.
+    fn persist(&self) -> Result<(), String> {
+        let Some(path) = &self.store_path else {
+            return Ok(());
+        };
+        let mut stored: Vec<PersistedRoom> = self
+            .rooms
+            .iter()
+            .map(|(channel, room)| PersistedRoom {
+                channel: channel.clone(),
+                moderator: room.moderator,
+                members: room.admitted.values().cloned().collect(),
+            })
+            .collect();
+        // Stable order so the file doesn't churn between writes.
+        stored.sort_by(|a, b| a.channel.cmp(&b.channel));
+        for room in &mut stored {
+            room.members.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        }
+        let data = serde_json::to_string_pretty(&stored)
+            .map_err(|e| format!("failed to serialize rooms: {e}"))?;
+        std::fs::write(path, data)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))
     }
 
     fn node_service_mut(&mut self) -> &mut Service {
@@ -194,11 +288,18 @@ impl Inner {
             .get_or_insert_with(|| Service::new(client_service_name()))
     }
 
-    /// Roster for a room: live `participants_list` names, enriched with
-    /// admission-time DID/endpoint/kind where this process knows them.
+    /// Roster for a room. Connected: live `participants_list` names, enriched
+    /// with admission-time DID/endpoint/kind where this process knows them.
+    /// Disconnected: the last-known admitted members, so a restored room still
+    /// shows who belongs to it.
     fn roster(&self, channel: &str) -> Result<Vec<SlimGroupMember>, String> {
         let room = self.room(channel)?;
-        let participants = room.session.participants_list().map_err(slim_err)?;
+        let Some(session) = &room.session else {
+            let mut members: Vec<SlimGroupMember> = room.admitted.values().cloned().collect();
+            members.sort_by(|a, b| a.name.cmp(&b.name));
+            return Ok(members);
+        };
+        let participants = session.participants_list().map_err(slim_err)?;
         Ok(participants
             .into_iter()
             .map(|name| {
@@ -222,6 +323,7 @@ impl Inner {
             } else {
                 "participant".to_string()
             },
+            connected: room.session.is_some(),
             members: self.roster(channel)?,
         })
     }
@@ -288,7 +390,7 @@ pub async fn slim_group_create(
     inner.rooms.insert(
         channel_name.to_string(),
         Room {
-            session,
+            session: Some(session),
             moderator: true,
             admitted: candidates
                 .into_iter()
@@ -296,6 +398,7 @@ pub async fn slim_group_create(
                 .collect(),
         },
     );
+    inner.persist()?;
     inner.group_info(&channel_name.to_string())
 }
 
@@ -356,7 +459,7 @@ pub async fn slim_group_invite(
     let mut inner = lock(&state)?;
     let connection_id = inner.ensure_connection()?;
     let app = inner.ensure_app()?;
-    let session = inner.room(&channel)?.session.clone();
+    let session = inner.live_session(&channel)?;
 
     for (member, _) in &resolved {
         let name = Arc::new(parse_name(&member.name)?);
@@ -367,14 +470,19 @@ pub async fn slim_group_invite(
     let room = inner
         .rooms
         .get_mut(&channel)
-        .ok_or_else(|| format!("not in room '{channel}'"))?;
+        .ok_or_else(|| format!("no room '{channel}'"))?;
     for (member, _) in resolved {
         room.admitted.insert(member.name.clone(), member);
     }
+    inner.persist()?;
     inner.group_info(&channel)
 }
 
-/// Join a room created by a moderator (`/slim join`).
+/// Join a room created by a moderator (`/slim join`), or rejoin a known one.
+///
+/// Rejoining reattaches the live session to the existing record, keeping the
+/// role and admitted-member metadata a restored room already carries — losing
+/// that on rejoin would defeat persisting it.
 #[tauri::command]
 pub async fn slim_group_join(
     state: tauri::State<'_, SlimState>,
@@ -402,18 +510,26 @@ pub async fn slim_group_join(
         ));
     }
 
-    inner.rooms.insert(
-        actual.clone(),
-        Room {
-            session,
-            moderator: false,
-            admitted: HashMap::new(),
-        },
-    );
+    match inner.rooms.get_mut(&actual) {
+        // Rejoin: keep the role and roster this room already carries.
+        Some(room) => room.session = Some(session),
+        None => {
+            inner.rooms.insert(
+                actual.clone(),
+                Room {
+                    session: Some(session),
+                    moderator: false,
+                    admitted: HashMap::new(),
+                },
+            );
+        }
+    }
+    inner.persist()?;
     inner.group_info(&actual)
 }
 
-/// Every room this process is currently in, moderator or participant.
+/// Every known room, moderator or participant, connected or not — rooms
+/// restored from the store appear here with `connected: false`.
 ///
 /// Has no `shadictl` equivalent — the shell holds one session slot and has no
 /// notion of a rooms overview.
@@ -447,21 +563,52 @@ pub async fn slim_group_remove_member(
     member_name: String,
 ) -> Result<SlimGroupInfo, String> {
     let mut inner = lock(&state)?;
-    let room = inner.room(&channel)?;
-    if !room.moderator {
+    if !inner.room(&channel)?.moderator {
         return Err(format!(
             "only the moderator of '{channel}' can remove members"
         ));
     }
-    let session = room.session.clone();
-    session
+    inner
+        .live_session(&channel)?
         .remove_and_wait(Arc::new(parse_name(&member_name)?))
         .map_err(slim_err)?;
 
     if let Some(room) = inner.rooms.get_mut(&channel) {
         room.admitted.remove(&member_name);
     }
+    inner.persist()?;
     inner.group_info(&channel)
+}
+
+/// Drop a room from the known list, tearing down its session if connected.
+///
+/// Persisting rooms means they otherwise accumulate with no way to remove one.
+/// This is local bookkeeping — it does not remove anyone else from the group.
+#[tauri::command]
+pub async fn slim_group_forget(
+    state: tauri::State<'_, SlimState>,
+    channel: String,
+) -> Result<Vec<SlimGroupInfo>, String> {
+    let mut inner = lock(&state)?;
+    let room = inner
+        .rooms
+        .remove(&channel)
+        .ok_or_else(|| format!("no room '{channel}'"))?;
+
+    // Best-effort teardown: the room is already gone from the list, so a
+    // failure here must not resurrect it or fail the call.
+    if let (Some(session), Some(app)) = (room.session, inner.app.clone()) {
+        let _ = app.delete_session_and_wait(session);
+    }
+    inner.subscribed_channels.retain(|c| c != &channel);
+
+    inner.persist()?;
+    let mut channels: Vec<String> = inner.rooms.keys().cloned().collect();
+    channels.sort();
+    channels
+        .iter()
+        .map(|channel| inner.group_info(channel))
+        .collect()
 }
 
 // --- Controller --------------------------------------------------------------
@@ -890,6 +1037,141 @@ fn ensure_file_exists(path: &Path, label: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member(name: &str, kind: &str) -> SlimGroupMember {
+        SlimGroupMember {
+            name: name.to_string(),
+            did: format!("did:key:z6Mk{name}"),
+            endpoint: Some("127.0.0.1:47357".to_string()),
+            kind: kind.to_string(),
+        }
+    }
+
+    fn room_with(moderator: bool, members: Vec<SlimGroupMember>) -> Room {
+        Room {
+            // No live session: exactly the shape a restored room has.
+            session: None,
+            moderator,
+            admitted: members
+                .into_iter()
+                .map(|m| (m.name.clone(), m))
+                .collect(),
+        }
+    }
+
+    fn store_path() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "shadi-desktop-rooms-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir.join("nested").join("rooms.json")
+    }
+
+    /// The core of agntcy/shadi#138: a room written before "restart" comes
+    /// back with its role and roster intact, and reports itself disconnected.
+    #[test]
+    fn known_rooms_survive_a_restart() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+
+        let before = SlimState::default();
+        {
+            let mut inner = before.0.lock().unwrap_or_else(|e| e.into_inner());
+            inner.store_path = Some(path.clone());
+            inner.rooms.insert(
+                "agntcy/shadi/review".to_string(),
+                room_with(true, vec![member("agntcy/shadi/bot", "agent")]),
+            );
+            inner.rooms.insert(
+                "agntcy/shadi/standup".to_string(),
+                room_with(false, vec![member("agntcy/shadi/lead", "human")]),
+            );
+            // Writes through a directory that doesn't exist yet.
+            inner.persist().expect("persist");
+        }
+
+        let after = SlimState::default();
+        after.init_store(path.clone()).expect("init store");
+        let inner = after.0.lock().unwrap_or_else(|e| e.into_inner());
+
+        let review = inner.group_info("agntcy/shadi/review").expect("review room");
+        assert_eq!(review.role, "moderator");
+        assert!(!review.connected, "a restored room has no live session");
+        assert_eq!(review.members.len(), 1);
+        assert_eq!(review.members[0].name, "agntcy/shadi/bot");
+        assert_eq!(review.members[0].kind, "agent");
+        assert_eq!(review.members[0].did, "did:key:z6Mkagntcy/shadi/bot");
+        assert_eq!(
+            review.members[0].endpoint.as_deref(),
+            Some("127.0.0.1:47357"),
+            "endpoint must survive — coordinate specs are built from it"
+        );
+
+        // Role and the human/agent label are per-room, not global.
+        let standup = inner.group_info("agntcy/shadi/standup").expect("standup room");
+        assert_eq!(standup.role, "participant");
+        assert_eq!(standup.members[0].kind, "human");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A disconnected room is readable but not modifiable: `live_session`
+    /// gates invite/remove, and says what to do about it.
+    #[test]
+    fn disconnected_room_is_readable_but_not_modifiable() {
+        let state = SlimState::default();
+        let mut inner = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        inner.rooms.insert(
+            "agntcy/shadi/review".to_string(),
+            room_with(true, vec![member("agntcy/shadi/bot", "agent")]),
+        );
+
+        // Roster works without a session.
+        assert_eq!(inner.roster("agntcy/shadi/review").unwrap().len(), 1);
+
+        // `unwrap_err` would require the Ok type (Arc<Session>) to be Debug.
+        let err = match inner.live_session("agntcy/shadi/review") {
+            Ok(_) => panic!("a room with no session must not yield one"),
+            Err(err) => err,
+        };
+        assert!(err.contains("not connected"), "unexpected: {err}");
+        assert!(err.contains("rejoin"), "should say how to fix it: {err}");
+    }
+
+    #[test]
+    fn unknown_room_is_distinguished_from_disconnected_one() {
+        let state = SlimState::default();
+        let inner = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        let err = match inner.room("agntcy/shadi/nope") {
+            Ok(_) => panic!("unknown room must not resolve"),
+            Err(err) => err,
+        };
+        assert!(err.contains("no room"), "unexpected: {err}");
+    }
+
+    /// Persisting with no store configured must not fail — that is the state
+    /// during tests and if the app data dir can't be resolved.
+    #[test]
+    fn persist_without_a_store_is_a_no_op() {
+        let state = SlimState::default();
+        let mut inner = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .rooms
+            .insert("agntcy/shadi/review".to_string(), room_with(true, vec![]));
+        assert!(inner.persist().is_ok());
+    }
+
+    /// A missing store is a first launch, not an error.
+    #[test]
+    fn init_store_tolerates_a_missing_file() {
+        let state = SlimState::default();
+        let missing = std::env::temp_dir().join("shadi-desktop-definitely-absent.json");
+        let _ = std::fs::remove_file(&missing);
+        assert!(state.init_store(missing).is_ok());
+        assert!(state.0.lock().unwrap_or_else(|e| e.into_inner()).rooms.is_empty());
+    }
 
     #[test]
     fn member_specs_are_recognised() {

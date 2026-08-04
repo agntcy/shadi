@@ -58,7 +58,9 @@ function AddToRoom({ adapter }: { adapter: AdapterInfo }) {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
-  const moderated = rooms.filter((r) => r.role === "moderator");
+  // Inviting needs both moderator rights and a live session, so a known but
+  // unrejoined room isn't a valid target (agntcy/shadi#138).
+  const targets = rooms.filter((r) => r.role === "moderator" && r.connected);
 
   async function add(channel: string) {
     setBusy(true);
@@ -84,8 +86,14 @@ function AddToRoom({ adapter }: { adapter: AdapterInfo }) {
     }
   }
 
-  if (moderated.length === 0) {
-    return <span className="ab-hint">no moderated room</span>;
+  if (targets.length === 0) {
+    // Distinguish "you moderate nothing" from "rejoin the room you moderate".
+    const needsRejoin = rooms.some((r) => r.role === "moderator");
+    return (
+      <span className="ab-hint">
+        {needsRejoin ? "rejoin a room first" : "no moderated room"}
+      </span>
+    );
   }
 
   return (
@@ -99,7 +107,7 @@ function AddToRoom({ adapter }: { adapter: AdapterInfo }) {
         }}
       >
         <option value="">{busy ? "Adding…" : "Add to…"}</option>
-        {moderated.map((r) => (
+        {targets.map((r) => (
           <option key={r.channel} value={r.channel}>
             {r.channel}
           </option>

@@ -100,7 +100,8 @@ function Roster({
     }
   }
 
-  const isModerator = room.role === "moderator";
+  // Removing needs a live session, so a disconnected room is read-only.
+  const canRemove = room.role === "moderator" && room.connected;
 
   return (
     <div className="sl-roster">
@@ -115,7 +116,7 @@ function Roster({
               <th>Member</th>
               <th>DID</th>
               <th>Endpoint</th>
-              {isModerator && <th />}
+              {canRemove && <th />}
             </tr>
           </thead>
           <tbody>
@@ -129,7 +130,7 @@ function Roster({
                 <td>{m.name}</td>
                 <td className="sl-did">{m.did || "—"}</td>
                 <td>{m.endpoint ?? "—"}</td>
-                {isModerator && (
+                {canRemove && (
                   <td>
                     <button
                       className="sl-remove"
@@ -173,38 +174,93 @@ function RoomCard({ room, onChanged }: { room: SlimGroupInfo; onChanged: () => v
     }
   }
 
+  async function onRejoin() {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke<SlimGroupInfo>("slim_group_join", {
+        channel: room.channel,
+        timeoutSecs: 30,
+      });
+      onChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onForget() {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke<SlimGroupInfo[]>("slim_group_forget", {
+        channel: room.channel,
+      });
+      onChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="sl-room">
+    <div className={room.connected ? "sl-room" : "sl-room sl-room-offline"}>
       <div className="sl-room-head">
         <strong>{room.channel}</strong>
         <span className={`sl-role sl-role-${room.role}`}>{room.role}</span>
+        <span
+          className={`sl-conn ${room.connected ? "sl-conn-on" : "sl-conn-off"}`}
+          title={
+            room.connected
+              ? "live session — can invite and remove"
+              : "known but not joined this session — roster is last known"
+          }
+        >
+          {room.connected ? "connected" : "not connected"}
+        </span>
         <span className="sl-muted">
           {room.members.length} member{room.members.length === 1 ? "" : "s"}
         </span>
-        <button onClick={onChanged}>Refresh roster</button>
+        {room.connected ? (
+          <button onClick={onChanged}>Refresh roster</button>
+        ) : (
+          <button onClick={onRejoin} disabled={busy}>
+            {busy ? "Rejoining…" : "Rejoin"}
+          </button>
+        )}
+        <button className="sl-forget" onClick={onForget} disabled={busy}>
+          Forget
+        </button>
       </div>
 
       <Roster room={room} onRemoved={onChanged} />
 
-      {room.role === "moderator" && (
-        <div className="sl-row sl-invite">
-          <input
-            className="sl-input"
-            placeholder="Member: skill:… | did:… | explicit:name=did | org/ns/app"
-            value={memberSpec}
-            onChange={(e) => setMemberSpec(e.target.value)}
-          />
-          <input
-            className="sl-input"
-            placeholder="DIR server (for skill:/did: specs)"
-            value={dirServer}
-            onChange={(e) => setDirServer(e.target.value)}
-          />
-          <button onClick={onInvite} disabled={busy || !memberSpec}>
-            {busy ? "Inviting…" : "Invite"}
-          </button>
-        </div>
-      )}
+      {room.role === "moderator" &&
+        (room.connected ? (
+          <div className="sl-row sl-invite">
+            <input
+              className="sl-input"
+              placeholder="Member: skill:… | did:… | explicit:name=did | org/ns/app"
+              value={memberSpec}
+              onChange={(e) => setMemberSpec(e.target.value)}
+            />
+            <input
+              className="sl-input"
+              placeholder="DIR server (for skill:/did: specs)"
+              value={dirServer}
+              onChange={(e) => setDirServer(e.target.value)}
+            />
+            <button onClick={onInvite} disabled={busy || !memberSpec}>
+              {busy ? "Inviting…" : "Invite"}
+            </button>
+          </div>
+        ) : (
+          <p className="sl-muted sl-invite">
+            Rejoin to invite or remove members.
+          </p>
+        ))}
       <ErrorText message={error} />
     </div>
   );
@@ -263,8 +319,9 @@ function RoomsSection() {
     <section className="sl-card">
       <h2>Rooms</h2>
       <p className="sl-muted sl-note">
-        Rooms are live SLIM sessions this app is joined to — the list is empty on
-        a fresh launch until you create or join one. Messaging between members
+        Rooms are remembered across restarts, but their SLIM sessions are not —
+        a room from a previous launch shows its last-known roster and needs a
+        rejoin before you can invite or remove. Messaging between members
         happens over SLIM via each member's own harness; this panel administers
         membership.
       </p>
