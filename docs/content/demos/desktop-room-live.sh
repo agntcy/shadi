@@ -39,12 +39,35 @@ cleanup() {
   echo
   echo "==> shutting down"
   for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  # `tauri dev` spawns vite as a child; killing only the parent orphans it and
+  # it keeps holding port 1420, breaking the next run.
+  lsof -tnP -iTCP:1420 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
   wait 2>/dev/null || true
   [ -n "${SHADI_LIVE_KEEP:-}" ] || rm -rf "$E2E"
 }
 trap cleanup EXIT INT TERM
 
 echo "==> scratch dir $E2E"
+
+# Vite's dev port. A `tauri dev` killed at the parent leaves its vite child
+# holding 1420, and the next run dies with "Port 1420 is already in use" — so
+# say what is holding it rather than leaving the user to hunt.
+if lsof -nP -iTCP:1420 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "    port 1420 is already in use by:"
+  lsof -nP -iTCP:1420 -sTCP:LISTEN | tail -n +2 | sed 's/^/      /'
+  if [ -n "${SHADI_LIVE_FREE_PORT:-}" ]; then
+    echo "    SHADI_LIVE_FREE_PORT set — terminating it"
+    lsof -tnP -iTCP:1420 -sTCP:LISTEN | xargs kill 2>/dev/null || true
+    sleep 2
+  else
+    echo
+    echo "    Usually a leftover vite from an earlier 'tauri dev'. Free it with:"
+    echo "      lsof -tnP -iTCP:1420 -sTCP:LISTEN | xargs kill"
+    echo "    or re-run with SHADI_LIVE_FREE_PORT=1 to do that automatically."
+    exit 1
+  fi
+fi
+
 cargo build -q -p agntcy-shadi-cli --bin shadictl
 
 echo "==> generating mTLS material"
