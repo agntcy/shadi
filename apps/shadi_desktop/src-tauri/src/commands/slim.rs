@@ -136,8 +136,38 @@ struct Inner {
 
 /// Registered with `.manage(...)` in `lib.rs`; the SLIM node/session lifecycle
 /// spans commands, so unlike the other panels this one cannot be stateless.
+///
+/// The state is behind an `Arc` so [`with_state`] can move a handle onto a
+/// blocking thread — see that function for why every command must.
 #[derive(Default)]
-pub struct SlimState(Mutex<Inner>);
+pub struct SlimState(Arc<Mutex<Inner>>);
+
+/// Run `f` against the SLIM state on a blocking thread.
+///
+/// Every blocking `slim_bindings` entry point this module uses — `run_server`,
+/// `connect`, `create_session_and_wait`, `subscribe`, `set_route`,
+/// `listen_for_session`, `invite_and_wait`, `remove_and_wait`,
+/// `participants_list`, `delete_session_and_wait` — is a
+/// `get_runtime().block_on(..)` wrapper. Calling one directly from an
+/// `async` command runs it on a Tauri async worker and panics with "Cannot
+/// start a runtime from within a runtime", killing the command. So the work
+/// has to leave the async runtime first; `spawn_blocking` is what does that.
+///
+/// The lock is held for the whole closure, which serializes room operations.
+/// That is intended: they mutate one shared node/app/session graph.
+async fn with_state<T, F>(state: &tauri::State<'_, SlimState>, f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut Inner) -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    let state = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut inner = state.lock().map_err(|_| "SLIM state poisoned".to_string())?;
+        f(&mut inner)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
 
 impl SlimState {
     /// Point the state at its on-disk room store and load whatever is already
@@ -334,32 +364,32 @@ impl Inner {
 /// Start a local native SLIM node with SHADI mTLS defaults (`/slim start-node`).
 #[tauri::command]
 pub async fn slim_node_start(state: tauri::State<'_, SlimState>) -> Result<SlimNodeStatus, String> {
-    let mut inner = lock(&state)?;
-    if inner.node_started {
-        return Ok(SlimNodeStatus {
+    with_state(&state, |inner| {
+        if !inner.node_started {
+            let config = build_server_config()?;
+            inner
+                .node_service_mut()
+                .run_server(config)
+                .map_err(slim_err)?;
+            inner.node_started = true;
+        }
+        Ok(SlimNodeStatus {
             running: true,
             endpoint: Some(resolve_endpoint()),
-        });
-    }
-    let config = build_server_config()?;
-    inner
-        .node_service_mut()
-        .run_server(config)
-        .map_err(slim_err)?;
-    inner.node_started = true;
-    Ok(SlimNodeStatus {
-        running: true,
-        endpoint: Some(resolve_endpoint()),
+        })
     })
+    .await
 }
 
 #[tauri::command]
 pub async fn slim_node_status(state: tauri::State<'_, SlimState>) -> Result<SlimNodeStatus, String> {
-    let inner = lock(&state)?;
-    Ok(SlimNodeStatus {
-        running: inner.node_started,
-        endpoint: Some(resolve_endpoint()),
+    with_state(&state, |inner| {
+        Ok(SlimNodeStatus {
+            running: inner.node_started,
+            endpoint: Some(resolve_endpoint()),
+        })
     })
+    .await
 }
 
 // --- Rooms -------------------------------------------------------------------
@@ -377,29 +407,33 @@ pub async fn slim_group_create(
     member_specs: Vec<String>,
     dir_server: String,
 ) -> Result<SlimGroupInfo, String> {
-    let candidates = resolve_candidates(&member_specs, &dir_server)?;
-    admit_dids_to_trust_set(candidates.iter().map(|(m, _)| m.did.as_str()));
+    with_state(&state, move |inner| {
+        // Directory resolution shells out to `dirctl`, so it belongs on the
+        // blocking thread too.
+        let candidates = resolve_candidates(&member_specs, &dir_server)?;
+        admit_dids_to_trust_set(candidates.iter().map(|(m, _)| m.did.as_str()));
 
-    let mut inner = lock(&state)?;
-    let channel_name = Arc::new(parse_name(&channel)?);
-    let app = inner.ensure_app()?;
-    let session = app
-        .create_session_and_wait(group_session_config(), channel_name.clone())
-        .map_err(slim_err)?;
+        let channel_name = Arc::new(parse_name(&channel)?);
+        let app = inner.ensure_app()?;
+        let session = app
+            .create_session_and_wait(group_session_config(), channel_name.clone())
+            .map_err(slim_err)?;
 
-    inner.rooms.insert(
-        channel_name.to_string(),
-        Room {
-            session: Some(session),
-            moderator: true,
-            admitted: candidates
-                .into_iter()
-                .map(|(member, _)| (member.name.clone(), member))
-                .collect(),
-        },
-    );
-    inner.persist()?;
-    inner.group_info(&channel_name.to_string())
+        inner.rooms.insert(
+            channel_name.to_string(),
+            Room {
+                session: Some(session),
+                moderator: true,
+                admitted: candidates
+                    .into_iter()
+                    .map(|(member, _)| (member.name.clone(), member))
+                    .collect(),
+            },
+        );
+        inner.persist()?;
+        inner.group_info(&channel_name.to_string())
+    })
+    .await
 }
 
 /// Invite a member into a room (`/slim invite`, `/slim invite-from`).
@@ -419,63 +453,69 @@ pub async fn slim_group_invite(
     dir_server: Option<String>,
     kind: Option<String>,
 ) -> Result<SlimGroupInfo, String> {
-    let mut resolved = if is_member_spec(&member_spec) {
-        // Only Directory-backed specs need a server; `explicit:` carries its
-        // own DID and resolves locally.
-        let dir_server = if spec_needs_directory(&member_spec) {
-            dir_server.ok_or_else(|| {
-                format!("member spec '{member_spec}' needs a Directory server to resolve against")
-            })?
+    with_state(&state, move |inner| {
+        let mut resolved = if is_member_spec(&member_spec) {
+            // Only Directory-backed specs need a server; `explicit:` carries its
+            // own DID and resolves locally.
+            let dir_server = if spec_needs_directory(&member_spec) {
+                dir_server.ok_or_else(|| {
+                    format!(
+                        "member spec '{member_spec}' needs a Directory server to resolve against"
+                    )
+                })?
+            } else {
+                dir_server.unwrap_or_default()
+            };
+            resolve_candidates(std::slice::from_ref(&member_spec), &dir_server)?
         } else {
-            dir_server.unwrap_or_default()
+            vec![(
+                SlimGroupMember {
+                    name: member_spec.clone(),
+                    did: String::new(),
+                    endpoint: None,
+                    kind: "human".to_string(),
+                },
+                None,
+            )]
         };
-        resolve_candidates(std::slice::from_ref(&member_spec), &dir_server)?
-    } else {
-        vec![(
-            SlimGroupMember {
-                name: member_spec.clone(),
-                did: String::new(),
-                endpoint: None,
-                kind: "human".to_string(),
-            },
-            None,
-        )]
-    };
-    if resolved.is_empty() {
-        return Err(format!("member spec '{member_spec}' resolved to no candidates"));
-    }
-    if let Some(kind) = kind {
-        for (member, _) in &mut resolved {
-            member.kind = kind.clone();
+        if resolved.is_empty() {
+            return Err(format!(
+                "member spec '{member_spec}' resolved to no candidates"
+            ));
         }
-    }
-    admit_dids_to_trust_set(
-        resolved
-            .iter()
-            .map(|(m, _)| m.did.as_str())
-            .filter(|d| !d.is_empty()),
-    );
+        if let Some(kind) = kind {
+            for (member, _) in &mut resolved {
+                member.kind = kind.clone();
+            }
+        }
+        admit_dids_to_trust_set(
+            resolved
+                .iter()
+                .map(|(m, _)| m.did.as_str())
+                .filter(|d| !d.is_empty()),
+        );
 
-    let mut inner = lock(&state)?;
-    let connection_id = inner.ensure_connection()?;
-    let app = inner.ensure_app()?;
-    let session = inner.live_session(&channel)?;
+        let connection_id = inner.ensure_connection()?;
+        let app = inner.ensure_app()?;
+        let session = inner.live_session(&channel)?;
 
-    for (member, _) in &resolved {
-        let name = Arc::new(parse_name(&member.name)?);
-        app.set_route(name.clone(), connection_id).map_err(slim_err)?;
-        session.invite_and_wait(name).map_err(slim_err)?;
-    }
+        for (member, _) in &resolved {
+            let name = Arc::new(parse_name(&member.name)?);
+            app.set_route(name.clone(), connection_id).map_err(slim_err)?;
+            session.invite_and_wait(name).map_err(slim_err)?;
+        }
 
-    let room = inner
-        .rooms
-        .get_mut(&channel)
-        .ok_or_else(|| format!("no room '{channel}'"))?;
-    for (member, _) in resolved {
-        room.admitted.insert(member.name.clone(), member);
-    }
-    inner.persist()?;
-    inner.group_info(&channel)
+        let room = inner
+            .rooms
+            .get_mut(&channel)
+            .ok_or_else(|| format!("no room '{channel}'"))?;
+        for (member, _) in resolved {
+            room.admitted.insert(member.name.clone(), member);
+        }
+        inner.persist()?;
+        inner.group_info(&channel)
+    })
+    .await
 }
 
 /// Join a room created by a moderator (`/slim join`), or rejoin a known one.
@@ -489,7 +529,7 @@ pub async fn slim_group_join(
     channel: String,
     timeout_secs: Option<u64>,
 ) -> Result<SlimGroupInfo, String> {
-    let mut inner = lock(&state)?;
+    with_state(&state, move |inner| {
     let expected = parse_name(&channel)?;
     inner.ensure_channel_subscription(&channel)?;
     let connection_id = inner.ensure_connection()?;
@@ -526,6 +566,8 @@ pub async fn slim_group_join(
     }
     inner.persist()?;
     inner.group_info(&actual)
+    })
+    .await
 }
 
 /// Every known room, moderator or participant, connected or not — rooms
@@ -537,13 +579,15 @@ pub async fn slim_group_join(
 pub async fn slim_group_list(
     state: tauri::State<'_, SlimState>,
 ) -> Result<Vec<SlimGroupInfo>, String> {
-    let inner = lock(&state)?;
-    let mut channels: Vec<&String> = inner.rooms.keys().collect();
-    channels.sort();
-    channels
-        .into_iter()
-        .map(|channel| inner.group_info(channel))
-        .collect()
+    with_state(&state, |inner| {
+        let mut channels: Vec<&String> = inner.rooms.keys().collect();
+        channels.sort();
+        channels
+            .into_iter()
+            .map(|channel| inner.group_info(channel))
+            .collect()
+    })
+    .await
 }
 
 /// Re-read a room's membership roster on demand.
@@ -552,7 +596,7 @@ pub async fn slim_group_roster(
     state: tauri::State<'_, SlimState>,
     channel: String,
 ) -> Result<Vec<SlimGroupMember>, String> {
-    lock(&state)?.roster(&channel)
+    with_state(&state, move |inner| inner.roster(&channel)).await
 }
 
 /// Remove a member from a room. Moderator-only.
@@ -562,7 +606,7 @@ pub async fn slim_group_remove_member(
     channel: String,
     member_name: String,
 ) -> Result<SlimGroupInfo, String> {
-    let mut inner = lock(&state)?;
+    with_state(&state, move |inner| {
     if !inner.room(&channel)?.moderator {
         return Err(format!(
             "only the moderator of '{channel}' can remove members"
@@ -578,6 +622,8 @@ pub async fn slim_group_remove_member(
     }
     inner.persist()?;
     inner.group_info(&channel)
+    })
+    .await
 }
 
 /// Drop a room from the known list, tearing down its session if connected.
@@ -589,26 +635,28 @@ pub async fn slim_group_forget(
     state: tauri::State<'_, SlimState>,
     channel: String,
 ) -> Result<Vec<SlimGroupInfo>, String> {
-    let mut inner = lock(&state)?;
-    let room = inner
-        .rooms
-        .remove(&channel)
-        .ok_or_else(|| format!("no room '{channel}'"))?;
+    with_state(&state, move |inner| {
+        let room = inner
+            .rooms
+            .remove(&channel)
+            .ok_or_else(|| format!("no room '{channel}'"))?;
 
-    // Best-effort teardown: the room is already gone from the list, so a
-    // failure here must not resurrect it or fail the call.
-    if let (Some(session), Some(app)) = (room.session, inner.app.clone()) {
-        let _ = app.delete_session_and_wait(session);
-    }
-    inner.subscribed_channels.retain(|c| c != &channel);
+        // Best-effort teardown: the room is already gone from the list, so a
+        // failure here must not resurrect it or fail the call.
+        if let (Some(session), Some(app)) = (room.session, inner.app.clone()) {
+            let _ = app.delete_session_and_wait(session);
+        }
+        inner.subscribed_channels.retain(|c| c != &channel);
 
-    inner.persist()?;
-    let mut channels: Vec<String> = inner.rooms.keys().cloned().collect();
-    channels.sort();
-    channels
-        .iter()
-        .map(|channel| inner.group_info(channel))
-        .collect()
+        inner.persist()?;
+        let mut channels: Vec<String> = inner.rooms.keys().cloned().collect();
+        channels.sort();
+        channels
+            .iter()
+            .map(|channel| inner.group_info(channel))
+            .collect()
+    })
+    .await
 }
 
 // --- Controller --------------------------------------------------------------
@@ -970,10 +1018,6 @@ fn client_identity_candidates(dir: &Path, agent_id: Option<&str>) -> Vec<(PathBu
 
 // --- Small helpers -----------------------------------------------------------
 
-fn lock<'a>(state: &'a tauri::State<'_, SlimState>) -> Result<std::sync::MutexGuard<'a, Inner>, String> {
-    state.0.lock().map_err(|_| "SLIM state poisoned".to_string())
-}
-
 fn slim_err(err: slim_bindings::SlimError) -> String {
     err.to_string()
 }
@@ -1171,6 +1215,145 @@ mod tests {
         let _ = std::fs::remove_file(&missing);
         assert!(state.init_store(missing).is_ok());
         assert!(state.0.lock().unwrap_or_else(|e| e.into_inner()).rooms.is_empty());
+    }
+
+    /// Pins the invariant that makes this whole module work.
+    ///
+    /// Every blocking `slim_bindings` call is `get_runtime().block_on(..)`.
+    /// Invoked straight from an `async` command it lands on a Tauri async
+    /// worker and panics — "Cannot start a runtime from within a runtime" —
+    /// which made the panel compile, pass its tests, and then die on the first
+    /// real SLIM call. `with_state` exists to move that work off the runtime.
+    ///
+    /// Needs no node: connecting nowhere must come back as `Err`, and the point
+    /// is that it comes back at all instead of unwinding.
+    #[test]
+    fn blocking_slim_calls_survive_inside_an_async_runtime() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+
+        rt.block_on(async {
+            let outcome = tokio::task::spawn_blocking(|| {
+                let service = Service::new("shadi-desktop-runtime-invariant".to_string());
+                service.connect(ClientConfig::default()).is_err()
+            })
+            .await;
+
+            match outcome {
+                Ok(errored) => assert!(errored, "connecting to nowhere should return Err"),
+                Err(join) if join.is_panic() => panic!(
+                    "blocking SLIM call panicked inside the async runtime — the \
+                     spawn_blocking hop in with_state is missing or ineffective"
+                ),
+                Err(join) => panic!("blocking task failed: {join}"),
+            }
+        });
+    }
+
+    /// Live end-to-end coverage of the room admin surface against a real SLIM
+    /// node with real DID auth — create a room as moderator, invite two waiting
+    /// agents, read the roster, then reload the store as a restart would.
+    ///
+    /// Ignored by default: needs a running node, mTLS material and the DID env
+    /// contract, so CI skips it. `docs/content/demos/desktop-room-e2e.sh` sets
+    /// all of that up and runs it.
+    ///
+    /// This is the coverage whose absence let the runtime panic ship: the panel
+    /// compiled with a green suite and still died on its first real SLIM call.
+    #[test]
+    #[ignore = "needs a live SLIM node; run docs/content/demos/desktop-room-e2e.sh"]
+    fn live_moderator_creates_room_invites_two_agents_and_sees_the_roster() {
+        let channel = std::env::var("SHADI_E2E_ROOM").expect("SHADI_E2E_ROOM");
+        let members: Vec<String> = std::env::var("SHADI_E2E_MEMBERS")
+            .expect("SHADI_E2E_MEMBERS")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(members.len(), 2, "expects exactly two agents");
+
+        let store = std::env::temp_dir().join("shadi-desktop-e2e-rooms.json");
+        let _ = std::fs::remove_file(&store);
+
+        let state = SlimState::default();
+        {
+            let mut inner = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            inner.store_path = Some(store.clone());
+
+            // slim_group_create's core: DID connect, build app, open the group.
+            let channel_name = Arc::new(parse_name(&channel).expect("channel name"));
+            let app = inner.ensure_app().expect("ensure_app: DID auth + connect");
+            let session = app
+                .create_session_and_wait(group_session_config(), channel_name.clone())
+                .expect("create group session");
+            inner.rooms.insert(
+                channel_name.to_string(),
+                Room {
+                    session: Some(session),
+                    moderator: true,
+                    admitted: HashMap::new(),
+                },
+            );
+            inner.persist().expect("persist after create");
+
+            let info = inner.group_info(&channel).expect("group info");
+            assert_eq!(info.role, "moderator");
+            assert!(info.connected, "a freshly created room is connected");
+
+            // Participants can only be invited once they're already listening;
+            // the harness starts them right after this test creates the room.
+            std::thread::sleep(Duration::from_secs(12));
+
+            // slim_group_invite's core.
+            let connection_id = inner.ensure_connection().expect("connection");
+            for member in &members {
+                let name = Arc::new(parse_name(member).expect("member name"));
+                let session = inner.live_session(&channel).expect("live session");
+                app.set_route(name.clone(), connection_id).expect("set route");
+                session
+                    .invite_and_wait(name)
+                    .unwrap_or_else(|e| panic!("invite {member} failed: {e}"));
+                inner.rooms.get_mut(&channel).unwrap().admitted.insert(
+                    member.clone(),
+                    SlimGroupMember {
+                        name: member.clone(),
+                        did: String::new(),
+                        endpoint: None,
+                        kind: "agent".to_string(),
+                    },
+                );
+            }
+            inner.persist().expect("persist after invites");
+
+            // Roster reads the live session's participants_list.
+            let roster = inner.roster(&channel).expect("roster");
+            let names: Vec<&str> = roster.iter().map(|m| m.name.as_str()).collect();
+            for member in &members {
+                assert!(
+                    names.iter().any(|n| n == member),
+                    "{member} missing from live roster {names:?}"
+                );
+            }
+        }
+
+        // Reload as a restart would (#138): known, not connected, roster intact.
+        let restarted = SlimState::default();
+        restarted.init_store(store.clone()).expect("reload store");
+        let inner = restarted.0.lock().unwrap_or_else(|e| e.into_inner());
+        let restored = inner.group_info(&channel).expect("restored room");
+        assert!(!restored.connected, "a restored room has no live session");
+        assert_eq!(restored.role, "moderator");
+        let restored_names: Vec<&str> = restored.members.iter().map(|m| m.name.as_str()).collect();
+        for member in &members {
+            assert!(
+                restored_names.iter().any(|n| n == member),
+                "{member} did not survive the restart: {restored_names:?}"
+            );
+        }
+
+        let _ = std::fs::remove_file(&store);
     }
 
     #[test]
