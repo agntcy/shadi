@@ -44,12 +44,14 @@ function ErrorText({ message }: { message: string | null }) {
   return <p className="ab-error">{message}</p>;
 }
 
-/// Admits a discovered adapter into a room without retyping its DID or
-/// endpoint (agntcy/shadi#135). `agentbridge_list_adapters` already returns
-/// `{agent_id, tool: did, endpoint}`, so this builds the `explicit:` spec from
-/// what's in hand — no second Directory round-trip — and passes
-/// `kind: "agent"` so the invite isn't mislabelled human by the spec-prefix
-/// default.
+/**
+ * Admits a discovered adapter into a room without retyping its DID or
+ * endpoint (agntcy/shadi#135). `agentbridge_list_adapters` already returns
+ * `{agent_id, tool: did, endpoint}`, so this builds the `explicit:` spec from
+ * what's in hand — no second Directory round-trip — and passes
+ * `kind: "agent"` so the invite isn't mislabelled human by the spec-prefix
+ * default.
+ */
 function AddToRoom({ adapter }: { adapter: AdapterInfo }) {
   const { rooms, refresh } = useRooms();
   const [busy, setBusy] = useState(false);
@@ -366,9 +368,11 @@ function CoordinateVisualizer() {
     roundsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [rounds]);
 
-  /// Replace the free-typed specs with this room's agent members
-  /// (agntcy/shadi#135). Humans are skipped — they participate through their
-  /// own harness, not as a coordination tool endpoint.
+  /**
+   * Replace the free-typed specs with this room's agent members
+   * (agntcy/shadi#135). Humans are skipped — they participate through their
+   * own harness, not as a coordination tool endpoint.
+   */
   function applyRoomRoster(channel: string) {
     const room = rooms.find((r) => r.channel === channel);
     if (!room) return;
