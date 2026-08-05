@@ -1,44 +1,28 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Rooting SHADI identities in an SSH Ed25519 key (agntcy/shadi#140).
+//! SSH Ed25519 keys as a SHADI identity root (agntcy/shadi#140).
 //!
-//! An SSH Ed25519 key is the same primitive `did:key` already encodes, so it can
-//! serve as both halves of the identity story:
-//!
-//! - the **public** key gives the human `did:key`. Published at
-//!   `github.com/<user>.keys`, that makes the binding checkable by anyone —
-//!   which is the useful part of "sign in with GitHub", not secret material.
-//! - the **private** key's 32-byte seed is the HKDF root every agent DID is
-//!   derived from, so the human and its agents share one real key rather than a
-//!   synthetic seed.
-//!
-//! Why the 32-byte seed and not the key file's bytes: the OpenSSH container is
-//! not a stable encoding of the key. Re-encrypting with a new passphrase, or
-//! rewriting the comment, changes the file while the key stays the same. Feeding
-//! the file to HKDF would silently change every derived agent DID; the seed is
-//! the key itself, so derivation is stable. (The OpenPGP path predates this and
-//! hashes its cert bytes — see [`crate::AgentIdentity::derive`] callers.)
-//!
-//! Hardware-backed `sk-ssh-ed25519` keys have no extractable private key, so
-//! they cannot be a derivation root and are rejected with that explanation.
+//! An SSH Ed25519 key encodes the same primitive as `did:key`: the public half
+//! gives a human DID, the private half roots agent derivation. See
+//! `docs/content/security.md` for how the sources compare.
 
 use ed25519_dalek::VerifyingKey;
 use ssh_key::{PrivateKey, PublicKey};
 
 use crate::IdentityError;
 
-/// Algorithm name of the only SSH key type usable here.
 pub const SSH_ED25519: &str = "ssh-ed25519";
 
 fn invalid(msg: impl Into<String>) -> IdentityError {
     IdentityError::Config(msg.into())
 }
 
-/// The 32-byte Ed25519 seed of an OpenSSH private key, for use as the HKDF root
-/// of every agent identity derived from this human.
+/// The key's 32-byte seed, used as the agent-derivation root.
 ///
-/// `passphrase` is required for an encrypted key and ignored otherwise.
+/// The seed rather than the file's bytes: re-encrypting with a new passphrase
+/// rewrites the file while the key is unchanged, so hashing the file would
+/// silently change every derived agent DID.
 pub fn seed_from_openssh_private_key(
     key_bytes: &[u8],
     passphrase: Option<&str>,
@@ -74,8 +58,7 @@ pub fn seed_from_openssh_private_key(
     Ok(keypair.private.to_bytes())
 }
 
-/// The Ed25519 public key of an OpenSSH public key line
-/// (`ssh-ed25519 AAAA... comment`), for the human `did:key`.
+/// The Ed25519 key behind an `ssh-ed25519 AAAA... comment` line.
 pub fn verifying_key_from_openssh_public_key(line: &str) -> Result<VerifyingKey, IdentityError> {
     let key = PublicKey::from_openssh(line.trim()).map_err(|err| {
         invalid(format!(
@@ -93,11 +76,9 @@ pub fn verifying_key_from_openssh_public_key(line: &str) -> Result<VerifyingKey,
         .map_err(|err| invalid(format!("SSH public key is not a valid Ed25519 point: {err}")))
 }
 
-/// Pick the first `ssh-ed25519` key out of an `authorized_keys`-style listing,
-/// such as the body of `https://github.com/<user>.keys`.
-///
-/// GitHub accounts commonly hold several keys of mixed algorithms, so selecting
-/// by algorithm — rather than taking the first line — is what makes this usable.
+/// First `ssh-ed25519` key in an `authorized_keys`-style listing, e.g.
+/// `github.com/<user>.keys`. Selects by algorithm because accounts commonly
+/// publish several keys of mixed types.
 pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, IdentityError> {
     let mut seen = 0usize;
     for line in listing.lines() {
@@ -116,8 +97,7 @@ pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, I
     )))
 }
 
-/// The public key matching an OpenSSH private key, so a human DID can be taken
-/// from the private key alone — no separate `.pub` file or network fetch.
+/// Public key of an OpenSSH private key, so a human DID needs no `.pub` file.
 pub fn verifying_key_from_openssh_private_key(
     key_bytes: &[u8],
     passphrase: Option<&str>,
@@ -132,9 +112,7 @@ mod tests {
     use super::*;
     use crate::encode_did_key;
 
-    /// A real OpenSSH key built from a fixed seed, so the fixture round-trips
-    /// through the library's own encoder instead of being a hand-written blob
-    /// that only looks like a key.
+    /// Fixed seed, encoded by the library itself so the fixture is a real key.
     const TEST_SEED: [u8; 32] = [
         0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
         0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
@@ -167,8 +145,7 @@ mod tests {
             .to_string()
     }
 
-    /// Encryption needs an RNG for its salt; the value does not affect what the
-    /// decrypted seed is, which is all these tests assert.
+    /// Only used for the encryption salt.
     fn rand_core_stub() -> impl ssh_key::rand_core::CryptoRng + ssh_key::rand_core::RngCore {
         ssh_key::rand_core::OsRng
     }
@@ -182,8 +159,7 @@ mod tests {
         assert_ne!(a, [0u8; 32]);
     }
 
-    /// The whole point of rooting in one key: the human DID taken from the
-    /// public half must match the private half the agents derive from.
+    /// One key, one human DID — whichever half it is read from.
     #[test]
     fn public_and_private_halves_agree() {
         let from_private =
@@ -225,9 +201,7 @@ mod tests {
         assert!(msg.contains("ssh-keygen -t ed25519"), "must say how to fix: {msg}");
     }
 
-    /// Real SSH keys are usually passphrase-protected, and an encrypted key must
-    /// yield the same seed as the plaintext one — otherwise adding a passphrase
-    /// would silently change every derived agent DID.
+    /// Adding a passphrase must not change the derivation root.
     #[test]
     fn encrypted_key_yields_the_same_seed_as_plaintext() {
         let encrypted = encrypted_key("correct horse");

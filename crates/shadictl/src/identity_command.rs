@@ -547,10 +547,8 @@ fn github_api_get_gpg_keys(_user: &str) -> Result<String, String> {
         .ok_or_else(|| "test github payload not set".to_string())
 }
 
-/// One GET against GitHub, shared by both key fetchers.
-///
-/// `token` is `Some` only for the authenticated REST API; `github.com/<u>.keys`
-/// is public and deliberately unauthenticated.
+/// One GET against GitHub. `token` is `Some` only for the REST API;
+/// `github.com/<u>.keys` is public.
 #[cfg(not(test))]
 fn github_get_text(url: &str, token: Option<String>) -> Result<String, String> {
     let mut headers = HeaderMap::new();
@@ -634,8 +632,7 @@ pub(crate) fn extract_ed25519_public_key(openpgp_bytes: &[u8]) -> Result<Vec<u8>
     Err("no Ed25519 public key found in OpenPGP certificate".to_string())
 }
 
-/// Resolve an SSH key passphrase without ever taking it as a CLI argument,
-/// which would expose it to anyone able to run `ps`.
+/// Never a CLI argument: that would be visible via `ps`.
 pub(crate) fn resolve_ssh_passphrase(secret_ref: Option<&str>) -> Result<Option<String>, String> {
     if let Some(secret_ref) = secret_ref {
         let store = default_secret_store();
@@ -651,8 +648,7 @@ pub(crate) fn resolve_ssh_passphrase(secret_ref: Option<&str>) -> Result<Option<
     }
 }
 
-/// Read an OpenSSH private key from the secret store or a file and reduce it to
-/// the 32-byte Ed25519 seed used as the agent-derivation root (agntcy/shadi#140).
+/// Reduce an OpenSSH private key to the seed agent derivation roots in.
 pub(crate) fn read_ssh_seed_input(
     label: &str,
     secret_key: Option<&str>,
@@ -666,10 +662,8 @@ pub(crate) fn read_ssh_seed_input(
     Ok(seed.to_vec())
 }
 
-/// `did-from-ssh`: build a human `did:key` from an SSH Ed25519 key.
-///
-/// The input may be a public `ssh-ed25519 AAAA...` line or an OpenSSH private
-/// key; which one is detected from the content, so there is no flag to get wrong.
+/// Human `did:key` from an SSH key. Public line or private key — detected from
+/// the content, so there is no flag to get wrong.
 pub(crate) fn run_did_from_ssh(args: DidFromSshArgs) -> Result<(), String> {
     let raw = read_seed_input("--key", args.key_ref.as_deref(), args.input.as_ref())?;
     let text = String::from_utf8_lossy(&raw);
@@ -694,10 +688,7 @@ pub(crate) fn run_did_from_ssh(args: DidFromSshArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// `github.com/<user>.keys` — the published SSH keys.
-///
-/// Unauthenticated on purpose: unlike `/users/<u>/gpg_keys` this needs no token,
-/// so anyone can verify a human DID against the account that claims it.
+/// `github.com/<user>.keys`. Unauthenticated, unlike `/users/<u>/gpg_keys`.
 #[cfg(not(test))]
 fn fetch_github_ssh_keys(user: &str) -> Result<String, String> {
     github_get_text(&format!("https://github.com/{}.keys", user), None)

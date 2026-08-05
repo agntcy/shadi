@@ -3085,8 +3085,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert_eq!(run_cli(cli), ExitCode::from(2));
     }
 
-    /// A fixed OpenSSH Ed25519 key and the DID it must produce, so the
-    /// SSH-rooted identity path (agntcy/shadi#140) is pinned end to end.
+    /// Fixed key plus the DID it must produce.
     fn ssh_test_key() -> (String, String, String) {
         let seed = [7u8; 32];
         let keypair = ssh_key::private::Ed25519Keypair::from_seed(&seed);
@@ -3146,8 +3145,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert_eq!(run_cli(cli), ExitCode::from(2));
     }
 
-    /// The private and public halves of one SSH key must yield the same human
-    /// DID — that shared root is what binds a human to its agents.
+    /// One key, one human DID — whichever half it is read from.
     #[test]
     fn run_cli_did_from_ssh_agrees_across_key_halves() {
         let (pem, public_line, expected_did) = ssh_test_key();
@@ -3188,8 +3186,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert_eq!(of(&pub_out), expected_did, "halves must agree");
     }
 
-    /// `--source ssh` is the headline of agntcy/shadi#140: agents rooted in the
-    /// SSH key rather than a synthetic seed, and re-derivable.
+    /// Agents rooted in the SSH key, and re-derivable from it.
     #[test]
     fn run_cli_derive_and_verify_agent_identity_from_ssh_key() {
         let (pem, _public_line, _did) = ssh_test_key();
@@ -3232,8 +3229,8 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert_eq!(code, ExitCode::from(0));
     }
 
-    /// The same SSH key must not derive the same agent as `--source seed` would:
-    /// `ssh` roots in the key's 32-byte seed, `seed` in the file's bytes.
+    /// `ssh` roots in the key's seed, `seed` in the file's bytes — so the same
+    /// file must not yield the same agent.
     #[test]
     fn run_cli_ssh_and_seed_sources_are_not_interchangeable() {
         let (pem, _pub_line, _did) = ssh_test_key();
@@ -3264,9 +3261,8 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert_ne!(dids[0], dids[1], "sources must not collide");
     }
 
-    /// `SHADI_SSH_PASSPHRASE` is the other accepted source, for shells that
-    /// already hold it. Serialized against other env-mutating tests via the
-    /// github payload lock, which this module already uses as a process mutex.
+    /// The env source. Takes the github payload lock only as a process mutex,
+    /// since this mutates a shared env var.
     #[test]
     fn run_cli_did_from_ssh_reads_passphrase_from_the_environment() {
         let _guard = github_payload_lock().lock().expect("env lock");
