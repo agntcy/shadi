@@ -20,6 +20,12 @@ export interface SlimGroupMember {
 export interface SlimGroupInfo {
   channel: string;
   role: string;
+  /**
+   * Whether a live SLIM session backs this room right now. A known room
+   * restored from disk is `false` until rejoined: its roster is readable, but
+   * it cannot be invited into or removed from (agntcy/shadi#138).
+   */
+  connected: boolean;
   members: SlimGroupMember[];
 }
 
