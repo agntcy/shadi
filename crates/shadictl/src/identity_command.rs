@@ -547,41 +547,51 @@ fn github_api_get_gpg_keys(_user: &str) -> Result<String, String> {
         .ok_or_else(|| "test github payload not set".to_string())
 }
 
+/// One GET against GitHub, shared by both key fetchers.
+///
+/// `token` is `Some` only for the authenticated REST API; `github.com/<u>.keys`
+/// is public and deliberately unauthenticated.
 #[cfg(not(test))]
-fn github_api_get_gpg_keys(user: &str) -> Result<String, String> {
-    let token = std::env::var("GH_TOKEN")
-        .or_else(|_| std::env::var("GITHUB_TOKEN"))
-        .map_err(|_| "GH_TOKEN or GITHUB_TOKEN must be set for GitHub API".to_string())?;
-
-    let url = format!("https://api.github.com/users/{}/gpg_keys", user);
+fn github_get_text(url: &str, token: Option<String>) -> Result<String, String> {
     let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
     headers.insert(USER_AGENT, HeaderValue::from_static("shadi-shadictl"));
-    let auth = format!("Bearer {}", token);
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&auth).map_err(|_| "invalid GitHub token".to_string())?,
-    );
+    if let Some(token) = token {
+        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", token))
+                .map_err(|_| "invalid GitHub token".to_string())?,
+        );
+    }
 
-    let client = Client::builder()
+    let response = Client::builder()
         .default_headers(headers)
         .build()
-        .map_err(|err| format!("failed to build HTTP client: {}", err))?;
-
-    let response = client
+        .map_err(|err| format!("failed to build HTTP client: {}", err))?
         .get(url)
         .send()
-        .map_err(|err| format!("GitHub API request failed: {}", err))?;
+        .map_err(|err| format!("GitHub request failed: {}", err))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
-        return Err(format!("GitHub API error {}: {}", status, body));
+        return Err(format!("GitHub error {} for {}: {}", status, url, body));
     }
 
     response
         .text()
         .map_err(|err| format!("failed to read GitHub response: {}", err))
+}
+
+#[cfg(not(test))]
+fn github_api_get_gpg_keys(user: &str) -> Result<String, String> {
+    let token = std::env::var("GH_TOKEN")
+        .or_else(|_| std::env::var("GITHUB_TOKEN"))
+        .map_err(|_| "GH_TOKEN or GITHUB_TOKEN must be set for GitHub API".to_string())?;
+    github_get_text(
+        &format!("https://api.github.com/users/{}/gpg_keys", user),
+        Some(token),
+    )
 }
 
 pub(crate) fn derive_agent_keypair(secret_key: &[u8], agent_name: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
@@ -690,23 +700,7 @@ pub(crate) fn run_did_from_ssh(args: DidFromSshArgs) -> Result<(), String> {
 /// so anyone can verify a human DID against the account that claims it.
 #[cfg(not(test))]
 fn fetch_github_ssh_keys(user: &str) -> Result<String, String> {
-    let url = format!("https://github.com/{}.keys", user);
-    let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static("shadi-shadictl"));
-    let client = Client::builder()
-        .default_headers(headers)
-        .build()
-        .map_err(|err| format!("failed to build HTTP client: {}", err))?;
-    let response = client
-        .get(&url)
-        .send()
-        .map_err(|err| format!("GitHub request failed: {}", err))?;
-    if !response.status().is_success() {
-        return Err(format!("GitHub returned {} for {}", response.status(), url));
-    }
-    response
-        .text()
-        .map_err(|err| format!("failed to read GitHub response: {}", err))
+    github_get_text(&format!("https://github.com/{}.keys", user), None)
 }
 
 #[cfg(test)]

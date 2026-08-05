@@ -3188,6 +3188,169 @@ members = [{ did = "did:key:zA", role = "human" }]
         assert_eq!(of(&pub_out), expected_did, "halves must agree");
     }
 
+    /// `--source ssh` is the headline of agntcy/shadi#140: agents rooted in the
+    /// SSH key rather than a synthetic seed, and re-derivable.
+    #[test]
+    fn run_cli_derive_and_verify_agent_identity_from_ssh_key() {
+        let (pem, _public_line, _did) = ssh_test_key();
+        let dir = temp_dir();
+        let key_path = dir.path().join("id_ed25519");
+        std::fs::write(&key_path, &pem).expect("write key");
+
+        let agent = unique_key("ssh-rooted-agent");
+        let prefix = unique_key("ssh-agents");
+
+        let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
+            ssh_passphrase_secret: None,
+            source: HumanIdentitySource::Ssh,
+            human_secret: None,
+            input: Some(key_path.clone()),
+            agent_names: vec![agent.clone()],
+            prefix: prefix.clone(),
+            human_did_key: None,
+            out_dir: None,
+        });
+        assert_eq!(code, ExitCode::from(0));
+
+        let stored_did = test_store_get(&format!("{prefix}/{agent}/did")).expect("stored did");
+        let did = String::from_utf8(stored_did).expect("utf8");
+        assert!(did.starts_with("did:key:z"), "unexpected did: {did}");
+
+        // Verification must re-derive the same key from the same SSH root.
+        let code = run_verify_agent_identity_command(VerifyAgentIdentityArgs {
+            ssh_passphrase_secret: None,
+            source: HumanIdentitySource::Ssh,
+            human_secret: None,
+            input: Some(key_path),
+            agent_name: agent,
+            prefix,
+            public_key_key: None,
+            did_key: None,
+            human_did_key: None,
+            require_human_binding: false,
+        });
+        assert_eq!(code, ExitCode::from(0));
+    }
+
+    /// The same SSH key must not derive the same agent as `--source seed` would:
+    /// `ssh` roots in the key's 32-byte seed, `seed` in the file's bytes.
+    #[test]
+    fn run_cli_ssh_and_seed_sources_are_not_interchangeable() {
+        let (pem, _pub_line, _did) = ssh_test_key();
+        let dir = temp_dir();
+        let key_path = dir.path().join("id_ed25519");
+        std::fs::write(&key_path, &pem).expect("write key");
+
+        let mut dids = Vec::new();
+        for source in [HumanIdentitySource::Ssh, HumanIdentitySource::Seed] {
+            let agent = unique_key("src-compare-agent");
+            let prefix = unique_key("src-compare");
+            let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
+                ssh_passphrase_secret: None,
+                source,
+                human_secret: None,
+                input: Some(key_path.clone()),
+                agent_names: vec![agent.clone()],
+                prefix: prefix.clone(),
+                human_did_key: None,
+                out_dir: None,
+            });
+            assert_eq!(code, ExitCode::from(0));
+            dids.push(
+                String::from_utf8(test_store_get(&format!("{prefix}/{agent}/did")).unwrap())
+                    .unwrap(),
+            );
+        }
+        assert_ne!(dids[0], dids[1], "sources must not collide");
+    }
+
+    /// `SHADI_SSH_PASSPHRASE` is the other accepted source, for shells that
+    /// already hold it. Serialized against other env-mutating tests via the
+    /// github payload lock, which this module already uses as a process mutex.
+    #[test]
+    fn run_cli_did_from_ssh_reads_passphrase_from_the_environment() {
+        let _guard = github_payload_lock().lock().expect("env lock");
+        let (pem, _pub_line, expected_did) = ssh_test_key();
+        let encrypted = {
+            let key = ssh_key::PrivateKey::from_openssh(&pem).expect("parse");
+            key.encrypt(&mut ssh_key::rand_core::OsRng, "envpass")
+                .expect("encrypt")
+                .to_openssh(ssh_key::LineEnding::LF)
+                .expect("encode")
+                .to_string()
+        };
+
+        let dir = temp_dir();
+        let key_path = dir.path().join("enc_env");
+        std::fs::write(&key_path, &encrypted).expect("write key");
+        let out = dir.path().join("from-env.json");
+
+        let previous = std::env::var_os("SHADI_SSH_PASSPHRASE");
+        std::env::set_var("SHADI_SSH_PASSPHRASE", "envpass");
+        let code = run_did_from_ssh_command(DidFromSshArgs {
+            key_ref: None,
+            input: Some(key_path),
+            passphrase_secret: None,
+            out_file: out.clone(),
+        });
+        match previous {
+            Some(value) => std::env::set_var("SHADI_SSH_PASSPHRASE", value),
+            None => std::env::remove_var("SHADI_SSH_PASSPHRASE"),
+        }
+
+        assert_eq!(code, ExitCode::from(0));
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(doc["id"].as_str(), Some(expected_did.as_str()));
+    }
+
+    /// Passphrases come from the secret store, never argv (visible via `ps`).
+    #[test]
+    fn run_cli_did_from_ssh_reads_passphrase_from_the_secret_store() {
+        let (pem, _pub_line, expected_did) = ssh_test_key();
+        let encrypted = {
+            let key = ssh_key::PrivateKey::from_openssh(&pem).expect("parse");
+            key.encrypt(&mut ssh_key::rand_core::OsRng, "s3cret")
+                .expect("encrypt")
+                .to_openssh(ssh_key::LineEnding::LF)
+                .expect("encode")
+                .to_string()
+        };
+
+        let dir = temp_dir();
+        let key_path = dir.path().join("enc_key");
+        std::fs::write(&key_path, &encrypted).expect("write key");
+        let out = dir.path().join("from-encrypted.json");
+
+        let pass_key = unique_key("ssh-passphrase");
+        test_store_put(&pass_key, b"s3cret");
+
+        let code = run_did_from_ssh_command(DidFromSshArgs {
+            key_ref: None,
+            input: Some(key_path.clone()),
+            passphrase_secret: Some(pass_key),
+            out_file: out.clone(),
+        });
+        assert_eq!(code, ExitCode::from(0));
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(
+            doc["id"].as_str(),
+            Some(expected_did.as_str()),
+            "an encrypted key must yield the same DID as its plaintext form"
+        );
+
+        // Without the passphrase the same key is refused.
+        let code = run_did_from_ssh_command(DidFromSshArgs {
+            key_ref: None,
+            input: Some(key_path),
+            passphrase_secret: None,
+            out_file: dir.path().join("nope.json"),
+        });
+        assert_eq!(code, ExitCode::from(2));
+    }
+
     #[test]
     fn run_cli_did_from_ssh_rejects_a_non_key_file() {
         let dir = temp_dir();
