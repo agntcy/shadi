@@ -1,0 +1,103 @@
+.ob-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  text-align: left;
+}
+
+.ob-card {
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  background: rgba(127, 127, 127, 0.05);
+}
+
+.ob-card h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.ob-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.ob-input {
+  flex: 1;
+  min-width: 12rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: transparent;
+  color: inherit;
+}
+
+.ob-input-narrow {
+  flex: 0 1 11rem;
+}
+
+.ob-muted {
+  opacity: 0.65;
+  font-size: 0.9rem;
+}
+
+.ob-note {
+  margin-top: 0;
+}
+
+.ob-error {
+  color: #d64545;
+  font-size: 0.9rem;
+}
+
+.ob-ok {
+  color: #3fb950;
+  font-weight: 600;
+}
+
+.ob-verified {
+  color: #3fb950;
+  font-size: 0.85rem;
+}
+
+.ob-did {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+.ob-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.ob-table th,
+.ob-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+}
+
+.ob-tag {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.35rem;
+  margin-left: 0.4rem;
+  border-radius: 4px;
+  background: rgba(88, 166, 255, 0.22);
+}
+
+.ob-small {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+}

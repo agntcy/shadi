@@ -22,11 +22,21 @@ pub fn run() {
             // and tolerated — a bad room store must not block startup.
             match app.path().app_data_dir() {
                 Ok(dir) => {
-                    if let Err(err) = app
-                        .state::<commands::slim::SlimState>()
-                        .init_store(dir.join("rooms.json"))
-                    {
+                    let state = app.state::<commands::slim::SlimState>();
+                    if let Err(err) = state.init_store(dir.join("rooms.json")) {
                         eprintln!("warning: could not load saved rooms: {err}");
+                    }
+                    // Adopt the onboarding identity (agntcy/shadi#123) so DID
+                    // auth works without the environment contract.
+                    match state.load_identity(&commands::bootstrap::config_path(&dir)) {
+                        Ok(true) => {}
+                        Ok(false) => eprintln!("info: no identity yet — run onboarding"),
+                        Err(err) => eprintln!("warning: could not load identity: {err}"),
+                    }
+                    // The transport reads mTLS material from SHADI_TMP_DIR; point
+                    // it at the app's own directory unless the operator set one.
+                    if std::env::var_os("SHADI_TMP_DIR").is_none() {
+                        std::env::set_var("SHADI_TMP_DIR", &dir);
                     }
                 }
                 Err(err) => eprintln!("warning: no app data dir, rooms will not persist: {err}"),
@@ -45,6 +55,11 @@ pub fn run() {
             commands::policy::policy_explain,
             commands::policy::policy_diff,
             commands::policy::policy_profiles,
+            commands::identity::identity_discover_ssh_keys,
+            commands::identity::identity_bootstrap,
+            commands::identity::identity_status,
+            commands::identity::identity_trust_github_handle,
+            commands::identity::identity_untrust_github_handle,
             commands::identity::identity_did_from_gpg,
             commands::identity::identity_did_from_github,
             commands::identity::identity_derive_agent,

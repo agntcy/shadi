@@ -22,7 +22,7 @@ than the other way round.
   "not found" from "permission denied" in the UI), add a typed error enum
   in that panel's own PR rather than widening this contract speculatively.
 - **One module per panel**, named to match: `sandbox.rs` (#115), `policy.rs`
-  (#116), `identity.rs` (#117, secrets included), `slim.rs` (#118), `dir.rs`
+  (#116), `identity.rs` (#117, plus onboarding #123), `slim.rs` (#118), `dir.rs`
   (#119), `agentbridge.rs` (#120), `trace_memory.rs` (#121, both included
   since they share one CLI-side gate — see below).
 - **Async by default.** Every command is `async fn`, even though the stubs
@@ -68,6 +68,15 @@ than the other way round.
   `connected` rather than only on `role`. Sessions and credentials are never
   written to disk; a `did:key` is a public key, so the stored roster holds no
   secrets. See agntcy/shadi#138.
+- **Onboarding replaces the environment contract.** DID auth used to require
+  `SHADI_SLIM_AUTH`, `SLIM_HUMAN_SEED` and `SLIM_MEMBER_DIDS` in the app's own
+  environment, so a fresh install could not reach a room without a shell script.
+  `identity_bootstrap` derives the identity from an SSH Ed25519 key, stores the
+  derivation root in the secret store, generates mTLS material, and writes
+  `identity.json`; `slim.rs` prefers that over the environment and only falls
+  back to the env vars when they are set (so the CLI demos still work). Panels
+  should gate on `identity_status().ready` rather than assuming configuration.
+  See agntcy/shadi#123.
 - **Tagged unions over mutually-exclusive optional fields.** The CLI models
   "secret ref xor file path" as two `Option<T>` args with `conflicts_with`/
   `required_unless_present` clap attributes — that's a clap ergonomics
@@ -81,7 +90,7 @@ than the other way round.
 |---|---|---|
 | `sandbox.rs` | `sandbox_launch`, `sandbox_list_sessions`, `sandbox_attach`, `sandbox_detach`, `sandbox_kill`, `sandbox_status` | `shadictl <flags> -- <cmd>`, shell `/sessions` `/attach` `/detach` `/kill` `/status` |
 | `policy.rs` | `policy_query`, `policy_patch`, `policy_explain`, `policy_diff`, `policy_profiles` | shell `/policy query\|patch\|explain\|diff`, `--profile` |
-| `identity.rs` | `identity_did_from_gpg`, `identity_did_from_github`, `identity_derive_agent`, `identity_verify_agent`, `secret_get`, `secret_put_key`, `secret_list_keychain`, `secret_backend_status` | `shadictl did-from-gpg\|did-from-github\|derive-agent-identity\|verify-agent-identity\|get-secret\|put-key`, `--list-keychain` |
+| `identity.rs` | `identity_discover_ssh_keys`, `identity_bootstrap`, `identity_status`, `identity_trust_github_handle`, `identity_untrust_github_handle`, `identity_did_from_gpg`, `identity_did_from_github`, `identity_derive_agent`, `identity_verify_agent`, `secret_get`, `secret_put_key`, `secret_list_keychain`, `secret_backend_status` | `shadictl did-from-gpg\|did-from-github\|derive-agent-identity\|verify-agent-identity\|get-secret\|put-key`, `--list-keychain` |
 | `slim.rs` | `slim_node_start`, `slim_node_status`, `slim_group_create`, `slim_group_invite`, `slim_group_join`, `slim_group_list`, `slim_group_roster`, `slim_group_remove_member`, `slim_group_forget`, `slim_controller_list_connections`, `slim_controller_list_routes` | shell `/slim start-node\|create-group\|invite\|join\|controller`; the room-list/roster/remove/forget commands have no CLI equivalent (see below) |
 | `dir.rs` | `dir_search`, `dir_pull`, `dir_info`, `dir_register` | `shadictl dir search\|pull\|info`, `agentbridge register --dir-publish` |
 | `agentbridge.rs` | `agentbridge_list_adapters`, `agentbridge_handoff`, `agentbridge_delegate`, `agentbridge_coordinate` | `agentbridge list\|handoff\|delegate\|coordinate` |
@@ -95,6 +104,6 @@ truth; this table is a map, not a copy.
 - **The embedded terminal (#122)** doesn't need any of these commands — it
   spawns `shadictl shell` as a real subprocess/PTY and talks to it over
   stdin/stdout, not Tauri IPC.
-- **Onboarding (#123)** composes `identity_derive_agent` and
-  `secret_backend_status` from this contract; it doesn't need new commands
-  of its own.
+Onboarding (#123) was expected to compose existing commands, but it needed its
+own: discovering keys, generating mTLS and storing the derivation root have no
+CLI equivalent to mirror, and it is what removes the environment contract.

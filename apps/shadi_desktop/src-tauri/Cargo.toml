@@ -48,6 +48,18 @@ slim_bindings = { package = "agntcy-slim-bindings", version = "=2.0.0-alpha.9" }
 slim_proto = { package = "agntcy-slim-proto", version = "0.4.0" }
 slim_config = { package = "agntcy-slim-config", version = "0.12.6" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.0", path = "../../../crates/shadi_identity" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.0", path = "../../../crates/agent_secrets" }
+# mTLS bootstrap without an openssl binary — the desktop app has to work on a
+# clean Windows install too (agntcy/shadi#123).
+rcgen = { version = "0.14", features = ["pem"] }
+# Reading github.com/<handle>.keys; rustls-tls to match the rest of the stack
+# and avoid an openssl dependency.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 futures = "0.3"
 
+
+[dev-dependencies]
+# Building an ssh-ed25519 public-key line for the GitHub-handle tests.
+base64 = "0.22"
+ed25519-dalek = "2.2"
