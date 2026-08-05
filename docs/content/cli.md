@@ -388,6 +388,61 @@ cargo run -p agntcy-shadi-cli -- \
   --out github.did.json
 ```
 
+### SSH Ed25519 identities
+
+An Ed25519 SSH key encodes the same primitive as `did:key`, so it can root a
+human identity and every agent derived from it. Use it when the account has no
+Ed25519 *GPG* key — `did-from-github` defaults to `--key-type gpg`, which fails
+with `no Ed25519 public key found in OpenPGP certificate` if the GPG key is RSA.
+
+`--key-type ssh` reads `github.com/<user>.keys`, which needs **no token** and is
+publicly readable, so anyone can check a human DID against the account claiming
+it:
+
+```bash
+cargo run -p agntcy-shadi-cli -- \
+  did-from-github \
+  --user octocat \
+  --key-type ssh \
+  --out github.did.json
+```
+
+`did-from-ssh` does the same from a local key. The input may be a public
+`ssh-ed25519 AAAA...` line or an OpenSSH private key — which one is detected from
+the content, and both halves of a key yield the same DID:
+
+```bash
+cargo run -p agntcy-shadi-cli -- \
+  did-from-ssh \
+  --in ~/.ssh/id_ed25519.pub \
+  --out human.did.json
+```
+
+Agents derive from the private key's 32-byte Ed25519 seed, so a human and its
+agents share one real key:
+
+```bash
+cargo run -p agntcy-shadi-cli -- \
+  derive-agent-identity \
+  --source ssh \
+  --in ~/.ssh/id_ed25519 \
+  --name claude-code \
+  --name codex
+```
+
+The key may also come from the secret store (`--human-secret <ref>`), which is
+how a 1Password- or keychain-held key is used — see
+[security.md](security.md#secret-backends).
+
+For an encrypted key, supply the passphrase through the secret store
+(`--ssh-passphrase-secret <ref>`) or `SHADI_SSH_PASSPHRASE`. It is deliberately
+not a command-line argument, which would be visible to anyone running `ps`.
+Adding or changing a passphrase does not change the derived DIDs: derivation uses
+the key's seed, not the encoded file.
+
+Only `ssh-ed25519` works. Hardware-backed `sk-ssh-ed25519` keys expose no private
+key, so they cannot root a derivation.
+
 Store an OpenPGP secret key in the SHADI secret store:
 
 ```bash
@@ -423,7 +478,8 @@ cargo run -p agntcy-shadi-cli -- \
   --out-dir ./agent-dids
 ```
 
-For non-GPG identities, store source material in SHADI and use `--source seed`:
+For identities that are neither GPG nor SSH, store source material in SHADI and
+use `--source seed`:
 
 ```bash
 cargo run -p agntcy-shadi-cli -- \

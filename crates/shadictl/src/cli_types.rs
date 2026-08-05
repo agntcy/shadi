@@ -150,6 +150,8 @@ pub(crate) enum Commands {
     DidFromGpg(DidFromGpgArgs),
     #[command(name = "did-from-github")]
     DidFromGitHub(DidFromGitHubArgs),
+    #[command(name = "did-from-ssh")]
+    DidFromSsh(DidFromSshArgs),
     #[command(name = "get-secret")]
     GetSecret(GetSecretArgs),
     #[command(name = "derive-agent-did")]
@@ -816,14 +818,67 @@ pub(crate) struct DidFromGpgArgs {
     pub(crate) out_file: PathBuf,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubKeyType {
+    /// `/users/<u>/gpg_keys`; needs GH_TOKEN and an Ed25519 GPG key.
+    Gpg,
+    /// `github.com/<u>.keys`; unauthenticated, picks the first ssh-ed25519 key.
+    Ssh,
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "did-from-github", about = "Create did:key DID document from a GitHub GPG public key")]
+#[command(
+    name = "did-from-github",
+    about = "Create did:key DID document from a public key published on GitHub"
+)]
 pub(crate) struct DidFromGitHubArgs {
     #[arg(long = "user", value_name = "USERNAME")]
     pub(crate) user: String,
 
+    /// Which published key to read. `ssh` needs no token and is the only option
+    /// that works when the account's GPG key is not Ed25519.
+    #[arg(long = "key-type", value_enum, default_value = "gpg")]
+    pub(crate) key_type: GitHubKeyType,
+
     #[arg(long = "out", value_name = "FILE")]
     pub(crate) out_file: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "did-from-ssh",
+    about = "Create did:key DID document from an SSH Ed25519 key (public line or private key)"
+)]
+pub(crate) struct DidFromSshArgs {
+    /// Secret-store reference holding the key.
+    #[arg(
+        short = 'k',
+        long = "key",
+        value_name = "SECRET",
+        required_unless_present = "input",
+        conflicts_with = "input"
+    )]
+    pub(crate) key_ref: Option<String>,
+
+    /// File holding the key. An `ssh-ed25519 AAAA...` line or an OpenSSH private
+    /// key; which one it is is detected from the content.
+    #[arg(
+        short = 'i',
+        long = "in",
+        value_name = "FILE",
+        required_unless_present = "key_ref",
+        conflicts_with = "key_ref"
+    )]
+    pub(crate) input: Option<PathBuf>,
+
+    /// Secret-store reference holding the passphrase, when the key is an
+    /// encrypted private key. Never passed as a literal: an argument would be
+    /// visible to anyone running `ps`. `SHADI_SSH_PASSPHRASE` is also honoured.
+    #[arg(long = "passphrase-secret", value_name = "SECRET")]
+    pub(crate) passphrase_secret: Option<String>,
+
+    #[arg(short = 'o', long = "out", value_name = "FILE", default_value = "did-document.json")]
+    pub(crate) out_file: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -868,6 +923,9 @@ pub(crate) struct DeriveAgentDidArgs {
 pub(crate) enum HumanIdentitySource {
     Gpg,
     Seed,
+    /// An OpenSSH Ed25519 private key; its 32-byte seed is the HKDF root
+    /// (agntcy/shadi#140).
+    Ssh,
 }
 
 #[derive(Parser, Debug)]
@@ -900,6 +958,12 @@ pub(crate) struct DeriveAgentIdentityArgs {
     #[arg(long = "prefix", value_name = "PATH", default_value = "agent_keys")]
     pub(crate) prefix: String,
 
+
+    /// Secret-store reference holding the SSH key passphrase (`--source ssh`
+    /// with an encrypted key). Never a literal argument — that would be visible
+    /// via `ps`. `SHADI_SSH_PASSPHRASE` is also honoured.
+    #[arg(long = "ssh-passphrase-secret", value_name = "SECRET")]
+    pub(crate) ssh_passphrase_secret: Option<String>,
     #[arg(long = "human-did-key", value_name = "SECRET")]
     pub(crate) human_did_key: Option<String>,
 
@@ -936,6 +1000,12 @@ pub(crate) struct VerifyAgentIdentityArgs {
 
     #[arg(long = "prefix", value_name = "PATH", default_value = "agent_keys")]
     pub(crate) prefix: String,
+
+    /// Secret-store reference holding the SSH key passphrase (`--source ssh`
+    /// with an encrypted key). Never a literal argument — that would be visible
+    /// via `ps`. `SHADI_SSH_PASSPHRASE` is also honoured.
+    #[arg(long = "ssh-passphrase-secret", value_name = "SECRET")]
+    pub(crate) ssh_passphrase_secret: Option<String>,
 
     #[arg(long = "public-key-key", value_name = "SECRET")]
     pub(crate) public_key_key: Option<String>,

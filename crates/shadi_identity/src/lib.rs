@@ -19,6 +19,7 @@ use pkcs8::LineEnding;
 
 pub mod auth;
 pub mod config;
+pub mod ssh;
 
 pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
 
