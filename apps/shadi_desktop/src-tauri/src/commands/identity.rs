@@ -552,6 +552,44 @@ mod tests {
         (line, did)
     }
 
+    /// The tags the frontend sends, spelled exactly as it spells them.
+    ///
+    /// `rename_all = "snake_case"` turns `OnePassword` into `one_password`,
+    /// which is easy to guess wrong from the TypeScript side — and did fail as
+    /// `unknown variant `onepassword``. Nothing else checks the two sides agree,
+    /// so pin the literals here.
+    #[test]
+    fn key_source_wire_tags_match_the_frontend() {
+        let file: KeySource =
+            serde_json::from_str(r#"{"kind":"file","path":"/tmp/id_ed25519"}"#).expect("file");
+        assert!(matches!(file, KeySource::File { .. }));
+
+        let op: KeySource = serde_json::from_str(
+            r#"{"kind":"one_password","item":"My Key","vault":"Private","account":"UUID"}"#,
+        )
+        .expect("one_password");
+        match op {
+            KeySource::OnePassword { item, vault, account } => {
+                assert_eq!(item, "My Key");
+                assert_eq!(vault.as_deref(), Some("Private"));
+                assert_eq!(account.as_deref(), Some("UUID"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // The frontend sends nulls for the optional fields when unset.
+        let minimal: KeySource = serde_json::from_str(
+            r#"{"kind":"one_password","item":"K","vault":null,"account":null}"#,
+        )
+        .expect("nulls are accepted");
+        assert!(matches!(minimal, KeySource::OnePassword { .. }));
+
+        assert!(
+            serde_json::from_str::<KeySource>(r#"{"kind":"onepassword","item":"K"}"#).is_err(),
+            "the old misspelling must not silently work"
+        );
+    }
+
     /// `op` may hand back a multi-line field quoted and with escaped newlines.
     /// The PEM has to come back with real breaks or the parser rejects it.
     #[test]

@@ -23,7 +23,7 @@ interface OnePasswordSshKey {
 }
 
 /** Which place the key is read from. Keys are not always in ~/.ssh. */
-type SourceKind = "ssh_dir" | "file" | "onepassword";
+type SourceKind = "ssh_dir" | "file" | "one_password";
 
 interface AgentIdentity {
   agent_name: string;
@@ -98,7 +98,7 @@ export function OnboardingPanel() {
   // Reading a vault's items can prompt for Touch ID, so it waits for an
   // explicit account choice.
   useEffect(() => {
-    if (sourceKind === "onepassword" && opAccounts === null) {
+    if (sourceKind === "one_password" && opAccounts === null) {
       onLoadOnePasswordAccounts();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -110,10 +110,10 @@ export function OnboardingPanel() {
     .filter(Boolean);
 
   function currentSource() {
-    if (sourceKind === "onepassword") {
+    if (sourceKind === "one_password") {
       const chosenOp = (opKeys ?? []).find((k) => k.item === opSelected);
       return {
-        kind: "onepassword",
+        kind: "one_password",
         item: opSelected,
         vault: chosenOp?.vault ?? null,
         account: opAccount || null,
@@ -129,7 +129,7 @@ export function OnboardingPanel() {
   const previewDid =
     sourceKind === "ssh_dir"
       ? keys.find((k) => k.path === selected)?.human_did ?? null
-      : sourceKind === "onepassword"
+      : sourceKind === "one_password"
         ? (opKeys ?? []).find((k) => k.item === opSelected)?.human_did ?? null
         : null;
 
@@ -306,7 +306,7 @@ export function OnboardingPanel() {
           {([
             ["ssh_dir", "~/.ssh"],
             ["file", "Choose a file"],
-            ["onepassword", "1Password"],
+            ["one_password", "1Password"],
           ] as const).map(([kind, label]) => (
             <button
               key={kind}
@@ -357,7 +357,7 @@ export function OnboardingPanel() {
           </div>
         )}
 
-        {sourceKind === "onepassword" && (
+        {sourceKind === "one_password" && (
           <>
             <div className="ob-row">
               <select
