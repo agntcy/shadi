@@ -86,6 +86,16 @@ export function OnboardingPanel() {
     refresh();
   }, [refresh]);
 
+  // Load 1Password items when that source is first chosen. `op` may prompt for
+  // Touch ID, so this only runs on an explicit switch to the tab, never at
+  // startup.
+  useEffect(() => {
+    if (sourceKind === "onepassword" && opKeys === null && !opLoading && !opError) {
+      onLoadOnePassword();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKind]);
+
   const names = agentNames
     .split(",")
     .map((n) => n.trim())
@@ -314,23 +324,17 @@ export function OnboardingPanel() {
 
         {sourceKind === "onepassword" && (
           <>
-            <p className="ob-muted ob-note">
-              Reads the item's <code>private key</code> field through the{" "}
-              <code>op</code> CLI. SHADI's own 1Password backend can't be used
-              here — it expects SHADI's storage format, not a native SSH Key
-              item. The vault may also forbid revealing a private key.
-            </p>
             <div className="ob-row">
-              {opKeys === null ? (
-                <button onClick={onLoadOnePassword} disabled={opLoading}>
-                  {opLoading ? "Listing…" : "List SSH keys"}
-                </button>
+              {opLoading ? (
+                <span className="ob-muted">Reading SSH Key items from 1Password…</span>
+              ) : opKeys === null ? (
+                <button onClick={onLoadOnePassword}>List SSH keys</button>
               ) : opKeys.length === 0 ? (
                 <>
-                  <span className="ob-muted">No SSH Key items found.</span>
-                  <button onClick={onLoadOnePassword} disabled={opLoading}>
-                    Retry
-                  </button>
+                  <span className="ob-muted">
+                    No SSH Key items in this vault.
+                  </span>
+                  <button onClick={onLoadOnePassword}>Retry</button>
                 </>
               ) : (
                 <>
