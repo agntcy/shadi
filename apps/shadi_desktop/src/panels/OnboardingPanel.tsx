@@ -10,6 +10,12 @@ interface SshKeyCandidate {
   human_did: string | null;
 }
 
+interface OnePasswordAccount {
+  account_uuid: string;
+  url: string;
+  email: string;
+}
+
 interface OnePasswordSshKey {
   item: string;
   vault: string | null;
@@ -53,6 +59,8 @@ export function OnboardingPanel() {
   const [selected, setSelected] = useState<string>("");
   const [sourceKind, setSourceKind] = useState<SourceKind>("ssh_dir");
   const [filePath, setFilePath] = useState("");
+  const [opAccounts, setOpAccounts] = useState<OnePasswordAccount[] | null>(null);
+  const [opAccount, setOpAccount] = useState<string>("");
   const [opKeys, setOpKeys] = useState<OnePasswordSshKey[] | null>(null);
   const [opSelected, setOpSelected] = useState<string>("");
   const [opError, setOpError] = useState<string | null>(null);
@@ -86,12 +94,12 @@ export function OnboardingPanel() {
     refresh();
   }, [refresh]);
 
-  // Load 1Password items when that source is first chosen. `op` may prompt for
-  // Touch ID, so this only runs on an explicit switch to the tab, never at
-  // startup.
+  // List accounts when that source is first chosen — that needs no unlock.
+  // Reading a vault's items can prompt for Touch ID, so it waits for an
+  // explicit account choice.
   useEffect(() => {
-    if (sourceKind === "onepassword" && opKeys === null && !opLoading && !opError) {
-      onLoadOnePassword();
+    if (sourceKind === "onepassword" && opAccounts === null) {
+      onLoadOnePasswordAccounts();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceKind]);
@@ -104,7 +112,12 @@ export function OnboardingPanel() {
   function currentSource() {
     if (sourceKind === "onepassword") {
       const chosenOp = (opKeys ?? []).find((k) => k.item === opSelected);
-      return { kind: "onepassword", item: opSelected, vault: chosenOp?.vault ?? null };
+      return {
+        kind: "onepassword",
+        item: opSelected,
+        vault: chosenOp?.vault ?? null,
+        account: opAccount || null,
+      };
     }
     return {
       kind: "file",
@@ -139,13 +152,35 @@ export function OnboardingPanel() {
     }
   }
 
-  async function onLoadOnePassword() {
+  async function onLoadOnePasswordAccounts() {
+    setOpError(null);
+    try {
+      const found = await invoke<OnePasswordAccount[]>("identity_list_1password_accounts");
+      setOpAccounts(found);
+      // No default: `op` picking one silently is what sent us to the wrong
+      // account in the first place.
+      return found;
+    } catch (e) {
+      setOpError(String(e));
+      setOpAccounts(null);
+      return [];
+    }
+  }
+
+  async function onLoadOnePassword(account?: string) {
+    const useAccount = account ?? opAccount;
+    if (!useAccount) {
+      setOpError("Choose a 1Password account first.");
+      return;
+    }
     setOpLoading(true);
     setOpError(null);
     try {
-      const found = await invoke<OnePasswordSshKey[]>("identity_list_1password_ssh_keys");
+      const found = await invoke<OnePasswordSshKey[]>("identity_list_1password_ssh_keys", {
+        account: useAccount,
+      });
       setOpKeys(found);
-      setOpSelected((prev) => prev || found[0]?.item || "");
+      setOpSelected(found[0]?.item ?? "");
     } catch (e) {
       setOpError(String(e));
       setOpKeys(null);
@@ -325,37 +360,69 @@ export function OnboardingPanel() {
         {sourceKind === "onepassword" && (
           <>
             <div className="ob-row">
-              {opLoading ? (
-                <span className="ob-muted">Reading SSH Key items from 1Password…</span>
-              ) : opKeys === null ? (
-                <button onClick={onLoadOnePassword}>List SSH keys</button>
-              ) : opKeys.length === 0 ? (
-                <>
-                  <span className="ob-muted">
-                    No SSH Key items in this vault.
-                  </span>
-                  <button onClick={onLoadOnePassword}>Retry</button>
-                </>
-              ) : (
-                <>
-                  <select
-                    className="ob-input"
-                    value={opSelected}
-                    onChange={(e) => setOpSelected(e.target.value)}
-                  >
-                    {opKeys.map((k) => (
-                      <option key={k.item} value={k.item}>
-                        {k.item}
-                        {k.vault ? ` (${k.vault})` : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <button onClick={onLoadOnePassword} disabled={opLoading}>
-                    Reload
-                  </button>
-                </>
-              )}
+              <select
+                className="ob-input"
+                value={opAccount}
+                onChange={(e) => {
+                  const account = e.target.value;
+                  setOpAccount(account);
+                  setOpKeys(null);
+                  setOpSelected("");
+                  if (account) onLoadOnePassword(account);
+                }}
+              >
+                <option value="">
+                  {opAccounts === null
+                    ? "Loading accounts…"
+                    : opAccounts.length === 0
+                      ? "No 1Password accounts found"
+                      : "Choose an account…"}
+                </option>
+                {(opAccounts ?? []).map((a) => (
+                  <option key={a.account_uuid} value={a.account_uuid}>
+                    {a.url} — {a.email}
+                  </option>
+                ))}
+              </select>
+              <button onClick={onLoadOnePasswordAccounts} disabled={opLoading}>
+                Reload accounts
+              </button>
             </div>
+
+            {opAccount && (
+              <div className="ob-row">
+                {opLoading ? (
+                  <span className="ob-muted">Reading SSH Key items…</span>
+                ) : opKeys === null ? (
+                  <button onClick={() => onLoadOnePassword()}>List SSH keys</button>
+                ) : opKeys.length === 0 ? (
+                  <>
+                    <span className="ob-muted">
+                      No SSH Key items in this account.
+                    </span>
+                    <button onClick={() => onLoadOnePassword()}>Retry</button>
+                  </>
+                ) : (
+                  <>
+                    <select
+                      className="ob-input"
+                      value={opSelected}
+                      onChange={(e) => setOpSelected(e.target.value)}
+                    >
+                      {opKeys.map((k) => (
+                        <option key={k.item} value={k.item}>
+                          {k.item}
+                          {k.vault ? ` (${k.vault})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <button onClick={() => onLoadOnePassword()} disabled={opLoading}>
+                      Reload
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {opError && <p className="ob-error">{opError}</p>}
           </>
         )}

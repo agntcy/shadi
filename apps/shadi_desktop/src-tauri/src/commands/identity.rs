@@ -154,10 +154,13 @@ pub struct SshKeyCandidate {
 pub enum KeySource {
     /// Any path — from `~/.ssh` discovery or a file picker.
     File { path: String },
-    /// A 1Password SSH Key item, read through the `op` CLI.
+    /// A 1Password SSH Key item, read through the `op` CLI. `account` is the
+    /// account UUID: `op` otherwise uses whichever account is default, which
+    /// is not necessarily the one holding the key.
     OnePassword {
         item: String,
         vault: Option<String>,
+        account: Option<String>,
     },
 }
 
@@ -165,7 +168,7 @@ impl KeySource {
     fn describe(&self) -> String {
         match self {
             KeySource::File { path } => path.clone(),
-            KeySource::OnePassword { item, vault } => match vault {
+            KeySource::OnePassword { item, vault, .. } => match vault {
                 Some(v) => format!("1Password {v}/{item}"),
                 None => format!("1Password item {item}"),
             },
@@ -613,6 +616,14 @@ mod tests {
     }
 }
 
+/// A 1Password account configured on this machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordAccount {
+    pub account_uuid: String,
+    pub url: String,
+    pub email: String,
+}
+
 /// An SSH Key item in 1Password, offered as an identity root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnePasswordSshKey {
@@ -627,31 +638,58 @@ fn op_binary() -> String {
     std::env::var("SHADI_OP_BINARY").unwrap_or_else(|_| "op".to_string())
 }
 
-fn run_op(args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new(op_binary())
-        .args(args)
+fn run_op(account: Option<&str>, args: &[&str]) -> Result<String, String> {
+    let mut command = std::process::Command::new(op_binary());
+    command.args(args);
+    if let Some(account) = account.filter(|a| !a.is_empty()) {
+        command.args(["--account", account]);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("failed to run `op`: {e}. Install the 1Password CLI to use this source"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // Not being signed in is the common case and has a specific remedy.
         if stderr.contains("not signed in") || stderr.contains("no account") {
-            return Err(
-                "1Password CLI is not signed in — run `op signin`, or enable the CLI in \
-                 1Password's Developer settings"
-                    .to_string(),
-            );
+            let which = account
+                .map(|a| format!(" to account {a}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "1Password CLI is not signed in{which} — run `op signin`, or enable the CLI \
+                 in 1Password's Developer settings"
+            ));
         }
         return Err(format!("`op` failed: {stderr}"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// SSH Key items visible to the signed-in `op` session.
+/// 1Password accounts configured on this machine.
+///
+/// Listing needs no sign-in, so the picker can be populated before any unlock.
 #[tauri::command]
-pub async fn identity_list_1password_ssh_keys() -> Result<Vec<OnePasswordSshKey>, String> {
+pub async fn identity_list_1password_accounts() -> Result<Vec<OnePasswordAccount>, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let json = run_op(&["item", "list", "--categories", "SSH Key", "--format", "json"])?;
+        let json = run_op(None, &["account", "list", "--format", "json"])?;
+        let accounts: Vec<OnePasswordAccount> =
+            serde_json::from_str(&json).map_err(|e| format!("unexpected `op` output: {e}"))?;
+        Ok(accounts)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// SSH Key items in one account.
+#[tauri::command]
+pub async fn identity_list_1password_ssh_keys(
+    account: Option<String>,
+) -> Result<Vec<OnePasswordSshKey>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let account = account.as_deref();
+        let json = run_op(
+            account,
+            &["item", "list", "--categories", "SSH Key", "--format", "json"],
+        )?;
         let items: serde_json::Value =
             serde_json::from_str(&json).map_err(|e| format!("unexpected `op` output: {e}"))?;
         let Some(array) = items.as_array() else {
@@ -668,7 +706,7 @@ pub async fn identity_list_1password_ssh_keys() -> Result<Vec<OnePasswordSshKey>
                     .and_then(|n| n.as_str())
                     .map(|s| s.to_string());
                 // Read only the public field for the DID preview.
-                let human_did = op_public_key_did(&title, vault.as_deref());
+                let human_did = op_public_key_did(account, &title, vault.as_deref());
                 Some(OnePasswordSshKey { item: title, vault, human_did })
             })
             .collect())
@@ -677,13 +715,13 @@ pub async fn identity_list_1password_ssh_keys() -> Result<Vec<OnePasswordSshKey>
     .map_err(|e| format!("task failed: {e}"))?
 }
 
-fn op_public_key_did(item: &str, vault: Option<&str>) -> Option<String> {
+fn op_public_key_did(account: Option<&str>, item: &str, vault: Option<&str>) -> Option<String> {
     let mut args = vec!["item", "get", item, "--fields", "public key"];
     if let Some(vault) = vault {
         args.push("--vault");
         args.push(vault);
     }
-    let line = run_op(&args).ok()?;
+    let line = run_op(account, &args).ok()?;
     shadi_identity::ssh::verifying_key_from_openssh_public_key(line.trim())
         .ok()
         .map(|vk| shadi_identity::encode_did_key(&vk))
@@ -700,13 +738,13 @@ fn read_key_material(source: &KeySource) -> Result<Vec<u8>, String> {
         KeySource::File { path } => {
             std::fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))
         }
-        KeySource::OnePassword { item, vault } => {
+        KeySource::OnePassword { item, vault, account } => {
             let mut args = vec!["item", "get", item.as_str(), "--fields", "private key", "--reveal"];
             if let Some(vault) = vault {
                 args.push("--vault");
                 args.push(vault);
             }
-            let value = run_op(&args)?;
+            let value = run_op(account.as_deref(), &args)?;
             let key = normalise_op_private_key(&value);
             if !key.contains("OPENSSH PRIVATE KEY") {
                 return Err(format!(
