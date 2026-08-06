@@ -15,6 +15,8 @@ mod commands;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Native file picker, so a key outside ~/.ssh can be chosen.
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::slim::SlimState::default())
         .setup(|app| {
             // Known rooms are persisted (agntcy/shadi#138); the app data dir is
@@ -56,6 +58,7 @@ pub fn run() {
             commands::policy::policy_diff,
             commands::policy::policy_profiles,
             commands::identity::identity_discover_ssh_keys,
+            commands::identity::identity_list_1password_ssh_keys,
             commands::identity::identity_bootstrap,
             commands::identity::identity_status,
             commands::identity::identity_trust_github_handle,

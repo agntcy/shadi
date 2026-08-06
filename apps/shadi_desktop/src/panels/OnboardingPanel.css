@@ -101,3 +101,22 @@
   font-size: 0.8rem;
   padding: 0.15rem 0.5rem;
 }
+
+.ob-sources {
+  gap: 0.3rem;
+}
+
+.ob-source {
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.ob-source-on {
+  background: rgba(127, 127, 127, 0.22);
+  font-weight: 600;
+}

@@ -146,10 +146,36 @@ pub struct SshKeyCandidate {
     pub human_did: Option<String>,
 }
 
+/// Where the SSH private key comes from. Keys are not always files in
+/// `~/.ssh`: many people keep them in 1Password and let its agent serve them,
+/// so the source is the user's choice rather than a fixed location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeySource {
+    /// Any path — from `~/.ssh` discovery or a file picker.
+    File { path: String },
+    /// A 1Password SSH Key item, read through the `op` CLI.
+    OnePassword {
+        item: String,
+        vault: Option<String>,
+    },
+}
+
+impl KeySource {
+    fn describe(&self) -> String {
+        match self {
+            KeySource::File { path } => path.clone(),
+            KeySource::OnePassword { item, vault } => match vault {
+                Some(v) => format!("1Password {v}/{item}"),
+                None => format!("1Password item {item}"),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapRequest {
-    /// Private key path, from [`identity_discover_ssh_keys`] or chosen by hand.
-    pub key_path: String,
+    pub source: KeySource,
     pub passphrase: Option<String>,
     /// Agent ids to derive, e.g. `["avatar", "claude-code", "codex"]`.
     pub agent_names: Vec<String>,
@@ -261,8 +287,7 @@ pub async fn identity_bootstrap(
             ));
         }
 
-        let key_bytes = std::fs::read(&request.key_path)
-            .map_err(|e| format!("failed to read {}: {e}", request.key_path))?;
+        let key_bytes = read_key_material(&request.source)?;
         let seed = shadi_identity::ssh::seed_from_openssh_private_key(
             &key_bytes,
             request.passphrase.as_deref(),
@@ -283,8 +308,9 @@ pub async fn identity_bootstrap(
             let published = fetch_github_human_did(handle)?;
             if published != human_did {
                 return Err(format!(
-                    "the key at {} is not the ssh-ed25519 key published by @{handle}                      (published {published}, this key {human_did})",
-                    request.key_path
+                    "{} is not the ssh-ed25519 key published by @{handle} \
+                     (published {published}, this key {human_did})",
+                    request.source.describe()
                 ));
             }
         }
@@ -523,6 +549,43 @@ mod tests {
         (line, did)
     }
 
+    /// `op` may hand back a multi-line field quoted and with escaped newlines.
+    /// The PEM has to come back with real breaks or the parser rejects it.
+    #[test]
+    fn op_private_key_output_is_normalised() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n";
+
+        // Already clean.
+        assert_eq!(normalise_op_private_key(pem), pem);
+
+        // Quoted with escaped newlines, as `--format json` style output gives.
+        let escaped = format!("\"{}\"", pem.replace('\n', "\\n"));
+        assert_eq!(normalise_op_private_key(&escaped), pem);
+
+        // Missing trailing newline gets one, since OpenSSH PEM needs it.
+        let no_trailing = pem.trim_end();
+        assert!(normalise_op_private_key(no_trailing).ends_with('\n'));
+    }
+
+    /// A normalised 1Password field must parse as a real key, not merely look
+    /// like one — this is the seam between `op` output and the SSH parser.
+    #[test]
+    fn a_normalised_op_field_parses_as_an_ssh_key() {
+        let keypair = ssh_key::private::Ed25519Keypair::from_seed(&[9u8; 32]);
+        let pem = ssh_key::PrivateKey::from(keypair)
+            .to_openssh(ssh_key::LineEnding::LF)
+            .expect("encode")
+            .to_string();
+        let as_op_would_return = format!("\"{}\"", pem.replace('\n', "\\n"));
+
+        let restored = normalise_op_private_key(&as_op_would_return);
+        let seed = shadi_identity::ssh::seed_from_openssh_private_key(restored.as_bytes(), None)
+            .expect("round-trips through the op quoting");
+        let direct =
+            shadi_identity::ssh::seed_from_openssh_private_key(pem.as_bytes(), None).unwrap();
+        assert_eq!(seed, direct, "quoting must not change the derivation root");
+    }
+
     /// Trusting a handle means reading the ed25519 key it publishes, skipping
     /// other algorithms rather than taking whatever is listed first.
     #[test]
@@ -547,5 +610,127 @@ mod tests {
     fn an_empty_listing_is_rejected() {
         test_support::set(Some(String::new()));
         assert!(fetch_github_human_did("ghost").is_err());
+    }
+}
+
+/// An SSH Key item in 1Password, offered as an identity root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordSshKey {
+    pub item: String,
+    pub vault: Option<String>,
+    /// Computed from the item's *public* key, so listing never reads a private
+    /// key. `None` when the field is absent or not Ed25519.
+    pub human_did: Option<String>,
+}
+
+fn op_binary() -> String {
+    std::env::var("SHADI_OP_BINARY").unwrap_or_else(|_| "op".to_string())
+}
+
+fn run_op(args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new(op_binary())
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run `op`: {e}. Install the 1Password CLI to use this source"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Not being signed in is the common case and has a specific remedy.
+        if stderr.contains("not signed in") || stderr.contains("no account") {
+            return Err(
+                "1Password CLI is not signed in — run `op signin`, or enable the CLI in \
+                 1Password's Developer settings"
+                    .to_string(),
+            );
+        }
+        return Err(format!("`op` failed: {stderr}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// SSH Key items visible to the signed-in `op` session.
+#[tauri::command]
+pub async fn identity_list_1password_ssh_keys() -> Result<Vec<OnePasswordSshKey>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let json = run_op(&["item", "list", "--categories", "SSH Key", "--format", "json"])?;
+        let items: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| format!("unexpected `op` output: {e}"))?;
+        let Some(array) = items.as_array() else {
+            return Ok(Vec::new());
+        };
+
+        Ok(array
+            .iter()
+            .filter_map(|item| {
+                let title = item.get("title")?.as_str()?.to_string();
+                let vault = item
+                    .get("vault")
+                    .and_then(|v| v.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string());
+                // Read only the public field for the DID preview.
+                let human_did = op_public_key_did(&title, vault.as_deref());
+                Some(OnePasswordSshKey { item: title, vault, human_did })
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+fn op_public_key_did(item: &str, vault: Option<&str>) -> Option<String> {
+    let mut args = vec!["item", "get", item, "--fields", "public key"];
+    if let Some(vault) = vault {
+        args.push("--vault");
+        args.push(vault);
+    }
+    let line = run_op(&args).ok()?;
+    shadi_identity::ssh::verifying_key_from_openssh_public_key(line.trim())
+        .ok()
+        .map(|vk| shadi_identity::encode_did_key(&vk))
+}
+
+/// The private key bytes for a source.
+///
+/// 1Password's own `SecretStore` backend cannot be used here: it expects
+/// base64 in an item's `notesPlain`, which is SHADI's own storage format, not
+/// how a native SSH Key item holds its key. So this reads the item's
+/// `private key` field through `op` directly.
+fn read_key_material(source: &KeySource) -> Result<Vec<u8>, String> {
+    match source {
+        KeySource::File { path } => {
+            std::fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))
+        }
+        KeySource::OnePassword { item, vault } => {
+            let mut args = vec!["item", "get", item.as_str(), "--fields", "private key", "--reveal"];
+            if let Some(vault) = vault {
+                args.push("--vault");
+                args.push(vault);
+            }
+            let value = run_op(&args)?;
+            let key = normalise_op_private_key(&value);
+            if !key.contains("OPENSSH PRIVATE KEY") {
+                return Err(format!(
+                    "1Password item '{item}' has no OpenSSH private key in its 'private key' \
+                     field. Only SSH Key items hold one, and the vault may forbid revealing it"
+                ));
+            }
+            Ok(key.into_bytes())
+        }
+    }
+}
+
+/// `op` returns a multi-line field quoted, and may escape the newlines; the PEM
+/// has to come back with real line breaks or the parser rejects it.
+fn normalise_op_private_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    let restored = unquoted.replace("\\n", "\n");
+    if restored.ends_with('\n') {
+        restored
+    } else {
+        format!("{restored}\n")
     }
 }
