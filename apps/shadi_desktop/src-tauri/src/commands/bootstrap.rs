@@ -103,8 +103,12 @@ pub fn store_seed(store: &dyn SecretStore, seed: &[u8]) -> Result<(), String> {
 }
 
 pub fn load_seed(store: &dyn SecretStore) -> Result<Vec<u8>, String> {
-    let secret = store.get(SEED_SECRET_KEY).map_err(|_| {
-        "no derivation root in the secret store — run onboarding first".to_string()
+    let secret = store.get(SEED_SECRET_KEY).map_err(|err| match err {
+        // Not stored yet is the first-run state, not a fault.
+        agent_secrets::SecretError::InvalidInput => {
+            "no derivation root stored — run onboarding first".to_string()
+        }
+        other => format!("could not read the derivation root: {other}"),
     })?;
     Ok(secret.expose(|bytes| bytes.to_vec()))
 }
