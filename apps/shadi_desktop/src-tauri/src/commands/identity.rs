@@ -474,6 +474,21 @@ fn status_from(
     })
 }
 
+/// The human DID a GitHub account publishes, so the UI can show which local
+/// key matches it instead of making the user guess.
+#[tauri::command]
+pub async fn identity_github_human_did(handle: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = handle.trim().trim_start_matches('@');
+        if handle.is_empty() {
+            return Err("give a GitHub handle".to_string());
+        }
+        fetch_github_human_did(handle)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
 /// The human DID behind a GitHub account's published `ssh-ed25519` key.
 ///
 /// `github.com/<handle>.keys` is public, so this needs no token.

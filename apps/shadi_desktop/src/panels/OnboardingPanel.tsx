@@ -73,6 +73,10 @@ export function OnboardingPanel() {
   const [error, setError] = useState<string | null>(null);
   const [trustHandle, setTrustHandle] = useState("");
   const [trustError, setTrustError] = useState<string | null>(null);
+  // The DID the GitHub handle publishes, so candidates can be marked as
+  // matching instead of the user guessing which key is the published one.
+  const [publishedDid, setPublishedDid] = useState<string | null>(null);
+  const [publishedError, setPublishedError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -103,6 +107,40 @@ export function OnboardingPanel() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceKind]);
+
+  useEffect(() => {
+    const h = handle.trim().replace(/^@/, "");
+    if (!h) {
+      setPublishedDid(null);
+      setPublishedError(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const did = await invoke<string>("identity_github_human_did", { handle: h });
+        if (!cancelled) {
+          setPublishedDid(did);
+          setPublishedError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setPublishedDid(null);
+          setPublishedError(String(e));
+        }
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [handle]);
+
+  /** "" when there is nothing to compare against. */
+  function matchMark(did: string | null): string {
+    if (!publishedDid || !did) return "";
+    return did === publishedDid ? "  ✓ matches @" + handle.trim().replace(/^@/, "") : "  ✗";
+  }
 
   const names = agentNames
     .split(",")
@@ -337,6 +375,7 @@ export function OnboardingPanel() {
                     {k.path}
                     {k.comment ? ` (${k.comment})` : ""}
                     {k.encrypted ? " — encrypted" : ""}
+                    {matchMark(k.human_did)}
                   </option>
                 ))}
               </select>
@@ -413,6 +452,7 @@ export function OnboardingPanel() {
                         <option key={k.item} value={k.item}>
                           {k.item}
                           {k.vault ? ` (${k.vault})` : ""}
+                          {matchMark(k.human_did)}
                         </option>
                       ))}
                     </select>
@@ -432,6 +472,21 @@ export function OnboardingPanel() {
             Human DID would be <Did value={previewDid} />
           </p>
         )}
+
+        {publishedDid && (
+          <p className={previewDid === publishedDid ? "ob-verified" : "ob-muted"}>
+            {previewDid === publishedDid ? (
+              <>This key is the one published on GitHub.</>
+            ) : (
+              <>
+                @{handle.trim().replace(/^@/, "")} publishes{" "}
+                <Did value={publishedDid} /> — pick the key marked ✓, or clear the
+                handle to set up without the GitHub binding.
+              </>
+            )}
+          </p>
+        )}
+        {publishedError && <p className="ob-muted">{publishedError}</p>}
 
         <div className="ob-row">
           <input
