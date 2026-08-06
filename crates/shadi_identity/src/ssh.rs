@@ -80,20 +80,28 @@ pub fn verifying_key_from_openssh_public_key(line: &str) -> Result<VerifyingKey,
 /// `github.com/<user>.keys`. Selects by algorithm because accounts commonly
 /// publish several keys of mixed types.
 pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, IdentityError> {
-    let mut seen = 0usize;
+    let mut algorithms = Vec::new();
     for line in listing.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        seen += 1;
         if line.starts_with(SSH_ED25519) {
             return verifying_key_from_openssh_public_key(line);
         }
+        if let Some(algorithm) = line.split_whitespace().next() {
+            algorithms.push(algorithm.to_string());
+        }
     }
+    algorithms.sort();
+    algorithms.dedup();
+    let found = if algorithms.is_empty() {
+        "none".to_string()
+    } else {
+        algorithms.join(", ")
+    };
     Err(invalid(format!(
-        "no {SSH_ED25519} key found among {seen} published SSH key(s). SHADI's did:key is \
-         Ed25519-only; add one with: ssh-keygen -t ed25519"
+        "no {SSH_ED25519} key published (found: {found}). SHADI's did:key is Ed25519-only"
     )))
 }
 
@@ -192,13 +200,15 @@ mod tests {
         assert_eq!(vk.as_bytes(), expected.as_bytes());
     }
 
+    /// Naming the algorithm that *is* published is what makes the refusal
+    /// diagnosable — "1 published key" left the reason invisible.
     #[test]
-    fn listing_without_an_ed25519_key_explains_what_to_do() {
+    fn listing_without_an_ed25519_key_names_what_was_found() {
         let err = first_ed25519_in_authorized_keys("ssh-rsa AAAAB3NzaC1yc2EAAAA nope\n")
             .expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains("no ssh-ed25519 key found"), "{msg}");
-        assert!(msg.contains("ssh-keygen -t ed25519"), "must say how to fix: {msg}");
+        assert!(msg.contains("no ssh-ed25519 key published"), "{msg}");
+        assert!(msg.contains("found: ssh-rsa"), "must name the algorithm: {msg}");
     }
 
     /// Adding a passphrase must not change the derivation root.

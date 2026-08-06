@@ -308,7 +308,17 @@ pub async fn identity_bootstrap(
         // otherwise the DID is not verifiable by anyone else and claiming the
         // handle would be misleading.
         if let Some(handle) = request.github_handle.as_deref() {
-            let published = fetch_github_human_did(handle)?;
+            let published = fetch_github_human_did(handle).map_err(|e| {
+                if e.contains("no ssh-ed25519 key published") {
+                    format!(
+                        "{e}. Add one to your account (ssh-keygen -t ed25519, then \
+                         github.com/settings/keys), or clear the handle to set up without \
+                         the GitHub binding"
+                    )
+                } else {
+                    e
+                }
+            })?;
             if published != human_did {
                 return Err(format!(
                     "{} is not the ssh-ed25519 key published by @{handle} \
@@ -384,7 +394,18 @@ pub async fn identity_trust_github_handle(
         if handle.is_empty() {
             return Err("give a GitHub handle".to_string());
         }
-        let human_did = fetch_github_human_did(&handle)?;
+        let human_did = fetch_github_human_did(&handle).map_err(|e| {
+            // The operator cannot fix another account's keys, so point the
+            // remedy at whoever owns it.
+            if e.contains("no ssh-ed25519 key published") {
+                format!(
+                    "{e}. Ask @{handle} to add an Ed25519 key to their GitHub account \
+                     (ssh-keygen -t ed25519, then github.com/settings/keys)"
+                )
+            } else {
+                e
+            }
+        })?;
 
         let mut config = bootstrap::load_config(&paths.config)?
             .ok_or_else(|| "run onboarding before trusting other accounts".to_string())?;
@@ -567,6 +588,18 @@ mod tests {
         (line, did)
     }
 
+    /// The remedy has to name the person who can act on it. Trusting someone
+    /// else's handle is not fixed by the operator running ssh-keygen.
+    #[test]
+    fn an_rsa_only_account_reports_what_it_published() {
+        test_support::set(Some("ssh-rsa AAAAB3NzaC1yc2EAAAA laptop\n".to_string()));
+        let err = fetch_github_human_did("msardara").expect_err("rsa cannot be used");
+        assert!(err.contains("@msardara"), "must name the account: {err}");
+        assert!(err.contains("found: ssh-rsa"), "must name the algorithm: {err}");
+        // The bare error must not presume whose key it is; callers add that.
+        assert!(!err.contains("Ask @"), "remedy belongs to the caller: {err}");
+    }
+
     /// The tags the frontend sends, spelled exactly as it spells them.
     ///
     /// `rename_all = "snake_case"` turns `OnePassword` into `one_password`,
@@ -651,14 +684,6 @@ mod tests {
             "ssh-rsa AAAAB3NzaC1yc2EAAAA other\n{line}\n"
         )));
         assert_eq!(fetch_github_human_did("octocat").unwrap(), expected);
-    }
-
-    #[test]
-    fn a_handle_without_an_ed25519_key_names_the_account() {
-        test_support::set(Some("ssh-rsa AAAAB3NzaC1yc2EAAAA only-rsa\n".to_string()));
-        let err = fetch_github_human_did("octocat").expect_err("must reject");
-        assert!(err.contains("@octocat"), "should name the account: {err}");
-        assert!(err.contains("ssh-keygen -t ed25519"), "should say how to fix: {err}");
     }
 
     /// A key that parses but is the wrong type must not silently pass.
