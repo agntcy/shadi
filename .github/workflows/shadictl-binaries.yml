@@ -88,6 +88,22 @@ jobs:
       - name: Build shadictl
         run: cargo build -p agntcy-shadi-cli --release --locked --target ${{ matrix.target }}
 
+      - name: Assert no dynamic OpenSSL import (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "target/${{ matrix.target }}/release/${{ steps.metadata.outputs.binary_name }}.exe"
+          $dumpbin = Get-ChildItem -Path "C:/Program Files*/Microsoft Visual Studio" `
+            -Filter dumpbin.exe -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) { throw "dumpbin.exe not found; cannot verify imports" }
+          $imports = & $dumpbin /dependents $exe
+          $imports | Write-Host
+          if ($imports | Select-String -Pattern 'libcrypto|libssl') {
+            throw "binary dynamically imports OpenSSL"
+          }
+          Write-Host "OK - no dynamic OpenSSL import"
+
       - name: Package shadictl release archive
         id: package
         shell: bash
