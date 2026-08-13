@@ -125,6 +125,11 @@ jobs:
             --accept-package-agreements --accept-source-agreements --disable-interactivity
           Assert-LastExit "winget install"
 
+          Write-Host "--- libcrypto on PATH after install ---"
+          $found = & where.exe libcrypto-3-x64.dll 2>$null
+          if ($found) { $found | Write-Host } else { Write-Host "libcrypto-3-x64.dll: not on PATH" }
+          & where.exe libcrypto-4-x64.dll 2>$null | Write-Host
+
           $env:PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:PATH"
           & $env:CLI --help
           Assert-LastExit "$env:CLI --help"
