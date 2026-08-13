@@ -30,10 +30,15 @@ on:
         type: string
 
 jobs:
-  publish-winget-manifests:
+  render-winget-manifests:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      manifest_rel_dir: ${{ needs.render-winget-manifests.outputs.manifest_rel_dir }}
+      package_identifier: ${{ needs.render-winget-manifests.outputs.package_identifier }}
+      package_version: ${{ needs.render-winget-manifests.outputs.package_version }}
+      release_url: ${{ needs.render-winget-manifests.outputs.release_url }}
     env:
       CLI: ${{ inputs.cli }}
       RELEASE_TAG: ${{ inputs.release_tag }}
@@ -61,7 +66,73 @@ jobs:
       - name: Upload WinGet manifest artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: winget-manifests-${{ steps.render.outputs.package_version }}
+          name: winget-manifests-${{ needs.render-winget-manifests.outputs.package_version }}
+          path: dist/winget/manifests
+
+
+  validate-winget-manifests:
+    needs: render-winget-manifests
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - name: Download rendered manifests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: winget-manifests-${{ needs.render-winget-manifests.outputs.package_version }}
+          path: manifests
+
+      - name: Show winget version
+        shell: pwsh
+        run: winget --version
+
+      - name: Validate manifests
+        shell: pwsh
+        env:
+          MANIFEST_REL_DIR: ${{ needs.render-winget-manifests.outputs.manifest_rel_dir }}
+        run: |
+          $dir = Join-Path "manifests" ($env:MANIFEST_REL_DIR -replace '^manifests/', '')
+          Get-ChildItem $dir | ForEach-Object { Write-Host $_.Name }
+          winget validate --manifest $dir
+
+      - name: Install from the manifest and run the command
+        shell: pwsh
+        env:
+          MANIFEST_REL_DIR: ${{ needs.render-winget-manifests.outputs.manifest_rel_dir }}
+          CLI: ${{ inputs.cli }}
+        run: |
+          function Assert-LastExit($what) {
+            if ($LASTEXITCODE -ne 0) { throw "$what failed with exit $LASTEXITCODE" }
+          }
+
+          $dir = Join-Path "manifests" ($env:MANIFEST_REL_DIR -replace '^manifests/', '')
+
+          winget settings --enable LocalManifestFiles
+          Assert-LastExit "winget settings --enable LocalManifestFiles"
+
+          winget install --manifest $dir `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+          Assert-LastExit "winget install"
+
+          $env:PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:PATH"
+          & $env:CLI --help
+          Assert-LastExit "$env:CLI --help"
+          Write-Host "OK - installed via winget and the binary runs"
+
+  publish-winget-manifests:
+    needs: [render-winget-manifests, validate-winget-manifests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CLI: ${{ inputs.cli }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      APP_AUTH_CONFIGURED: ${{ secrets.PROJECT_APP_ID != '' && secrets.PROJECT_APP_KEY != '' }}
+    steps:
+      - name: Download rendered manifests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: winget-manifests-${{ needs.render-winget-manifests.outputs.package_version }}
           path: dist/winget/manifests
 
       - name: Authenticate with GitHub App Bot
@@ -87,11 +158,11 @@ jobs:
           FORK_OWNER: ${{ github.repository_owner }}
           GIT_AUTHOR_NAME: ${{ steps.app-token.outputs.app-slug }}[bot]
           GIT_AUTHOR_EMAIL: ${{ steps.app-user.outputs.user_id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com
-          MANIFEST_DIR: ${{ steps.render.outputs.manifest_dir }}
-          MANIFEST_REL_DIR: ${{ steps.render.outputs.manifest_rel_dir }}
-          PACKAGE_IDENTIFIER: ${{ steps.render.outputs.package_identifier }}
-          PACKAGE_VERSION: ${{ steps.render.outputs.package_version }}
-          RELEASE_URL: ${{ steps.render.outputs.release_url }}
+          MANIFEST_DIR: dist/winget/${{ needs.render-winget-manifests.outputs.manifest_rel_dir }}
+          MANIFEST_REL_DIR: ${{ needs.render-winget-manifests.outputs.manifest_rel_dir }}
+          PACKAGE_IDENTIFIER: ${{ needs.render-winget-manifests.outputs.package_identifier }}
+          PACKAGE_VERSION: ${{ needs.render-winget-manifests.outputs.package_version }}
+          RELEASE_URL: ${{ needs.render-winget-manifests.outputs.release_url }}
         run: |
           if [ -z "$WINGET_PKGS_TOKEN" ]; then
             echo "::notice::PROJECT_APP_ID / PROJECT_APP_KEY are not configured; uploaded generated WinGet manifests as a workflow artifact only."
