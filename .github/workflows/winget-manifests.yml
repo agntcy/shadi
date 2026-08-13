@@ -12,6 +12,11 @@ on:
         description: CLI release tag to render into WinGet manifests
         required: true
         type: string
+      publish:
+        description: Open or update the winget-pkgs PR. Off by default so a manual run only validates.
+        required: false
+        type: boolean
+        default: false
     secrets:
       PROJECT_APP_ID:
         required: false
@@ -28,6 +33,11 @@ on:
         description: CLI release tag to render into WinGet manifests
         required: true
         type: string
+      publish:
+        description: Open or update the winget-pkgs PR. Off by default so a manual run only validates.
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   render-winget-manifests:
@@ -121,6 +131,7 @@ jobs:
 
   publish-winget-manifests:
     needs: [render-winget-manifests, validate-winget-manifests]
+    if: inputs.publish == true || inputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

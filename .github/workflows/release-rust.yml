@@ -217,7 +217,8 @@ jobs:
           gh workflow run winget-manifests.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
-            -f release_tag="$RELEASE_TAG"
+            -f release_tag="$RELEASE_TAG" \
+            -f publish=true
 
   release-shadictl-homebrew:
     name: Publish shadictl Homebrew formula
@@ -401,7 +402,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
             -f cli=agentbridge \
-            -f release_tag="$RELEASE_TAG"
+            -f release_tag="$RELEASE_TAG" \
+            -f publish=true
 
   release-agentbridge-homebrew:
     name: Publish agentbridge Homebrew formula
