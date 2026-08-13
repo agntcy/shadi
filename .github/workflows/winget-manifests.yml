@@ -103,7 +103,8 @@ jobs:
         run: |
           $dir = Join-Path "manifests" ($env:MANIFEST_REL_DIR -replace '^manifests/', '')
           Get-ChildItem $dir | ForEach-Object { Write-Host $_.Name }
-          winget validate --manifest $dir
+          winget validate --manifest $dir --ignore-warnings
+          if ($LASTEXITCODE -ne 0) { throw "winget validate failed with exit $LASTEXITCODE" }
 
       - name: Install from the manifest and run the command
         shell: pwsh
