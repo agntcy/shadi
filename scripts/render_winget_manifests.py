@@ -306,10 +306,6 @@ def render_installer_manifest(
         Commands:
         - {moniker}
         ReleaseDate: {release_assets.release_date}
-        Dependencies:
-          PackageDependencies:
-          - PackageIdentifier: ShiningLight.OpenSSL.Light
-            MinimumVersion: 3.0.0
         Installers:
         - Architecture: {WINDOWS_ARCHITECTURE}
           InstallerUrl: {release_assets.installer_url}
