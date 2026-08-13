@@ -92,6 +92,20 @@ jobs:
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Check the imported OpenSSL major (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "${{ steps.metadata.outputs.binary_path }}"
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          $majors = [regex]::Matches($text, 'libcrypto-(\d+)-x64\.dll') |
+            ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          $found = $majors -join ","
+          Write-Host "$exe imports libcrypto major(s): $(if ($found) { $found } else { 'none' })"
+          if ($found -ne $env:OPENSSL_MAJOR) {
+            throw "built against OpenSSL $env:OPENSSL_MAJOR, which is what the WinGet dependency installs, but the binary imports '$found'"
+          }
+
       - name: Resolve agentbridge release metadata
         id: metadata-agentbridge
         shell: bash

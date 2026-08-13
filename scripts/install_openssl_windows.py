@@ -144,6 +144,7 @@ def main() -> int:
         lib_dir = openssl_dir / "lib"
 
     variables = {
+        "OPENSSL_MAJOR": version.split(".")[0],
         "OPENSSL_DIR": str(openssl_dir),
         "OPENSSL_LIB_DIR": str(lib_dir),
         "OPENSSL_INCLUDE_DIR": str(openssl_dir / "include"),
