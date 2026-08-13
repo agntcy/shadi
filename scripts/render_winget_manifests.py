@@ -27,6 +27,11 @@ PACKAGE_LOCALE = "en-US"
 PUBLISHER = "AGNTCY"
 WINDOWS_ARCHITECTURE = "x64"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
+# SQLCipher links libcrypto-3-x64.dll dynamically. PackageDependencies has no
+# version ceiling and winget installs the newest version satisfying it, so the
+# non-LTS ShiningLight.OpenSSL.Light (4.0.1) would install libcrypto-4-x64.dll
+# and leave the CLI unable to start. The LTS package stays on OpenSSL 3.
+OPENSSL_DEPENDENCY = "ShiningLight.OpenSSL.LTS.Light"
 DOCS_URL = "https://agntcy.github.io/shadi"
 REPOSITORY_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
@@ -306,6 +311,9 @@ def render_installer_manifest(
         Commands:
         - {moniker}
         ReleaseDate: {release_assets.release_date}
+        Dependencies:
+          PackageDependencies:
+          - PackageIdentifier: {OPENSSL_DEPENDENCY}
         Installers:
         - Architecture: {WINDOWS_ARCHITECTURE}
           InstallerUrl: {release_assets.installer_url}

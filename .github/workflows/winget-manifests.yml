@@ -125,7 +125,11 @@ jobs:
             --accept-package-agreements --accept-source-agreements --disable-interactivity
           Assert-LastExit "winget install"
 
-          $env:PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:PATH"
+          $env:PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:SystemRoot\System32;$env:SystemRoot"
+          $dll = & where.exe libcrypto-3-x64.dll 2>$null
+          $global:LASTEXITCODE = 0
+          Write-Host "libcrypto-3-x64.dll -> $(if ($dll) { $dll -join '; ' } else { 'not found' })"
+
           & $env:CLI --help
           Assert-LastExit "$env:CLI --help"
           Write-Host "OK - installed via winget and the binary runs"
