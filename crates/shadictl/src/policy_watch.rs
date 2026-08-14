@@ -1518,6 +1518,7 @@ mod tests {
 
     /// A client that connects before it writes must still be served: the server
     /// has to block on the read rather than treat an empty socket as a dead peer.
+    #[cfg(unix)]
     #[test]
     fn control_socket_serves_a_client_that_pauses_before_writing() {
         use std::io::{BufRead, BufReader, Write};
