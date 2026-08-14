@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.1.0...agntcy-shadi-identity-v0.1.1) - 2026-08-14
+
+### Added
+
+- *(identity)* root human and agent DIDs in an SSH Ed25519 key ([#142](https://github.com/agntcy/shadi/pull/142))
+
 ## [0.1.0](https://github.com/agntcy/shadi/releases/tag/agntcy-shadi-identity-v0.1.0) - 2026-07-27
 
 ### Added

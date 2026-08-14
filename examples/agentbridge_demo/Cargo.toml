@@ -12,5 +12,5 @@ name = "agentbridge_demo"
 path = "src/main.rs"
 
 [dependencies]
-agentbridge = { package = "agntcy-agentbridge", version = "0.1.1", path = "../../crates/agentbridge" }
-shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.1", path = "../../crates/shadi_mas" }
+agentbridge = { package = "agntcy-agentbridge", version = "0.1.2", path = "../../crates/agentbridge" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.2", path = "../../crates/shadi_mas" }

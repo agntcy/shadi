@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.1.0...agntcy-shadi-sandbox-v0.1.1) - 2026-08-14
+
+### Added
+
+- *(agentbridge)* require SHADI sandbox enforcement for remote listeners ([#130](https://github.com/agntcy/shadi/pull/130))
+
 ## [0.1.0](https://github.com/agntcy/shadi/releases/tag/agntcy-shadi-sandbox-v0.1.0) - 2026-04-07
 
 ### Added
