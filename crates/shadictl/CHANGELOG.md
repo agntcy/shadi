@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.3...agntcy-shadi-cli-v0.1.4) - 2026-08-14
+
+### Added
+
+- *(identity)* root human and agent DIDs in an SSH Ed25519 key ([#142](https://github.com/agntcy/shadi/pull/142))
+
+### Fixed
+
+- *(policy)* keep accepted control-socket connections blocking ([#149](https://github.com/agntcy/shadi/pull/149))
+
 ## [0.1.3](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.2...agntcy-shadi-cli-v0.1.3) - 2026-07-28
 
 ### Other

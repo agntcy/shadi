@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.2.0...agntcy-shadi-agent-transport-slim-v0.2.1) - 2026-08-14
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.1.2...agntcy-shadi-agent-transport-slim-v0.2.0) - 2026-07-27
 
 ### Added

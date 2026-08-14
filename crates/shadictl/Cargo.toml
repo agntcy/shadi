@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-cli"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.88"
 description = "Command-line interface for SHADI policy, secrets, memory, and SLIM operations."
@@ -18,21 +18,21 @@ a2a-client = { package = "a2a-client-lf", version = "0.2.1" }
 a2a-server = { package = "a2a-server-lf", version = "0.4.1" }
 async-trait = "0.1"
 futures = "0.3"
-shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.0", path = "../shadi_sandbox" }
-agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.2.0", path = "../agent_transport_slim" }
+shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.1", path = "../shadi_sandbox" }
+agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.2.1", path = "../agent_transport_slim" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.0", path = "../agent_secrets", features = ["onepassword"] }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.2", path = "../shadi_a2a" }
 shadi_memory = { package = "agntcy-shadi-memory", version = "0.1.2", path = "../shadi_memory" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path = "../shadi_telemetry" }
 slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.2", path = "../slim_mas" }
-agentbridge = { package = "agntcy-agentbridge", version = "0.1.1", path = "../agentbridge" }
+agentbridge = { package = "agntcy-agentbridge", version = "0.1.2", path = "../agentbridge" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }
 slim_rpc = { package = "agntcy-slim-rpc", version = "2.0.0-alpha.7" }
 slim_proto = { package = "agntcy-slim-proto", version = "0.4.0" }
 slim_config = { package = "agntcy-slim-config", version = "0.12.6" }
 tonic = { version = "0.14" }
 uuid = { version = "1", features = ["v4"] }
-shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.0", path = "../shadi_identity" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.1", path = "../shadi_identity" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bs58 = "0.5"
@@ -66,4 +66,4 @@ sequoia-openpgp = { version = "2.2", default-features = false, features = ["cryp
 # Building OpenSSH key fixtures for the SSH identity tests (agntcy/shadi#140).
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519"] }
 tempfile = "3.27"
-shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.0", path = "../shadi_identity" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.1", path = "../shadi_identity" }
