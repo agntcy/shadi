@@ -27,6 +27,12 @@ PACKAGE_LOCALE = "en-US"
 PUBLISHER = "AGNTCY"
 WINDOWS_ARCHITECTURE = "x64"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
+# SQLCipher links libcrypto dynamically, so this has to be the package whose
+# newest version matches the major scripts/install_openssl_windows.py builds
+# against: PackageDependencies has no version ceiling, and winget installs the
+# newest version satisfying it. No MinimumVersion for the same reason - it
+# would suggest a bound that winget does not honour.
+OPENSSL_DEPENDENCY = "ShiningLight.OpenSSL.Light"
 DOCS_URL = "https://agntcy.github.io/shadi"
 REPOSITORY_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
@@ -306,6 +312,9 @@ def render_installer_manifest(
         Commands:
         - {moniker}
         ReleaseDate: {release_assets.release_date}
+        Dependencies:
+          PackageDependencies:
+          - PackageIdentifier: {OPENSSL_DEPENDENCY}
         Installers:
         - Architecture: {WINDOWS_ARCHITECTURE}
           InstallerUrl: {release_assets.installer_url}

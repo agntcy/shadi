@@ -59,20 +59,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nettle pkg-config
 
-      - name: Set OpenSSL env vars (Windows)
+      - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $candidates = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL", "C:\OpenSSL-Win64")
-          $opensslDir = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $opensslDir) {
-            choco install openssl -y --no-progress
-            $opensslDir = "C:\Program Files\OpenSSL-Win64"
-          }
-          $libDir = if (Test-Path "$opensslDir\lib\VC\x64\MD") { "$opensslDir\lib\VC\x64\MD" } else { "$opensslDir\lib" }
-          "OPENSSL_DIR=$opensslDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_INCLUDE_DIR=$opensslDir\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/install_openssl_windows.py
 
       - name: Resolve shadictl release metadata
         id: metadata
@@ -99,6 +91,20 @@ jobs:
             --name "${{ steps.metadata.outputs.binary_name }}" \
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Check the imported OpenSSL major (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "${{ steps.metadata.outputs.binary_path }}"
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          $majors = [regex]::Matches($text, 'libcrypto-(\d+)-x64\.dll') |
+            ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          $found = $majors -join ","
+          Write-Host "$exe imports libcrypto major(s): $(if ($found) { $found } else { 'none' })"
+          if ($found -ne $env:OPENSSL_MAJOR) {
+            throw "built against OpenSSL $env:OPENSSL_MAJOR, which is what the WinGet dependency installs, but the binary imports '$found'"
+          }
 
       - name: Resolve agentbridge release metadata
         id: metadata-agentbridge

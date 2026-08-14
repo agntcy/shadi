@@ -145,20 +145,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nettle pkg-config
 
-      - name: Set OpenSSL env vars (Windows)
+      - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $candidates = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL", "C:\OpenSSL-Win64")
-          $opensslDir = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $opensslDir) {
-            choco install openssl -y --no-progress
-            $opensslDir = "C:\Program Files\OpenSSL-Win64"
-          }
-          $libDir = if (Test-Path "$opensslDir\lib\VC\x64\MD") { "$opensslDir\lib\VC\x64\MD" } else { "$opensslDir\lib" }
-          "OPENSSL_DIR=$opensslDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_INCLUDE_DIR=$opensslDir\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/install_openssl_windows.py
 
       - name: Resolve release metadata
         id: metadata
@@ -217,7 +209,8 @@ jobs:
           gh workflow run winget-manifests.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
-            -f release_tag="$RELEASE_TAG"
+            -f release_tag="$RELEASE_TAG" \
+            -f publish=true
 
   release-shadictl-homebrew:
     name: Publish shadictl Homebrew formula
@@ -328,20 +321,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nettle pkg-config
 
-      - name: Set OpenSSL env vars (Windows)
+      - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $candidates = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL", "C:\OpenSSL-Win64")
-          $opensslDir = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $opensslDir) {
-            choco install openssl -y --no-progress
-            $opensslDir = "C:\Program Files\OpenSSL-Win64"
-          }
-          $libDir = if (Test-Path "$opensslDir\lib\VC\x64\MD") { "$opensslDir\lib\VC\x64\MD" } else { "$opensslDir\lib" }
-          "OPENSSL_DIR=$opensslDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_INCLUDE_DIR=$opensslDir\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/install_openssl_windows.py
 
       - name: Resolve release metadata
         id: metadata
@@ -401,7 +386,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
             -f cli=agentbridge \
-            -f release_tag="$RELEASE_TAG"
+            -f release_tag="$RELEASE_TAG" \
+            -f publish=true
 
   release-agentbridge-homebrew:
     name: Publish agentbridge Homebrew formula
