@@ -46,6 +46,7 @@ CLI_CONFIGS = {
         "package_name": "shadictl",
         "moniker": "shadictl",
         "binary_name": "shadictl",
+        "openssl_dependency": OPENSSL_DEPENDENCY,
     },
     "agentbridge": {
         "manifest": ROOT / "crates" / "agentbridge_cli" / "Cargo.toml",
@@ -56,6 +57,7 @@ CLI_CONFIGS = {
         "package_name": "agentbridge",
         "moniker": "agentbridge",
         "binary_name": "agentbridge",
+        "openssl_dependency": None,
     },
 }
 
@@ -296,12 +298,22 @@ def render_default_locale_manifest(
 
 
 def render_installer_manifest(
-    *, package_identifier: str, moniker: str, binary_name: str, release_assets: ReleaseAssets
+    *,
+    package_identifier: str,
+    moniker: str,
+    binary_name: str,
+    release_assets: ReleaseAssets,
+    openssl_dependency: str | None,
 ) -> str:
     relative_file_path = (
         f"{binary_name}-v{release_assets.version}-{WINDOWS_TARGET}\\{binary_name}.exe"
     )
-    return textwrap.dedent(
+    dependencies = (
+        f"Dependencies:\n  PackageDependencies:\n  - PackageIdentifier: {openssl_dependency}\n"
+        if openssl_dependency
+        else ""
+    )
+    manifest = textwrap.dedent(
         f"""\
         # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.{MANIFEST_VERSION}.schema.json
 
@@ -312,10 +324,7 @@ def render_installer_manifest(
         Commands:
         - {moniker}
         ReleaseDate: {release_assets.release_date}
-        Dependencies:
-          PackageDependencies:
-          - PackageIdentifier: {OPENSSL_DEPENDENCY}
-        Installers:
+        __DEPENDENCIES__Installers:
         - Architecture: {WINDOWS_ARCHITECTURE}
           InstallerUrl: {release_assets.installer_url}
           InstallerSha256: {release_assets.installer_sha256}
@@ -326,6 +335,7 @@ def render_installer_manifest(
         ManifestVersion: {MANIFEST_VERSION}
         """
     )
+    return manifest.replace("__DEPENDENCIES__", dependencies)
 
 
 def manifest_directory(output_dir: Path, package_identifier: str, version: str) -> Path:
@@ -387,6 +397,7 @@ def main() -> int:
             moniker=config["moniker"],
             binary_name=config["binary_name"],
             release_assets=release_assets,
+            openssl_dependency=config["openssl_dependency"],
         ),
         encoding="utf-8",
     )
