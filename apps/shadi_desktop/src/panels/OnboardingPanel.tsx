@@ -69,6 +69,7 @@ export function OnboardingPanel() {
   const [agentNames, setAgentNames] = useState(DEFAULT_AGENTS);
   const [handle, setHandle] = useState("");
   const [endpoint, setEndpoint] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trustHandle, setTrustHandle] = useState("");
@@ -170,6 +171,13 @@ export function OnboardingPanel() {
       : sourceKind === "one_password"
         ? (opKeys ?? []).find((k) => k.item === opSelected)?.human_did ?? null
         : null;
+
+  // Only ~/.ssh candidates carry the flag; a picked file or a 1Password item is
+  // unknown until it is read, so ask there rather than fail on submit.
+  const needsPassphrase =
+    sourceKind === "ssh_dir"
+      ? (keys.find((k) => k.path === selected)?.encrypted ?? false)
+      : true;
 
   const sourceReady =
     sourceKind === "ssh_dir" ? !!selected
@@ -488,37 +496,55 @@ export function OnboardingPanel() {
         )}
         {publishedError && <p className="ob-muted">{publishedError}</p>}
 
+        {needsPassphrase && (
+          <div className="ob-row">
+            <input
+              className="ob-input"
+              type="password"
+              placeholder="Key passphrase"
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+            />
+          </div>
+        )}
+
         <div className="ob-row">
-          <input
-            className="ob-input"
-            type="password"
-            placeholder="Key passphrase (leave empty if the key has none)"
-            value={passphrase}
-            onChange={(e) => setPassphrase(e.target.value)}
-          />
+          <button className="ob-link" onClick={() => setShowAdvanced((v) => !v)}>
+            {showAdvanced ? "Hide options" : "Options"}
+          </button>
+          {!showAdvanced && (
+            <span className="ob-muted">
+              {names.length} agent{names.length === 1 ? "" : "s"} · {endpoint}
+            </span>
+          )}
         </div>
-        <div className="ob-row">
-          <input
-            className="ob-input"
-            placeholder="Agents to derive, comma-separated"
-            value={agentNames}
-            onChange={(e) => setAgentNames(e.target.value)}
-          />
-        </div>
-        <div className="ob-row">
-          <input
-            className="ob-input"
-            placeholder="GitHub handle (optional — verifies the key is published there)"
-            value={handle}
-            onChange={(e) => setHandle(e.target.value)}
-          />
-          <input
-            className="ob-input ob-input-narrow"
-            placeholder="SLIM endpoint"
-            value={endpoint}
-            onChange={(e) => setEndpoint(e.target.value)}
-          />
-        </div>
+
+        {showAdvanced && (
+          <>
+            <div className="ob-row">
+              <input
+                className="ob-input"
+                placeholder="Agents to derive, comma-separated"
+                value={agentNames}
+                onChange={(e) => setAgentNames(e.target.value)}
+              />
+            </div>
+            <div className="ob-row">
+              <input
+                className="ob-input"
+                placeholder="GitHub handle (optional — verifies the key is published there)"
+                value={handle}
+                onChange={(e) => setHandle(e.target.value)}
+              />
+              <input
+                className="ob-input ob-input-narrow"
+                placeholder="SLIM endpoint"
+                value={endpoint}
+                onChange={(e) => setEndpoint(e.target.value)}
+              />
+            </div>
+          </>
+        )}
         <div className="ob-row">
           <button
             onClick={onBootstrap}

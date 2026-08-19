@@ -120,3 +120,14 @@
   background: rgba(127, 127, 127, 0.22);
   font-weight: 600;
 }
+
+.ob-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  opacity: 0.65;
+  font-size: 0.9rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
