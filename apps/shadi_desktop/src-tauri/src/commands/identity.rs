@@ -207,6 +207,102 @@ fn ssh_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ssh"))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateKeyRequest {
+    /// Comment for the public key. Defaults to `shadi@<hostname>`.
+    pub comment: Option<String>,
+    /// Empty or absent writes the private half in the clear, as `ssh-keygen`
+    /// does when the prompt is left blank.
+    pub passphrase: Option<String>,
+}
+
+fn default_comment() -> String {
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    format!("shadi@{host}")
+}
+
+/// Create `~/.ssh/id_ed25519` for a machine that has no key yet.
+#[tauri::command]
+pub async fn identity_generate_ssh_key(
+    request: GenerateKeyRequest,
+) -> Result<SshKeyCandidate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = ssh_dir().ok_or_else(|| "cannot locate a home directory".to_string())?;
+        generate_into(&dir, request)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// Refuses to touch an existing key: overwriting one would orphan every
+/// identity already derived from it.
+fn generate_into(dir: &std::path::Path, request: GenerateKeyRequest) -> Result<SshKeyCandidate, String> {
+    let private_path = dir.join("id_ed25519");
+    let public_path = dir.join("id_ed25519.pub");
+    if private_path.exists() || public_path.exists() {
+        return Err(format!(
+            "{} already exists; pick it from the list instead of generating over it",
+            private_path.display()
+        ));
+    }
+
+    let comment = request
+        .comment
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or_else(default_comment);
+    let passphrase = request.passphrase.filter(|p| !p.is_empty());
+    let (private, public) =
+        shadi_identity::ssh::generate_ed25519_openssh(&comment, passphrase.as_deref())
+            .map_err(|e| e.to_string())?;
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    // Written before the public half so a crash cannot leave a .pub whose
+    // private counterpart is missing, which discovery would list and fail on.
+    write_private_key(&private_path, &private)?;
+    std::fs::write(&public_path, format!("{public}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", public_path.display()))?;
+
+    let human_did = shadi_identity::ssh::verifying_key_from_openssh_public_key(&public)
+        .ok()
+        .map(|vk| shadi_identity::encode_did_key(&vk));
+
+    Ok(SshKeyCandidate {
+        path: private_path.to_string_lossy().into_owned(),
+        comment: Some(comment),
+        encrypted: passphrase.is_some(),
+        human_did,
+    })
+}
+
+/// Create the private key readable only by its owner, never widening an
+/// existing file: `create_new` fails rather than truncating.
+fn write_private_key(path: &std::path::Path, body: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 /// Offer the Ed25519 keys already on this machine, so onboarding is a choice
 /// from a list rather than a path to type.
 #[tauri::command]
@@ -691,6 +787,69 @@ mod tests {
     fn an_empty_listing_is_rejected() {
         test_support::set(Some(String::new()));
         assert!(fetch_github_human_did("ghost").is_err());
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("shadi-keygen-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn request(passphrase: Option<&str>) -> GenerateKeyRequest {
+        GenerateKeyRequest {
+            comment: Some("shadi@test".to_string()),
+            passphrase: passphrase.map(|p| p.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_generated_key_is_owner_only_and_derives_the_reported_did() {
+        let dir = scratch_dir("fresh");
+        let created = generate_into(&dir, request(None)).expect("generate");
+
+        let private = std::fs::read(dir.join("id_ed25519")).expect("private half");
+        let public = std::fs::read_to_string(dir.join("id_ed25519.pub")).expect("public half");
+        assert!(public.starts_with(shadi_identity::ssh::SSH_ED25519), "{public}");
+        assert!(public.ends_with('\n'), "public key must be newline terminated");
+        assert!(!created.encrypted);
+
+        // The DID handed to the UI has to be the one the key actually derives.
+        let vk = shadi_identity::ssh::verifying_key_from_openssh_private_key(&private, None)
+            .expect("read back");
+        assert_eq!(created.human_did.as_deref(), Some(shadi_identity::encode_did_key(&vk).as_str()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("id_ed25519")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "private key must not be group or world readable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generating_never_overwrites_an_existing_key() {
+        let dir = scratch_dir("existing");
+        generate_into(&dir, request(None)).expect("first");
+        let before = std::fs::read(dir.join("id_ed25519")).unwrap();
+
+        let err = generate_into(&dir, request(None)).expect_err("must refuse");
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(before, std::fs::read(dir.join("id_ed25519")).unwrap(), "key was rewritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_passphrase_protects_the_generated_key() {
+        let dir = scratch_dir("protected");
+        let created = generate_into(&dir, request(Some("hunter2"))).expect("generate");
+        assert!(created.encrypted);
+
+        let private = std::fs::read(dir.join("id_ed25519")).unwrap();
+        assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, None).is_err());
+        assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, Some("hunter2")).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

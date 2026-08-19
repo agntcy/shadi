@@ -105,6 +105,38 @@ pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, I
     )))
 }
 
+/// A fresh Ed25519 key as `(private OpenSSH PEM, public line)`.
+///
+/// For onboarding a machine that has no key yet. An empty passphrase writes the
+/// private half in the clear, which is what `ssh-keygen` does when the prompt is
+/// left blank.
+pub fn generate_ed25519_openssh(
+    comment: &str,
+    passphrase: Option<&str>,
+) -> Result<(String, String), IdentityError> {
+    let keypair = ssh_key::private::Ed25519Keypair::random(&mut ssh_key::rand_core::OsRng);
+    let mut key = PrivateKey::from(keypair);
+    key.set_comment(comment);
+
+    let public = key
+        .public_key()
+        .to_openssh()
+        .map_err(|err| invalid(format!("failed to encode the public key: {err}")))?;
+
+    let key = match passphrase.filter(|p| !p.is_empty()) {
+        Some(passphrase) => key
+            .encrypt(&mut ssh_key::rand_core::OsRng, passphrase)
+            .map_err(|err| invalid(format!("failed to encrypt the new key: {err}")))?,
+        None => key,
+    };
+    let private = key
+        .to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|err| invalid(format!("failed to encode the private key: {err}")))?
+        .to_string();
+
+    Ok((private, public))
+}
+
 /// Public key of an OpenSSH private key, so a human DID needs no `.pub` file.
 pub fn verifying_key_from_openssh_private_key(
     key_bytes: &[u8],
@@ -239,6 +271,41 @@ mod tests {
         let wrong = seed_from_openssh_private_key(encrypted.as_bytes(), Some("nope"))
             .expect_err("wrong passphrase must fail");
         assert!(wrong.to_string().contains("wrong passphrase"), "{wrong}");
+    }
+
+    #[test]
+    fn a_generated_key_roots_an_identity() {
+        let (private, public) = generate_ed25519_openssh("shadi@host", None).expect("generate");
+
+        let from_private =
+            verifying_key_from_openssh_private_key(private.as_bytes(), None).expect("private half");
+        let from_public = verifying_key_from_openssh_public_key(&public).expect("public half");
+        assert_eq!(from_private.as_bytes(), from_public.as_bytes());
+        assert!(public.starts_with(SSH_ED25519), "{public}");
+        assert!(public.ends_with("shadi@host"), "comment must survive: {public}");
+
+        let seed = seed_from_openssh_private_key(private.as_bytes(), None).expect("seed");
+        assert!(crate::AgentIdentity::derive(&seed, "claude-code").is_ok());
+    }
+
+    #[test]
+    fn generated_keys_are_distinct() {
+        let (a, _) = generate_ed25519_openssh("a", None).unwrap();
+        let (b, _) = generate_ed25519_openssh("b", None).unwrap();
+        assert_ne!(
+            seed_from_openssh_private_key(a.as_bytes(), None).unwrap(),
+            seed_from_openssh_private_key(b.as_bytes(), None).unwrap(),
+        );
+    }
+
+    #[test]
+    fn a_generated_key_can_be_passphrase_protected() {
+        let (private, _) = generate_ed25519_openssh("shadi@host", Some("hunter2")).unwrap();
+        assert!(
+            seed_from_openssh_private_key(private.as_bytes(), None).is_err(),
+            "must not open without the passphrase"
+        );
+        assert!(seed_from_openssh_private_key(private.as_bytes(), Some("hunter2")).is_ok());
     }
 
     #[test]

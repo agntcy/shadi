@@ -172,10 +172,14 @@ export function OnboardingPanel() {
         ? (opKeys ?? []).find((k) => k.item === opSelected)?.human_did ?? null
         : null;
 
+  /** Nothing to choose from in ~/.ssh means the next action is creating a key. */
+  const generating = sourceKind === "ssh_dir" && keys.length === 0;
+
   // Only ~/.ssh candidates carry the flag; a picked file or a 1Password item is
   // unknown until it is read, so ask there rather than fail on submit.
-  const needsPassphrase =
-    sourceKind === "ssh_dir"
+  const needsPassphrase = generating
+    ? true
+    : sourceKind === "ssh_dir"
       ? (keys.find((k) => k.path === selected)?.encrypted ?? false)
       : true;
 
@@ -183,6 +187,22 @@ export function OnboardingPanel() {
     sourceKind === "ssh_dir" ? !!selected
       : sourceKind === "file" ? !!filePath
       : !!opSelected;
+
+  async function onGenerate() {
+    setError(null);
+    setBusy(true);
+    try {
+      const created = await invoke<SshKeyCandidate>("identity_generate_ssh_key", {
+        request: { comment: null, passphrase: passphrase || null },
+      });
+      await refresh();
+      setSelected(created.path);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function onPickFile() {
     setError(null);
@@ -366,11 +386,22 @@ export function OnboardingPanel() {
 
         {sourceKind === "ssh_dir" &&
           (keys.length === 0 ? (
-            <p className="ob-muted">
-              No Ed25519 key in <code>~/.ssh</code>. Keys kept in 1Password or
-              elsewhere won't appear here — use one of the other sources, or
-              create one with <code>ssh-keygen -t ed25519</code> and Refresh.
-            </p>
+            <>
+              <p className="ob-muted">
+                No Ed25519 key in <code>~/.ssh</code>. Keys kept in 1Password or
+                elsewhere won't appear here — use one of the other sources, or
+                create one now.
+              </p>
+              <div className="ob-row">
+                <button onClick={onGenerate} disabled={busy}>
+                  {busy ? "Working…" : "Create a key"}
+                </button>
+                <span className="ob-muted">
+                  writes <code>~/.ssh/id_ed25519</code>
+                  {passphrase ? ", protected by the passphrase below" : ""}
+                </span>
+              </div>
+            </>
           ) : (
             <div className="ob-row">
               <select
@@ -501,7 +532,9 @@ export function OnboardingPanel() {
             <input
               className="ob-input"
               type="password"
-              placeholder="Key passphrase"
+              placeholder={
+                generating ? "Passphrase for the new key (optional)" : "Key passphrase"
+              }
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
             />

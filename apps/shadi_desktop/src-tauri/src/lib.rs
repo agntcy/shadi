@@ -58,6 +58,7 @@ pub fn run() {
             commands::policy::policy_diff,
             commands::policy::policy_profiles,
             commands::identity::identity_discover_ssh_keys,
+            commands::identity::identity_generate_ssh_key,
             commands::identity::identity_github_human_did,
             commands::identity::identity_list_1password_accounts,
             commands::identity::identity_list_1password_ssh_keys,
