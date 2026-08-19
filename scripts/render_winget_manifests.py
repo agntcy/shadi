@@ -33,6 +33,7 @@ WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 # newest version satisfying it. No MinimumVersion for the same reason - it
 # would suggest a bound that winget does not honour.
 OPENSSL_DEPENDENCY = "ShiningLight.OpenSSL.Light"
+VCREDIST_DEPENDENCY = "Microsoft.VCRedist.2015+.x64"
 DOCS_URL = "https://agntcy.github.io/shadi"
 REPOSITORY_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
@@ -46,7 +47,7 @@ CLI_CONFIGS = {
         "package_name": "shadictl",
         "moniker": "shadictl",
         "binary_name": "shadictl",
-        "openssl_dependency": OPENSSL_DEPENDENCY,
+        "dependencies": [VCREDIST_DEPENDENCY, OPENSSL_DEPENDENCY],
     },
     "agentbridge": {
         "manifest": ROOT / "crates" / "agentbridge_cli" / "Cargo.toml",
@@ -57,7 +58,7 @@ CLI_CONFIGS = {
         "package_name": "agentbridge",
         "moniker": "agentbridge",
         "binary_name": "agentbridge",
-        "openssl_dependency": None,
+        "dependencies": [VCREDIST_DEPENDENCY],
     },
 }
 
@@ -303,16 +304,16 @@ def render_installer_manifest(
     moniker: str,
     binary_name: str,
     release_assets: ReleaseAssets,
-    openssl_dependency: str | None,
+    dependencies: list[str],
 ) -> str:
     relative_file_path = (
         f"{binary_name}-v{release_assets.version}-{WINDOWS_TARGET}\\{binary_name}.exe"
     )
-    dependencies = (
-        f"Dependencies:\n  PackageDependencies:\n  - PackageIdentifier: {openssl_dependency}\n"
-        if openssl_dependency
-        else ""
-    )
+    if dependencies:
+        entries = "".join(f"  - PackageIdentifier: {name}\n" for name in dependencies)
+        dependency_block = f"Dependencies:\n  PackageDependencies:\n{entries}"
+    else:
+        dependency_block = ""
     manifest = textwrap.dedent(
         f"""\
         # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.{MANIFEST_VERSION}.schema.json
@@ -335,7 +336,7 @@ def render_installer_manifest(
         ManifestVersion: {MANIFEST_VERSION}
         """
     )
-    return manifest.replace("__DEPENDENCIES__", dependencies)
+    return manifest.replace("__DEPENDENCIES__", dependency_block)
 
 
 def manifest_directory(output_dir: Path, package_identifier: str, version: str) -> Path:
@@ -397,7 +398,7 @@ def main() -> int:
             moniker=config["moniker"],
             binary_name=config["binary_name"],
             release_assets=release_assets,
-            openssl_dependency=config["openssl_dependency"],
+            dependencies=config["dependencies"],
         ),
         encoding="utf-8",
     )
