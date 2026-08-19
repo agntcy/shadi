@@ -9,6 +9,7 @@
 //! mTLS material, and a stored derivation root. Nothing else has to be set by
 //! hand, which is what the environment variables used to be for.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -204,7 +205,18 @@ pub struct BootstrapStatus {
 }
 
 fn ssh_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ssh"))
+    ssh_dir_from(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// Windows sets `USERPROFILE`, not `HOME`, so reading only `HOME` there made
+/// discovery report an empty `~/.ssh` on a machine that has keys.
+fn ssh_dir_from(home: Option<OsString>, user_profile: Option<OsString>) -> Option<PathBuf> {
+    home.filter(|h| !h.is_empty())
+        .or(user_profile.filter(|p| !p.is_empty()))
+        .map(|h| PathBuf::from(h).join(".ssh"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,6 +298,9 @@ fn generate_into(dir: &std::path::Path, request: GenerateKeyRequest) -> Result<S
 
 /// Create the private key readable only by its owner, never widening an
 /// existing file: `create_new` fails rather than truncating.
+///
+/// The mode is Unix-only. On Windows the file inherits the ACLs of the user
+/// profile, which is what `ssh-keygen` there relies on as well.
 fn write_private_key(path: &std::path::Path, body: &str) -> Result<(), String> {
     use std::io::Write;
 
@@ -850,6 +865,22 @@ mod tests {
         assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, None).is_err());
         assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, Some("hunter2")).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ssh_directory_follows_windows_user_profile() {
+        let home = ssh_dir_from(Some(OsString::from("/home/dev")), None).unwrap();
+        assert_eq!(home, PathBuf::from("/home/dev").join(".ssh"));
+
+        // Windows sets USERPROFILE and leaves HOME unset.
+        let profile = ssh_dir_from(None, Some(OsString::from(r"C:\Users\dev"))).unwrap();
+        assert_eq!(profile, PathBuf::from(r"C:\Users\dev").join(".ssh"));
+
+        // An empty HOME must not win over a usable USERPROFILE.
+        let empty = ssh_dir_from(Some(OsString::new()), Some(OsString::from("/home/dev"))).unwrap();
+        assert_eq!(empty, PathBuf::from("/home/dev").join(".ssh"));
+
+        assert!(ssh_dir_from(None, None).is_none());
     }
 }
 
