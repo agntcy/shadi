@@ -236,6 +236,11 @@ fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_pa
         match listener.accept() {
             Ok((stream, _)) => {
                 let mut stream = stream;
+                // accept(2) inherits O_NONBLOCK from the listener on macOS and the
+                // BSDs, where Linux's accept4(2) does not. Left non-blocking, a read
+                // that runs before the client's request lands returns WouldBlock,
+                // which reads as a dead connection and drops it mid-write.
+                let _ = stream.set_nonblocking(false);
                 #[cfg(unix)]
                 if let Err(err) = authorize_control_peer(&stream) {
                     let _ = write_response(
@@ -1509,6 +1514,33 @@ mod tests {
 
         drop(handle);
         wait_for_socket_removed(&sock_path);
+    }
+
+    /// A client that connects before it writes must still be served: the server
+    /// has to block on the read rather than treat an empty socket as a dead peer.
+    #[cfg(unix)]
+    #[test]
+    fn control_socket_serves_a_client_that_pauses_before_writing() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("slow.sock");
+        let handle = start_control_socket(&sock_path, test_live_policy()).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let mut stream = std::os::unix::net::UnixStream::connect(&sock_path).expect("connect");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let request = serde_json::to_string(&ControlMessage::QueryPolicy).expect("encode");
+        writeln!(stream, "{request}").expect("the server must not have hung up on an idle client");
+        stream.flush().expect("flush");
+
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).expect("read response");
+        assert!(!line.trim().is_empty(), "expected a response, got nothing");
+
+        drop(stream);
+        drop(handle);
     }
 
     #[test]

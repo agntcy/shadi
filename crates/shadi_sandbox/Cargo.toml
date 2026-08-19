@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "OS-level sandbox policy and process launching for SHADI."
 license.workspace = true
