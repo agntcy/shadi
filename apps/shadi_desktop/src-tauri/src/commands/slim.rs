@@ -132,6 +132,16 @@ struct Inner {
     /// Where known rooms are persisted. `None` until `lib.rs`'s setup hook
     /// resolves the app data dir, which also makes this harmless in tests.
     store_path: Option<PathBuf>,
+    /// What onboarding produced, when it has run. `None` falls back to the env
+    /// contract.
+    identity: Option<LoadedIdentity>,
+}
+
+/// The derivation root plus allow-list, held in memory for the session so DID
+/// auth needs no environment variables.
+struct LoadedIdentity {
+    seed: Vec<u8>,
+    member_dids: String,
 }
 
 /// Registered with `.manage(...)` in `lib.rs`; the SLIM node/session lifecycle
@@ -170,6 +180,29 @@ where
 }
 
 impl SlimState {
+    /// Adopt the identity onboarding stored, so DID auth works without env vars.
+    ///
+    /// Both halves are needed: the seed comes from the secret store and the
+    /// allow-list from the config, so a partially-onboarded app is treated as
+    /// not onboarded rather than half-working.
+    pub fn load_identity(&self, config_path: &Path) -> Result<bool, String> {
+        let Some(config) = crate::commands::bootstrap::load_config(config_path)? else {
+            return Ok(false);
+        };
+        let member_dids = config.member_dids();
+        if member_dids.is_empty() {
+            return Ok(false);
+        }
+        let store = agent_secrets::default_store();
+        let seed = match crate::commands::bootstrap::load_seed(store.as_ref()) {
+            Ok(seed) => seed,
+            Err(_) => return Ok(false),
+        };
+        let mut inner = self.0.lock().map_err(|_| "SLIM state poisoned")?;
+        inner.identity = Some(LoadedIdentity { seed, member_dids });
+        Ok(true)
+    }
+
     /// Point the state at its on-disk room store and load whatever is already
     /// there. Called once from `lib.rs`'s setup hook, where the app data dir is
     /// first available. A load failure is reported but not fatal — a corrupt or
@@ -233,19 +266,32 @@ impl Inner {
         let local_name = self.local_name()?;
         // DID derivation uses the app (last) component of the local name.
         let agent_id = local_name.components().last().cloned().unwrap_or_default();
-        let auth = shadi_identity::did_auth_from_env(&agent_id)
-            .ok_or_else(|| {
-                "SLIM group administration requires DID auth; set SHADI_SLIM_AUTH=did \
-                 (a room's trust set is meaningless under shared-secret auth)"
-                    .to_string()
-            })?
-            .map_err(|e| e.to_string())?;
+        let auth = self.resolve_auth(&agent_id)?;
         let app = shadi_identity::create_app(self.client_service_mut(), local_name.clone(), &auth)
             .map_err(slim_err)?;
         app.subscribe(local_name, Some(connection_id))
             .map_err(slim_err)?;
         self.app = Some(app.clone());
         Ok(app)
+    }
+
+    /// DID auth for `agent_id`, preferring what onboarding stored over the
+    /// environment.
+    ///
+    /// The env contract still wins when it is set, so the launcher scripts and
+    /// the CLI demos keep working; onboarding (agntcy/shadi#123) is what makes a
+    /// fresh install usable without them.
+    fn resolve_auth(&self, agent_id: &str) -> Result<shadi_identity::SlimAuth, String> {
+        if let Some(result) = shadi_identity::did_auth_from_env(agent_id) {
+            return result.map_err(|e| e.to_string());
+        }
+        let identity = self.identity.as_ref().ok_or_else(|| {
+            "no identity configured — complete onboarding in the Identity tab, or set \
+             SHADI_SLIM_AUTH=did with SLIM_HUMAN_SEED and SLIM_MEMBER_DIDS"
+                .to_string()
+        })?;
+        shadi_identity::build_did_auth(&identity.seed, &identity.member_dids, agent_id)
+            .map_err(|e| e.to_string())
     }
 
     /// Subscribing enables *receiving*. Joining also needs a route to the
@@ -1422,6 +1468,101 @@ mod tests {
             err.contains("generate_slim_mtls_certs.sh"),
             "must say how to generate the material: {err}"
         );
+    }
+
+    /// Generates mTLS material into the harness directory so the node under
+    /// test runs on rcgen-issued certs — the ones onboarding actually mints.
+    #[test]
+    #[ignore = "harness step; run docs/content/demos/desktop-onboarding-e2e.sh"]
+    fn live_generate_mtls_for_the_harness() {
+        let dir = PathBuf::from(std::env::var("SHADI_E2E_DIR").expect("SHADI_E2E_DIR"));
+        let written = crate::commands::bootstrap::ensure_mtls(
+            &dir.join("shadi-slim-mtls"),
+            &["avatar".to_string()],
+        )
+        .expect("generate mTLS");
+        println!("generated {} files", written.len());
+    }
+
+    /// The point of onboarding (agntcy/shadi#123): a room with no environment
+    /// contract at all. Derives from an SSH key, generates mTLS, and creates a
+    /// group using only what bootstrap produced.
+    ///
+    /// Deliberately unsets SHADI_SLIM_AUTH/SLIM_HUMAN_SEED/SLIM_MEMBER_DIDS —
+    /// if any of them leaked in, this would prove nothing.
+    #[test]
+    #[ignore = "needs a live SLIM node; run docs/content/demos/desktop-onboarding-e2e.sh"]
+    fn live_bootstrap_creates_a_room_without_env_vars() {
+        use crate::commands::bootstrap;
+
+        let key_path = std::env::var("SHADI_E2E_SSH_KEY").expect("SHADI_E2E_SSH_KEY");
+        let dir = PathBuf::from(std::env::var("SHADI_E2E_DIR").expect("SHADI_E2E_DIR"));
+        let endpoint = std::env::var("SHADI_E2E_ENDPOINT").expect("SHADI_E2E_ENDPOINT");
+        let channel = std::env::var("SHADI_E2E_ROOM").expect("SHADI_E2E_ROOM");
+
+        for leaked in ["SHADI_SLIM_AUTH", "SLIM_HUMAN_SEED", "SLIM_MEMBER_DIDS"] {
+            std::env::remove_var(leaked);
+        }
+        // The app sets this itself in its setup hook; the user never does.
+        std::env::set_var("SHADI_TMP_DIR", &dir);
+        std::env::set_var("SLIM_ENDPOINT", &endpoint);
+
+        let key = std::fs::read(&key_path).expect("read ssh key");
+        let seed = shadi_identity::ssh::seed_from_openssh_private_key(&key, None).expect("seed");
+        let agent_names = vec!["avatar".to_string()];
+        let agents: Vec<bootstrap::AgentEntry> = agent_names
+            .iter()
+            .map(|n| bootstrap::AgentEntry {
+                agent_id: n.clone(),
+                did: shadi_identity::AgentIdentity::derive(&seed, n).unwrap().did(),
+            })
+            .collect();
+
+        bootstrap::ensure_mtls(&dir.join("shadi-slim-mtls"), &agent_names).expect("mtls");
+        let config = bootstrap::IdentityConfig {
+            human_did: shadi_identity::encode_did_key(
+                &shadi_identity::ssh::verifying_key_from_openssh_private_key(&key, None).unwrap(),
+            ),
+            github_handle: None,
+            agents,
+            local_agent: "avatar".to_string(),
+            endpoint: endpoint.clone(),
+            trusted: Vec::new(),
+        };
+        let config_path = bootstrap::config_path(&dir);
+        bootstrap::save_config(&config_path, &config).expect("save config");
+
+        // Feed the state the way the setup hook does, minus the secret store so
+        // the test does not touch the developer's keychain.
+        let state = SlimState::default();
+        {
+            let mut inner = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            inner.store_path = Some(dir.join("rooms.json"));
+            inner.identity = Some(LoadedIdentity {
+                seed: seed.to_vec(),
+                member_dids: config.member_dids(),
+            });
+
+            std::env::set_var("SHADI_AGENT_ID", "avatar");
+            let channel_name = Arc::new(parse_name(&channel).expect("channel"));
+            let app = inner.ensure_app().expect("ensure_app with no env contract");
+            let session = app
+                .create_session_and_wait(group_session_config(), channel_name.clone())
+                .expect("create group session");
+            inner.rooms.insert(
+                channel_name.to_string(),
+                Room { session: Some(session), moderator: true, admitted: HashMap::new() },
+            );
+            inner.persist().expect("persist");
+
+            let info = inner.group_info(&channel).expect("group info");
+            assert_eq!(info.role, "moderator");
+            assert!(info.connected);
+        }
+
+        // And the config carries no secret.
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!raw.contains("seed"), "config must not hold key material");
     }
 
     #[test]

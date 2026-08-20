@@ -180,19 +180,31 @@ impl SecretStore for MacosKeychainStore {
     }
 
     fn get(&self, key: &str) -> SecretResult<SecretBytes> {
-        let value = get_generic_password(&self.service, key)
-            .map_err(|err| {
+        match get_generic_password(&self.service, key) {
+            Ok(value) => Ok(SecretBytes::new(value)),
+            // A miss is ordinary control flow — "is this secret set yet?" is a
+            // question callers ask. Reporting it as a storage failure hid real
+            // ones, and logging it filled the console on every first run.
+            // Matches the 1Password backend, which maps not-found the same way.
+            Err(err) if err.code() == errSecItemNotFound => Err(SecretError::InvalidInput),
+            Err(err) => {
                 eprintln!("keychain get failed: {}", err);
-                SecretError::StorageFailure
-            })?;
-        Ok(SecretBytes::new(value))
+                Err(SecretError::StorageFailure)
+            }
+        }
     }
 
     fn delete(&self, key: &str) -> SecretResult<()> {
-        delete_generic_password(&self.service, key).map_err(|err| {
-            eprintln!("keychain delete failed: {}", err);
-            SecretError::StorageFailure
-        })?;
+        match delete_generic_password(&self.service, key) {
+            Ok(()) => {}
+            Err(err) if err.code() == errSecItemNotFound => {
+                return Err(SecretError::InvalidInput)
+            }
+            Err(err) => {
+                eprintln!("keychain delete failed: {}", err);
+                return Err(SecretError::StorageFailure);
+            }
+        }
         self.update_registry_on_delete(key)
     }
 
@@ -323,16 +335,34 @@ mod tests {
     }
 
     #[test]
-    fn get_missing_key_returns_error() {
+    /// A missing key is not a storage failure. Callers ask "is this set yet?"
+    /// and need to tell that apart from a keychain that is actually broken.
+    fn get_missing_key_reports_not_found() {
         let store = MacosKeychainStore::new(unique_service());
         let err = store.get("missing-key").err().expect("error");
-        assert!(matches!(err, SecretError::StorageFailure));
+        assert!(
+            matches!(err, SecretError::InvalidInput),
+            "expected not-found, got {err:?}"
+        );
     }
 
     #[test]
-    fn delete_missing_key_returns_error() {
+    fn delete_missing_key_reports_not_found() {
         let store = MacosKeychainStore::new(unique_service());
         let err = store.delete("missing-key").unwrap_err();
-        assert!(matches!(err, SecretError::StorageFailure));
+        assert!(
+            matches!(err, SecretError::InvalidInput),
+            "expected not-found, got {err:?}"
+        );
+    }
+
+    /// A real backend failure must still be distinguishable from a miss.
+    #[test]
+    fn storage_failure_is_still_reported_as_such() {
+        let store = MacosKeychainStore::new("__force_error__");
+        assert!(matches!(
+            store.list_keys().unwrap_err(),
+            SecretError::StorageFailure
+        ));
     }
 }

@@ -1,12 +1,22 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Identity and secrets (agntcy/shadi#117) — replaces `shadictl`'s
-//! `did-from-gpg`, `did-from-github`, `derive-agent-identity`,
-//! `verify-agent-identity`, `get-secret`, `put-key`, `--list-keychain`.
+//! Identity and secrets (agntcy/shadi#117), and the SSH onboarding flow
+//! (agntcy/shadi#123).
+//!
+//! Onboarding is deliberately one command: [`identity_bootstrap`] takes a local
+//! SSH key and leaves the app able to join a room — human DID, derived agents,
+//! mTLS material, and a stored derivation root. Nothing else has to be set by
+//! hand, which is what the environment variables used to be for.
+
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::bootstrap::{
+    self, AgentEntry, IdentityConfig, TrustedHuman, DEFAULT_ENDPOINT,
+};
 use super::not_implemented;
 
 const PANEL_ISSUE: u32 = 117;
@@ -121,4 +131,912 @@ pub async fn secret_list_keychain(prefix: Option<String>) -> Result<Vec<Keychain
 #[tauri::command]
 pub async fn secret_backend_status() -> Result<SecretBackend, String> {
     not_implemented(PANEL_ISSUE)
+}
+
+// --- SSH onboarding (agntcy/shadi#123) ---------------------------------------
+
+/// An Ed25519 SSH key found on this machine, offered as an identity root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshKeyCandidate {
+    pub path: String,
+    /// Comment from the public key, usually an email or host label.
+    pub comment: Option<String>,
+    pub encrypted: bool,
+    /// The human DID this key would produce. `None` when only the private key
+    /// is present and encrypted, since the public half cannot be read yet.
+    pub human_did: Option<String>,
+}
+
+/// Where the SSH private key comes from. Keys are not always files in
+/// `~/.ssh`: many people keep them in 1Password and let its agent serve them,
+/// so the source is the user's choice rather than a fixed location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeySource {
+    /// Any path — from `~/.ssh` discovery or a file picker.
+    File { path: String },
+    /// A 1Password SSH Key item, read through the `op` CLI. `account` is the
+    /// account UUID: `op` otherwise uses whichever account is default, which
+    /// is not necessarily the one holding the key.
+    OnePassword {
+        item: String,
+        vault: Option<String>,
+        account: Option<String>,
+    },
+}
+
+impl KeySource {
+    fn describe(&self) -> String {
+        match self {
+            KeySource::File { path } => path.clone(),
+            KeySource::OnePassword { item, vault, .. } => match vault {
+                Some(v) => format!("1Password {v}/{item}"),
+                None => format!("1Password item {item}"),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapRequest {
+    pub source: KeySource,
+    pub passphrase: Option<String>,
+    /// Agent ids to derive, e.g. `["avatar", "claude-code", "codex"]`.
+    pub agent_names: Vec<String>,
+    /// Which of them this app authenticates as.
+    pub local_agent: String,
+    pub endpoint: Option<String>,
+    /// Cross-check the key against this account's published keys.
+    pub github_handle: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapStatus {
+    pub ready: bool,
+    pub human_did: Option<String>,
+    pub github_handle: Option<String>,
+    pub agents: Vec<AgentIdentity>,
+    pub local_agent: Option<String>,
+    pub endpoint: String,
+    pub mtls_ready: bool,
+    pub trusted: Vec<TrustedHuman>,
+    /// Whether the derivation root is present in the secret store.
+    pub seed_stored: bool,
+}
+
+fn ssh_dir() -> Option<PathBuf> {
+    ssh_dir_from(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// Windows sets `USERPROFILE`, not `HOME`, so reading only `HOME` there made
+/// discovery report an empty `~/.ssh` on a machine that has keys.
+fn ssh_dir_from(home: Option<OsString>, user_profile: Option<OsString>) -> Option<PathBuf> {
+    home.filter(|h| !h.is_empty())
+        .or(user_profile.filter(|p| !p.is_empty()))
+        .map(|h| PathBuf::from(h).join(".ssh"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateKeyRequest {
+    /// Comment for the public key. Defaults to `shadi@<hostname>`.
+    pub comment: Option<String>,
+    /// Empty or absent writes the private half in the clear, as `ssh-keygen`
+    /// does when the prompt is left blank.
+    pub passphrase: Option<String>,
+}
+
+fn default_comment() -> String {
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    format!("shadi@{host}")
+}
+
+/// Create `~/.ssh/id_ed25519` for a machine that has no key yet.
+#[tauri::command]
+pub async fn identity_generate_ssh_key(
+    request: GenerateKeyRequest,
+) -> Result<SshKeyCandidate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = ssh_dir().ok_or_else(|| "cannot locate a home directory".to_string())?;
+        generate_into(&dir, request)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// Refuses to touch an existing key: overwriting one would orphan every
+/// identity already derived from it.
+fn generate_into(dir: &std::path::Path, request: GenerateKeyRequest) -> Result<SshKeyCandidate, String> {
+    let private_path = dir.join("id_ed25519");
+    let public_path = dir.join("id_ed25519.pub");
+    if private_path.exists() || public_path.exists() {
+        return Err(format!(
+            "{} already exists; pick it from the list instead of generating over it",
+            private_path.display()
+        ));
+    }
+
+    let comment = request
+        .comment
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or_else(default_comment);
+    let passphrase = request.passphrase.filter(|p| !p.is_empty());
+    let (private, public) =
+        shadi_identity::ssh::generate_ed25519_openssh(&comment, passphrase.as_deref())
+            .map_err(|e| e.to_string())?;
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    // Written before the public half so a crash cannot leave a .pub whose
+    // private counterpart is missing, which discovery would list and fail on.
+    write_private_key(&private_path, &private)?;
+    std::fs::write(&public_path, format!("{public}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", public_path.display()))?;
+
+    let human_did = shadi_identity::ssh::verifying_key_from_openssh_public_key(&public)
+        .ok()
+        .map(|vk| shadi_identity::encode_did_key(&vk));
+
+    Ok(SshKeyCandidate {
+        path: private_path.to_string_lossy().into_owned(),
+        comment: Some(comment),
+        encrypted: passphrase.is_some(),
+        human_did,
+    })
+}
+
+/// Create the private key readable only by its owner, never widening an
+/// existing file: `create_new` fails rather than truncating.
+///
+/// The mode is Unix-only. On Windows the file inherits the ACLs of the user
+/// profile, which is what `ssh-keygen` there relies on as well.
+fn write_private_key(path: &std::path::Path, body: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Offer the Ed25519 keys already on this machine, so onboarding is a choice
+/// from a list rather than a path to type.
+#[tauri::command]
+pub async fn identity_discover_ssh_keys() -> Result<Vec<SshKeyCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(dir) = ssh_dir() else {
+            return Ok(Vec::new());
+        };
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // No ~/.ssh at all is a normal first-run state, not an error.
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut found = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Iterate public keys: they are safe to read and name their private
+            // counterpart, so nothing probes private files speculatively.
+            if path.extension().and_then(|e| e.to_str()) != Some("pub") {
+                continue;
+            }
+            let Ok(line) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !line.trim_start().starts_with(shadi_identity::ssh::SSH_ED25519) {
+                continue;
+            }
+            let private = path.with_extension("");
+            if !private.is_file() {
+                continue;
+            }
+            let human_did = shadi_identity::ssh::verifying_key_from_openssh_public_key(&line)
+                .ok()
+                .map(|vk| shadi_identity::encode_did_key(&vk));
+            let encrypted = std::fs::read_to_string(&private)
+                .map(|body| body.contains("ENCRYPTED") || is_encrypted_openssh(&body))
+                .unwrap_or(false);
+
+            found.push(SshKeyCandidate {
+                path: private.to_string_lossy().into_owned(),
+                comment: line
+                    .split_whitespace()
+                    .nth(2)
+                    .map(|c| c.to_string()),
+                encrypted,
+                human_did,
+            });
+        }
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(found)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// OpenSSH marks encryption in the container rather than the PEM header, so ask
+/// the parser instead of pattern-matching the text.
+fn is_encrypted_openssh(body: &str) -> bool {
+    shadi_identity::ssh::seed_from_openssh_private_key(body.as_bytes(), None)
+        .err()
+        .map(|e| e.to_string().contains("passphrase is required"))
+        .unwrap_or(false)
+}
+
+/// Everything a fresh install needs, in one step (agntcy/shadi#123).
+#[tauri::command]
+pub async fn identity_bootstrap(
+    app: tauri::AppHandle,
+    request: BootstrapRequest,
+) -> Result<BootstrapStatus, String> {
+    let paths = app_paths(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.agent_names.is_empty() {
+            return Err("choose at least one agent to derive".to_string());
+        }
+        if !request.agent_names.contains(&request.local_agent) {
+            return Err(format!(
+                "local agent '{}' is not among the derived agents",
+                request.local_agent
+            ));
+        }
+
+        let key_bytes = read_key_material(&request.source)?;
+        let seed = shadi_identity::ssh::seed_from_openssh_private_key(
+            &key_bytes,
+            request.passphrase.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let human_vk = shadi_identity::ssh::verifying_key_from_openssh_private_key(
+            &key_bytes,
+            request.passphrase.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        let human_did = shadi_identity::encode_did_key(&human_vk);
+
+        // If a handle was given, the key must actually be published there —
+        // otherwise the DID is not verifiable by anyone else and claiming the
+        // handle would be misleading.
+        if let Some(handle) = request.github_handle.as_deref() {
+            let published = fetch_github_human_did(handle).map_err(|e| {
+                if e.contains("no ssh-ed25519 key published") {
+                    format!(
+                        "{e}. Add one to your account (ssh-keygen -t ed25519, then \
+                         github.com/settings/keys), or clear the handle to set up without \
+                         the GitHub binding"
+                    )
+                } else {
+                    e
+                }
+            })?;
+            if published != human_did {
+                return Err(format!(
+                    "{} is not the ssh-ed25519 key published by @{handle} \
+                     (published {published}, this key {human_did})",
+                    request.source.describe()
+                ));
+            }
+        }
+
+        let agents = request
+            .agent_names
+            .iter()
+            .map(|name| {
+                shadi_identity::AgentIdentity::derive(&seed, name)
+                    .map(|id| AgentEntry { agent_id: name.clone(), did: id.did() })
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let store = agent_secrets::default_store();
+        bootstrap::store_seed(store.as_ref(), &seed)?;
+
+        bootstrap::ensure_mtls(&paths.mtls_dir, &request.agent_names)?;
+
+        let config = IdentityConfig {
+            human_did,
+            github_handle: request.github_handle,
+            agents,
+            local_agent: request.local_agent,
+            endpoint: request
+                .endpoint
+                .filter(|e| !e.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+            // Preserve anyone already trusted across a re-run.
+            trusted: bootstrap::load_config(&paths.config)?
+                .map(|c| c.trusted)
+                .unwrap_or_default(),
+        };
+        bootstrap::save_config(&paths.config, &config)?;
+
+        status_from(&paths, Some(config), store.as_ref())
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn identity_status(app: tauri::AppHandle) -> Result<BootstrapStatus, String> {
+    let paths = app_paths(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = bootstrap::load_config(&paths.config)?;
+        let store = agent_secrets::default_store();
+        status_from(&paths, config, store.as_ref())
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// Trust a GitHub account by handle: read the `ssh-ed25519` key it publishes and
+/// record the human DID that key produces.
+///
+/// This is the invite side of onboarding — naming a person instead of pasting a
+/// DID. It records *who* we accept; it cannot admit their agents, whose DIDs
+/// derive from their private key. See agntcy/shadi#141.
+#[tauri::command]
+pub async fn identity_trust_github_handle(
+    app: tauri::AppHandle,
+    handle: String,
+) -> Result<Vec<TrustedHuman>, String> {
+    let paths = app_paths(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = handle.trim().trim_start_matches('@').to_string();
+        if handle.is_empty() {
+            return Err("give a GitHub handle".to_string());
+        }
+        let human_did = fetch_github_human_did(&handle).map_err(|e| {
+            // The operator cannot fix another account's keys, so point the
+            // remedy at whoever owns it.
+            if e.contains("no ssh-ed25519 key published") {
+                format!(
+                    "{e}. Ask @{handle} to add an Ed25519 key to their GitHub account \
+                     (ssh-keygen -t ed25519, then github.com/settings/keys)"
+                )
+            } else {
+                e
+            }
+        })?;
+
+        let mut config = bootstrap::load_config(&paths.config)?
+            .ok_or_else(|| "run onboarding before trusting other accounts".to_string())?;
+        let entry = TrustedHuman { github_handle: handle.clone(), human_did };
+        match config.trusted.iter_mut().find(|t| t.github_handle == handle) {
+            // Re-trusting refreshes the DID, so a rotated key is picked up.
+            Some(existing) => *existing = entry,
+            None => config.trusted.push(entry),
+        }
+        config.trusted.sort_by(|a, b| a.github_handle.cmp(&b.github_handle));
+        bootstrap::save_config(&paths.config, &config)?;
+        Ok(config.trusted)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn identity_untrust_github_handle(
+    app: tauri::AppHandle,
+    handle: String,
+) -> Result<Vec<TrustedHuman>, String> {
+    let paths = app_paths(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut config = bootstrap::load_config(&paths.config)?
+            .ok_or_else(|| "nothing is configured yet".to_string())?;
+        config.trusted.retain(|t| t.github_handle != handle);
+        bootstrap::save_config(&paths.config, &config)?;
+        Ok(config.trusted)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+pub(crate) struct AppPaths {
+    pub(crate) config: PathBuf,
+    pub(crate) mtls_dir: PathBuf,
+}
+
+pub(crate) fn app_paths(app: &tauri::AppHandle) -> Result<AppPaths, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data dir: {e}"))?;
+    Ok(AppPaths {
+        config: bootstrap::config_path(&dir),
+        mtls_dir: dir.join("shadi-slim-mtls"),
+    })
+}
+
+fn status_from(
+    paths: &AppPaths,
+    config: Option<IdentityConfig>,
+    store: &dyn agent_secrets::SecretStore,
+) -> Result<BootstrapStatus, String> {
+    let seed_stored = bootstrap::load_seed(store).is_ok();
+    let Some(config) = config else {
+        return Ok(BootstrapStatus {
+            ready: false,
+            human_did: None,
+            github_handle: None,
+            agents: Vec::new(),
+            local_agent: None,
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+            mtls_ready: false,
+            trusted: Vec::new(),
+            seed_stored,
+        });
+    };
+    let agent_names: Vec<String> = config.agents.iter().map(|a| a.agent_id.clone()).collect();
+    let mtls_ready = bootstrap::mtls_is_complete(&paths.mtls_dir, &agent_names);
+    Ok(BootstrapStatus {
+        ready: seed_stored && mtls_ready && !config.agents.is_empty(),
+        human_did: Some(config.human_did.clone()),
+        github_handle: config.github_handle.clone(),
+        agents: config
+            .agents
+            .iter()
+            .map(|a| AgentIdentity { agent_name: a.agent_id.clone(), did: a.did.clone() })
+            .collect(),
+        local_agent: Some(config.local_agent.clone()),
+        endpoint: config.endpoint.clone(),
+        mtls_ready,
+        trusted: config.trusted.clone(),
+        seed_stored,
+    })
+}
+
+/// The human DID a GitHub account publishes, so the UI can show which local
+/// key matches it instead of making the user guess.
+#[tauri::command]
+pub async fn identity_github_human_did(handle: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = handle.trim().trim_start_matches('@');
+        if handle.is_empty() {
+            return Err("give a GitHub handle".to_string());
+        }
+        fetch_github_human_did(handle)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// The human DID behind a GitHub account's published `ssh-ed25519` key.
+///
+/// `github.com/<handle>.keys` is public, so this needs no token.
+fn fetch_github_human_did(handle: &str) -> Result<String, String> {
+    let listing = github_published_keys(handle)?;
+    let vk = shadi_identity::ssh::first_ed25519_in_authorized_keys(&listing)
+        .map_err(|e| format!("@{handle}: {e}"))?;
+    Ok(shadi_identity::encode_did_key(&vk))
+}
+
+#[cfg(not(test))]
+fn github_published_keys(handle: &str) -> Result<String, String> {
+    let url = format!("https://github.com/{handle}.keys");
+    let response = reqwest::blocking::Client::builder()
+        .user_agent("shadi-desktop")
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?
+        .get(&url)
+        .send()
+        .map_err(|e| format!("failed to fetch {url}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub returned {} for {url}", response.status()));
+    }
+    response
+        .text()
+        .map_err(|e| format!("failed to read {url}: {e}"))
+}
+
+#[cfg(test)]
+fn github_published_keys(_handle: &str) -> Result<String, String> {
+    test_support::published_keys()
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, OnceLock};
+
+    static PAYLOAD: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+    fn slot() -> &'static Mutex<Option<String>> {
+        PAYLOAD.get_or_init(|| Mutex::new(None))
+    }
+
+    pub(crate) fn set(payload: Option<String>) {
+        *slot().lock().expect("payload lock") = payload;
+    }
+
+    pub(crate) fn published_keys() -> Result<String, String> {
+        slot()
+            .lock()
+            .expect("payload lock")
+            .clone()
+            .ok_or_else(|| "no test payload set".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ed25519_line() -> (String, String) {
+        let seed = [3u8; 32];
+        let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let did = shadi_identity::encode_did_key(&signing.verifying_key());
+        let mut blob = Vec::new();
+        let algo = shadi_identity::ssh::SSH_ED25519;
+        blob.extend_from_slice(&(algo.len() as u32).to_be_bytes());
+        blob.extend_from_slice(algo.as_bytes());
+        blob.extend_from_slice(&32u32.to_be_bytes());
+        blob.extend_from_slice(signing.verifying_key().as_bytes());
+        use base64::Engine as _;
+        let line = format!(
+            "{algo} {} someone@example",
+            base64::engine::general_purpose::STANDARD.encode(&blob)
+        );
+        (line, did)
+    }
+
+    /// The remedy has to name the person who can act on it. Trusting someone
+    /// else's handle is not fixed by the operator running ssh-keygen.
+    #[test]
+    fn an_rsa_only_account_reports_what_it_published() {
+        test_support::set(Some("ssh-rsa AAAAB3NzaC1yc2EAAAA laptop\n".to_string()));
+        let err = fetch_github_human_did("msardara").expect_err("rsa cannot be used");
+        assert!(err.contains("@msardara"), "must name the account: {err}");
+        assert!(err.contains("found: ssh-rsa"), "must name the algorithm: {err}");
+        // The bare error must not presume whose key it is; callers add that.
+        assert!(!err.contains("Ask @"), "remedy belongs to the caller: {err}");
+    }
+
+    /// The tags the frontend sends, spelled exactly as it spells them.
+    ///
+    /// `rename_all = "snake_case"` turns `OnePassword` into `one_password`,
+    /// which is easy to guess wrong from the TypeScript side — and did fail as
+    /// `unknown variant `onepassword``. Nothing else checks the two sides agree,
+    /// so pin the literals here.
+    #[test]
+    fn key_source_wire_tags_match_the_frontend() {
+        let file: KeySource =
+            serde_json::from_str(r#"{"kind":"file","path":"/tmp/id_ed25519"}"#).expect("file");
+        assert!(matches!(file, KeySource::File { .. }));
+
+        let op: KeySource = serde_json::from_str(
+            r#"{"kind":"one_password","item":"My Key","vault":"Private","account":"UUID"}"#,
+        )
+        .expect("one_password");
+        match op {
+            KeySource::OnePassword { item, vault, account } => {
+                assert_eq!(item, "My Key");
+                assert_eq!(vault.as_deref(), Some("Private"));
+                assert_eq!(account.as_deref(), Some("UUID"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // The frontend sends nulls for the optional fields when unset.
+        let minimal: KeySource = serde_json::from_str(
+            r#"{"kind":"one_password","item":"K","vault":null,"account":null}"#,
+        )
+        .expect("nulls are accepted");
+        assert!(matches!(minimal, KeySource::OnePassword { .. }));
+
+        assert!(
+            serde_json::from_str::<KeySource>(r#"{"kind":"onepassword","item":"K"}"#).is_err(),
+            "the old misspelling must not silently work"
+        );
+    }
+
+    /// `op` may hand back a multi-line field quoted and with escaped newlines.
+    /// The PEM has to come back with real breaks or the parser rejects it.
+    #[test]
+    fn op_private_key_output_is_normalised() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n";
+
+        // Already clean.
+        assert_eq!(normalise_op_private_key(pem), pem);
+
+        // Quoted with escaped newlines, as `--format json` style output gives.
+        let escaped = format!("\"{}\"", pem.replace('\n', "\\n"));
+        assert_eq!(normalise_op_private_key(&escaped), pem);
+
+        // Missing trailing newline gets one, since OpenSSH PEM needs it.
+        let no_trailing = pem.trim_end();
+        assert!(normalise_op_private_key(no_trailing).ends_with('\n'));
+    }
+
+    /// A normalised 1Password field must parse as a real key, not merely look
+    /// like one — this is the seam between `op` output and the SSH parser.
+    #[test]
+    fn a_normalised_op_field_parses_as_an_ssh_key() {
+        let keypair = ssh_key::private::Ed25519Keypair::from_seed(&[9u8; 32]);
+        let pem = ssh_key::PrivateKey::from(keypair)
+            .to_openssh(ssh_key::LineEnding::LF)
+            .expect("encode")
+            .to_string();
+        let as_op_would_return = format!("\"{}\"", pem.replace('\n', "\\n"));
+
+        let restored = normalise_op_private_key(&as_op_would_return);
+        let seed = shadi_identity::ssh::seed_from_openssh_private_key(restored.as_bytes(), None)
+            .expect("round-trips through the op quoting");
+        let direct =
+            shadi_identity::ssh::seed_from_openssh_private_key(pem.as_bytes(), None).unwrap();
+        assert_eq!(seed, direct, "quoting must not change the derivation root");
+    }
+
+    /// Trusting a handle means reading the ed25519 key it publishes, skipping
+    /// other algorithms rather than taking whatever is listed first.
+    #[test]
+    fn github_handle_resolves_to_the_published_ed25519_did() {
+        let (line, expected) = ed25519_line();
+        test_support::set(Some(format!(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAA other\n{line}\n"
+        )));
+        assert_eq!(fetch_github_human_did("octocat").unwrap(), expected);
+    }
+
+    /// A key that parses but is the wrong type must not silently pass.
+    #[test]
+    fn an_empty_listing_is_rejected() {
+        test_support::set(Some(String::new()));
+        assert!(fetch_github_human_did("ghost").is_err());
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("shadi-keygen-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn request(passphrase: Option<&str>) -> GenerateKeyRequest {
+        GenerateKeyRequest {
+            comment: Some("shadi@test".to_string()),
+            passphrase: passphrase.map(|p| p.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_generated_key_is_owner_only_and_derives_the_reported_did() {
+        let dir = scratch_dir("fresh");
+        let created = generate_into(&dir, request(None)).expect("generate");
+
+        let private = std::fs::read(dir.join("id_ed25519")).expect("private half");
+        let public = std::fs::read_to_string(dir.join("id_ed25519.pub")).expect("public half");
+        assert!(public.starts_with(shadi_identity::ssh::SSH_ED25519), "{public}");
+        assert!(public.ends_with('\n'), "public key must be newline terminated");
+        assert!(!created.encrypted);
+
+        // The DID handed to the UI has to be the one the key actually derives.
+        let vk = shadi_identity::ssh::verifying_key_from_openssh_private_key(&private, None)
+            .expect("read back");
+        assert_eq!(created.human_did.as_deref(), Some(shadi_identity::encode_did_key(&vk).as_str()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("id_ed25519")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "private key must not be group or world readable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generating_never_overwrites_an_existing_key() {
+        let dir = scratch_dir("existing");
+        generate_into(&dir, request(None)).expect("first");
+        let before = std::fs::read(dir.join("id_ed25519")).unwrap();
+
+        let err = generate_into(&dir, request(None)).expect_err("must refuse");
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(before, std::fs::read(dir.join("id_ed25519")).unwrap(), "key was rewritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_passphrase_protects_the_generated_key() {
+        let dir = scratch_dir("protected");
+        let created = generate_into(&dir, request(Some("hunter2"))).expect("generate");
+        assert!(created.encrypted);
+
+        let private = std::fs::read(dir.join("id_ed25519")).unwrap();
+        assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, None).is_err());
+        assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, Some("hunter2")).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ssh_directory_follows_windows_user_profile() {
+        let home = ssh_dir_from(Some(OsString::from("/home/dev")), None).unwrap();
+        assert_eq!(home, PathBuf::from("/home/dev").join(".ssh"));
+
+        // Windows sets USERPROFILE and leaves HOME unset.
+        let profile = ssh_dir_from(None, Some(OsString::from(r"C:\Users\dev"))).unwrap();
+        assert_eq!(profile, PathBuf::from(r"C:\Users\dev").join(".ssh"));
+
+        // An empty HOME must not win over a usable USERPROFILE.
+        let empty = ssh_dir_from(Some(OsString::new()), Some(OsString::from("/home/dev"))).unwrap();
+        assert_eq!(empty, PathBuf::from("/home/dev").join(".ssh"));
+
+        assert!(ssh_dir_from(None, None).is_none());
+    }
+}
+
+/// A 1Password account configured on this machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordAccount {
+    pub account_uuid: String,
+    pub url: String,
+    pub email: String,
+}
+
+/// An SSH Key item in 1Password, offered as an identity root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordSshKey {
+    pub item: String,
+    pub vault: Option<String>,
+    /// Computed from the item's *public* key, so listing never reads a private
+    /// key. `None` when the field is absent or not Ed25519.
+    pub human_did: Option<String>,
+}
+
+fn op_binary() -> String {
+    std::env::var("SHADI_OP_BINARY").unwrap_or_else(|_| "op".to_string())
+}
+
+fn run_op(account: Option<&str>, args: &[&str]) -> Result<String, String> {
+    let mut command = std::process::Command::new(op_binary());
+    command.args(args);
+    if let Some(account) = account.filter(|a| !a.is_empty()) {
+        command.args(["--account", account]);
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("failed to run `op`: {e}. Install the 1Password CLI to use this source"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Not being signed in is the common case and has a specific remedy.
+        if stderr.contains("not signed in") || stderr.contains("no account") {
+            let which = account
+                .map(|a| format!(" to account {a}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "1Password CLI is not signed in{which} — run `op signin`, or enable the CLI \
+                 in 1Password's Developer settings"
+            ));
+        }
+        return Err(format!("`op` failed: {stderr}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// 1Password accounts configured on this machine.
+///
+/// Listing needs no sign-in, so the picker can be populated before any unlock.
+#[tauri::command]
+pub async fn identity_list_1password_accounts() -> Result<Vec<OnePasswordAccount>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let json = run_op(None, &["account", "list", "--format", "json"])?;
+        let accounts: Vec<OnePasswordAccount> =
+            serde_json::from_str(&json).map_err(|e| format!("unexpected `op` output: {e}"))?;
+        Ok(accounts)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// SSH Key items in one account.
+#[tauri::command]
+pub async fn identity_list_1password_ssh_keys(
+    account: Option<String>,
+) -> Result<Vec<OnePasswordSshKey>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let account = account.as_deref();
+        let json = run_op(
+            account,
+            &["item", "list", "--categories", "SSH Key", "--format", "json"],
+        )?;
+        let items: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| format!("unexpected `op` output: {e}"))?;
+        let Some(array) = items.as_array() else {
+            return Ok(Vec::new());
+        };
+
+        Ok(array
+            .iter()
+            .filter_map(|item| {
+                let title = item.get("title")?.as_str()?.to_string();
+                let vault = item
+                    .get("vault")
+                    .and_then(|v| v.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string());
+                // Read only the public field for the DID preview.
+                let human_did = op_public_key_did(account, &title, vault.as_deref());
+                Some(OnePasswordSshKey { item: title, vault, human_did })
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+fn op_public_key_did(account: Option<&str>, item: &str, vault: Option<&str>) -> Option<String> {
+    let mut args = vec!["item", "get", item, "--fields", "public key"];
+    if let Some(vault) = vault {
+        args.push("--vault");
+        args.push(vault);
+    }
+    let line = run_op(account, &args).ok()?;
+    shadi_identity::ssh::verifying_key_from_openssh_public_key(line.trim())
+        .ok()
+        .map(|vk| shadi_identity::encode_did_key(&vk))
+}
+
+/// The private key bytes for a source.
+///
+/// 1Password's own `SecretStore` backend cannot be used here: it expects
+/// base64 in an item's `notesPlain`, which is SHADI's own storage format, not
+/// how a native SSH Key item holds its key. So this reads the item's
+/// `private key` field through `op` directly.
+fn read_key_material(source: &KeySource) -> Result<Vec<u8>, String> {
+    match source {
+        KeySource::File { path } => {
+            std::fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))
+        }
+        KeySource::OnePassword { item, vault, account } => {
+            let mut args = vec!["item", "get", item.as_str(), "--fields", "private key", "--reveal"];
+            if let Some(vault) = vault {
+                args.push("--vault");
+                args.push(vault);
+            }
+            let value = run_op(account.as_deref(), &args)?;
+            let key = normalise_op_private_key(&value);
+            if !key.contains("OPENSSH PRIVATE KEY") {
+                return Err(format!(
+                    "1Password item '{item}' has no OpenSSH private key in its 'private key' \
+                     field. Only SSH Key items hold one, and the vault may forbid revealing it"
+                ));
+            }
+            Ok(key.into_bytes())
+        }
+    }
+}
+
+/// `op` returns a multi-line field quoted, and may escape the newlines; the PEM
+/// has to come back with real line breaks or the parser rejects it.
+fn normalise_op_private_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    let restored = unquoted.replace("\\n", "\n");
+    if restored.ends_with('\n') {
+        restored
+    } else {
+        format!("{restored}\n")
+    }
 }
