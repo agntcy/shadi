@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.4...agntcy-shadi-cli-v0.1.5) - 2026-08-20
+
+### Other
+
+- updated the following local packages: agntcy-shadi-agent-secrets, agntcy-shadi-identity, agntcy-shadi-identity, agntcy-shadi-agent-transport-slim, agntcy-shadi-a2a, agntcy-shadi-memory, agntcy-agentbridge, agntcy-shadi-slim-mas
+
 ## [0.1.4](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.3...agntcy-shadi-cli-v0.1.4) - 2026-08-14
 
 ### Added

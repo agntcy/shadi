@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-agentbridge"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version.workspace = true
 description = "General-purpose agent interconnect over A2A, built on shadi_mas."
@@ -11,7 +11,7 @@ repository.workspace = true
 name = "agentbridge"
 
 [dependencies]
-shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.2", path = "../shadi_mas" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.3", path = "../shadi_mas" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["process", "io-util", "rt", "time"] }
