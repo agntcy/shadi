@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.2.1...agntcy-shadi-agent-transport-slim-v0.2.2) - 2026-08-20
+
+### Other
+
+- updated the following local packages: agntcy-shadi-agent-secrets, agntcy-shadi-identity
+
 ## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.2.0...agntcy-shadi-agent-transport-slim-v0.2.1) - 2026-08-14
 
 ### Other
