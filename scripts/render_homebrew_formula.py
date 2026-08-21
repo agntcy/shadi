@@ -96,6 +96,19 @@ def fetch_sha256(url: str) -> str:
     return digest.hexdigest()
 
 
+def released_sha256(url: str) -> str:
+    """The digest the release publishes, rather than re-hashing the archive."""
+    request = urllib.request.Request(f"{url}.sha256", headers={"User-Agent": "GitHub-Copilot"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            first = response.read().decode("utf-8").split()
+        if first:
+            return first[0]
+    except Exception:
+        pass
+    return fetch_sha256(url)
+
+
 def ruby_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -121,27 +134,58 @@ def render_formula(cli: str, tag: str) -> str:
     crate_path = config["crate_path"]
     binary_name = config["binary_name"]
 
+    version = match.group("version")
+    macos_targets = {
+        "arm": f"aarch64-apple-darwin",
+        "intel": f"x86_64-apple-darwin",
+    }
+    macos_blocks = []
+    for cpu, target in macos_targets.items():
+        asset = f"{binary_name}-v{version}-{target}.tar.gz"
+        url = f"{homepage}/releases/download/{tag}/{asset}"
+        macos_blocks.append(
+            f'    on_{cpu} do\n'
+            f'      url "{ruby_string(url)}"\n'
+            f'      sha256 "{released_sha256(url)}"\n'
+            f'    end'
+        )
+    macos_block = "\n\n".join(macos_blocks)
+
     formula_body = textwrap.dedent(
         f"""\
         class {class_name} < Formula
           desc \"{ruby_string(description)}\"
           homepage \"{ruby_string(homepage)}\"
-          url \"{ruby_string(source_url)}\"
-          sha256 \"{source_sha256}\"
+          version \"{version}\"
           license \"{ruby_string(license_id)}\"
           head \"{ruby_string(git_url)}\", branch: \"main\"
 
-          depends_on \"pkgconf\" => :build
-          depends_on \"rust\" => :build
-          depends_on \"nettle\"
-          depends_on \"openssl@3\"
-          depends_on \"python@3.12\"
+        MACOS_BLOCK
+
+          on_linux do
+            # The Linux build links libcrypto.so.3 with no rpath, so it resolves
+            # against the system loader path rather than a Homebrew prefix. Built
+            # from source here until the released binary carries its own rpath.
+            url \"{ruby_string(source_url)}\"
+            sha256 \"{source_sha256}\"
+
+            depends_on \"pkgconf\" => :build
+            depends_on \"rust\" => :build
+            depends_on \"nettle\"
+            depends_on \"openssl@3\"
+            depends_on \"python@3.12\"
+          end
 
           def install
-            ENV[\"OPENSSL_DIR\"] = Formula[\"openssl@3\"].opt_prefix
-            ENV[\"PYO3_PYTHON\"] = Formula[\"python@3.12\"].opt_bin/\"python3.12\"
+            if OS.mac?
+              bin.install \"{binary_name}\"
+            else
+              ENV[\"OPENSSL_DIR\"] = Formula[\"openssl@3\"].opt_prefix
+              ENV[\"PYO3_PYTHON\"] = Formula[\"python@3.12\"].opt_bin/\"python3.12\"
 
-            system \"cargo\", \"install\", \"--locked\", \"--path\", \"{crate_path}\", *std_cargo_args
+              # std_cargo_args already passes --locked and --path.
+              system \"cargo\", \"install\", *std_cargo_args(path: \"{crate_path}\")
+            end
           end
 
           test do
@@ -149,7 +193,7 @@ def render_formula(cli: str, tag: str) -> str:
           end
         end
         """
-    )
+    ).replace("MACOS_BLOCK", f"  on_macos do\n{macos_block}\n  end")
 
     return f"{FORMULA_HEADER}{formula_body}"
 
