@@ -16,6 +16,8 @@ jobs:
   check:
     name: Check (frontend + src-tauri)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: apps/shadi_desktop

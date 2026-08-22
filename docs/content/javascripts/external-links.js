@@ -2,7 +2,7 @@
 document$.subscribe(function () {
   document.querySelectorAll("a[href]").forEach(function (link) {
     var href = link.getAttribute("href");
-    if (!href || href.charAt(0) === "#" || href.indexOf("javascript:") === 0) {
+    if (!href) {
       return;
     }
 
@@ -13,7 +13,9 @@ document$.subscribe(function () {
       return;
     }
 
-    if (url.protocol === "mailto:" || url.protocol === "tel:") {
+    /* Allowlisted rather than denylisted: mailto:, tel:, javascript: and data:
+       are all left alone without having to be named. */
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
       return;
     }
 
