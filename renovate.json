@@ -1,0 +1,35 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommits"],
+  "semanticCommitType": "chore",
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "agntcy-slim* are pinned with = to match the root lockfile; bumping them here breaks resolution.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^agntcy-slim/"],
+      "enabled": false
+    },
+    {
+      "description": "Our own crates are released by release-plz, not Renovate.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^agntcy-shadi/", "/^agntcy-agentbridge/"],
+      "enabled": false
+    },
+    {
+      "description": "Low-risk bumps in one PR to keep the review load down.",
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "patch and minor"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    }
+  ]
+}
