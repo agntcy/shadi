@@ -63,6 +63,7 @@ jobs:
     needs: release-crates
     if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
     runs-on: ubuntu-latest
+    permissions: {}
     outputs:
       release_tag: ${{ steps.release.outputs.release_tag }}
     steps:
@@ -239,6 +240,7 @@ jobs:
     needs: release-crates
     if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
     runs-on: ubuntu-latest
+    permissions: {}
     outputs:
       release_tag: ${{ steps.release.outputs.release_tag }}
     steps:

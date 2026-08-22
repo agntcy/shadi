@@ -9,6 +9,8 @@ on:
 jobs:
   build-shadictl-release-artifacts:
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
