@@ -81,7 +81,9 @@ jobs:
           CLI: ${{ steps.release.outputs.cli }}
           FORMULA_PATH: Formula/${{ steps.release.outputs.cli }}.rb
         run: |
-          if git diff --quiet -- "$FORMULA_PATH"; then
+          # git diff only reports tracked files, so a formula that does not exist
+          # yet looked unchanged and was never created.
+          if [ -z "$(git status --porcelain -- "$FORMULA_PATH")" ]; then
             echo "Formula already up to date for ${{ steps.release.outputs.tag }}"
             exit 0
           fi
