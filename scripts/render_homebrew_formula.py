@@ -24,6 +24,7 @@ CLI_CONFIGS = {
         "class_name": "Shadictl",
         "crate_path": "crates/shadictl",
         "binary_name": "shadictl",
+        "linux_needs_openssl": True,
     },
     "agentbridge": {
         "manifest": ROOT / "crates" / "agentbridge_cli" / "Cargo.toml",
@@ -34,6 +35,7 @@ CLI_CONFIGS = {
         "class_name": "Agentbridge",
         "crate_path": "crates/agentbridge_cli",
         "binary_name": "agentbridge",
+        "linux_needs_openssl": False,
     },
 }
 
@@ -135,21 +137,41 @@ def render_formula(cli: str, tag: str) -> str:
     binary_name = config["binary_name"]
 
     version = match.group("version")
-    macos_targets = {
-        "arm": f"aarch64-apple-darwin",
-        "intel": f"x86_64-apple-darwin",
-    }
-    macos_blocks = []
-    for cpu, target in macos_targets.items():
-        asset = f"{binary_name}-v{version}-{target}.tar.gz"
-        url = f"{homepage}/releases/download/{tag}/{asset}"
-        macos_blocks.append(
-            f'    on_{cpu} do\n'
-            f'      url "{ruby_string(url)}"\n'
-            f'      sha256 "{released_sha256(url)}"\n'
-            f'    end'
+    needs_openssl = config["linux_needs_openssl"]
+
+    def arch_blocks(targets: dict[str, str], indent: str) -> str:
+        blocks = []
+        for cpu, target in targets.items():
+            asset = f"{binary_name}-v{version}-{target}.tar.gz"
+            url = f"{homepage}/releases/download/{tag}/{asset}"
+            blocks.append(
+                f"{indent}on_{cpu} do\n"
+                f'{indent}  url "{ruby_string(url)}"\n'
+                f'{indent}  sha256 "{released_sha256(url)}"\n'
+                f"{indent}end"
+            )
+        return "\n\n".join(blocks)
+
+    macos_block = arch_blocks(
+        {"arm": "aarch64-apple-darwin", "intel": "x86_64-apple-darwin"}, "    "
+    )
+    linux_block = arch_blocks(
+        {"arm": "aarch64-unknown-linux-gnu", "intel": "x86_64-unknown-linux-gnu"}, "    "
+    )
+    if needs_openssl:
+        linux_block += (
+            '\n\n    depends_on "patchelf" => :build'
+            '\n    depends_on "openssl@3"'
         )
-    macos_block = "\n\n".join(macos_blocks)
+        # The released binary carries no DT_RUNPATH, so the loader would look for
+        # libcrypto.so.3 on the system path and miss Homebrew's copy.
+        rpath = (
+            '\n\n    return unless OS.linux?\n\n'
+            '    system "patchelf", "--set-rpath", Formula["openssl@3"].opt_lib,'
+            f' bin/"{binary_name}"'
+        )
+    else:
+        rpath = ""
 
     formula_body = textwrap.dedent(
         f"""\
@@ -162,30 +184,10 @@ def render_formula(cli: str, tag: str) -> str:
 
         MACOS_BLOCK
 
-          on_linux do
-            # The Linux build links libcrypto.so.3 with no rpath, so it resolves
-            # against the system loader path rather than a Homebrew prefix. Built
-            # from source here until the released binary carries its own rpath.
-            url \"{ruby_string(source_url)}\"
-            sha256 \"{source_sha256}\"
-
-            depends_on \"pkgconf\" => :build
-            depends_on \"rust\" => :build
-            depends_on \"nettle\"
-            depends_on \"openssl@3\"
-            depends_on \"python@3.12\"
-          end
+        LINUX_BLOCK
 
           def install
-            if OS.mac?
-              bin.install \"{binary_name}\"
-            else
-              ENV[\"OPENSSL_DIR\"] = Formula[\"openssl@3\"].opt_prefix
-              ENV[\"PYO3_PYTHON\"] = Formula[\"python@3.12\"].opt_bin/\"python3.12\"
-
-              # std_cargo_args already passes --locked and --path.
-              system \"cargo\", \"install\", *std_cargo_args(path: \"{crate_path}\")
-            end
+            bin.install \"{binary_name}\"RPATH
           end
 
           test do
@@ -193,7 +195,12 @@ def render_formula(cli: str, tag: str) -> str:
           end
         end
         """
-    ).replace("MACOS_BLOCK", f"  on_macos do\n{macos_block}\n  end")
+    )
+    formula_body = (
+        formula_body.replace("MACOS_BLOCK", f"  on_macos do\n{macos_block}\n  end")
+        .replace("LINUX_BLOCK", f"  on_linux do\n{linux_block}\n  end")
+        .replace("RPATH", rpath)
+    )
 
     return f"{FORMULA_HEADER}{formula_body}"
 
