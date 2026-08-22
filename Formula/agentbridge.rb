@@ -21,29 +21,19 @@ class Agentbridge < Formula
   end
 
   on_linux do
-    # The Linux build links libcrypto.so.3 with no rpath, so it resolves
-    # against the system loader path rather than a Homebrew prefix. Built
-    # from source here until the released binary carries its own rpath.
-    url "https://github.com/agntcy/shadi/archive/refs/tags/agntcy-agentbridge-cli-v0.1.3.tar.gz"
-    sha256 "0decd71c02d385025594eaddc39a47aa6927a088067583ba56b5fa04859ea919"
+    on_arm do
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.3/agentbridge-v0.1.3-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "bfc5fa331bb7ec001d8467155f9ba14036177c507b229a9184967f41d22d3c29"
+    end
 
-    depends_on "pkgconf" => :build
-    depends_on "rust" => :build
-    depends_on "nettle"
-    depends_on "openssl@3"
-    depends_on "python@3.12"
+    on_intel do
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.3/agentbridge-v0.1.3-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "bb1695e96f8a88255524c1a0d0698f9cb32b27a7fd9286291601b661466f7a9d"
+    end
   end
 
   def install
-    if OS.mac?
-      bin.install "agentbridge"
-    else
-      ENV["OPENSSL_DIR"] = Formula["openssl@3"].opt_prefix
-      ENV["PYO3_PYTHON"] = Formula["python@3.12"].opt_bin/"python3.12"
-
-      # std_cargo_args already passes --locked and --path.
-      system "cargo", "install", *std_cargo_args(path: "crates/agentbridge_cli")
-    end
+    bin.install "agentbridge"
   end
 
   test do
