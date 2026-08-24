@@ -37,19 +37,7 @@ pub fn init(service_name: &str) {
             .build();
 
         let otel_layer = if !config.otlp_endpoint.is_empty() {
-            let exporter = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_endpoint(traces_endpoint(&config.otlp_endpoint))
-                .build();
-
-            exporter.ok().map(|exporter| {
-                // Batched, not simple: export runs on its own thread, so it
-                // neither needs a reactor at startup nor blocks inside one when
-                // a span ends in async code.
-                let provider = trace::SdkTracerProvider::builder()
-                    .with_batch_exporter(exporter)
-                    .with_resource(resource)
-                    .build();
+            build_provider(&config.otlp_endpoint, resource).map(|provider| {
                 let _ = PROVIDER.set(provider);
                 let tracer = PROVIDER
                     .get()
@@ -95,6 +83,26 @@ pub fn init(service_name: &str) {
 /// OTEL_EXPORTER_OTLP_ENDPOINT is a base URL per the OpenTelemetry spec, and
 /// 0.24 appended the signal path itself. 0.32 takes the full URL, so a base
 /// endpoint has to be completed here or spans go nowhere.
+/// Build the OTLP provider for an endpoint.
+///
+/// Batched, not simple: export runs on its own thread, so it neither needs a
+/// reactor at startup nor blocks inside one when a span ends in async code.
+/// Nothing here touches the network — that starts when spans are exported.
+fn build_provider(endpoint: &str, resource: Resource) -> Option<trace::SdkTracerProvider> {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(traces_endpoint(endpoint))
+        .build()
+        .ok()?;
+
+    Some(
+        trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(resource)
+            .build(),
+    )
+}
+
 /// Flush and stop the exporter.
 ///
 /// Batched export means spans still in the queue are lost if the process just
@@ -298,5 +306,36 @@ mod tests {
             traces_endpoint("http://collector.example:4318/v1/traces/"),
             "http://collector.example:4318/v1/traces"
         );
+    }
+
+    fn test_resource() -> Resource {
+        Resource::builder()
+            .with_attributes([KeyValue::new("service.name", "coverage-test")])
+            .build()
+    }
+
+    /// Building the provider must not need a collector: the exporter only
+    /// starts talking to one when spans are exported.
+    #[test]
+    fn build_provider_succeeds_without_a_collector() {
+        let provider = build_provider("http://127.0.0.1:9/", test_resource())
+            .expect("provider builds offline");
+        let _ = provider.shutdown();
+    }
+
+    /// A base endpoint is completed on the way into the exporter, so the same
+    /// value that worked before the 0.32 move still works.
+    #[test]
+    fn build_provider_accepts_a_base_endpoint() {
+        let provider =
+            build_provider("http://127.0.0.1:9", test_resource()).expect("provider builds");
+        let _ = provider.shutdown();
+    }
+
+    /// Shutting down before anything was initialised must be a no-op, since
+    /// shadictl calls it unconditionally on the way out.
+    #[test]
+    fn shutdown_without_init_is_harmless() {
+        shutdown();
     }
 }
