@@ -29,6 +29,17 @@
   },
   "packageRules": [
     {
+      "description": "The OpenTelemetry crates must move together: bumping one leaves two opentelemetry versions in the tree and the KeyValue types stop matching. tracing-opentelemetry tracks its own number (0.33 pairs with otel 0.32).",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "/^opentelemetry/",
+        "tracing-opentelemetry"
+      ],
+      "groupName": "opentelemetry"
+    },
+    {
       "description": "agntcy-slim* are pinned with = to match the root lockfile; bumping them here breaks resolution.",
       "matchManagers": [
         "cargo"
