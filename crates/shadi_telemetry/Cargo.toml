@@ -10,10 +10,13 @@ repository.workspace = true
 name = "shadi_telemetry"
 
 [dependencies]
-opentelemetry = "0.24"
-opentelemetry_sdk = "0.24"
-opentelemetry-otlp = { version = "0.17", features = ["http-proto", "reqwest-client"] }
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", features = ["http-proto", "reqwest-blocking-client"] }
 tracing = "0.1"
-tracing-opentelemetry = "0.25"
+tracing-opentelemetry = "0.33"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tracing-appender = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
