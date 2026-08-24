@@ -11,7 +11,7 @@ name = "shadi_telemetry"
 
 [dependencies]
 opentelemetry = "0.24"
-opentelemetry_sdk = "0.24"
+opentelemetry_sdk = "0.32"
 opentelemetry-otlp = { version = "0.17", features = ["http-proto", "reqwest-client"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.25"
