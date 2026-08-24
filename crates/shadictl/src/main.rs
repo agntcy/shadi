@@ -193,7 +193,10 @@ pub(crate) fn scrub_test_secret_backend_env(command: &mut Command) {
 fn main() -> ExitCode {
     shadi_telemetry::init("shadi-core");
     let cli = Cli::parse();
-    run_cli(cli)
+    let code = run_cli(cli);
+    // Export is batched, so queued spans need flushing before we exit.
+    shadi_telemetry::shutdown();
+    code
 }
 
 fn run_named_command(command: Commands) -> ExitCode {
