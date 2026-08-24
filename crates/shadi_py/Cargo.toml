@@ -20,7 +20,7 @@ shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.0", path 
 tracing = "0.1"
 
 [dependencies.pyo3]
-version = "0.21"
+version = "0.29"
 features = ["extension-module"]
 
 [build-dependencies]
