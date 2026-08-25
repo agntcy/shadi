@@ -82,20 +82,8 @@ winget install --id AGNTCY.shadictl -e
 winget upgrade --id AGNTCY.shadictl -e
 ```
 
-`shadictl` links OpenSSL dynamically for its encrypted memory store, so the
-manifest declares `ShiningLight.OpenSSL.Light` as a dependency and WinGet
-installs it for you. If you install by downloading the release archive instead,
-install OpenSSL yourself — without it the CLI cannot start:
-
-```powershell
-winget install --id ShiningLight.OpenSSL.Light -e
-```
-
-The major matters: the Windows binaries are built against OpenSSL 4 and load
-`libcrypto-4-x64.dll`, which an OpenSSL 3 install does not provide. Check what
-you have with `where.exe libcrypto-4-x64.dll`. The DLL has to sit in a
-directory Windows searches — `System32` (where the installer puts it), the
-directory holding `shadictl.exe`, or one on `PATH`.
+`shadictl` needs nothing else installed: OpenSSL is built into the Windows
+binary, and the Visual C++ runtime it needs is declared as a WinGet dependency.
 
 ## Next steps
 
