@@ -40,14 +40,14 @@
       "groupName": "opentelemetry"
     },
     {
-      "description": "agntcy-slim* are pinned with = to match the root lockfile; bumping them here breaks resolution.",
+      "description": "The SLIM crates must move together: slim_auth 0.14 caps below 0.15 while slim_rpc 2.3 requires it, which puts two versions in the tree and breaks the TokenProvider bounds.",
       "matchManagers": [
         "cargo"
       ],
       "matchPackageNames": [
         "/^agntcy-slim/"
       ],
-      "enabled": false
+      "groupName": "slim"
     },
     {
       "description": "Our own crates are released by release-plz, not Renovate.",

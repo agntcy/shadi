@@ -36,17 +36,14 @@ agentbridge = { package = "agntcy-agentbridge", version = "0.1.1", path = "../..
 shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.1", path = "../../../crates/shadi_mas" }
 uuid = { version = "1", features = ["v4"] }
 
-# Pinned to exactly what the root SHADI workspace's Cargo.lock already
-# resolves. Without this, this independently-resolved workspace picks up
-# newer alpha releases of these two crates, whose transitive requirement on
-# agntcy-slim-service/agntcy-slim-proto conflicts with a2a-slimrpc's own
-# direct (older) requirement on those same crates — two incompatible
-# versions of each end up in the graph and the build fails to link types.
-slim = { package = "agntcy-slim", version = "=2.0.0-alpha.7" }
-slim_rpc = { package = "agntcy-slim-rpc", version = "=2.0.0-alpha.7" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "=2.0.0-alpha.9" }
-slim_proto = { package = "agntcy-slim-proto", version = "0.4.0" }
-slim_config = { package = "agntcy-slim-config", version = "0.12.6" }
+# Kept in step with the root SHADI workspace. The `=` pins these carried are
+# gone: they existed because a2a-slimrpc required older
+# agntcy-slim-service/agntcy-slim-proto, which 0.2.5 no longer does.
+slim = { package = "agntcy-slim", version = "2.3.0" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "2.3.0" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
+slim_proto = { package = "agntcy-slim-proto", version = "0.6.0" }
+slim_config = { package = "agntcy-slim-config", version = "0.16.0" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.0", path = "../../../crates/shadi_identity" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.0", path = "../../../crates/agent_secrets" }
 # mTLS bootstrap without an openssl binary — the desktop app has to work on a

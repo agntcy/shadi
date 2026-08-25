@@ -19,7 +19,7 @@ agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.1", pat
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.2", path = "../shadi_identity" }
 agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.2.2", path = "../agent_transport_slim" }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.3", path = "../shadi_a2a" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.0.0-alpha.8" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
 tokio = { version = "1", features = ["rt", "time"] }
 tracing = "0.1"
 

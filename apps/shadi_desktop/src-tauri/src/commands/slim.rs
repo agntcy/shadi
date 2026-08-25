@@ -378,8 +378,10 @@ impl Inner {
         let participants = session.participants_list().map_err(slim_err)?;
         Ok(participants
             .into_iter()
-            .map(|name| {
-                let name = name.to_string();
+            // 2.3 returns ParticipantInfo (name plus status) rather than the
+            // name alone; the status is not surfaced yet.
+            .map(|participant| {
+                let name = participant.name.to_string();
                 room.admitted.get(&name).cloned().unwrap_or(SlimGroupMember {
                     name,
                     did: String::new(),
@@ -1002,6 +1004,8 @@ fn build_core_client_config(endpoint: &str) -> Result<CoreClientConfig, String> 
                     include_system_ca_certs_pool: false,
                     tls_version: "tls1.3".to_string(),
                     reload_interval: None,
+                    // slim-config 0.16 added this; upstream defaults it off.
+                    enforce_pqc: false,
                 },
                 insecure: false,
                 insecure_skip_verify: false,

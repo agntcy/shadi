@@ -199,6 +199,9 @@ fn build_core_client_config(endpoint: &str) -> Result<CoreClientConfig, String> 
             include_system_ca_certs_pool: false,
             tls_version: "tls1.3".to_string(),
             reload_interval: None,
+            // slim-config 0.16 added this; upstream defaults it off and drives
+            // it from dataplane.enforce_pqc rather than the tls settings.
+            enforce_pqc: false,
         },
         insecure: false,
         insecure_skip_verify: false,
