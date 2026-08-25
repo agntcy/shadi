@@ -124,7 +124,8 @@ jobs:
             $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
             $found = ([regex]::Matches($text, 'libcrypto-(\d+)-x64\.dll') |
               ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ","
-            Write-Host "$exe imports libcrypto major(s): $(if ($found) { $found } else { 'none' })"
+            $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+            Write-Host "$exe ${mb} MB, imports libcrypto major(s): $(if ($found) { $found } else { 'none' })"
             if ($found) {
               throw "$exe imports libcrypto-$found-x64.dll; OpenSSL should be vendored on Windows"
             }
