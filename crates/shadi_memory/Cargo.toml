@@ -11,11 +11,21 @@ name = "shadi_memory"
 
 [dependencies]
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.1", path = "../agent_secrets" }
-rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 time = { version = "0.3", features = ["formatting"] }
+
+# SQLCipher's crypto provider. macOS resolves to CommonCrypto and Linux to the
+# distro's libcrypto, both patched by the platform. Windows has no system
+# OpenSSL, so a dynamic link there means every user installing one themselves
+# from a single publisher whose old builds are deleted; vendored instead, and
+# openssl-src is bumped like any other dependency.
+[target.'cfg(not(windows))'.dependencies]
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
+
+[target.'cfg(windows)'.dependencies]
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [dev-dependencies]
 tempfile = "3.27"

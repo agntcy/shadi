@@ -146,13 +146,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nettle pkg-config
 
-      - name: Install OpenSSL (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/install_openssl_windows.py
-
       - name: Resolve release metadata
         id: metadata
         shell: bash
@@ -322,13 +315,6 @@ jobs:
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: brew install nettle pkg-config
-
-      - name: Install OpenSSL (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/install_openssl_windows.py
 
       - name: Resolve release metadata
         id: metadata

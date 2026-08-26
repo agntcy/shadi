@@ -61,13 +61,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nettle pkg-config
 
-      - name: Install OpenSSL (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/install_openssl_windows.py
-
       - name: Resolve shadictl release metadata
         id: metadata
         shell: bash
@@ -120,29 +113,20 @@ jobs:
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Check the imported OpenSSL major (Windows)
+      - name: Check no OpenSSL DLL is needed (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          function Get-LibcryptoMajors($exe) {
+          # OpenSSL is vendored into SQLCipher on Windows, so neither binary may
+          # import libcrypto: a dynamic link here is a user who cannot start it.
+          foreach ($exe in @("${{ steps.metadata.outputs.binary_path }}",
+                             "${{ steps.metadata-agentbridge.outputs.binary_path }}")) {
             $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
-            ([regex]::Matches($text, 'libcrypto-(\d+)-x64\.dll') |
+            $found = ([regex]::Matches($text, 'libcrypto-(\d+)-x64\.dll') |
               ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ","
-          }
-
-          $expected = [ordered]@{
-            "${{ steps.metadata.outputs.binary_path }}" = $env:OPENSSL_MAJOR
-            "${{ steps.metadata-agentbridge.outputs.binary_path }}" = ""
-          }
-          foreach ($exe in $expected.Keys) {
-            $found = Get-LibcryptoMajors $exe
-            Write-Host "$exe imports libcrypto major(s): $(if ($found) { $found } else { 'none' })"
-            if ($found -ne $expected[$exe]) {
-              $want = if ($expected[$exe]) {
-                "OpenSSL $($expected[$exe]), the major the WinGet dependency installs"
-              } else {
-                "no OpenSSL, since its manifest declares no dependency"
-              }
-              throw "$exe should need $want, but it imports '$found'"
+            $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+            Write-Host "$exe ${mb} MB, imports libcrypto major(s): $(if ($found) { $found } else { 'none' })"
+            if ($found) {
+              throw "$exe imports libcrypto-$found-x64.dll; OpenSSL should be vendored on Windows"
             }
           }
