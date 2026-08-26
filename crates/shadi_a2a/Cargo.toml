@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-a2a"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.88"
 description = "A2A channel support for SHADI over SLIMRPC."

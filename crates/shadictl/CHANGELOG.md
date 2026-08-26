@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.5...agntcy-shadi-cli-v0.1.6) - 2026-08-26
+
+### Added
+
+- *(slim)* move to SLIM 2.3 ([#175](https://github.com/agntcy/shadi/pull/175))
+- *(telemetry)* move to OpenTelemetry 0.32 ([#173](https://github.com/agntcy/shadi/pull/173))
+
 ## [0.1.5](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.4...agntcy-shadi-cli-v0.1.5) - 2026-08-20
 
 ### Other

@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-identity"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Ed25519 did:key agent identity primitives for SHADI."
 license.workspace = true

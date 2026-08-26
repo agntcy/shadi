@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/agntcy/shadi/compare/agntcy-shadi-py-v0.1.4...agntcy-shadi-py-v0.1.5) - 2026-08-26
+
+### Fixed
+
+- *(deps)* update rust crate pyo3 to 0.29 [security] ([#168](https://github.com/agntcy/shadi/pull/168))
+
 ## [0.1.4](https://github.com/agntcy/shadi/compare/agntcy-shadi-py-v0.1.3...agntcy-shadi-py-v0.1.4) - 2026-08-20
 
 ### Other

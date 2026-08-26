@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-telemetry"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "OpenTelemetry initialization and tracing sinks for SHADI runtimes and tools."
 license.workspace = true
