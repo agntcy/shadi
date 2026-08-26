@@ -4,31 +4,31 @@
 class Agentbridge < Formula
   desc "CLI binary for the agentbridge general-purpose agent interconnect."
   homepage "https://github.com/agntcy/shadi"
-  version "0.1.3"
+  version "0.1.4"
   license "Apache-2.0"
   head "https://github.com/agntcy/shadi.git", branch: "main"
 
   on_macos do
     on_arm do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.3/agentbridge-v0.1.3-aarch64-apple-darwin.tar.gz"
-      sha256 "65d18f4582dfe7bd6fd6e776c209e979eb4a47e179503fade9aa16f3a9881b38"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.4/agentbridge-v0.1.4-aarch64-apple-darwin.tar.gz"
+      sha256 "e49760ff40bd3d4020c43210a648d9b398e11813c368f581d759429332177ffd"
     end
 
     on_intel do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.3/agentbridge-v0.1.3-x86_64-apple-darwin.tar.gz"
-      sha256 "77292b752a2f8a92f435baf28952cbffd3168dd36b03a55fcc0c5bdc7a8c6549"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.4/agentbridge-v0.1.4-x86_64-apple-darwin.tar.gz"
+      sha256 "7b049c2f2a648eed163c298e53eaa5b32db91adcb4f2f88b645655e97bdafe50"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.3/agentbridge-v0.1.3-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "bfc5fa331bb7ec001d8467155f9ba14036177c507b229a9184967f41d22d3c29"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.4/agentbridge-v0.1.4-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "a250b1ba87fe3ae89ca5488cf805ac9a76c1802dd073cac1322194ad59aa84f6"
     end
 
     on_intel do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.3/agentbridge-v0.1.3-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "bb1695e96f8a88255524c1a0d0698f9cb32b27a7fd9286291601b661466f7a9d"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-agentbridge-cli-v0.1.4/agentbridge-v0.1.4-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "7f02737910690ecd1e3227484b5eb65f151ab18e2d44a14ff36318d4b0cbcbf8"
     end
   end
 
