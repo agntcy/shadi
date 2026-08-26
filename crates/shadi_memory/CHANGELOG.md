@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/agntcy/shadi/compare/agntcy-shadi-memory-v0.1.3...agntcy-shadi-memory-v0.1.4) - 2026-08-26
+
+### Added
+
+- *(slim)* move to SLIM 2.3 ([#175](https://github.com/agntcy/shadi/pull/175))
+
+### Fixed
+
+- *(memory)* vendor OpenSSL into SQLCipher on Windows ([#176](https://github.com/agntcy/shadi/pull/176))
+
 ## [0.1.3](https://github.com/agntcy/shadi/compare/agntcy-shadi-memory-v0.1.2...agntcy-shadi-memory-v0.1.3) - 2026-08-20
 
 ### Other
