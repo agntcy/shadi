@@ -29,6 +29,12 @@ enum Cmd {
         #[arg(long = "arg", value_name = "ARG")]
         args: Vec<String>,
 
+        /// SLIM identity for this instance (default: same as --tool). Set this
+        /// to run more than one instance of the same --tool concurrently on
+        /// one mesh, each independently addressable via `delegate --to`.
+        #[arg(long)]
+        agent_id: Option<String>,
+
         /// Publish an OASF record to the Agent Directory after registering.
         #[arg(long)]
         dir_publish: bool,
@@ -146,7 +152,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Cmd::Register { tool, command, args, dir_publish, dir_server, gh_token, slim_endpoint } => {
+        Cmd::Register { tool, command, args, agent_id, dir_publish, dir_server, gh_token, slim_endpoint } => {
             let publish_opts = dir_publish.then(|| commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
@@ -155,6 +161,7 @@ fn main() {
                 &tool,
                 command.as_deref(),
                 &args,
+                agent_id.as_deref(),
                 slim_endpoint.as_deref(),
                 publish_opts,
             )

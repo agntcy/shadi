@@ -52,6 +52,9 @@ const ESSENTIAL_MACH_SERVICES: &[&str] = &[
 #[cfg(not(any(test, feature = "coverage")))]
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
+    if std::env::var_os("SHADI_DEBUG_SANDBOX").is_some() {
+        eprintln!("=== SHADI_DEBUG_SANDBOX: generated SBPL profile ===\n{profile}\n=== end profile ===");
+    }
     let profile_cstr = CString::new(profile).map_err(|_| SandboxError::InvalidConfig)?;
 
     unsafe {
@@ -168,6 +171,15 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     // per-user and session-scoped.
     rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
     rules.push("(allow file-read* file-write* (subpath \"/private/var/folders\"))".to_string());
+    // Same symlink duality as /var/folders above: plain "/tmp" is itself a
+    // symlink to "/private/tmp", and Seatbelt's `subpath` matcher needs a
+    // rule for whichever literal path form a process actually names — a
+    // rule for only the canonicalized target does not cover a process (e.g.
+    // `claude`) that hardcodes the "/tmp/..." symlink form rather than
+    // respecting $TMPDIR. Legacy /tmp is as fundamental as /var/folders for
+    // scratch space, so it gets the same unconditional treatment.
+    rules.push("(allow file-read* file-write* (subpath \"/tmp\"))".to_string());
+    rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
     if let Ok(tmpdir) = std::env::var("TMPDIR") {
         let canonical = escape_profile_string(tmpdir.trim_end_matches('/'))?;
         rules.push(format!(

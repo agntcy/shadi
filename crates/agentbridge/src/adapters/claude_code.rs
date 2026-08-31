@@ -74,7 +74,7 @@ impl ClaudeCodeAdapter {
             .arg("--output-format")
             .arg("json")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         // Only add the project directory for snapshot/inject where filesystem
         // context is needed. For plain execute_prompt calls (coordinate loop),
@@ -233,21 +233,18 @@ impl CliAdapter for ClaudeCodeAdapter {
     }
 
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError> {
-        let session_id = self
-            .state
-            .lock()
-            .map_err(|_| CliAdapterError::Subprocess("lock poisoned".to_string()))?
-            .session_id
-            .clone();
-
-        let out = self.run_print(prompt, None, session_id.as_deref(), false)?;
-
-        if let Ok(mut state) = self.state.lock() {
-            if out.session_id.is_some() {
-                state.session_id = out.session_id.clone();
-            }
-        }
-
+        // Deliberately NOT reusing a stored session_id here. `claude
+        // --session-id <id>` only creates a session with that id — passing
+        // one that already exists (i.e. the id `claude` itself returned
+        // from a prior call) always fails with "Session ID ... is already
+        // in use" (there is no flag here to *resume* one, that's a
+        // separate `--resume` mechanism this adapter doesn't use). Every
+        // call up to now silently failed on the second message to a given
+        // adapter instance. A fresh session per call also matches how
+        // agentbridge actually uses this: A2A tasks (e.g. CONCORD receiver
+        // messages) are explicitly stateless — full context resent each
+        // time — so there's no continuity to preserve anyway.
+        let out = self.run_print(prompt, None, None, false)?;
         Ok(out.result.unwrap_or_default())
     }
 }

@@ -34,6 +34,7 @@ fn build_policy_cli(
         write,
         net_block,
         net_allow,
+        sandbox_minimal: false,
         allow_command,
         inject_keychain: Vec::new(),
         trusted_secret: Vec::new(),

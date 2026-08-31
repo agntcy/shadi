@@ -45,24 +45,26 @@ pub fn run(
     tool: &str,
     command: Option<&str>,
     args: &[String],
+    agent_id: Option<&str>,
     slim_endpoint: Option<&str>,
     dir_publish: Option<DirPublishOptions>,
 ) -> anyhow::Result<()> {
+    let id = agent_id.unwrap_or(tool);
     match tool {
         "generic-stdio" => {
             let command = command.ok_or_else(|| {
                 anyhow::anyhow!("--command is required for tool type 'generic-stdio'")
             })?;
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let adapter = Arc::new(GenericStdioAdapter::spawn(tool, command, &args_ref)?);
+            let adapter = Arc::new(GenericStdioAdapter::spawn(id, command, &args_ref)?);
             println!("Registered adapter '{}' (agent id: {})", tool, adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
-                run_slim_listener(tool, adapter, endpoint, dir_publish.as_ref())
+                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{id}-a2a ...");
+                run_slim_listener(id, adapter, endpoint, dir_publish.as_ref())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir(tool, None, best_effort_did(tool).as_deref(), opts)?;
+                    publish_card_to_dir(id, None, best_effort_did(id).as_deref(), opts)?;
                 }
                 println!("Adapter is running. Press Ctrl-C to stop.");
                 std::thread::park();
@@ -72,19 +74,19 @@ pub fn run(
             let work_dir = command
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(ClaudeCodeAdapter::new("claude-code", &work_dir));
+            let adapter = Arc::new(ClaudeCodeAdapter::new(id, &work_dir));
             println!(
                 "Registered Claude Code adapter (agent id: {}, dir: {})",
                 adapter.agent_id().0,
                 work_dir.display()
             );
             if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/claude-code-a2a ...");
-                run_slim_listener("claude-code", adapter, endpoint, dir_publish.as_ref())
+                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{id}-a2a ...");
+                run_slim_listener(id, adapter, endpoint, dir_publish.as_ref())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir("claude-code", None, best_effort_did("claude-code").as_deref(), opts)?;
+                    publish_card_to_dir(id, None, best_effort_did(id).as_deref(), opts)?;
                 }
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
@@ -93,15 +95,15 @@ pub fn run(
             let work_dir = command
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CopilotAdapter::new("copilot", work_dir));
+            let adapter = Arc::new(CopilotAdapter::new(id, work_dir));
             println!("Registered Copilot adapter (agent id: {})", adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/copilot-a2a ...");
-                run_slim_listener("copilot", adapter, endpoint, dir_publish.as_ref())
+                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{id}-a2a ...");
+                run_slim_listener(id, adapter, endpoint, dir_publish.as_ref())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir("copilot", None, best_effort_did("copilot").as_deref(), opts)?;
+                    publish_card_to_dir(id, None, best_effort_did(id).as_deref(), opts)?;
                 }
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
@@ -110,15 +112,15 @@ pub fn run(
             let work_dir = command
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CodexAdapter::new("codex", work_dir));
+            let adapter = Arc::new(CodexAdapter::new(id, work_dir));
             println!("Registered Codex adapter (agent id: {})", adapter.agent_id().0);
             if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/codex-a2a ...");
-                run_slim_listener("codex", adapter, endpoint, dir_publish.as_ref())
+                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{id}-a2a ...");
+                run_slim_listener(id, adapter, endpoint, dir_publish.as_ref())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             } else {
                 if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir("codex", None, best_effort_did("codex").as_deref(), opts)?;
+                    publish_card_to_dir(id, None, best_effort_did(id).as_deref(), opts)?;
                 }
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
@@ -461,6 +463,21 @@ fn default_skills() -> Vec<AgentSkill> {
 /// [`shadi_sandbox::sandbox_enforced_from_env`].
 fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String> {
     if shadi_sandbox::sandbox_enforced_from_env() {
+        return Ok(());
+    }
+    // Explicit, opt-in escape hatch — NOT the default. Added for a
+    // loopback-only local demo where a corporate endpoint-security agent
+    // was silently blackholing network traffic from Seatbelt-sandboxed
+    // child processes (confirmed via SHADI_DEBUG_SANDBOX that the Seatbelt
+    // policy itself was correctly wide-open; the interference was outside
+    // shadi_sandbox entirely). Anyone relying on the sandbox guarantee
+    // should not set this.
+    if std::env::var_os("AGENTBRIDGE_ALLOW_UNSANDBOXED_REGISTER").is_some() {
+        eprintln!(
+            "⚠️  AGENTBRIDGE_ALLOW_UNSANDBOXED_REGISTER set — running WITHOUT a SHADI sandbox. \
+             This listener's incoming A2A tasks will execute with no containment. Only use this \
+             for a trusted, loopback-only mesh."
+        );
         return Ok(());
     }
     Err(format!(

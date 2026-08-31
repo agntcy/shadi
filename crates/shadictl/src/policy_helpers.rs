@@ -103,7 +103,9 @@ pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<Reso
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        policy = policy.use_minimal_platform_profile();
+        if cli.sandbox_minimal {
+            policy = policy.use_minimal_platform_profile();
+        }
     }
 
     policy = apply_string_paths(policy, &profile.read, PathMode::Read)?;

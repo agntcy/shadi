@@ -25,6 +25,16 @@ pub(crate) struct Cli {
     #[arg(long = "net-allow", value_name = "HOST[:PORT]", action = ArgAction::Append)]
     pub(crate) net_allow: Vec<String>,
 
+    /// Use the hardened "minimal" macOS/Linux kernel sandbox profile
+    /// (mach-lookup allow-listed to essentials, no default keychain/bin
+    /// access) instead of the default "compatibility" profile. Compatibility
+    /// already allows keychains, /bin, /usr/bin, and per-user TMPDIR, which
+    /// most CLI tools (including `claude`) need to run at all; opt into
+    /// minimal only when you've allow-listed everything the wrapped command
+    /// needs yourself.
+    #[arg(long = "sandbox-minimal", action = ArgAction::SetTrue)]
+    pub(crate) sandbox_minimal: bool,
+
     #[arg(long = "allow-command", value_name = "CMD", action = ArgAction::Append)]
     pub(crate) allow_command: Vec<String>,
 
