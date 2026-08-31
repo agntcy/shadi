@@ -6,11 +6,13 @@ pub mod adapters;
 pub mod context;
 pub mod dir_registry;
 pub mod member_source;
+pub mod subprocess;
 
 pub use shadi_mas;
 
 pub use adapter::{CliAdapter, CliAdapterError, CliToolAdapter, prompt_tool_call};
 pub use context::{ArtifactPayload, CodeContext, ContextPacket, ConversationMessage, FileSnapshot};
+pub use subprocess::TrackedSubprocess;
 
 /// Re-export the shadi_mas coordination primitives most commonly used with
 /// agentbridge so callers have a single dependency.

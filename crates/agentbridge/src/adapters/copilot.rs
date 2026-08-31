@@ -7,6 +7,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::{ArtifactPayload, ConversationMessage, ContextPacket},
+    subprocess::TrackedSubprocess,
 };
 
 /// Adapter for the GitHub Copilot CLI (`copilot`).
@@ -17,6 +18,7 @@ use crate::{
 pub struct CopilotAdapter {
     id: AgentId,
     work_dir: PathBuf,
+    subprocess: TrackedSubprocess,
 }
 
 impl CopilotAdapter {
@@ -24,6 +26,7 @@ impl CopilotAdapter {
         Self {
             id: AgentId(id.into()),
             work_dir: work_dir.into(),
+            subprocess: TrackedSubprocess::new(),
         }
     }
 
@@ -47,8 +50,9 @@ impl CopilotAdapter {
             cmd.arg("--system-prompt").arg(sp);
         }
 
-        let output = cmd
-            .output()
+        let output = self
+            .subprocess
+            .output(&mut cmd)
             .map_err(|e| CliAdapterError::Subprocess(format!("failed to run copilot: {e}")))?;
 
         if !output.status.success() && output.stdout.is_empty() {
@@ -130,6 +134,10 @@ impl CliAdapter for CopilotAdapter {
 
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError> {
         self.run_prompt(prompt, None)
+    }
+
+    fn kill_in_flight(&self) {
+        self.subprocess.kill();
     }
 }
 
