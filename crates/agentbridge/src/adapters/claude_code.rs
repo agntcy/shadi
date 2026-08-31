@@ -9,6 +9,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::{ArtifactPayload, ConversationMessage, ContextPacket},
+    subprocess::TrackedSubprocess,
 };
 
 // --- Claude CLI output schema -----------------------------------------------
@@ -31,10 +32,6 @@ struct State {
     /// Session ID from the last successful `claude --print` call.
     /// Passed as `--session-id` to maintain conversation continuity.
     session_id: Option<String>,
-    /// PID of the currently in-flight `claude` child, if any — set right
-    /// after spawn, cleared right after it exits. Lets `kill_in_flight`
-    /// reach a child that's still running when shutdown is requested.
-    active_child_pid: Option<u32>,
 }
 
 /// Adapter for the Claude Code CLI (`claude`).
@@ -48,6 +45,7 @@ pub struct ClaudeCodeAdapter {
     id: AgentId,
     work_dir: PathBuf,
     state: Mutex<State>,
+    subprocess: TrackedSubprocess,
 }
 
 impl ClaudeCodeAdapter {
@@ -57,7 +55,8 @@ impl ClaudeCodeAdapter {
         Self {
             id: AgentId(id.into()),
             work_dir: work_dir.into(),
-            state: Mutex::new(State { session_id: None, active_child_pid: None }),
+            state: Mutex::new(State { session_id: None }),
+            subprocess: TrackedSubprocess::new(),
         }
     }
 
@@ -118,21 +117,9 @@ impl ClaudeCodeAdapter {
         // error instead of ever seeing the prompt.
         cmd.arg("--").arg(&effective_prompt);
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| CliAdapterError::Subprocess(format!("failed to run claude: {e}")))?;
-
-        if let Ok(mut state) = self.state.lock() {
-            state.active_child_pid = Some(child.id());
-        }
-
-        let output = child.wait_with_output();
-
-        if let Ok(mut state) = self.state.lock() {
-            state.active_child_pid = None;
-        }
-
-        let output = output
+        let output = self
+            .subprocess
+            .output(&mut cmd)
             .map_err(|e| CliAdapterError::Subprocess(format!("failed to run claude: {e}")))?;
 
         if !output.status.success() && output.stdout.is_empty() {
@@ -271,19 +258,7 @@ impl CliAdapter for ClaudeCodeAdapter {
     }
 
     fn kill_in_flight(&self) {
-        let pid = match self.state.lock() {
-            Ok(state) => state.active_child_pid,
-            Err(_) => None,
-        };
-        if let Some(pid) = pid {
-            // SAFETY: `pid` is a plain integer we recorded from `Child::id()`
-            // moments ago; passing it to `kill(2)` cannot violate memory
-            // safety even if the process has since exited (that just makes
-            // the call a harmless no-op, reported as ESRCH).
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
-        }
+        self.subprocess.kill();
     }
 }
 
