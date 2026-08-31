@@ -107,7 +107,12 @@ impl ClaudeCodeAdapter {
         if let Some(sid) = session_id {
             cmd.arg("--session-id").arg(sid);
         }
-        cmd.arg(&effective_prompt);
+        // `--` tells claude's arg parser everything after is positional, not
+        // an option — without it, a prompt/split-fragment that happens to
+        // start with '-' (e.g. "-budget/SLO with auto-rollback...") is read
+        // as an unknown flag and claude exits immediately with a parse
+        // error instead of ever seeing the prompt.
+        cmd.arg("--").arg(&effective_prompt);
 
         let output = cmd
             .output()

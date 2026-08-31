@@ -151,12 +151,28 @@ struct AgentBridgeExecutor {
     adapter: Arc<dyn CliAdapter>,
 }
 
+#[allow(dead_code)]
 fn preview(s: &str, max: usize) -> String {
     let first_line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or(s);
     if first_line.len() > max {
         format!("{}…", &first_line[..max])
     } else {
         first_line.to_string()
+    }
+}
+
+/// Print the full text of a recv/send body, one "│  " prefixed line at a
+/// time — unlike `preview` (kept for anyone still calling it directly),
+/// this never truncates. A single-line first-sentence preview was hiding
+/// the rest of every multi-line reply (e.g. a full CONCORD certificate),
+/// which is the whole point of watching this log.
+fn print_full(s: &str) {
+    if s.is_empty() {
+        println!("│  (empty)");
+        return;
+    }
+    for line in s.lines() {
+        println!("│  {line}");
     }
 }
 
@@ -184,7 +200,7 @@ impl AgentExecutor for AgentBridgeExecutor {
             "\n┌─ A2A recv [{agent_id}] task {}",
             ctx.task_id
         );
-        println!("│  {}", preview(&prompt, 120));
+        print_full(&prompt);
         println!("└─────────────────────────────────────────────────────────");
 
         let started = std::time::Instant::now();
@@ -198,7 +214,7 @@ impl AgentExecutor for AgentBridgeExecutor {
             "\n┌─ A2A send [{agent_id}] ({} ms)",
             elapsed_ms
         );
-        println!("│  {}", preview(&response_text, 120));
+        print_full(&response_text);
         println!("└─────────────────────────────────────────────────────────\n");
 
         let response = Message {
