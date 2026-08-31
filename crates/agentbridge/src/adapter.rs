@@ -39,6 +39,14 @@ pub trait CliAdapter: Send + Sync {
     /// Send a free-form prompt to the CLI tool and return its text response.
     /// Used by `CliToolAdapter` to drive the development coordination loop.
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError>;
+
+    /// Best-effort: terminate whatever child process this adapter's most
+    /// recent `execute_prompt` call spawned, if it's still running. Called
+    /// during listener shutdown so an in-flight message doesn't leave an
+    /// orphaned process behind after the listener itself has exited.
+    /// Default no-op — adapters that don't track a live child don't need
+    /// to implement this.
+    fn kill_in_flight(&self) {}
 }
 
 /// Wraps any [`CliAdapter`] as a `shadi_mas::ToolAdapter` so it can be

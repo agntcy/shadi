@@ -540,6 +540,9 @@ fn run_slim_listener(
         Some(slim_bindings::get_runtime()),
     ));
     let ready = Arc::new(Notify::new());
+    // Cloned before the move below so shutdown can still reach the adapter
+    // to kill whatever child process its current message is running.
+    let adapter_for_shutdown = Arc::clone(&adapter);
     let handler = Arc::new(AgentBridgeRequestHandler::new(
         adapter,
         agent_id,
@@ -570,6 +573,13 @@ fn run_slim_listener(
             .map_err(|e| format!("ctrl_c error: {e}"))?;
 
         println!("\n[agentbridge] shutting down...");
+        // Proactively kill whatever child process the adapter's current
+        // message is running, if any. Without this, a `claude` call still
+        // in flight when Ctrl-C arrives is left orphaned: the listener
+        // itself exits promptly (see the spawn_blocking fix above), but
+        // nothing ever tells the child to stop, so it just keeps running
+        // on its own after the parent that owned it is gone.
+        adapter_for_shutdown.kill_in_flight();
         server.shutdown().await;
         let _ = server_task.await;
         Ok::<(), String>(())
