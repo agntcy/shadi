@@ -75,7 +75,27 @@ impl ClaudeCodeAdapter {
         let mut cmd = Command::new("claude");
         cmd.arg("--print")
             .arg("--output-format")
-            .arg("json")
+            .arg("stream-json")
+            // stream-json (vs. plain "json") gives us each tool_use/tool_result
+            // event as it happens, which is what lets `[a2a]` send/return
+            // logging below fire while the child is still in flight instead of
+            // only after the whole (possibly long) call returns. `--verbose`
+            // is mandatory: `claude --print --output-format stream-json`
+            // refuses to start without it.
+            .arg("--verbose")
+            // This adapter represents one standalone A2A peer among several
+            // separately-running Claude Code instances (see agentbridge's
+            // register/delegate model) — it must reach other agents for real,
+            // over whatever transport agentbridge wires up (e.g. the
+            // agentbridge-delegate skill's SLIM call), never by spinning up
+            // its own local subagent to play the other side. Without this,
+            // a session asked to "get monolith's input" can and will take
+            // the path of least resistance: fake it with a same-process
+            // Task subagent instead of actually contacting the separate
+            // `monolith` adapter process, silently defeating the whole
+            // multi-process A2A design.
+            .arg("--disallowedTools")
+            .arg("Task")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -117,12 +137,71 @@ impl ClaudeCodeAdapter {
         // error instead of ever seeing the prompt.
         cmd.arg("--").arg(&effective_prompt);
 
+        // `pending_delegate` correlates a Bash tool_use event (an
+        // `agentbridge delegate ...` call this session made) with the
+        // matching tool_result event that arrives once it returns — the two
+        // are separate stream-json lines, joined only by `tool_use_id`.
+        let mut pending_delegate: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut result_line: Option<String> = None;
+
         let output = self
             .subprocess
-            .output(&mut cmd)
+            .output_streaming(&mut cmd, |line| {
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                    return;
+                };
+                match event.get("type").and_then(|t| t.as_str()) {
+                    Some("assistant") => {
+                        let Some(blocks) = event["message"]["content"].as_array() else {
+                            return;
+                        };
+                        for block in blocks {
+                            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use")
+                                || block.get("name").and_then(|n| n.as_str()) != Some("Bash")
+                            {
+                                continue;
+                            }
+                            let command = block["input"]["command"].as_str().unwrap_or("");
+                            if !command.contains("agentbridge delegate") {
+                                continue;
+                            }
+                            if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                                pending_delegate.insert(id.to_string(), command.to_string());
+                            }
+                            tracing::debug!(command, "[a2a] send");
+                        }
+                    }
+                    Some("user") => {
+                        let Some(blocks) = event["message"]["content"].as_array() else {
+                            return;
+                        };
+                        for block in blocks {
+                            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                                continue;
+                            }
+                            let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
+                            else {
+                                continue;
+                            };
+                            if let Some(command) = pending_delegate.remove(id) {
+                                let is_error = block
+                                    .get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false);
+                                tracing::debug!(command, is_error, "[a2a] returned");
+                            }
+                        }
+                    }
+                    Some("result") => {
+                        result_line = Some(line.to_string());
+                    }
+                    _ => {}
+                }
+            })
             .map_err(|e| CliAdapterError::Subprocess(format!("failed to run claude: {e}")))?;
 
-        if !output.status.success() && output.stdout.is_empty() {
+        if !output.status.success() && result_line.is_none() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(CliAdapterError::Subprocess(format!(
                 "claude exited with {}: {stderr}",
@@ -130,7 +209,10 @@ impl ClaudeCodeAdapter {
             )));
         }
 
-        let parsed: ClaudeJsonOutput = serde_json::from_slice(&output.stdout)
+        let result_line = result_line.ok_or_else(|| {
+            CliAdapterError::Protocol("no result event in claude stream-json output".to_string())
+        })?;
+        let parsed: ClaudeJsonOutput = serde_json::from_str(&result_line)
             .map_err(|e| CliAdapterError::Protocol(format!("unexpected claude output: {e}")))?;
 
         if parsed.is_error {

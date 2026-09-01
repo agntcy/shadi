@@ -12,9 +12,10 @@
 //! one-line `kill_in_flight` override instead of duplicating PID-tracking
 //! per adapter.
 
-use std::io;
-use std::process::{Command, Output};
+use std::io::{self, BufRead, BufReader, Read};
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
+use std::thread;
 
 /// Tracks the PID of a subprocess for as long as it's running, so it can be
 /// killed on demand from anywhere holding a reference to this struct.
@@ -45,6 +46,59 @@ impl TrackedSubprocess {
         }
 
         result
+    }
+
+    /// Same as [`Self::output`], but `on_stdout_line` is invoked with each
+    /// line of the child's stdout as soon as it's written, instead of only
+    /// after the whole process exits — for callers that need to observe
+    /// progress (e.g. NDJSON events) while a long-running child is still in
+    /// flight. Requires `cmd`'s stdout/stderr to be pipeable; this sets both
+    /// to `Stdio::piped()` itself, overriding any prior configuration.
+    ///
+    /// stderr is drained concurrently on a background thread so a child that
+    /// writes enough to either pipe to fill its OS buffer can't deadlock
+    /// against this call blocking on the other one.
+    pub fn output_streaming(
+        &self,
+        cmd: &mut Command,
+        mut on_stdout_line: impl FnMut(&str),
+    ) -> io::Result<Output> {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+
+        if let Ok(mut active) = self.active_pid.lock() {
+            *active = Some(child.id());
+        }
+
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let stderr_thread = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut stderr = stderr;
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        });
+
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let mut stdout_buf = Vec::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            on_stdout_line(&line);
+            stdout_buf.extend_from_slice(line.as_bytes());
+            stdout_buf.push(b'\n');
+        }
+
+        let status = child.wait()?;
+        let stderr_buf = stderr_thread.join().unwrap_or_default();
+
+        if let Ok(mut active) = self.active_pid.lock() {
+            *active = None;
+        }
+
+        Ok(Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        })
     }
 
     /// Best-effort: send SIGTERM to whatever child is currently tracked, if
