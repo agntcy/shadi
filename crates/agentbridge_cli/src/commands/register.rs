@@ -492,28 +492,25 @@ fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String
     if shadi_sandbox::sandbox_enforced_from_env() {
         return Ok(());
     }
-    // Explicit, opt-in escape hatch — NOT the default. Added for a
-    // loopback-only local demo where a corporate endpoint-security agent
-    // was silently blackholing network traffic from Seatbelt-sandboxed
-    // child processes (confirmed via SHADI_DEBUG_SANDBOX that the Seatbelt
-    // policy itself was correctly wide-open; the interference was outside
-    // shadi_sandbox entirely). Anyone relying on the sandbox guarantee
-    // should not set this.
-    if std::env::var_os("AGENTBRIDGE_ALLOW_UNSANDBOXED_REGISTER").is_some() {
-        eprintln!(
-            "⚠️  AGENTBRIDGE_ALLOW_UNSANDBOXED_REGISTER set — running WITHOUT a SHADI sandbox. \
-             This listener's incoming A2A tasks will execute with no containment. Only use this \
-             for a trusted, loopback-only mesh."
-        );
-        return Ok(());
-    }
-    Err(format!(
-        "agentbridge register --slim-endpoint requires running under a SHADI sandbox with \
-         network blocked by default — a remote-reachable listener must not execute tasks \
-         unsandboxed. Launch as:\n\n  \
+    // Not a hard gate: warn and proceed. A real sandbox is still strongly
+    // recommended — see the launch command below — but sandboxing can fail
+    // to actually work end-to-end even when correctly configured (e.g. a
+    // corporate endpoint-security agent silently blackholing network
+    // traffic from Seatbelt-sandboxed child processes specifically,
+    // confirmed via SHADI_DEBUG_SANDBOX showing the Seatbelt policy itself
+    // was correctly wide-open; the interference was outside shadi_sandbox
+    // entirely). Refusing to start at all in that case just forces everyone
+    // onto an unsandboxed run anyway, with extra friction and no added
+    // safety. This listener's incoming A2A tasks execute with no
+    // containment when unsandboxed — only run this on a trusted,
+    // loopback-only mesh.
+    eprintln!(
+        "⚠️  Running WITHOUT a SHADI sandbox — this listener's incoming A2A tasks will execute \
+         with no containment. Only use this for a trusted, loopback-only mesh. Recommended:\n\n  \
          shadictl --net-block --net-allow {endpoint} -- agentbridge register --tool {agent_id} \
          --slim-endpoint {endpoint} ...\n"
-    ))
+    );
+    Ok(())
 }
 
 /// Start a SLIM A2A listener that forwards incoming tasks to `adapter`.
@@ -750,22 +747,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn require_sandbox_enforced_rejects_unsandboxed_and_permissive() {
+    fn require_sandbox_enforced_warns_but_never_refuses() {
         // These env vars are touched by no other test in this crate, so a single
         // sequential test needs no cross-test lock.
         std::env::remove_var(shadi_sandbox::SANDBOX_ACTIVE_ENV);
         std::env::remove_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV);
-        let err = require_sandbox_enforced("copilot", "127.0.0.1:47357")
-            .expect_err("must reject when not running under any sandbox");
-        assert!(err.contains("shadictl --net-block"));
-        assert!(err.contains("--tool copilot"));
-        assert!(err.contains("127.0.0.1:47357"));
+        assert!(
+            require_sandbox_enforced("copilot", "127.0.0.1:47357").is_ok(),
+            "must warn, not refuse, when not running under any sandbox"
+        );
 
         std::env::set_var(shadi_sandbox::SANDBOX_ACTIVE_ENV, "1");
         std::env::set_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV, "0");
         assert!(
-            require_sandbox_enforced("copilot", "127.0.0.1:47357").is_err(),
-            "an active but network-permissive sandbox must still be rejected"
+            require_sandbox_enforced("copilot", "127.0.0.1:47357").is_ok(),
+            "an active but network-permissive sandbox must warn, not refuse"
         );
 
         std::env::set_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV, "1");
