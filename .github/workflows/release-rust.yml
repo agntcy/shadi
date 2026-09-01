@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+      id-token: write
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       PYO3_PYTHON: python
