@@ -261,6 +261,19 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         // authoritative for audit and is enforced at kernel level on Linux via
         // Landlock ConnectTcp rules).
         rules.push("(allow network-outbound)".to_string());
+        // DNS-over-UDP binds a local ephemeral port before sending the
+        // query — `network-bind`, a distinct Seatbelt operation from
+        // connect-based `network-outbound` — and then needs to actually
+        // receive the reply datagram on that socket — `network-inbound`,
+        // previously only granted for local unix-socket. Without these,
+        // raw UDP DNS (e.g. `nslookup`, or any resolver using c-ares
+        // instead of the system resolver) fails outright: bind() denied
+        // before patch, and a packet capture confirmed the reply datagram
+        // genuinely arriving at the kernel while the sandboxed process
+        // still hung, consistent with the read being denied rather than
+        // the network. Both confirmed fixed by this pair of rules.
+        rules.push("(allow network-bind)".to_string());
+        rules.push("(allow network-inbound)".to_string());
     } else if !policy.net_blocked() {
         rules.push("(allow network*)".to_string());
     }
