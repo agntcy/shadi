@@ -9,6 +9,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::{ArtifactPayload, ConversationMessage, ContextPacket},
+    subprocess::TrackedSubprocess,
 };
 
 // --- Claude CLI output schema -----------------------------------------------
@@ -44,6 +45,7 @@ pub struct ClaudeCodeAdapter {
     id: AgentId,
     work_dir: PathBuf,
     state: Mutex<State>,
+    subprocess: TrackedSubprocess,
 }
 
 impl ClaudeCodeAdapter {
@@ -54,6 +56,7 @@ impl ClaudeCodeAdapter {
             id: AgentId(id.into()),
             work_dir: work_dir.into(),
             state: Mutex::new(State { session_id: None }),
+            subprocess: TrackedSubprocess::new(),
         }
     }
 
@@ -109,8 +112,9 @@ impl ClaudeCodeAdapter {
         }
         cmd.arg(&effective_prompt);
 
-        let output = cmd
-            .output()
+        let output = self
+            .subprocess
+            .output(&mut cmd)
             .map_err(|e| CliAdapterError::Subprocess(format!("failed to run claude: {e}")))?;
 
         if !output.status.success() && output.stdout.is_empty() {
@@ -249,6 +253,10 @@ impl CliAdapter for ClaudeCodeAdapter {
         }
 
         Ok(out.result.unwrap_or_default())
+    }
+
+    fn kill_in_flight(&self) {
+        self.subprocess.kill();
     }
 }
 

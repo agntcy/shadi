@@ -20,6 +20,7 @@ use agentbridge::{
 };
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use shadi_a2a::SlimRpcHandler;
 use slim_bindings::{
     CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource,
@@ -185,56 +186,66 @@ impl AgentExecutor for AgentBridgeExecutor {
         println!("│  {}", preview(&prompt, 120));
         println!("└─────────────────────────────────────────────────────────");
 
-        let started = std::time::Instant::now();
-        let response_text = match self.adapter.execute_prompt(&prompt) {
-            Ok(text) => text,
-            Err(e) => format!("agentbridge error: {e}"),
-        };
-        let elapsed_ms = started.elapsed().as_millis();
-
-        println!(
-            "\n┌─ A2A send [{agent_id}] ({} ms)",
-            elapsed_ms
-        );
-        println!("│  {}", preview(&response_text, 120));
-        println!("└─────────────────────────────────────────────────────────\n");
-
-        let response = Message {
-            message_id: new_message_id(),
-            context_id: Some(ctx.context_id.clone()),
-            task_id: Some(ctx.task_id.clone()),
-            role: Role::Agent,
-            parts: vec![Part::text(response_text)],
-            metadata: None,
-            extensions: None,
-            reference_task_ids: None,
-        };
+        let adapter = Arc::clone(&self.adapter);
+        let task_id = ctx.task_id.clone();
+        let context_id = ctx.context_id.clone();
         let history = ctx.message.clone().map(|m| vec![m]);
 
-        Box::pin(futures::stream::iter(vec![
-            Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-                task_id: ctx.task_id.clone(),
-                context_id: ctx.context_id.clone(),
-                status: TaskStatus {
-                    state: TaskState::Working,
-                    message: None,
-                    timestamp: None,
-                },
+        let respond = async move {
+            let started = std::time::Instant::now();
+            let response_text =
+                match tokio::task::spawn_blocking(move || adapter.execute_prompt(&prompt)).await {
+                    Ok(Ok(text)) => text,
+                    Ok(Err(e)) => format!("agentbridge error: {e}"),
+                    Err(join_err) => format!("agentbridge error: adapter task panicked: {join_err}"),
+                };
+            let elapsed_ms = started.elapsed().as_millis();
+
+            println!(
+                "\n┌─ A2A send [{agent_id}] ({} ms)",
+                elapsed_ms
+            );
+            println!("│  {}", preview(&response_text, 120));
+            println!("└─────────────────────────────────────────────────────────\n");
+
+            let response = Message {
+                message_id: new_message_id(),
+                context_id: Some(context_id.clone()),
+                task_id: Some(task_id.clone()),
+                role: Role::Agent,
+                parts: vec![Part::text(response_text)],
                 metadata: None,
-            })),
-            Ok(StreamResponse::Task(Task {
-                id: ctx.task_id,
-                context_id: ctx.context_id,
-                status: TaskStatus {
-                    state: TaskState::Completed,
-                    message: Some(response),
-                    timestamp: None,
-                },
-                artifacts: None,
-                history,
-                metadata: None,
-            })),
-        ]))
+                extensions: None,
+                reference_task_ids: None,
+            };
+
+            vec![
+                Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                    task_id: task_id.clone(),
+                    context_id: context_id.clone(),
+                    status: TaskStatus {
+                        state: TaskState::Working,
+                        message: None,
+                        timestamp: None,
+                    },
+                    metadata: None,
+                })),
+                Ok(StreamResponse::Task(Task {
+                    id: task_id,
+                    context_id,
+                    status: TaskStatus {
+                        state: TaskState::Completed,
+                        message: Some(response),
+                        timestamp: None,
+                    },
+                    artifacts: None,
+                    history,
+                    metadata: None,
+                })),
+            ]
+        };
+
+        Box::pin(futures::stream::once(respond).flat_map(futures::stream::iter))
     }
 
     fn cancel(
@@ -529,6 +540,9 @@ fn run_slim_listener(
         Some(slim_bindings::get_runtime()),
     ));
     let ready = Arc::new(Notify::new());
+    // Cloned before the move below so shutdown can still reach the adapter
+    // to kill whatever child process its current message is running.
+    let adapter_for_shutdown = Arc::clone(&adapter);
     let handler = Arc::new(AgentBridgeRequestHandler::new(
         adapter,
         agent_id,
@@ -559,6 +573,13 @@ fn run_slim_listener(
             .map_err(|e| format!("ctrl_c error: {e}"))?;
 
         println!("\n[agentbridge] shutting down...");
+        // Proactively kill whatever child process the adapter's current
+        // message is running, if any. Without this, a `claude` call still
+        // in flight when Ctrl-C arrives is left orphaned: the listener
+        // itself exits promptly (see the spawn_blocking fix above), but
+        // nothing ever tells the child to stop, so it just keeps running
+        // on its own after the parent that owned it is gone.
+        adapter_for_shutdown.kill_in_flight();
         server.shutdown().await;
         let _ = server_task.await;
         Ok::<(), String>(())

@@ -7,6 +7,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::{ArtifactPayload, ConversationMessage, ContextPacket},
+    subprocess::TrackedSubprocess,
 };
 
 /// Adapter for the OpenAI Codex CLI (`codex`).
@@ -21,6 +22,7 @@ pub struct CodexAdapter {
     id: AgentId,
     work_dir: PathBuf,
     extra_args: Vec<String>,
+    subprocess: TrackedSubprocess,
 }
 
 impl CodexAdapter {
@@ -36,6 +38,7 @@ impl CodexAdapter {
             id: AgentId(id.into()),
             work_dir: work_dir.into(),
             extra_args,
+            subprocess: TrackedSubprocess::new(),
         }
     }
 
@@ -57,8 +60,9 @@ impl CodexAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
-        let output = cmd
-            .output()
+        let output = self
+            .subprocess
+            .output(&mut cmd)
             .map_err(|e| CliAdapterError::Subprocess(format!("failed to run codex: {e}")))?;
 
         if output.stdout.is_empty() && !output.status.success() {
@@ -140,6 +144,10 @@ impl CliAdapter for CodexAdapter {
 
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError> {
         self.run_exec(prompt)
+    }
+
+    fn kill_in_flight(&self) {
+        self.subprocess.kill();
     }
 }
 
