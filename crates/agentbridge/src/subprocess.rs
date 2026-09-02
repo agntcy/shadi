@@ -129,6 +129,14 @@ mod tests {
     }
 
     #[test]
+    fn output_surfaces_spawn_failure_without_stranding_a_pid() {
+        let tracked = TrackedSubprocess::new();
+        let mut cmd = Command::new("agentbridge-no-such-binary");
+        assert!(tracked.output(&mut cmd).is_err());
+        assert!(tracked.active_pid.lock().unwrap().is_none());
+    }
+
+    #[test]
     fn kill_on_idle_tracker_is_a_harmless_no_op() {
         let tracked = TrackedSubprocess::new();
         tracked.kill(); // must not panic
