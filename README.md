@@ -5,6 +5,7 @@
 [![codecov](https://codecov.io/gh/agntcy/shadi/branch/main/graph/badge.svg)](https://codecov.io/gh/agntcy/shadi)
 [![CI](https://github.com/agntcy/shadi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/ci.yml)
 [![Crates](https://github.com/agntcy/shadi/actions/workflows/release-rust.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/release-rust.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/agntcy/shadi/badge)](https://scorecard.dev/viewer/?uri=github.com/agntcy/shadi)
 
 Secure Host for Agentic AI Dynamic Instantiation (SHADI) is a secure runtime for AI agents.
 
