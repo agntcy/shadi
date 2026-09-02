@@ -94,29 +94,34 @@ fn terminate(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// Exits successfully straight away.
+    #[cfg(unix)]
     fn exits_now() -> Command {
-        if cfg!(windows) {
-            let mut cmd = Command::new("cmd");
-            cmd.args(["/C", "exit", "0"]);
-            cmd
-        } else {
-            Command::new("true")
-        }
+        Command::new("true")
+    }
+
+    #[cfg(windows)]
+    fn exits_now() -> Command {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "exit", "0"]);
+        cmd
     }
 
     /// Stays alive long enough to be killed out from under the test.
+    #[cfg(unix)]
     fn stays_alive() -> Command {
-        if cfg!(windows) {
-            let mut cmd = Command::new("ping");
-            cmd.args(["-n", "31", "127.0.0.1"]);
-            cmd
-        } else {
-            let mut cmd = Command::new("sleep");
-            cmd.arg("30");
-            cmd
-        }
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        cmd
+    }
+
+    #[cfg(windows)]
+    fn stays_alive() -> Command {
+        let mut cmd = Command::new("ping");
+        cmd.args(["-n", "31", "127.0.0.1"]);
+        cmd
     }
 
     #[test]
@@ -147,11 +152,28 @@ mod tests {
         let tracked = TrackedSubprocess::new();
         let mut child = stays_alive().spawn().expect("spawn long-running child");
         let pid = child.id();
-        if let Ok(mut active) = tracked.active_pid.lock() {
-            *active = Some(pid);
-        }
+        *tracked.active_pid.lock().expect("fresh tracker is not poisoned") = Some(pid);
         tracked.kill();
         let status = child.wait().expect("wait after kill");
         assert!(!status.success());
+    }
+
+    #[test]
+    fn a_poisoned_tracker_still_runs_and_still_shuts_down() {
+        let tracked = Arc::new(TrackedSubprocess::new());
+        let poisoner = Arc::clone(&tracked);
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.active_pid.lock().unwrap();
+            panic!("poison the tracker's lock");
+        })
+        .join();
+        assert!(tracked.active_pid.lock().is_err(), "lock should be poisoned");
+
+        // Both paths skip the pid bookkeeping rather than propagating the
+        // poison: the command still runs, and shutdown still returns.
+        let mut cmd = exits_now();
+        let output = tracked.output(&mut cmd).expect("command still runs");
+        assert!(output.status.success());
+        tracked.kill();
     }
 }
