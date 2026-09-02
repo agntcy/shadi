@@ -47,21 +47,46 @@ impl TrackedSubprocess {
         result
     }
 
-    /// Best-effort: send SIGTERM to whatever child is currently tracked, if
-    /// any. A no-op if nothing is running right now.
+    /// Best-effort: terminate whatever child is currently tracked, if any. A
+    /// no-op if nothing is running right now.
     pub fn kill(&self) {
         let pid = match self.active_pid.lock() {
             Ok(active) => *active,
             Err(_) => None,
         };
         if let Some(pid) = pid {
-            // SAFETY: `pid` is a plain integer recorded from `Child::id()`
-            // moments ago; passing it to `kill(2)` cannot violate memory
-            // safety even if the process has since exited (that just makes
-            // the call a harmless no-op, reported as ESRCH).
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
+            terminate(pid);
+        }
+    }
+}
+
+/// SIGTERM, so the child still gets to run its own shutdown path.
+#[cfg(unix)]
+fn terminate(pid: u32) {
+    // SAFETY: `pid` is a plain integer recorded from `Child::id()` moments
+    // ago; passing it to `kill(2)` cannot violate memory safety even if the
+    // process has since exited (that just makes the call a harmless no-op,
+    // reported as ESRCH).
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+}
+
+/// Windows has no signals reachable from another process, so the equivalent
+/// is `TerminateProcess` — abrupt, with no shutdown path for the child.
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    // SAFETY: `OpenProcess` returns null rather than a bogus handle when the
+    // process has already exited, which is what the check below covers; the
+    // handle is used only while open and closed exactly once.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
         }
     }
 }
@@ -70,10 +95,34 @@ impl TrackedSubprocess {
 mod tests {
     use super::*;
 
+    /// Exits successfully straight away.
+    fn exits_now() -> Command {
+        if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/C", "exit", "0"]);
+            cmd
+        } else {
+            Command::new("true")
+        }
+    }
+
+    /// Stays alive long enough to be killed out from under the test.
+    fn stays_alive() -> Command {
+        if cfg!(windows) {
+            let mut cmd = Command::new("ping");
+            cmd.args(["-n", "31", "127.0.0.1"]);
+            cmd
+        } else {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("30");
+            cmd
+        }
+    }
+
     #[test]
     fn output_runs_command_and_clears_pid_after() {
         let tracked = TrackedSubprocess::new();
-        let mut cmd = Command::new("true");
+        let mut cmd = exits_now();
         let output = tracked.output(&mut cmd).expect("spawn should succeed");
         assert!(output.status.success());
         assert!(tracked.active_pid.lock().unwrap().is_none());
@@ -88,7 +137,7 @@ mod tests {
     #[test]
     fn kill_terminates_a_running_child() {
         let tracked = TrackedSubprocess::new();
-        let mut child = Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let mut child = stays_alive().spawn().expect("spawn long-running child");
         let pid = child.id();
         if let Ok(mut active) = tracked.active_pid.lock() {
             *active = Some(pid);
