@@ -12,6 +12,10 @@ on:
       - "apps/shadi_desktop/**"
   workflow_dispatch:
 
+# Least privilege by default; jobs widen it where they need to.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check (frontend + src-tauri)

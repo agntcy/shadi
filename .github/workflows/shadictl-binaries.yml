@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+# Least privilege by default; jobs widen it where they need to.
+permissions:
+  contents: read
+
 jobs:
   build-shadictl-release-artifacts:
     runs-on: ${{ matrix.runner }}
