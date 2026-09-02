@@ -10,6 +10,10 @@ on:
         type: boolean
         default: false
 
+# Least privilege by default; jobs widen it where they need to.
+permissions:
+  contents: read
+
 jobs:
   renovate:
     runs-on: ubuntu-latest
