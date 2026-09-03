@@ -14,6 +14,24 @@ members = [
   "crates/shadi_py",
   "crates/shadi_sandbox",
   "crates/shadi_telemetry",
+  "crates/shadictl",
+  "apps/shadi_desktop/src-tauri"
+]
+default-members = [
+  "crates/agent_secrets",
+  "crates/agent_transport_slim",
+  "crates/shadi_a2a",
+  "examples/shadi_demo_bot",
+  "examples/agentbridge_demo",
+  "crates/shadi_mas",
+  "crates/agentbridge",
+  "crates/agentbridge_cli",
+  "crates/slim_mas",
+  "crates/shadi_identity",
+  "crates/shadi_memory",
+  "crates/shadi_py",
+  "crates/shadi_sandbox",
+  "crates/shadi_telemetry",
   "crates/shadictl"
 ]
 resolver = "2"

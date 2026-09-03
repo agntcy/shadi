@@ -21,11 +21,11 @@ windows-test: test
 [doc('Run the Rust workspace test suite with the correct Python toolchain.')]
 test:
   {{ if os() == "windows" {
-    "$env:PYO3_PYTHON = \"" + python312 + "\"; cargo test --workspace"
+    "$env:PYO3_PYTHON = \"" + python312 + "\"; cargo test --workspace --exclude shadi_desktop"
   } else if python_rustflags != "" {
-    "PYO3_PYTHON=\"" + python312 + "\" RUSTFLAGS=\"" + python_rustflags + "\" cargo test --workspace"
+    "PYO3_PYTHON=\"" + python312 + "\" RUSTFLAGS=\"" + python_rustflags + "\" cargo test --workspace --exclude shadi_desktop"
   } else {
-    "PYO3_PYTHON=\"" + python312 + "\" cargo test --workspace"
+    "PYO3_PYTHON=\"" + python312 + "\" cargo test --workspace --exclude shadi_desktop"
   } }}
 
 [group('core')]
@@ -65,7 +65,7 @@ coverage-html:
 [group('core')]
 [doc('Run the Windows integration-oriented Cargo tests.')]
 windows-integration:
-  $env:PYO3_PYTHON = "{{python312}}"; $env:SHADI_WINDOWS_INTEGRATION = "1"; cargo test --workspace
+  $env:PYO3_PYTHON = "{{python312}}"; $env:SHADI_WINDOWS_INTEGRATION = "1"; cargo test --workspace --exclude shadi_desktop
 
 [group('docs')]
 [doc('Build the MkDocs site locally.')]
