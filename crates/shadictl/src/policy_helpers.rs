@@ -1,5 +1,5 @@
 use super::*;
-use shadi_sandbox::PlatformSandboxProfile;
+use shadi_sandbox::{PlatformSandboxProfile, SandboxProfile};
 
 pub(crate) fn format_policy(
     policy: &SandboxPolicy,
@@ -133,52 +133,28 @@ pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<Reso
 }
 
 pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
-    match profile.unwrap_or(LauncherProfile::Balanced) {
-        LauncherProfile::Strict => PolicyFile {
-            allow: vec![".".to_string()],
-            read: vec![".".to_string()],
-            write: Vec::new(),
-            net_block: Some(true),
-            net_allow: Vec::new(),
-            allow_command: Vec::new(),
-            block_command: Vec::new(),
-            env_remove: Vec::new(),
-            process_inject_keychain: Vec::new(),
-            process_trusted_secret: Vec::new(),
-            process_secret_policy: Vec::new(),
-        },
-        LauncherProfile::Balanced => PolicyFile {
-            allow: vec![".".to_string()],
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            read: Vec::new(),
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            read: vec!["/".to_string()],
-            write: Vec::new(),
-            net_block: Some(true),
-            net_allow: Vec::new(),
-            allow_command: Vec::new(),
-            block_command: Vec::new(),
-            env_remove: Vec::new(),
-            process_inject_keychain: Vec::new(),
-            process_trusted_secret: Vec::new(),
-            process_secret_policy: Vec::new(),
-        },
-        LauncherProfile::Connected => PolicyFile {
-            allow: vec![".".to_string()],
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            read: Vec::new(),
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            read: vec!["/".to_string()],
-            write: Vec::new(),
-            net_block: Some(false),
-            net_allow: Vec::new(),
-            allow_command: Vec::new(),
-            block_command: Vec::new(),
-            env_remove: Vec::new(),
-            process_inject_keychain: Vec::new(),
-            process_trusted_secret: Vec::new(),
-            process_secret_policy: Vec::new(),
-        },
+    // The sandbox axes live in shadi_sandbox so the desktop panel gets the same
+    // profiles without restating them; everything below them is empty in every
+    // profile and stays here with the rest of the policy-file schema.
+    let defaults = match profile.unwrap_or(LauncherProfile::Balanced) {
+        LauncherProfile::Strict => SandboxProfile::Strict,
+        LauncherProfile::Balanced => SandboxProfile::Balanced,
+        LauncherProfile::Connected => SandboxProfile::Connected,
+    }
+    .defaults();
+
+    PolicyFile {
+        allow: defaults.allow,
+        read: defaults.read,
+        write: defaults.write,
+        net_block: Some(defaults.net_block),
+        net_allow: Vec::new(),
+        allow_command: Vec::new(),
+        block_command: Vec::new(),
+        env_remove: Vec::new(),
+        process_inject_keychain: Vec::new(),
+        process_trusted_secret: Vec::new(),
+        process_secret_policy: Vec::new(),
     }
 }
 

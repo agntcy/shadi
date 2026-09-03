@@ -23,6 +23,74 @@ pub struct SandboxPolicy {
     net_proxy_port: Option<u16>,
 }
 
+/// The named launch profiles offered by `shadictl --profile` and the desktop
+/// sandbox panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxProfile {
+    /// Read and write confined to the working directory, network off.
+    Strict,
+    /// Working directory writable, wider reads where the platform sandbox
+    /// gives them for free, network off.
+    Balanced,
+    /// Balanced, with the network left on.
+    Connected,
+}
+
+/// The four axes a named profile fixes. A caller layers its own paths and
+/// allowlists on top; everything else a profile could set is empty in all of
+/// them, which is why only these four live here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileDefaults {
+    pub allow: Vec<String>,
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub net_block: bool,
+}
+
+impl SandboxProfile {
+    /// Parse the profile names accepted on the command line.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "strict" => Some(Self::Strict),
+            "balanced" => Some(Self::Balanced),
+            "connected" => Some(Self::Connected),
+            _ => None,
+        }
+    }
+
+    pub fn defaults(self) -> ProfileDefaults {
+        // macOS Seatbelt and Linux Landlock both give a readable root without
+        // it costing anything, so only the platforms without that need "/"
+        // spelled out.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let wide_read: Vec<String> = Vec::new();
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let wide_read: Vec<String> = vec!["/".to_string()];
+
+        match self {
+            Self::Strict => ProfileDefaults {
+                allow: vec![".".to_string()],
+                read: vec![".".to_string()],
+                write: Vec::new(),
+                net_block: true,
+            },
+            Self::Balanced => ProfileDefaults {
+                allow: vec![".".to_string()],
+                read: wide_read,
+                write: Vec::new(),
+                net_block: true,
+            },
+            Self::Connected => ProfileDefaults {
+                allow: vec![".".to_string()],
+                read: wide_read,
+                write: Vec::new(),
+                net_block: false,
+            },
+        }
+    }
+}
+
 impl SandboxPolicy {
     pub fn new() -> Self {
         Self {
@@ -164,5 +232,52 @@ mod tests {
     fn policy_can_allow_local_unix_sockets() {
         let policy = SandboxPolicy::new().allow_local_unix_sockets();
         assert!(policy.local_unix_sockets_allowed());
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn profile_names_round_trip_and_reject_the_rest() {
+        assert_eq!(SandboxProfile::from_name("strict"), Some(SandboxProfile::Strict));
+        assert_eq!(SandboxProfile::from_name("balanced"), Some(SandboxProfile::Balanced));
+        assert_eq!(SandboxProfile::from_name("connected"), Some(SandboxProfile::Connected));
+        // The CLI accepts these case-insensitively, so the library must too.
+        assert_eq!(SandboxProfile::from_name("STRICT"), Some(SandboxProfile::Strict));
+        assert_eq!(SandboxProfile::from_name("paranoid"), None);
+        assert_eq!(SandboxProfile::from_name(""), None);
+    }
+
+    #[test]
+    fn only_connected_leaves_the_network_on() {
+        assert!(SandboxProfile::Strict.defaults().net_block);
+        assert!(SandboxProfile::Balanced.defaults().net_block);
+        assert!(!SandboxProfile::Connected.defaults().net_block);
+    }
+
+    #[test]
+    fn every_profile_grants_the_working_directory_and_no_blanket_write() {
+        for profile in [
+            SandboxProfile::Strict,
+            SandboxProfile::Balanced,
+            SandboxProfile::Connected,
+        ] {
+            let d = profile.defaults();
+            assert_eq!(d.allow, vec![".".to_string()], "{profile:?}");
+            assert!(d.write.is_empty(), "{profile:?} must not grant a blanket write");
+        }
+    }
+
+    #[test]
+    fn strict_confines_reads_where_the_others_do_not() {
+        assert_eq!(SandboxProfile::Strict.defaults().read, vec![".".to_string()]);
+        // Seatbelt and Landlock give a readable root for free; elsewhere it is
+        // spelled out, so the two cases differ by platform, not by profile.
+        assert_eq!(
+            SandboxProfile::Balanced.defaults().read,
+            SandboxProfile::Connected.defaults().read
+        );
     }
 }

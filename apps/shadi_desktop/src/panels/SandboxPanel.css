@@ -1,0 +1,148 @@
+.sb-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sb-card {
+  background: var(--panel-bg, #ffffff);
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sb-card h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.sb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.sb-field span {
+  font-size: 12px;
+  color: var(--muted-fg, #5b6770);
+}
+
+.sb-field input,
+.sb-field select {
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.sb-row {
+  display: flex;
+  gap: 12px;
+}
+
+.sb-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-fg, #5b6770);
+}
+
+.sb-error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--error-fg, #b3261e);
+}
+
+.sb-sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sb-sessions li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 6px;
+}
+
+.sb-sessions li.sb-selected {
+  border-color: var(--accent, #2f6feb);
+  box-shadow: inset 2px 0 0 var(--accent, #2f6feb);
+}
+
+.sb-session-id {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.sb-tag {
+  font-size: 11px;
+  color: var(--muted-fg, #5b6770);
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.sb-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sb-danger {
+  color: var(--error-fg, #b3261e);
+}
+
+.sb-status {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.sb-status dt {
+  color: var(--muted-fg, #5b6770);
+}
+
+.sb-status dd {
+  margin: 0;
+  min-width: 0;
+}
+
+/* A socket path can be long; let it scroll rather than widen the panel. */
+.sb-endpoint {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.sb-pill {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 10px;
+}
+
+.sb-pill-live {
+  background: var(--ok-bg, #e4f0ea);
+  color: var(--ok-fg, #2e7d5b);
+}
+
+.sb-pill-stopped {
+  background: var(--muted-bg, #eceff1);
+  color: var(--muted-fg, #5b6770);
+}
