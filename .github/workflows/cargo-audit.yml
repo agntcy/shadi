@@ -1,0 +1,57 @@
+name: Cargo Audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/Cargo.lock"
+      - ".cargo/audit.toml"
+      - ".github/workflows/cargo-audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.lock"
+      - ".cargo/audit.toml"
+      - ".github/workflows/cargo-audit.yml"
+  # Advisories land without anyone touching this repository, so the scheduled
+  # run is the one that actually catches them.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+# Least privilege by default; jobs widen it where they need to.
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: workspace
+            lockfile: Cargo.lock
+          # The desktop app is a second cargo workspace with its own lock, and
+          # nothing else audits it (see #194).
+          - name: desktop
+            lockfile: apps/shadi_desktop/src-tauri/Cargo.lock
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2
+        with:
+          tool: cargo-audit
+
+      # Vulnerabilities fail the job. Unmaintained, unsound and yanked crates
+      # are reported but do not, because the ones we carry come in through
+      # Tauri's GTK3 bindings and have no upstream replacement to move to.
+      - name: Audit ${{ matrix.lockfile }}
+        env:
+          LOCKFILE: ${{ matrix.lockfile }}
+        run: cargo audit --color always --file "$LOCKFILE"
