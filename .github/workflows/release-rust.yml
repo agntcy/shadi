@@ -47,6 +47,12 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
+      - name: Verify crate packaging
+        # cargo dry-run validates packaging (Cargo.toml metadata, build, etc.)
+        # without publishing; it warns (doesn't fail) if the version already
+        # shipped, so this is safe to run on every push.
+        run: cargo publish --dry-run -p agntcy-shadi-agent-secrets
+
       - name: Require crates.io publish token
         run: |
           if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
