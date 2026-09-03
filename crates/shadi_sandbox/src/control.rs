@@ -14,7 +14,7 @@
 //! [`socket_dir`]. A caller connects, writes one JSON [`ControlMessage`] line,
 //! and reads one JSON [`ControlResponse`] line back.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::policy_patch::{
@@ -23,6 +23,8 @@ use crate::policy_patch::{
 
 #[cfg(test)]
 use crate::policy_patch::PatchAxisStatus;
+#[cfg(test)]
+use std::io::Read;
 
 /// Directory holding control sockets.
 ///
