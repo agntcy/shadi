@@ -446,3 +446,47 @@ jobs:
           manifest_path: ./Cargo.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # release-plz only knows about ./Cargo.toml. The desktop app is a second
+      # cargo workspace with its own lock, so that lock keeps naming the
+      # previous crate versions and `cargo check --locked` breaks on main as
+      # soon as the release merges (#194). Refresh it on the release branch
+      # rather than fixing it by hand every time, which release-plz discards
+      # anyway when it regenerates the PR.
+      - name: Sync the desktop lock onto the release branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESKTOP_MANIFEST: apps/shadi_desktop/src-tauri/Cargo.toml
+          DESKTOP_LOCK: apps/shadi_desktop/src-tauri/Cargo.lock
+        run: |
+          branch=$(gh pr list --state open --base main --json headRefName \
+            --jq '[.[] | .headRefName | select(startswith("release-plz-"))] | first // ""')
+          if [ -z "$branch" ]; then
+            echo "no open release-plz PR to sync"
+            exit 0
+          fi
+          echo "release branch: $branch"
+
+          git fetch origin "$branch"
+          git checkout -B "$branch" "origin/$branch"
+
+          if cargo metadata --locked --format-version 1 \
+            --manifest-path "$DESKTOP_MANIFEST" >/dev/null 2>&1; then
+            echo "desktop lock is already in sync"
+            exit 0
+          fi
+
+          cargo metadata --format-version 1 --manifest-path "$DESKTOP_MANIFEST" >/dev/null
+
+          if git diff --quiet -- "$DESKTOP_LOCK"; then
+            echo "desktop lock unchanged after resolving; nothing to push"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$DESKTOP_LOCK"
+          git commit -s -m "chore: sync the desktop lock with this release"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$branch"
+          echo "pushed the refreshed desktop lock to $branch"
