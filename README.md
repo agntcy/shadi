@@ -70,8 +70,8 @@ For unreleased changes or any other host, use the source build flow below.
 ## Quick Start
 
 ```bash
-cargo build --workspace
-cargo test --workspace
+cargo build
+cargo test
 cargo run -p shadi_demo_bot -- feature-bot
 ```
 

@@ -54,7 +54,7 @@ Build the workspace with either Cargo directly or the repo task runner.
 === "Cargo"
 
     ```bash
-    cargo build --workspace
+    cargo build
     ```
 
 === "Just"

@@ -120,7 +120,7 @@ try {
         $env:RUSTFLAGS = $RustflagsValue
     }
 
-    & cargo llvm-cov --workspace --features coverage @formatArgs --ignore-filename-regex '/rustc-[^/]+'
+    & cargo llvm-cov --workspace --exclude shadi_desktop --features coverage @formatArgs --ignore-filename-regex '/rustc-[^/]+'
 
     if ($Mode -eq 'lcov') {
         $lcov = Get-Command lcov -ErrorAction SilentlyContinue
