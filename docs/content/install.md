@@ -53,6 +53,25 @@ curl -fsSL https://agntcy.github.io/shadi/install.sh | env SHADI_VERSION=0.1.1 b
 The installer replaces the existing `shadictl` binary in place. If the archive
 download or checksum validation fails, the existing binary is left untouched.
 
+## Verifying release signatures
+
+Every release archive is signed keylessly with [cosign](https://docs.sigstore.dev/)
+during the release workflow, producing a `<archive>.sigstore.json` bundle
+alongside the `.sha256` checksum. The install script only checks the
+checksum; the signature is for anyone who wants to confirm the archive was
+actually built by this repository's release workflow, not just that the
+bytes match what the release page lists.
+
+```bash
+cosign verify-blob \
+  --bundle shadictl-vX.Y.Z-<target>.zip.sigstore.json \
+  --certificate-identity-regexp 'https://github.com/agntcy/shadi/\.github/workflows/release-rust\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  shadictl-vX.Y.Z-<target>.zip
+```
+
+A successful verification prints `Verified OK`.
+
 ## Environment Overrides
 
 These environment variables are supported by the installer:
