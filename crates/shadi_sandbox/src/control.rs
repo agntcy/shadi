@@ -21,6 +21,9 @@ use crate::policy_patch::{
     ControlMessage, ControlResponse, PolicyPatch, PolicyPatchResponse, ProcessResources,
 };
 
+#[cfg(test)]
+use crate::policy_patch::PatchAxisStatus;
+
 /// Directory holding control sockets.
 ///
 /// Discovery and path construction both go through this, so a session can
@@ -308,6 +311,115 @@ mod tests {
         let live = prune_unreachable(vec![dead.clone()]);
         assert!(live.is_empty());
         assert!(!dead.exists(), "prune must remove the stale endpoint");
+    }
+
+    /// A listener that answers `replies.len()` connections with canned
+    /// responses, so the client half can be exercised without a real sandbox.
+    fn stub_server(replies: Vec<ControlResponse>) -> (tempfile::TempDir, PathBuf) {
+        #[cfg(unix)]
+        use std::os::unix::net::UnixListener;
+        #[cfg(windows)]
+        use uds_windows::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shadi-ctl-stub.sock");
+        let listener = UnixListener::bind(&path).expect("bind stub listener");
+
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                // Drain the request so the client's write half completes.
+                let mut request = String::new();
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let _ = reader.read_line(&mut request);
+                let body = serde_json::to_string(&reply).expect("serialize reply");
+                let _ = writeln!(stream, "{}", body);
+                let _ = stream.flush();
+            }
+        });
+
+        (dir, path)
+    }
+
+    #[test]
+    fn each_client_call_returns_its_own_response_variant() {
+        let (_dir, sock) = stub_server(vec![
+            ControlResponse::Policy { policy: serde_json::json!({"net_block": true}) },
+            ControlResponse::Ack { message: "terminating".to_string() },
+            ControlResponse::PatchResult(PolicyPatchResponse {
+                accepted: true,
+                filesystem: PatchAxisStatus::Unchanged,
+                commands: PatchAxisStatus::Applied,
+                network: PatchAxisStatus::Unchanged,
+                message: "applied".to_string(),
+                pending_restart: Vec::new(),
+            }),
+        ]);
+
+        assert_eq!(query_policy(&sock).expect("policy")["net_block"], true);
+        assert_eq!(send_terminate(&sock).expect("ack"), "terminating");
+        let patched = send_patch(&sock, &PolicyPatch::default()).expect("patch result");
+        assert!(patched.accepted);
+        assert_eq!(patched.commands, PatchAxisStatus::Applied);
+    }
+
+    #[test]
+    fn an_error_response_becomes_the_error_message() {
+        let (_dir, sock) = stub_server(vec![ControlResponse::Error {
+            message: "policy is frozen".to_string(),
+        }]);
+
+        assert_eq!(query_policy(&sock).unwrap_err(), "policy is frozen");
+    }
+
+    #[test]
+    fn a_mismatched_response_is_rejected_rather_than_misread() {
+        // Terminate answered with a policy: the wrong variant must not be
+        // silently accepted as success.
+        let (_dir, sock) = stub_server(vec![ControlResponse::Policy {
+            policy: serde_json::json!({}),
+        }]);
+
+        assert_eq!(send_terminate(&sock).unwrap_err(), "unexpected response type");
+    }
+
+    #[test]
+    fn every_client_call_surfaces_a_server_error() {
+        // One Error reply per call, so each function's Error arm is exercised
+        // rather than only the one that happens to be tested elsewhere.
+        let err = || ControlResponse::Error { message: "denied".to_string() };
+        let (_dir, sock) = stub_server(vec![err(), err(), err(), err()]);
+
+        assert_eq!(query_policy(&sock).unwrap_err(), "denied");
+        assert_eq!(query_resources(&sock).unwrap_err(), "denied");
+        assert_eq!(send_terminate(&sock).unwrap_err(), "denied");
+        assert_eq!(send_patch(&sock, &PolicyPatch::default()).unwrap_err(), "denied");
+    }
+
+    #[test]
+    fn every_client_call_rejects_the_wrong_response_variant() {
+        // An Ack answers all four; only send_terminate should accept it.
+        let ack = || ControlResponse::Ack { message: "ok".to_string() };
+        let (_dir, sock) = stub_server(vec![ack(), ack(), ack()]);
+
+        assert_eq!(query_policy(&sock).unwrap_err(), "unexpected response type");
+        assert_eq!(query_resources(&sock).unwrap_err(), "unexpected response type");
+        assert_eq!(
+            send_patch(&sock, &PolicyPatch::default()).unwrap_err(),
+            "unexpected response type"
+        );
+    }
+
+    #[test]
+    fn a_reachable_socket_survives_pruning() {
+        let (_dir, sock) = stub_server(vec![
+            ControlResponse::Policy { policy: serde_json::json!({}) },
+            ControlResponse::Policy { policy: serde_json::json!({}) },
+        ]);
+
+        assert!(is_reachable(&sock));
+        assert_eq!(prune_unreachable(vec![sock.clone()]), vec![sock.clone()]);
+        assert!(sock.exists(), "a live endpoint must not be deleted");
     }
 
     #[test]
