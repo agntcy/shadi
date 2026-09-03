@@ -36,7 +36,15 @@ use uds_windows::UnixListener;
 
 use shadi_sandbox::{
     ControlMessage, ControlResponse, NetAllowlist, PatchAxisStatus, PolicyPatch,
-    PolicyPatchResponse, ProcessResources, SandboxPolicy,
+    PolicyPatchResponse, SandboxPolicy,
+};
+
+// The caller's half of this protocol lives in the library, so `shadictl`, the
+// shell's session commands and SHADI Desktop all speak it through one
+// implementation. Only the listener below is shadictl's own.
+pub(crate) use shadi_sandbox::control::{
+    default_socket_path, named_socket_path, query_policy, query_resources, resolve_session_socket,
+    send_patch, send_terminate, session_name_from_path,
 };
 use tracing::info_span;
 
@@ -108,92 +116,6 @@ fn extract_host(dest: &str) -> String {
         host_port.split(':').next().unwrap_or(host_port)
     };
     host.to_ascii_lowercase()
-}
-
-/// Resolve the default control socket path for a given PID.
-#[cfg(unix)]
-pub(crate) fn default_socket_path(pid: u32) -> PathBuf {
-    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", pid))
-}
-
-/// Resolve a named control socket path.
-///
-/// Named sockets use `$TMPDIR/shadi-ctl-<name>.sock` instead of the PID-based
-/// path, making them stable and human-addressable: any tool can connect by name
-/// without needing to discover the PID.
-///
-/// Only alphanumeric characters, hyphens, and underscores are allowed in the
-/// name; other characters are replaced with `-` to keep the filename safe.
-#[cfg(unix)]
-pub(crate) fn named_socket_path(name: &str) -> PathBuf {
-    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    let slug = sanitize_session_name(name);
-    PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", slug))
-}
-
-/// Resolve the control socket path for a given session name or socket path.
-///
-/// If `name_or_path` looks like a path (contains `/` or ends with `.sock`) it
-/// is used as-is; otherwise it is treated as a session name and resolved via
-/// `named_socket_path`.
-#[cfg(unix)]
-pub(crate) fn resolve_session_socket(name_or_path: &str) -> PathBuf {
-    if name_or_path.contains('/') || name_or_path.ends_with(".sock") {
-        PathBuf::from(name_or_path)
-    } else {
-        named_socket_path(name_or_path)
-    }
-}
-
-/// Extract the human-readable session name from a socket path.
-///
-/// `$TMPDIR/shadi-ctl-myagent.sock` → `"myagent"`
-/// `$TMPDIR/shadi-ctl-12345.sock`   → `"12345"` (PID-based fallback)
-pub(crate) fn session_name_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.strip_prefix("shadi-ctl-"))
-        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("session"))
-        .to_string()
-}
-
-/// Sanitize a session name: keep only alphanumerics, hyphens, and underscores;
-/// replace everything else with `-`; truncate to 48 characters.
-pub(crate) fn sanitize_session_name(name: &str) -> String {
-    let slug: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-        .collect();
-    let slug = slug.trim_matches('-');
-    slug.chars().take(48).collect()
-}
-
-/// Resolve the default control socket path for a given PID.
-///
-/// On Windows this is an `AF_UNIX` socket file (requires Windows 10 1803+).
-#[cfg(windows)]
-pub(crate) fn default_socket_path(pid: u32) -> PathBuf {
-    let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", pid))
-}
-
-/// Resolve a named control socket path (Windows).
-#[cfg(windows)]
-pub(crate) fn named_socket_path(name: &str) -> PathBuf {
-    let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".to_string());
-    let slug = sanitize_session_name(name);
-    PathBuf::from(dir).join(format!("shadi-ctl-{}.sock", slug))
-}
-
-/// Resolve the control socket path for a given session name or socket path (Windows).
-#[cfg(windows)]
-pub(crate) fn resolve_session_socket(name_or_path: &str) -> PathBuf {
-    if name_or_path.contains('\\') || name_or_path.contains('/') || name_or_path.ends_with(".sock") {
-        PathBuf::from(name_or_path)
-    } else {
-        named_socket_path(name_or_path)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -610,82 +532,6 @@ pub(crate) fn apply_staged_policy_updates(live: &Arc<Mutex<LivePolicy>>) -> Resu
 // Client helpers (cross-platform)
 // ---------------------------------------------------------------------------
 
-/// Send a patch to a running control endpoint and return the response.
-pub(crate) fn send_patch(socket_path: &Path, patch: &PolicyPatch) -> Result<PolicyPatchResponse, String> {
-    let msg = ControlMessage::Patch(patch.clone());
-    let resp = send_message(socket_path, &msg)?;
-    match resp {
-        ControlResponse::PatchResult(r) => Ok(r),
-        ControlResponse::Error { message } => Err(message),
-        _ => Err("unexpected response type".to_string()),
-    }
-}
-
-/// Query the current effective policy from a running control endpoint.
-pub(crate) fn query_policy(socket_path: &Path) -> Result<serde_json::Value, String> {
-    let msg = ControlMessage::QueryPolicy;
-    let resp = send_message(socket_path, &msg)?;
-    match resp {
-        ControlResponse::Policy { policy } => Ok(policy),
-        ControlResponse::Error { message } => Err(message),
-        _ => Err("unexpected response type".to_string()),
-    }
-}
-
-pub(crate) fn send_terminate(socket_path: &Path) -> Result<String, String> {
-    let msg = ControlMessage::Terminate;
-    let resp = send_message(socket_path, &msg)?;
-    match resp {
-        ControlResponse::Ack { message } => Ok(message),
-        ControlResponse::Error { message } => Err(message),
-        _ => Err("unexpected response type".to_string()),
-    }
-}
-
-/// Query resource usage of the sandboxed child process.
-pub(crate) fn query_resources(socket_path: &Path) -> Result<ProcessResources, String> {
-    let msg = ControlMessage::QueryResources;
-    let resp = send_message(socket_path, &msg)?;
-    match resp {
-        ControlResponse::Resources(r) => Ok(r),
-        ControlResponse::Error { message } => Err(message),
-        _ => Err("unexpected response type".to_string()),
-    }
-}
-
-fn send_message(socket_path: &Path, msg: &ControlMessage) -> Result<ControlResponse, String> {
-    #[cfg(unix)]
-    use std::os::unix::net::UnixStream;
-    #[cfg(windows)]
-    use uds_windows::UnixStream;
-
-    let mut stream =
-        UnixStream::connect(socket_path).map_err(|e| format!("failed to connect: {}", e))?;
-
-    let json =
-        serde_json::to_string(msg).map_err(|e| format!("failed to serialize message: {}", e))?;
-    let payload = format!("{}\n", json);
-    stream
-        .write_all(payload.as_bytes())
-        .map_err(|e| format!("failed to write: {}", e))?;
-    stream
-        .flush()
-        .map_err(|e| format!("failed to flush: {}", e))?;
-
-    // Shutdown write half so the server sees EOF on our request.
-    stream
-        .shutdown(std::net::Shutdown::Write)
-        .map_err(|e| format!("failed to shutdown write: {}", e))?;
-
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|e| format!("failed to read response: {}", e))?;
-
-    serde_json::from_str(&line).map_err(|e| format!("invalid response: {}", e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -962,14 +808,6 @@ mod tests {
     }
 
     #[test]
-    fn default_socket_path_contains_pid() {
-        let path = default_socket_path(42);
-        let name = path.file_name().unwrap().to_str().unwrap();
-        assert!(name.contains("42"));
-        assert!(name.ends_with(".sock"));
-    }
-
-    #[test]
     fn handle_patch_removes_commands() {
         let live = test_live_policy();
         // "rm" and "sudo" are in the initial blocked set.
@@ -1102,14 +940,6 @@ mod tests {
         let input = b"\n   \n";
         let stream = Cursor::new(input.to_vec());
         handle_stream(stream, &live);
-    }
-
-    #[test]
-    fn send_message_fails_on_bad_path() {
-        let bad_path = Path::new("/tmp/shadi-nonexistent-test.sock");
-        let msg = ControlMessage::QueryPolicy;
-        let result = send_message(bad_path, &msg);
-        assert!(result.is_err());
     }
 
     #[test]

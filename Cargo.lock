@@ -362,8 +362,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "uds_windows",
  "windows-sys 0.61.2",
 ]
 
