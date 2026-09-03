@@ -59,14 +59,6 @@ impl SandboxProfile {
         }
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-            Self::Balanced => "balanced",
-            Self::Connected => "connected",
-        }
-    }
-
     pub fn defaults(self) -> ProfileDefaults {
         // macOS Seatbelt and Linux Landlock both give a readable root without
         // it costing anything, so only the platforms without that need "/"
@@ -240,5 +232,52 @@ mod tests {
     fn policy_can_allow_local_unix_sockets() {
         let policy = SandboxPolicy::new().allow_local_unix_sockets();
         assert!(policy.local_unix_sockets_allowed());
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn profile_names_round_trip_and_reject_the_rest() {
+        assert_eq!(SandboxProfile::from_name("strict"), Some(SandboxProfile::Strict));
+        assert_eq!(SandboxProfile::from_name("balanced"), Some(SandboxProfile::Balanced));
+        assert_eq!(SandboxProfile::from_name("connected"), Some(SandboxProfile::Connected));
+        // The CLI accepts these case-insensitively, so the library must too.
+        assert_eq!(SandboxProfile::from_name("STRICT"), Some(SandboxProfile::Strict));
+        assert_eq!(SandboxProfile::from_name("paranoid"), None);
+        assert_eq!(SandboxProfile::from_name(""), None);
+    }
+
+    #[test]
+    fn only_connected_leaves_the_network_on() {
+        assert!(SandboxProfile::Strict.defaults().net_block);
+        assert!(SandboxProfile::Balanced.defaults().net_block);
+        assert!(!SandboxProfile::Connected.defaults().net_block);
+    }
+
+    #[test]
+    fn every_profile_grants_the_working_directory_and_no_blanket_write() {
+        for profile in [
+            SandboxProfile::Strict,
+            SandboxProfile::Balanced,
+            SandboxProfile::Connected,
+        ] {
+            let d = profile.defaults();
+            assert_eq!(d.allow, vec![".".to_string()], "{profile:?}");
+            assert!(d.write.is_empty(), "{profile:?} must not grant a blanket write");
+        }
+    }
+
+    #[test]
+    fn strict_confines_reads_where_the_others_do_not() {
+        assert_eq!(SandboxProfile::Strict.defaults().read, vec![".".to_string()]);
+        // Seatbelt and Landlock give a readable root for free; elsewhere it is
+        // spelled out, so the two cases differ by platform, not by profile.
+        assert_eq!(
+            SandboxProfile::Balanced.defaults().read,
+            SandboxProfile::Connected.defaults().read
+        );
     }
 }

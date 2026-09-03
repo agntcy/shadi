@@ -14,7 +14,7 @@
 //! [`socket_dir`]. A caller connects, writes one JSON [`ControlMessage`] line,
 //! and reads one JSON [`ControlResponse`] line back.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::policy_patch::{
@@ -328,10 +328,13 @@ mod tests {
         std::thread::spawn(move || {
             for reply in replies {
                 let Ok((mut stream, _)) = listener.accept() else { return };
-                // Drain the request so the client's write half completes.
+                // Read to EOF before replying. The client writes its request,
+                // shuts down its write half, and only then reads; answering
+                // the moment the first line arrives can close this end before
+                // that shutdown lands, which fails it with ENOTCONN.
                 let mut request = String::new();
                 let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-                let _ = reader.read_line(&mut request);
+                let _ = reader.read_to_string(&mut request);
                 let body = serde_json::to_string(&reply).expect("serialize reply");
                 let _ = writeln!(stream, "{}", body);
                 let _ = stream.flush();
