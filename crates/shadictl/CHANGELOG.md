@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.6...agntcy-shadi-cli-v0.1.7) - 2026-09-03
+
+### Added
+
+- *(sandbox)* add cargo-fuzz targets for the control protocol ([#203](https://github.com/agntcy/shadi/pull/203))
+
+### Other
+
+- *(sandbox)* move the control-socket client into shadi_sandbox ([#200](https://github.com/agntcy/shadi/pull/200))
+- *(deps)* update github actions ([#188](https://github.com/agntcy/shadi/pull/188))
+
 ## [0.1.6](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.5...agntcy-shadi-cli-v0.1.6) - 2026-08-26
 
 ### Added

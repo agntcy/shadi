@@ -32,8 +32,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-agentbridge = { package = "agntcy-agentbridge", version = "0.1.1", path = "../../../crates/agentbridge" }
-shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.1", path = "../../../crates/shadi_mas" }
+agentbridge = { package = "agntcy-agentbridge", version = "0.1.5", path = "../../../crates/agentbridge" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.1.5", path = "../../../crates/shadi_mas" }
 uuid = { version = "1", features = ["v4"] }
 
 # Kept in step with the root SHADI workspace. The `=` pins these carried are
@@ -45,7 +45,7 @@ slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
 slim_proto = { package = "agntcy-slim-proto", version = "0.6.0" }
 slim_config = { package = "agntcy-slim-config", version = "0.16.0" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.1.0", path = "../../../crates/shadi_identity" }
-shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.2", path = "../../../crates/shadi_sandbox" }
+shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.3", path = "../../../crates/shadi_sandbox" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.0", path = "../../../crates/agent_secrets" }
 # mTLS bootstrap without an openssl binary — the desktop app has to work on a
 # clean Windows install too (agntcy/shadi#123).
