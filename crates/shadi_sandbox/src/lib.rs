@@ -8,7 +8,7 @@ pub mod policy_patch;
 mod platform;
 
 pub use net_proxy::{NetAllowlist, NetProxy};
-pub use policy::{PlatformSandboxProfile, SandboxPolicy};
+pub use policy::{PlatformSandboxProfile, ProfileDefaults, SandboxPolicy, SandboxProfile};
 pub use policy_patch::{
     ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
     ProcessResources,

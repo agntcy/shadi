@@ -18,6 +18,7 @@ pub fn run() {
         // Native file picker, so a key outside ~/.ssh can be chosen.
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::slim::SlimState::default())
+        .manage(commands::sandbox::SandboxState::default())
         .setup(|app| {
             // Known rooms are persisted (agntcy/shadi#138); the app data dir is
             // only resolvable once the app exists. A failure here is reported

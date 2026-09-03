@@ -8081,6 +8081,7 @@ dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",
+ "agntcy-shadi-sandbox",
  "agntcy-slim",
  "agntcy-slim-bindings",
  "agntcy-slim-config",
@@ -8098,6 +8099,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
  "uuid",
 ]

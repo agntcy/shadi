@@ -23,6 +23,82 @@ pub struct SandboxPolicy {
     net_proxy_port: Option<u16>,
 }
 
+/// The named launch profiles offered by `shadictl --profile` and the desktop
+/// sandbox panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxProfile {
+    /// Read and write confined to the working directory, network off.
+    Strict,
+    /// Working directory writable, wider reads where the platform sandbox
+    /// gives them for free, network off.
+    Balanced,
+    /// Balanced, with the network left on.
+    Connected,
+}
+
+/// The four axes a named profile fixes. A caller layers its own paths and
+/// allowlists on top; everything else a profile could set is empty in all of
+/// them, which is why only these four live here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileDefaults {
+    pub allow: Vec<String>,
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub net_block: bool,
+}
+
+impl SandboxProfile {
+    /// Parse the profile names accepted on the command line.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "strict" => Some(Self::Strict),
+            "balanced" => Some(Self::Balanced),
+            "connected" => Some(Self::Connected),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Balanced => "balanced",
+            Self::Connected => "connected",
+        }
+    }
+
+    pub fn defaults(self) -> ProfileDefaults {
+        // macOS Seatbelt and Linux Landlock both give a readable root without
+        // it costing anything, so only the platforms without that need "/"
+        // spelled out.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let wide_read: Vec<String> = Vec::new();
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let wide_read: Vec<String> = vec!["/".to_string()];
+
+        match self {
+            Self::Strict => ProfileDefaults {
+                allow: vec![".".to_string()],
+                read: vec![".".to_string()],
+                write: Vec::new(),
+                net_block: true,
+            },
+            Self::Balanced => ProfileDefaults {
+                allow: vec![".".to_string()],
+                read: wide_read,
+                write: Vec::new(),
+                net_block: true,
+            },
+            Self::Connected => ProfileDefaults {
+                allow: vec![".".to_string()],
+                read: wide_read,
+                write: Vec::new(),
+                net_block: false,
+            },
+        }
+    }
+}
+
 impl SandboxPolicy {
     pub fn new() -> Self {
         Self {
