@@ -13,3 +13,8 @@ release = false
 name = "agentbridge_demo"
 publish = false
 release = false
+
+[[package]]
+name = "shadi_desktop"
+publish = false
+release = false
