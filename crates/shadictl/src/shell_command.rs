@@ -26,7 +26,7 @@ use crate::slim_a2a;
 use crate::slim_shell::SlimShellState;
 use crate::snapshot_command;
 use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
-use shadi_sandbox::PolicyPatch;
+use shadi_sandbox::{control, PolicyPatch};
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show available commands (alias: /h)"),
@@ -913,18 +913,15 @@ impl ShellSession {
     }
 
     fn cmd_sessions(&self) -> LoopAction {
-        let tmpdir = std::env::temp_dir();
-        let found = discover_control_sockets(&tmpdir);
-        let sessions = classify_and_prune_control_sockets(found);
+        let dir = control::socket_dir();
+        let sessions = control::prune_unreachable(control::discover_sockets(&dir));
 
         if sessions.is_empty() {
-            println!("no running SHADI sandbox sessions found in {}", tmpdir.display());
+            println!("no running SHADI sandbox sessions found in {}", dir.display());
         } else {
             println!("found {} session(s):", sessions.len());
-            for (sock, reachable) in &sessions {
-                let name = policy_watch::session_name_from_path(sock);
-                let marker = if *reachable { "reachable" } else { "stale" };
-                println!("  {} ({})", name, marker);
+            for sock in &sessions {
+                println!("  {} (reachable)", control::session_name_from_path(sock));
             }
         }
         LoopAction::Continue
@@ -1770,33 +1767,6 @@ fn short_socket_name(path: &Path) -> String {
     policy_watch::session_name_from_path(path)
 }
 
-fn discover_control_sockets(tmpdir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(tmpdir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("shadi-ctl-") && name_str.ends_with(".sock") {
-                found.push(entry.path());
-            }
-        }
-    }
-    found
-}
-
-fn classify_and_prune_control_sockets(sockets: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
-    let mut sessions = Vec::new();
-    for sock in sockets {
-        let reachable = policy_watch::query_policy(&sock).is_ok();
-        if reachable {
-            sessions.push((sock, true));
-        } else {
-            let _ = std::fs::remove_file(&sock);
-        }
-    }
-    sessions
-}
-
 fn dirs_history_path() -> Option<PathBuf> {
     let dir = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -2004,7 +1974,7 @@ mod tests {
         let stale_socket = tempdir.path().join("shadi-ctl-stale.sock");
         std::fs::write(&stale_socket, b"stale").expect("create stale socket marker");
 
-        let sessions = classify_and_prune_control_sockets(discover_control_sockets(tempdir.path()));
+        let sessions = control::prune_unreachable(control::discover_sockets(tempdir.path()));
 
         assert!(sessions.is_empty());
         assert!(!stale_socket.exists(), "stale socket should be removed");
