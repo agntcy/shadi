@@ -102,6 +102,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
+      # Needed for cosign's keyless signing: it exchanges this for a
+      # short-lived certificate tying the signature to this workflow run.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -177,6 +180,21 @@ jobs:
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Keyless: the signature ties to this workflow run and repository via
+      # Sigstore's Fulcio CA, using the OIDC token id-token: write grants —
+      # no signing key for anyone to hold or rotate.
+      - name: Sign the release archive
+        id: sign
+        shell: bash
+        run: |
+          archive="${{ steps.package.outputs.archive_path }}"
+          bundle="$archive.sigstore.json"
+          cosign sign-blob --yes --bundle "$bundle" "$archive"
+          echo "bundle_path=$bundle" >> "$GITHUB_OUTPUT"
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,6 +203,7 @@ jobs:
           gh release upload "${{ steps.metadata.outputs.release_tag }}" \
             "${{ steps.package.outputs.archive_path }}" \
             "${{ steps.package.outputs.checksum_path }}" \
+            "${{ steps.sign.outputs.bundle_path }}" \
             --repo "${{ github.repository }}" \
             --clobber
 
@@ -272,6 +291,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
+      # Needed for cosign's keyless signing: it exchanges this for a
+      # short-lived certificate tying the signature to this workflow run.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -347,6 +369,21 @@ jobs:
             --output-dir dist \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Keyless: the signature ties to this workflow run and repository via
+      # Sigstore's Fulcio CA, using the OIDC token id-token: write grants —
+      # no signing key for anyone to hold or rotate.
+      - name: Sign the release archive
+        id: sign
+        shell: bash
+        run: |
+          archive="${{ steps.package.outputs.archive_path }}"
+          bundle="$archive.sigstore.json"
+          cosign sign-blob --yes --bundle "$bundle" "$archive"
+          echo "bundle_path=$bundle" >> "$GITHUB_OUTPUT"
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -355,6 +392,7 @@ jobs:
           gh release upload "${{ steps.metadata.outputs.release_tag }}" \
             "${{ steps.package.outputs.archive_path }}" \
             "${{ steps.package.outputs.checksum_path }}" \
+            "${{ steps.sign.outputs.bundle_path }}" \
             --repo "${{ github.repository }}" \
             --clobber
 
