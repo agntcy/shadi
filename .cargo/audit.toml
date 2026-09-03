@@ -1,0 +1,13 @@
+# cargo-audit configuration. Unmaintained, unsound and yanked advisories are
+# warnings here, not failures, so only genuine vulnerabilities need an entry.
+
+[advisories]
+ignore = [
+	# Marvin Attack, a timing sidechannel in RSA private-key operations, with no
+	# fixed release published. It reaches us through sequoia-openpgp's crypto-rust
+	# backend in shadictl, which only parses certificates and pulls Ed25519 public
+	# keys out of them (identity_command::extract_ed25519_public_key) — shadictl
+	# performs no RSA decryption, so the vulnerable path is never entered. Drop
+	# this entry once rsa ships a constant-time release.
+	"RUSTSEC-2023-0071",
+]
