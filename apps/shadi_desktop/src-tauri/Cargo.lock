@@ -156,6 +156,7 @@ name = "agntcy-agentbridge"
 version = "0.1.4"
 dependencies = [
  "agntcy-shadi-mas",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -163,6 +164,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
