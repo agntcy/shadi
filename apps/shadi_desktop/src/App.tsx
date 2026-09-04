@@ -4,12 +4,14 @@ import { AgentBridgePanel } from "./panels/AgentBridgePanel";
 import { SlimRoomsPanel } from "./panels/SlimRoomsPanel";
 import { OnboardingPanel } from "./panels/OnboardingPanel";
 import { SandboxPanel } from "./panels/SandboxPanel";
+import { PolicyPanel } from "./panels/PolicyPanel";
 import { RoomsProvider } from "./shared/rooms";
 
 // Identity first: nothing else works until onboarding has run.
 const TABS = [
   { id: "identity", label: "Identity", render: () => <OnboardingPanel /> },
   { id: "sandbox", label: "Sandbox", render: () => <SandboxPanel /> },
+  { id: "policy", label: "Policy", render: () => <PolicyPanel /> },
   { id: "rooms", label: "Rooms", render: () => <SlimRoomsPanel /> },
   { id: "agentbridge", label: "agentbridge", render: () => <AgentBridgePanel /> },
 ] as const;

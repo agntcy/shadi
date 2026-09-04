@@ -3,16 +3,61 @@
 
 //! Policy inspector and editor (agntcy/shadi#116) — replaces `shadictl
 //! shell`'s `/policy query|patch|explain|diff` and the `--profile` presets.
+//!
+//! `query` and `patch` reach a live session over its control socket, the
+//! same client `shadi_sandbox::control` gives the sandbox panel. `explain`
+//! and `diff` stay stubs: their shadictl equivalents resolve a policy file,
+//! a named profile and CLI flags against shadictl's own `Cli` type
+//! (`policy_helpers::resolve_policy`), which is private to that binary and
+//! not yet factored into a form this app can call. That factoring is its
+//! own piece of work, not something to rush alongside the live-session half.
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use shadi_sandbox::{control, PolicyPatch, PolicyPatchResponse};
 
 use super::not_implemented;
 
 const PANEL_ISSUE: u32 = 116;
 
-/// Serde-friendly mirror of `shadi_sandbox::SandboxPolicy` — the desktop app
-/// doesn't link `shadi_sandbox` yet (that lands with #116's implementation),
-/// so this is an independent shape with the same fields, not a re-export.
+/// Blocking round trip to a session's control socket, off the async runtime
+/// — same reasoning as the sandbox panel's commands: the client is blocking
+/// socket I/O, so this must not tie up a Tauri async worker.
+async fn blocking<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|err| format!("policy task failed: {err}"))?
+}
+
+/// Mirrors the JSON `handle_query` sends over the control socket
+/// (`crates/shadictl/src/policy_watch.rs`) — the live effective policy of an
+/// attached session, not shadictl's own private `SandboxPolicy` type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivePolicySnapshot {
+    pub allow_read: Vec<String>,
+    pub allow_write: Vec<String>,
+    pub net_allow: Vec<String>,
+    pub net_blocked: bool,
+    pub allow_command: Vec<String>,
+    pub block_command: Vec<String>,
+    /// Filesystem and command changes staged by a prior patch, pending the
+    /// restart that applies them.
+    pub staged_read: Vec<String>,
+    pub staged_write: Vec<String>,
+    pub staged_allow: Vec<String>,
+    /// The live network allowlist, when the session's proxy applied a
+    /// network patch immediately rather than staging it.
+    pub net_allow_live: Option<Vec<String>>,
+}
+
+/// The policy a sandbox is launched with (`sandbox_launch`'s
+/// `LaunchSandboxRequest`) — a config to build a fresh `SandboxPolicy` from,
+/// not the live, already-resolved shape `LivePolicySnapshot` reads back.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PolicyConfig {
     pub allow: Vec<String>,
@@ -40,16 +85,22 @@ pub struct PolicyDiff {
 
 /// Show the effective policy of the attached session (`/policy query`).
 #[tauri::command]
-pub async fn policy_query(socket_path: String) -> Result<PolicyConfig, String> {
-    let _ = socket_path;
-    not_implemented(PANEL_ISSUE)
+pub async fn policy_query(socket_path: String) -> Result<LivePolicySnapshot, String> {
+    blocking(move || {
+        let value = control::query_policy(&PathBuf::from(socket_path))?;
+        serde_json::from_value(value)
+            .map_err(|err| format!("session returned an unexpected policy shape: {err}"))
+    })
+    .await
 }
 
 /// Patch the policy of the attached session live (`/policy patch`).
 #[tauri::command]
-pub async fn policy_patch(socket_path: String, patch: PolicyConfig) -> Result<PolicyConfig, String> {
-    let _ = (socket_path, patch);
-    not_implemented(PANEL_ISSUE)
+pub async fn policy_patch(
+    socket_path: String,
+    patch: PolicyPatch,
+) -> Result<PolicyPatchResponse, String> {
+    blocking(move || control::send_patch(&PathBuf::from(socket_path), &patch)).await
 }
 
 /// Resolved policy plus source inputs (`/policy explain`).
