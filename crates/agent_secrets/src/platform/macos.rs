@@ -53,8 +53,11 @@ impl fmt::Display for KeychainError {
 }
 
 #[cfg(any(test, feature = "coverage"))]
-fn keychain_fixture() -> &'static Mutex<HashMap<(String, String), Vec<u8>>> {
-    static FIXTURE: OnceLock<Mutex<HashMap<(String, String), Vec<u8>>>> = OnceLock::new();
+type KeychainFixture = Mutex<HashMap<(String, String), Vec<u8>>>;
+
+#[cfg(any(test, feature = "coverage"))]
+fn keychain_fixture() -> &'static KeychainFixture {
+    static FIXTURE: OnceLock<KeychainFixture> = OnceLock::new();
     FIXTURE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -339,7 +342,7 @@ mod tests {
     /// and need to tell that apart from a keychain that is actually broken.
     fn get_missing_key_reports_not_found() {
         let store = MacosKeychainStore::new(unique_service());
-        let err = store.get("missing-key").err().expect("error");
+        let err = store.get("missing-key").expect_err("error");
         assert!(
             matches!(err, SecretError::InvalidInput),
             "expected not-found, got {err:?}"

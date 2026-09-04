@@ -6,7 +6,13 @@ use std::time::{Duration, Instant};
 
 use a2a::*;
 use a2a_client::A2AClient;
-use agent_secrets::{AgentVerifier, SecretError, SecretResult, SessionContext};
+use agent_secrets::{DidProofVerifier, SessionContext};
+
+pub mod auth_required;
+pub use auth_required::{
+    audit_auth_required, decide_auth_required, is_auth_required, run_auth_required_loop,
+    AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
+};
 use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 use shadi_a2a::A2AChannelBuilder;
 use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
@@ -122,6 +128,39 @@ impl LiveA2ATaskAdapter {
     }
 
     fn send_task(&self, task: &TaskEnvelope) -> Result<String, String> {
+        let body = Mutex::new(render_task_message(task));
+        let auth_cfg = AuthRequiredConfig::from_env();
+        let response = run_auth_required_loop(
+            || {
+                let current = body
+                    .lock()
+                    .map_err(|_| "live A2A task body lock poisoned".to_string())?
+                    .clone();
+                let signed = shadi_identity::sign_message_from_env(&self.config.agent_id, current.as_bytes())
+                    .map_err(|err| err.to_string())?;
+                let signed_text = String::from_utf8(signed)
+                    .map_err(|err| format!("DID proof envelope is not UTF-8: {err}"))?;
+                self.send_signed_task(task, &signed_text)
+            },
+            &auth_cfg,
+            || {
+                let note = escalate_auth_required(&auth_cfg)?;
+                let mut guard = body
+                    .lock()
+                    .map_err(|_| "live A2A task body lock poisoned".to_string())?;
+                guard.push_str("\n\nauth_escalate:\n");
+                guard.push_str(&note);
+                Ok(note)
+            },
+        )?;
+        Ok(describe_a2a_response(&response))
+    }
+
+    fn send_signed_task(
+        &self,
+        task: &TaskEnvelope,
+        signed_text: &str,
+    ) -> Result<SendMessageResponse, String> {
         let tls = resolve_client_tls_material_for_agent(Some(&self.config.agent_id))?;
         let local_name = self
             .config
@@ -152,7 +191,7 @@ impl LiveA2ATaskAdapter {
                 task.task_id,
                 attempt
             ));
-            let attempt_result = (|| -> Result<String, String> {
+            let attempt_result = (|| -> Result<SendMessageResponse, String> {
                 let connection_id = service
                     .connect(build_client_config_for_endpoint(&self.config.endpoint, &tls))
                     .map_err(format_slim_error)?;
@@ -161,6 +200,15 @@ impl LiveA2ATaskAdapter {
 
                 let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
                     .map_err(|e| e.to_string())?;
+                let proven_did = match &auth {
+                    shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
+                    shadi_identity::SlimAuth::SharedSecret(_) => {
+                        return Err(
+                            "application auth requires an agent DID; shared-secret node auth is not enough"
+                                .to_string(),
+                        );
+                    }
+                };
                 let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
                     .map_err(format_slim_error)?;
                 app.subscribe(local_name_ref.clone(), Some(connection_id))
@@ -171,11 +219,12 @@ impl LiveA2ATaskAdapter {
                     .build()
                     .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
 
-                let mut session = SessionContext::new(
+                // Outbound payload is DID-signed above; the verifier requires that proof.
+                let session = SessionContext::new(
                     &self.config.agent_id,
-                    &format!("mas-task-session-{}", task.task_id),
-                );
-                session.verified = true;
+                    format!("mas-task-session-{}", task.task_id),
+                )
+                .with_proven_did(proven_did);
 
                 // slim_rpc::Channel captures `tokio::runtime::Handle::current()` at
                 // construction, so build the transport inside the runtime context.
@@ -184,7 +233,7 @@ impl LiveA2ATaskAdapter {
                     A2AChannelBuilder::new(
                         app.clone(),
                         remote_name_ref,
-                        Arc::new(VerifiedSessionVerifier),
+                        Arc::new(DidProofVerifier),
                         session,
                     )
                     .connection_id(connection_id)
@@ -192,26 +241,23 @@ impl LiveA2ATaskAdapter {
                 };
                 let client = A2AClient::new(Box::new(channel));
                 let request = SendMessageRequest {
-                    message: Message::new(
-                        Role::User,
-                        vec![Part::text(render_task_message(task))],
-                    ),
+                    message: Message::new(Role::User, vec![Part::text(signed_text.to_string())]),
                     configuration: None,
                     metadata: None,
                     tenant: None,
                 };
 
-                let response_detail = runtime
+                let response = runtime
                     .block_on(async {
                         let response = client.send_message(&request).await?;
                         client.destroy().await?;
-                        Ok::<String, A2AError>(describe_a2a_response(&response))
+                        Ok::<SendMessageResponse, A2AError>(response)
                     })
                     .map_err(|err| format!("failed to send A2A task {}: {}", task.task_id, err))?;
 
                 let _ = app.unsubscribe(local_name_ref.clone(), Some(connection_id));
                 let _ = service.disconnect(connection_id);
-                Ok(response_detail)
+                Ok(response)
             })();
             let _ = service.shutdown();
 
@@ -233,6 +279,18 @@ impl LiveA2ATaskAdapter {
     }
 }
 
+fn escalate_auth_required(config: &AuthRequiredConfig) -> Result<String, String> {
+    if let Ok(note) = std::env::var("SHADI_AUTH_REQUIRED_ESCALATE") {
+        if !note.trim().is_empty() {
+            return Ok(note);
+        }
+    }
+    Err(format!(
+        "AUTH_REQUIRED denied: no harness escalate answer within {}ms",
+        config.timeout.as_millis()
+    ))
+}
+
 impl TaskAdapter for LiveA2ATaskAdapter {
     fn dispatch(&self, task: TaskEnvelope) -> Result<(), String> {
         let started_at = Instant::now();
@@ -249,18 +307,6 @@ impl TaskAdapter for LiveA2ATaskAdapter {
     }
 }
 
-
-struct VerifiedSessionVerifier;
-
-impl AgentVerifier for VerifiedSessionVerifier {
-    fn verify(&self, session: &SessionContext) -> SecretResult<()> {
-        if session.verified {
-            Ok(())
-        } else {
-            Err(SecretError::NotAuthorized)
-        }
-    }
-}
 
 #[derive(Clone)]
 struct TlsMaterial {
@@ -440,6 +486,7 @@ fn format_slim_error(err: slim_bindings::SlimError) -> String {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+    use agent_secrets::AgentVerifier;
     use crate::types::{Epoch, PatternKind};
 
     fn sample_task() -> TaskEnvelope {
@@ -655,10 +702,11 @@ mod transport_tests {
     }
 
     #[test]
-    fn verified_session_verifier_enforces_verification() {
+    fn did_proof_verifier_rejects_asserted_verified_flag() {
         let mut session = SessionContext::new("avatar", "unit-test");
-        assert!(VerifiedSessionVerifier.verify(&session).is_err());
         session.verified = true;
-        assert!(VerifiedSessionVerifier.verify(&session).is_ok());
+        assert!(DidProofVerifier.verify(&session).is_err());
+        let proven = SessionContext::new("avatar", "unit-test").with_proven_did("did:key:zexample");
+        assert!(DidProofVerifier.verify(&proven).is_ok());
     }
 }

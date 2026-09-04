@@ -3,9 +3,10 @@
 
 //! The Tauri IPC command contract — see ../../docs/ipc-contract.md.
 //!
-//! `agentbridge`, `slim` and `identity` are implemented; the rest are still
-//! stubs returning [`not_implemented`], one panel issue each
-//! (agntcy/shadi#115, #116, #119, #121).
+//! `agentbridge`, `slim`, `sandbox`, policy query/patch/explain/diff, and
+//! identity onboarding are implemented. DIR, remaining identity/secrets
+//! commands, and trace/memory still return [`not_implemented`]
+//! (agntcy/shadi#117, #119, #121).
 
 pub mod agentbridge;
 pub mod bootstrap;

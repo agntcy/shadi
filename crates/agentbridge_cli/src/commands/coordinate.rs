@@ -30,13 +30,10 @@ struct AgentEntry {
 ///
 /// With N agents and quorum = N:
 ///
-///   1. Agent 1 proposes  → engine: Applied (1/N)
-///   2. Agent 2 proposes  → engine: Applied (2/N)
-///      → vote round: agents 1,2 each endorse a proposal
-///   3. Agent 3 proposes  → engine: Applied (3/N)
-///      → vote round: agents 1,2,3 each endorse a proposal
-///   ...
-///   N. Agent N proposes  → engine: FINALIZED (votes already counted!)
+/// 1. Agent 1 proposes → engine: Applied (1/N)
+/// 2. Agent 2 proposes → engine: Applied (2/N), then a vote round
+/// 3. Agent 3 proposes → engine: Applied (3/N), then a vote round
+/// 4. Agent N proposes → engine: FINALIZED (votes already counted)
 ///
 /// This guarantees the endorsement phase actually runs before finalization,
 /// so the winner is the agent whose implementation earned the most peer votes.

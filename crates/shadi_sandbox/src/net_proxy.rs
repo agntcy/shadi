@@ -227,7 +227,24 @@ impl NetProxy {
         // SAFETY: we own `this` exclusively via ManuallyDrop and never
         // access `thread` again after this read.
         let _ = unsafe { std::ptr::read(&this.thread) }.join();
-        Self::bind_and_start(port, allowlist)
+        // Another test in the same process can bind port 0 in the window
+        // between release and rebind and be handed this port (agntcy/shadi#204).
+        // Retry a bounded number of times; production restart is not racing
+        // other NetProxy::start calls in-process.
+        const ATTEMPTS: u32 = 8;
+        let mut last_err = None;
+        for attempt in 0..ATTEMPTS {
+            match Self::bind_and_start(port, allowlist.clone()) {
+                Ok(proxy) => return Ok(proxy),
+                Err(err) => {
+                    last_err = Some(err);
+                    thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt + 1)));
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            std::io::Error::other("net proxy restart failed to rebind")
+        }))
     }
 
     fn bind_and_start(port: u16, allowlist: NetAllowlist) -> std::io::Result<Self> {
@@ -455,7 +472,7 @@ fn pipe_bidirectional(client: TcpStream, upstream: TcpStream) {
         .name("shadi-proxy-up".into())
         .spawn(move || copy_stream(client, upstream));
 
-    let _ = copy_stream(upstream2, client2);
+    copy_stream(upstream2, client2);
     if let Ok(handle) = t1 {
         let _ = handle.join();
     }
@@ -611,6 +628,12 @@ mod tests {
 
     #[test]
     fn proxy_restart_rebinds_to_same_port() {
+        // Serialize against other tests that bind port 0 so the OS cannot
+        // hand this proxy's just-released port to a sibling NetProxy::start
+        // (agntcy/shadi#204).
+        static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // Start proxy, record port, restart it, verify the new proxy answers
         // on the same port — the macOS Seatbelt constraint.
         let al = NetAllowlist::new(vec![]);

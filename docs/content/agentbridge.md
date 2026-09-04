@@ -65,7 +65,7 @@ same machine). SLIM is the authenticated transport bus between them.
 flowchart LR
   subgraph reg["agentbridge register  (one per agent)"]
     direction TB
-    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex"]
+    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex | cursor-agent"]
     ca["CliAdapter\nexecute_prompt(prompt) → text"]
     srv["A2A server\nAgentBridgeRequestHandler\nInMemoryTaskStore"]
     tool -- "stdin / stdout" --> ca --> srv
@@ -161,13 +161,20 @@ Export a session snapshot from one tool and import it into another. The
 generated artifacts.
 
 ```
-agentbridge handoff --from ./claude-proxy --to ./copilot-proxy
+agentbridge handoff --from claude-code --to copilot
 ```
 
-1. Source adapter → `snapshot_context()` → `ContextPacket`
-2. Packet persisted to `shadi_memory` (SQLCipher-backed, recoverable)
-3. A2A Task sent to destination adapter (skill: `inject-context`)
-4. Destination adapter → `inject_context(packet)`
+`--from` / `--to` accept the same specs as `coordinate` (`claude-code`,
+`copilot`, `codex`, `cursor-agent`, `generic-stdio:<cmd>`, `slim:<id>`).
+A bare subprocess command still opens GenericStdio. `--save` /
+`--from-file` persist the packet.
+
+The snapshot is an LLM summary of the source session this cycle, not a
+true session export.
+
+1. Source adapter → `snapshot_context()` → `ContextPacket` (LLM summary)
+2. Optional `--save` of the packet
+3. Destination adapter → `inject_context(packet)`
 
 ### 2. Task delegation
 

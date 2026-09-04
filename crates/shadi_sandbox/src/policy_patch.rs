@@ -84,6 +84,7 @@ pub struct PolicyPatchResponse {
 /// A wire-level message sent over the control socket.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ControlMessage {
     /// Request the current effective policy.
     QueryPolicy,

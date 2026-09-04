@@ -5,6 +5,10 @@ use shadi_mas::{
 
 /// Delegate a single task to a remote agentbridge adapter over A2A/SLIM.
 ///
+/// Remote `TASK_STATE_AUTH_REQUIRED` is handled by `LiveA2ATaskAdapter`:
+/// re-prove the agent DID, optionally escalate (`SHADI_AUTH_REQUIRED_POLICY=ask`),
+/// then deny with a reason on timeout or repeat bound.
+///
 /// The adapter must be registered and listening on the SLIM node. Use
 /// `agentbridge register --tool <name>` in a separate terminal first.
 /// Coding-agent adapters authenticate via DID/keys only (`SHADI_SLIM_AUTH=did`,

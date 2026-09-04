@@ -63,7 +63,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     let cwd = command
         .get_current_dir()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "".to_string());
+        .unwrap_or_default();
     let allowed_paths = policy.allow_read().len() + policy.allow_write().len();
     let network_mode = if policy.net_blocked() { "blocked" } else { "allowed" };
 
@@ -121,7 +121,7 @@ impl SandboxedChild {
         };
 
         if let Ok(ref status) = status {
-            span.record("exit.code", &status.code().unwrap_or(-1));
+            span.record("exit.code", status.code().unwrap_or(-1));
         }
 
         status

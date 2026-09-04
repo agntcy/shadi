@@ -69,7 +69,7 @@ pub fn init(service_name: &str) {
             )
         });
 
-        let fmt_layer = config.console_enabled.then(|| tracing_subscriber::fmt::layer());
+        let fmt_layer = config.console_enabled.then(tracing_subscriber::fmt::layer);
 
         let subscriber = tracing_subscriber::registry()
             .with(otel_layer)

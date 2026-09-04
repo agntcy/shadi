@@ -88,6 +88,44 @@ flowchart LR
 3. Session verification gates later reads.
 4. The SQLCipher memory key is retrieved through the same secret-control path rather than living in plaintext config.
 
+## Node auth versus application auth
+
+Two different things are called authentication on the SLIM path. Mixing them
+is how a mesh member can present another agent's DID. Tracked in
+agntcy/shadi#182; the handoff proof is agntcy/shadi#183.
+
+**Node auth** answers: may this process join the mesh? SLIM 2.3 provides
+that — `slim login` (OIDC device flow), SPIRE workload identity, or a
+legacy shared secret. A node credential says the process is allowed on the
+wire. It does not say which agent sent a message.
+
+**Application auth** answers: which agent is speaking, and whose is it?
+SLIM does not provide this. SHADI does, with `did:key` agent DIDs derived
+from the human's key. Agentbridge must verify that DID on a handoff,
+delegate, or coordinate task — not the node credential.
+
+| Layer | Question | Credential | Who checks it |
+|---|---|---|---|
+| Node | May this process join the mesh? | `slim login` / SPIRE SVID / shared secret | SLIM |
+| Application | Which agent sent this message? | Agent `did:key` signed over the payload | SHADI / agentbridge |
+| Human binding | Which human does that agent belong to? | Attestation over the agent DID | Not on the wire yet (#141) |
+
+Rules that must stay true when SLIM node auth is adopted:
+
+- Agentbridge verifies SHADI's agent DID chain before accepting a handoff.
+  A node SVID is not a substitute.
+- The node credential and the agent DID travel together; they are not
+  interchangeable.
+- `SessionContext.did` is proven from a signature on the message on the
+  agentbridge SLIM path (`SessionContext.did_proven`). A locally set
+  `session.verified` bool is not application auth.
+- Shared-secret node auth remains valid only for single-mesh setups and
+  is rejected by `agentbridge register --slim-endpoint`, because a
+  listener forwards incoming A2A tasks to a local CLI.
+
+Adopting SLIM's `TokenProvider` / `Verifier` (agntcy/shadi#179) and
+`slim login` / SPIRE (agntcy/shadi#180) must not collapse these layers.
+
 ## 1Password backend
 
 When `SHADI_SECRET_BACKEND=onepassword` is set, secrets are stored in a

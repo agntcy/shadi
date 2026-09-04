@@ -219,17 +219,19 @@ impl CoordinationEngine for DevelopmentEngine {
                 self.accept_proposal(participant, bytes)
             }
             // Vote: ToolResult.accepted=true means "I endorse tool_name (= AgentId)".
-            SemanticPayload::ToolResult { tool_name, accepted } => {
-                if accepted {
-                    let voter = match &event.metadata.source {
-                        crate::types::EventSource::Peer(id) => id.clone(),
-                        _ => AgentId("local".to_string()),
-                    };
-                    self.accept_vote(voter, AgentId(tool_name))
-                } else {
-                    self.counters.applied += 1;
-                    EventOutcome::Applied
-                }
+            SemanticPayload::ToolResult {
+                tool_name,
+                accepted: true,
+            } => {
+                let voter = match &event.metadata.source {
+                    crate::types::EventSource::Peer(id) => id.clone(),
+                    _ => AgentId("local".to_string()),
+                };
+                self.accept_vote(voter, AgentId(tool_name))
+            }
+            SemanticPayload::ToolResult { accepted: false, .. } => {
+                self.counters.applied += 1;
+                EventOutcome::Applied
             }
             _ => {
                 self.counters.applied += 1;

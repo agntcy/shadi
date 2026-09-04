@@ -7,6 +7,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::{ArtifactPayload, ConversationMessage, ContextPacket},
+    subprocess::TrackedSubprocess,
 };
 
 /// Adapter for the Cursor Agent CLI (`cursor-agent`).
@@ -18,6 +19,7 @@ pub struct CursorAgentAdapter {
     id: AgentId,
     work_dir: PathBuf,
     session_id: std::sync::Mutex<Option<String>>,
+    subprocess: TrackedSubprocess,
 }
 
 impl CursorAgentAdapter {
@@ -26,6 +28,7 @@ impl CursorAgentAdapter {
             id: AgentId(id.into()),
             work_dir: work_dir.into(),
             session_id: std::sync::Mutex::new(None),
+            subprocess: TrackedSubprocess::new(),
         }
     }
 
@@ -57,8 +60,9 @@ impl CursorAgentAdapter {
 
         cmd.arg(prompt);
 
-        let output = cmd
-            .output()
+        let output = self
+            .subprocess
+            .output(&mut cmd)
             .map_err(|e| CliAdapterError::Subprocess(format!("failed to run cursor-agent: {e}")))?;
 
         if !output.status.success() && output.stdout.is_empty() {
@@ -117,6 +121,10 @@ impl CliAdapter for CursorAgentAdapter {
 
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError> {
         self.run_print(prompt, None)
+    }
+
+    fn kill_in_flight(&self) {
+        self.subprocess.kill();
     }
 }
 

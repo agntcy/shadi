@@ -387,8 +387,8 @@ fn main() {
         .iter()
         .find(|a| a.starts_with("--scenario=") || *a == "--scenario")
         .and_then(|a| {
-            if a.contains('=') {
-                a.splitn(2, '=').nth(1).map(str::to_string)
+            if let Some((_, value)) = a.split_once('=') {
+                Some(value.to_string())
             } else {
                 args.iter()
                     .skip_while(|b| *b != "--scenario")
