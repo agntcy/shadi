@@ -56,16 +56,24 @@ fn wait_for_child_or_interrupt(
             return Ok(ChildWaitOutcome::Exited(status));
         }
 
-        if interrupted.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-            || terminate_requested.is_some_and(|flag| {
-                flag.load(std::sync::atomic::Ordering::SeqCst)
-            })
-        {
+        // Read restart before terminate. Both are read once per iteration so
+        // the choice between them is made from one snapshot; taking restart
+        // first means a terminate stored before it is always visible here, so
+        // terminate keeps its priority even when both land mid-iteration.
+        // Reading terminate first let a restart stored in between win.
+        let restart =
+            restart_requested.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
+        let terminate = interrupted
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            || terminate_requested
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
+
+        if terminate {
             let _ = child.kill();
             return child.wait().map(ChildWaitOutcome::Terminated);
         }
 
-        if restart_requested.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
+        if restart {
             let _ = child.kill();
             let _ = child.wait()?;
             return Ok(ChildWaitOutcome::RestartRequested);
