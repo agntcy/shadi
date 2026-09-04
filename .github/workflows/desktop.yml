@@ -70,6 +70,6 @@ jobs:
       - name: Build frontend (tsc + vite)
         run: pnpm build
 
-      - name: Check src-tauri
+      - name: Test src-tauri
         working-directory: apps/shadi_desktop/src-tauri
-        run: cargo check --locked
+        run: cargo test --locked

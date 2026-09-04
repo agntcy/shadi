@@ -64,12 +64,18 @@ enum Cmd {
     },
 
     /// Hand off context from one CLI tool to another.
+    ///
+    /// `--from` / `--to` accept the same specs as `coordinate`
+    /// (`claude-code`, `copilot`, `codex`, `cursor-agent`,
+    /// `generic-stdio:<cmd>`, `slim:<id>`). A bare command still opens
+    /// GenericStdio. The snapshot is an LLM session summary this cycle,
+    /// not a true session export.
     Handoff {
-        /// Subprocess command for the source adapter.
+        /// Source spec (native tool, generic-stdio:<cmd>, slim:<id>, or a command).
         #[arg(long)]
         from: String,
 
-        /// Subprocess command for the destination adapter.
+        /// Destination spec (same forms as --from).
         #[arg(long)]
         to: String,
 
@@ -80,6 +86,10 @@ enum Cmd {
         /// Load a saved ContextPacket instead of snapshotting a live source.
         #[arg(long, value_name = "FILE")]
         from_file: Option<String>,
+
+        /// SLIM node endpoint used for slim:<id> specs.
+        #[arg(long, env = "SLIM_ENDPOINT", default_value = "127.0.0.1:47357")]
+        slim_endpoint: String,
     },
 
     /// Delegate a single task to a remote agentbridge adapter over A2A/SLIM.
@@ -147,7 +157,7 @@ fn main() {
 
     let result = match cli.command {
         Cmd::Register { tool, command, args, dir_publish, dir_server, gh_token, slim_endpoint } => {
-            let publish_opts = dir_publish.then(|| commands::register::DirPublishOptions {
+            let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
@@ -162,11 +172,15 @@ fn main() {
         Cmd::List { local, dir_server, gh_token } => {
             commands::list::run(local, &dir_server, gh_token.as_deref())
         }
-        Cmd::Handoff { from, to, save, from_file } => {
+        Cmd::Handoff { from, to, save, from_file, slim_endpoint } => {
             if let Some(file) = from_file {
-                commands::handoff::run_from_file(std::path::Path::new(&file), &to)
+                commands::handoff::run_from_file(
+                    std::path::Path::new(&file),
+                    &to,
+                    &slim_endpoint,
+                )
             } else {
-                commands::handoff::run(&from, &to, save.as_deref())
+                commands::handoff::run(&from, &to, save.as_deref(), &slim_endpoint)
             }
         }
         Cmd::Delegate { prompt, to, agent_id, endpoint } => {
@@ -235,5 +249,25 @@ mod tests {
     #[test]
     fn rejects_unknown_subcommand() {
         assert!(Cli::try_parse_from(["agentbridge", "nope"]).is_err());
+    }
+
+    #[test]
+    fn parses_native_handoff_specs() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "handoff",
+            "--from",
+            "claude-code",
+            "--to",
+            "copilot",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Handoff { from, to, .. } => {
+                assert_eq!(from, "claude-code");
+                assert_eq!(to, "copilot");
+            }
+            _ => panic!("expected handoff subcommand"),
+        }
     }
 }

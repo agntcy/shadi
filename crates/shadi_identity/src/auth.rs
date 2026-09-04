@@ -78,6 +78,12 @@ pub fn create_app(
     service.create_app(name, provider, verifier)
 }
 
+#[cfg(test)]
+pub(crate) fn lock_slim_auth_env() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Build DID-JWT auth for `agent_id`: derive the agent key from `human_seed` (via
 /// SHADI's HKDF agent derivation) and trust the comma-separated `member_dids` as the
 /// allow-list. Pure (no environment access) so it is easy to unit-test.
@@ -197,9 +203,8 @@ mod tests {
 
     #[test]
     fn did_auth_from_env_selects_mode() {
-        // These env vars are touched by no other test in this crate, so a single
-        // sequential test needs no cross-test lock.
         use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
         let member = AgentIdentity::derive(b"human", "avatar").unwrap().did();
 
         env::remove_var("SHADI_SLIM_AUTH");

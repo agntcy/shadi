@@ -8,11 +8,12 @@ use a2a_server::{
     AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
     ServiceParams as A2AServiceParams,
 };
-use agentbridge::{
+use         agentbridge::{
     adapters::{
         claude_code::ClaudeCodeAdapter,
         codex::CodexAdapter,
         copilot::CopilotAdapter,
+        cursor_agent::CursorAgentAdapter,
         generic_stdio::GenericStdioAdapter,
     },
     dir_registry::DirError,
@@ -124,9 +125,36 @@ pub fn run(
                 println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
             }
         }
+        "cursor-agent" => {
+            let work_dir = command
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let adapter = Arc::new(CursorAgentAdapter::new("cursor-agent", work_dir));
+            println!(
+                "Registered Cursor Agent adapter (agent id: {})",
+                adapter.agent_id().0
+            );
+            if let Some(endpoint) = slim_endpoint {
+                println!(
+                    "Starting SLIM A2A listener on {endpoint} as agntcy/shadi/cursor-agent-a2a ..."
+                );
+                run_slim_listener("cursor-agent", adapter, endpoint, dir_publish.as_ref())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            } else {
+                if let Some(opts) = dir_publish.as_ref() {
+                    publish_card_to_dir(
+                        "cursor-agent",
+                        None,
+                        best_effort_did("cursor-agent").as_deref(),
+                        opts,
+                    )?;
+                }
+                println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
+            }
+        }
         other => {
             anyhow::bail!(
-                "Unknown tool type '{}'. Supported: generic-stdio, claude-code, copilot, codex.",
+                "Unknown tool type '{}'. Supported: generic-stdio, claude-code, copilot, codex, cursor-agent.",
                 other
             );
         }
@@ -303,7 +331,18 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
         self.ready.notify_waiters();
-        self.inner.send_message(params, req).await
+        match admit_incoming_message(req) {
+            IncomingAdmission::Proven { request, did } => {
+                tracing::info!(%did, "admitted A2A message with proven agent DID");
+                self.inner.send_message(params, request).await
+            }
+            IncomingAdmission::AuthRequired { request, reason } => {
+                Ok(parked_auth_required(&request, &reason))
+            }
+            IncomingAdmission::Forged { request, reason } => {
+                Ok(rejected_forged_did(&request, &reason))
+            }
+        }
     }
 
     async fn send_streaming_message(
@@ -312,7 +351,34 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.ready.notify_waiters();
-        self.inner.send_streaming_message(params, req).await
+        match admit_incoming_message(req) {
+            IncomingAdmission::Proven { request, did } => {
+                tracing::info!(%did, "admitted A2A stream with proven agent DID");
+                self.inner.send_streaming_message(params, request).await
+            }
+            IncomingAdmission::AuthRequired { request, reason } => {
+                let task = parked_auth_required(&request, &reason);
+                Ok(Box::pin(futures::stream::once(async move {
+                    match task {
+                        SendMessageResponse::Task(task) => Ok(StreamResponse::Task(task)),
+                        SendMessageResponse::Message(message) => {
+                            Ok(StreamResponse::Message(message))
+                        }
+                    }
+                })))
+            }
+            IncomingAdmission::Forged { request, reason } => {
+                let task = rejected_forged_did(&request, &reason);
+                Ok(Box::pin(futures::stream::once(async move {
+                    match task {
+                        SendMessageResponse::Task(task) => Ok(StreamResponse::Task(task)),
+                        SendMessageResponse::Message(message) => {
+                            Ok(StreamResponse::Message(message))
+                        }
+                    }
+                })))
+            }
+        }
     }
 
     async fn get_task(
@@ -671,6 +737,107 @@ fn parse_name(name: &str) -> Result<Name, String> {
     })
 }
 
+#[derive(Debug)]
+enum IncomingAdmission {
+    Proven {
+        did: String,
+        request: SendMessageRequest,
+    },
+    AuthRequired {
+        request: SendMessageRequest,
+        reason: String,
+    },
+    Forged {
+        request: SendMessageRequest,
+        reason: String,
+    },
+}
+
+/// Application-layer gate: the payload must be signed by the claimed agent DID.
+/// Missing/unsigned proof parks the task (`AUTH_REQUIRED`). A mesh member that
+/// presents another agent's DID is rejected.
+fn admit_incoming_message(mut req: SendMessageRequest) -> IncomingAdmission {
+    let text = extract_text(&req.message);
+    if text == "(no text parts)" || !shadi_identity::looks_like_did_proof(text.as_bytes()) {
+        return IncomingAdmission::AuthRequired {
+            request: req,
+            reason: "DID proof required on the message".to_string(),
+        };
+    }
+    match shadi_identity::unwrap_signed_message(text.as_bytes()) {
+        Ok(verified) => {
+            let payload = String::from_utf8_lossy(&verified.payload).into_owned();
+            req.message.parts = vec![Part::text(payload)];
+            IncomingAdmission::Proven {
+                did: verified.did,
+                request: req,
+            }
+        }
+        Err(shadi_identity::IdentityError::Proof(msg)) if msg.contains("forged DID") => {
+            IncomingAdmission::Forged {
+                request: req,
+                reason: msg,
+            }
+        }
+        Err(_) => IncomingAdmission::AuthRequired {
+            request: req,
+            reason: "DID proof required on the message".to_string(),
+        },
+    }
+}
+
+fn task_ids_from(req: &SendMessageRequest) -> (String, String) {
+    let task_id = req
+        .message
+        .task_id
+        .clone()
+        .unwrap_or_else(new_task_id);
+    let context_id = req
+        .message
+        .context_id
+        .clone()
+        .unwrap_or_else(new_context_id);
+    (task_id, context_id)
+}
+
+fn parked_auth_required(req: &SendMessageRequest, reason: &str) -> SendMessageResponse {
+    let (task_id, context_id) = task_ids_from(req);
+    SendMessageResponse::Task(Task {
+        id: task_id,
+        context_id,
+        status: TaskStatus {
+            state: TaskState::AuthRequired,
+            message: Some(Message::new(
+                Role::Agent,
+                vec![Part::text(reason.to_string())],
+            )),
+            timestamp: None,
+        },
+        artifacts: None,
+        history: None,
+        metadata: None,
+    })
+}
+
+fn rejected_forged_did(req: &SendMessageRequest, reason: &str) -> SendMessageResponse {
+    let (task_id, context_id) = task_ids_from(req);
+    SendMessageResponse::Task(Task {
+        id: task_id,
+        context_id,
+        status: TaskStatus {
+            state: TaskState::Rejected,
+            message: Some(Message::new(
+                Role::Agent,
+                vec![Part::text(reason.to_string())],
+            )),
+            timestamp: None,
+        },
+        artifacts: None,
+        history: None,
+        metadata: None,
+    })
+}
+
 fn extract_text(message: &Message) -> String {
     let text = message
         .parts
@@ -746,6 +913,67 @@ mod tests {
     fn preview_truncates_to_first_nonblank_line() {
         assert_eq!(preview("\n\nhello world", 5), "hello…");
         assert_eq!(preview("short", 20), "short");
+    }
+
+    fn sample_request(text: impl Into<String>) -> SendMessageRequest {
+        SendMessageRequest {
+            message: Message::new(Role::User, vec![Part::text(text.into())]),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+        }
+    }
+
+    #[test]
+    fn admit_unsigned_message_parks_auth_required() {
+        match admit_incoming_message(sample_request("plain task")) {
+            IncomingAdmission::AuthRequired { reason, .. } => {
+                assert!(reason.contains("DID proof required"));
+            }
+            other => panic!("expected AUTH_REQUIRED, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admit_forged_did_is_rejected() {
+        let honest = shadi_identity::AgentIdentity::generate().unwrap();
+        let impostor = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        // Claim the impostor's DID while keeping the honest signature.
+        let sig_line = {
+            let text = String::from_utf8(envelope.clone()).unwrap();
+            text.lines().nth(2).unwrap().to_string()
+        };
+        let forged = format!(
+            "SHADI-DID-PROOF/1\n{}\n{}\ntask",
+            impostor.did(),
+            sig_line
+        );
+        match admit_incoming_message(sample_request(forged)) {
+            IncomingAdmission::Forged { reason, .. } => {
+                assert!(reason.contains("forged DID"), "{reason}");
+            }
+            IncomingAdmission::AuthRequired { reason, .. } => {
+                panic!("forged DID must be rejected, not parked: {reason}");
+            }
+            IncomingAdmission::Proven { did, .. } => {
+                panic!("forged DID must not prove as {did}");
+            }
+        }
+    }
+
+    #[test]
+    fn admit_honest_proof_unwraps_payload() {
+        let id = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
+        let text = String::from_utf8(envelope).unwrap();
+        match admit_incoming_message(sample_request(text)) {
+            IncomingAdmission::Proven { did, request } => {
+                assert_eq!(did, id.did());
+                assert_eq!(extract_text(&request.message), "real prompt");
+            }
+            _ => panic!("honest proof must be admitted"),
+        }
     }
 
     #[test]

@@ -37,9 +37,9 @@ impl SqlCipherStore {
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        conn.pragma_update(None, "key", &key)?;
-        conn.pragma_update(None, "cipher_compatibility", &4)?;
-        conn.pragma_update(None, "foreign_keys", &"ON")?;
+        conn.pragma_update(None, "key", key)?;
+        conn.pragma_update(None, "cipher_compatibility", 4)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memory_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

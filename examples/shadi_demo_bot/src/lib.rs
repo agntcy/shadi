@@ -2107,7 +2107,7 @@ mod tests {
     use super::*;
     use clap::Parser;
     use futures::StreamExt;
-    use std::io::{Cursor, Error, ErrorKind};
+    use std::io::{Cursor, Error};
 
     fn demo_send_request(text: &str) -> SendMessageRequest {
         SendMessageRequest {
@@ -2135,7 +2135,7 @@ mod tests {
 
     impl Read for FailingReader {
         fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(Error::new(ErrorKind::Other, "boom"))
+            Err(Error::other("boom"))
         }
     }
 

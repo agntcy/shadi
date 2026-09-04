@@ -243,22 +243,23 @@ fn build_client_config() -> Result<ClientConfig, String> {
 }
 
 fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
-    let mut config = ClientConfig::default();
-    config.endpoint = resolve_client_endpoint_value(endpoint);
-    config.tls = TlsClientConfig {
-        insecure: false,
-        insecure_skip_verify: false,
-        source: TlsSource::File {
-            cert: tls.cert.display().to_string(),
-            key: tls.key.display().to_string(),
+    ClientConfig {
+        endpoint: resolve_client_endpoint_value(endpoint),
+        tls: TlsClientConfig {
+            insecure: false,
+            insecure_skip_verify: false,
+            source: TlsSource::File {
+                cert: tls.cert.display().to_string(),
+                key: tls.key.display().to_string(),
+            },
+            ca_source: CaSource::File {
+                path: tls.ca.display().to_string(),
+            },
+            include_system_ca_certs_pool: false,
+            tls_version: "tls1.3".to_string(),
         },
-        ca_source: CaSource::File {
-            path: tls.ca.display().to_string(),
-        },
-        include_system_ca_certs_pool: false,
-        tls_version: "tls1.3".to_string(),
-    };
-    config
+        ..ClientConfig::default()
+    }
 }
 
 fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
@@ -552,22 +553,23 @@ mod tests {
 
     #[cfg(not(windows))]
     fn build_test_server_config(endpoint: &str, tls: &TlsMaterial) -> slim_bindings::ServerConfig {
-        let mut config = slim_bindings::ServerConfig::default();
-        config.endpoint = endpoint.to_string();
-        config.tls = slim_bindings::TlsServerConfig {
-            insecure: false,
-            source: TlsSource::File {
-                cert: tls.cert.display().to_string(),
-                key: tls.key.display().to_string(),
+        slim_bindings::ServerConfig {
+            endpoint: endpoint.to_string(),
+            tls: slim_bindings::TlsServerConfig {
+                insecure: false,
+                source: TlsSource::File {
+                    cert: tls.cert.display().to_string(),
+                    key: tls.key.display().to_string(),
+                },
+                client_ca: CaSource::File {
+                    path: tls.ca.display().to_string(),
+                },
+                include_system_ca_certs_pool: Some(false),
+                tls_version: Some("tls1.3".to_string()),
+                reload_client_ca_file: Some(false),
             },
-            client_ca: CaSource::File {
-                path: tls.ca.display().to_string(),
-            },
-            include_system_ca_certs_pool: Some(false),
-            tls_version: Some("tls1.3".to_string()),
-            reload_client_ca_file: Some(false),
-        };
-        config
+            ..slim_bindings::ServerConfig::default()
+        }
     }
 
     #[cfg(not(windows))]

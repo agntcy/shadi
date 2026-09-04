@@ -502,10 +502,7 @@ mod tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        let mut bytes = Vec::new();
-        bytes.push(0xff);
-        bytes.push(0xfe);
-        let bad = OsString::from_vec(bytes);
+        let bad = OsString::from_vec(vec![0xff, 0xfe]);
         let path = PathBuf::from(bad);
 
         let policy = SandboxPolicy::new().allow_read_path(path);
@@ -518,10 +515,7 @@ mod tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        let mut bytes = Vec::new();
-        bytes.push(0xff);
-        bytes.push(0xfe);
-        let bad = OsString::from_vec(bytes);
+        let bad = OsString::from_vec(vec![0xff, 0xfe]);
         let path = PathBuf::from(bad);
 
         let policy = SandboxPolicy::new().allow_write_path(path);
@@ -531,7 +525,7 @@ mod tests {
 
     #[test]
     fn apply_profile_noop_in_tests() {
-        let profile = CStr::from_bytes_with_nul(b"(version 1)\0").expect("cstr");
+        let profile = c"(version 1)";
         apply_profile(profile).expect("apply");
     }
 

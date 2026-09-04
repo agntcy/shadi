@@ -309,6 +309,7 @@ impl PySessionContext {
             verified: self.verified,
             claims: self.claims.clone(),
             did: None,
+            did_proven: false,
         }
     }
 }

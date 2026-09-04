@@ -11,7 +11,7 @@ pub mod session;
 use std::fmt;
 
 pub use agent::AgentSecretAccess;
-pub use auth::AgentVerifier;
+pub use auth::{AgentVerifier, DidProofVerifier, NoopVerifier};
 pub use memory::SecretBytes;
 pub use policy::SecretPolicy;
 pub use session::SessionContext;

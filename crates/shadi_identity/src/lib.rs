@@ -19,9 +19,14 @@ use pkcs8::LineEnding;
 
 pub mod auth;
 pub mod config;
+pub mod did_proof;
 pub mod ssh;
 
 pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
+pub use did_proof::{
+    looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
+    VerifiedPayload,
+};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
@@ -32,6 +37,7 @@ pub enum IdentityError {
     Pkcs8(String),
     InvalidDid(String),
     Config(String),
+    Proof(String),
 }
 
 impl fmt::Display for IdentityError {
@@ -41,6 +47,7 @@ impl fmt::Display for IdentityError {
             IdentityError::Pkcs8(e) => write!(f, "PKCS#8 error: {e}"),
             IdentityError::InvalidDid(e) => write!(f, "invalid did:key: {e}"),
             IdentityError::Config(e) => write!(f, "auth configuration error: {e}"),
+            IdentityError::Proof(e) => write!(f, "DID proof error: {e}"),
         }
     }
 }
@@ -128,6 +135,14 @@ impl AgentIdentity {
 
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
+    }
+
+    /// Detached Ed25519 signature over `message` (64 bytes). Used by the
+    /// application-layer DID proof — never log the key or the signature
+    /// together with the seed.
+    pub fn sign_bytes(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        self.signing_key.sign(message).to_bytes()
     }
 
     /// This identity's `did:key`.
@@ -296,9 +311,12 @@ mod tests {
         assert!(IdentityError::Pkcs8("x".into())
             .to_string()
             .contains("PKCS#8"));
-        assert!(IdentityError::InvalidDid("x".into())
+        assert!(            IdentityError::InvalidDid("x".into())
             .to_string()
             .contains("invalid did:key"));
+        assert!(IdentityError::Proof("x".into())
+            .to_string()
+            .contains("DID proof"));
     }
 
     #[test]

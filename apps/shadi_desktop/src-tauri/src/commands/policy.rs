@@ -55,6 +55,9 @@ pub struct LivePolicySnapshot {
 /// The policy a sandbox is launched with (`sandbox_launch`'s
 /// `LaunchSandboxRequest`) — a config to build a fresh `SandboxPolicy` from,
 /// not the live, already-resolved shape `LivePolicySnapshot` reads back.
+/// This is a full-replacement launch config, not the additive control-socket
+/// [`shadi_sandbox::PolicyPatch`]. Keep the types separate so a live patch
+/// cannot be mistaken for a launch config.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PolicyConfig {
     pub allow: Vec<String>,
