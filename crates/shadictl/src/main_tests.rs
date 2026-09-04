@@ -406,7 +406,7 @@
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            let default_read = canonicalize_string_path("/").expect("canonical root path");
+            let default_read = shadi_sandbox::canonicalize_path("/").expect("canonical root path");
             assert_eq!(
                 resolved.policy.platform_profile(),
                 PlatformSandboxProfile::Minimal
@@ -420,7 +420,7 @@
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let default_read = canonicalize_string_path("/").expect("canonical root path");
+            let default_read = shadi_sandbox::canonicalize_path("/").expect("canonical root path");
             assert!(resolved
                 .policy
                 .allow_read()
@@ -531,7 +531,7 @@
         let mut cli = build_cli();
         cli.profile = Some(LauncherProfile::Strict);
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
-        let default_read = canonicalize_string_path("/").expect("canonical root path");
+        let default_read = shadi_sandbox::canonicalize_path("/").expect("canonical root path");
         assert!(resolved.policy.net_blocked());
         assert!(!resolved
             .policy
@@ -557,7 +557,7 @@
 
     #[test]
     fn is_command_blocked_allows_unknown_when_not_blocked() {
-        let blocked = default_blocked_commands()
+        let blocked = shadi_sandbox::default_blocked_commands()
             .into_iter()
             .map(|cmd| cmd.to_string())
             .collect::<HashSet<_>>();
@@ -567,7 +567,7 @@
 
     #[test]
     fn command_blocking_respects_allowlist() {
-        let blocked = default_blocked_commands()
+        let blocked = shadi_sandbox::default_blocked_commands()
             .into_iter()
             .map(|cmd| cmd.to_string())
             .collect::<HashSet<_>>();
@@ -1306,8 +1306,8 @@
     #[test]
     fn canonicalize_helpers_resolve_paths() {
         let dir = temp_dir();
-        let path = canonicalize_path(&dir.path().to_path_buf()).expect("path");
-        let text = canonicalize_string_path(dir.path().to_str().expect("str")).expect("str path");
+        let path = shadi_sandbox::canonicalize_path(dir.path()).expect("path");
+        let text = shadi_sandbox::canonicalize_path(dir.path().to_str().expect("str")).expect("str path");
         assert_eq!(path, text);
     }
 
@@ -3614,13 +3614,13 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn blocklist_blocks_default_command() {
-        let blocked = default_blocked_commands();
+        let blocked = shadi_sandbox::default_blocked_commands();
         assert!(blocked.contains("rm"));
     }
 
     #[test]
     fn allowlist_overrides_blocklist() {
-        let blocked = default_blocked_commands();
+        let blocked = shadi_sandbox::default_blocked_commands();
         let allow = ["rm"].into_iter().collect::<HashSet<_>>();
         assert!(blocked.contains("rm"));
         assert!(allow.contains("rm"));

@@ -42,6 +42,59 @@ interface PolicyPatchResponse {
   pending_restart: string[];
 }
 
+interface PolicyDescription {
+  allow: string[];
+  read: string[];
+  write: string[];
+  net_block: boolean;
+  net_allow: string[];
+  platform_profile: string;
+  allow_command: string[];
+  block_command: string[];
+}
+
+interface PolicyInputs {
+  profile: string | null;
+  policy_file: string | null;
+  allow: string[];
+  read: string[];
+  write: string[];
+  net_block: boolean;
+  net_allow: string[];
+  allow_command: string[];
+}
+
+interface PolicyExplanation {
+  effective: PolicyDescription;
+  sources: {
+    profile: string;
+    profile_defaults: { allow: string[]; read: string[]; write: string[]; net_block: boolean };
+    policy_file: { path: string; values: Record<string, unknown> } | null;
+    overrides: {
+      allow: string[];
+      read: string[];
+      write: string[];
+      net_block: boolean;
+      net_allow: string[];
+      allow_command: string[];
+    };
+  };
+  live: LivePolicySnapshot | null;
+}
+
+interface PolicyFieldDiff {
+  field: string;
+  current: string[];
+  baseline: string[];
+}
+
+interface PolicyDiffResult {
+  equivalent: boolean;
+  changed: PolicyFieldDiff[];
+}
+
+const PROFILES = ["strict", "balanced", "connected"] as const;
+
 const EMPTY_PATCH: PolicyPatch = {
   add_allow: [],
   add_read: [],
@@ -229,6 +282,217 @@ function PatchResultView({ result }: { result: PolicyPatchResponse }) {
   );
 }
 
+function ResolveSection({ attached }: { attached: string | null }) {
+  const [profile, setProfile] = useState<string>("balanced");
+  const [policyFile, setPolicyFile] = useState("");
+  const [allow, setAllow] = useState("");
+  const [read, setRead] = useState("");
+  const [write, setWrite] = useState("");
+  const [netBlock, setNetBlock] = useState(false);
+  const [netAllow, setNetAllow] = useState("");
+  const [baseline, setBaseline] = useState<string>("strict");
+  const [explanation, setExplanation] = useState<PolicyExplanation | null>(null);
+  const [diff, setDiff] = useState<PolicyDiffResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function currentInputs(): PolicyInputs {
+    return {
+      profile,
+      policy_file: policyFile.trim() || null,
+      allow: splitList(allow),
+      read: splitList(read),
+      write: splitList(write),
+      net_block: netBlock,
+      net_allow: splitList(netAllow),
+      allow_command: [],
+    };
+  }
+
+  async function run(what: "explain" | "diff") {
+    setBusy(true);
+    setError(null);
+    try {
+      if (what === "explain") {
+        setDiff(null);
+        setExplanation(
+          await invoke<PolicyExplanation>("policy_explain", {
+            inputs: currentInputs(),
+            socketPath: attached,
+          }),
+        );
+      } else {
+        setExplanation(null);
+        setDiff(
+          await invoke<PolicyDiffResult>("policy_diff", {
+            inputs: currentInputs(),
+            baselineProfile: baseline,
+          }),
+        );
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <section className="pl-card">
+        <h2>Resolve from inputs</h2>
+        <p className="pl-hint">
+          What a profile, a policy file and these paths resolve to — answered without a running
+          session, so you can check a policy before launching anything.
+          {attached !== null && " The attached session's live policy is shown alongside it."}
+        </p>
+        <div className="pl-grid">
+          <label className="pl-field">
+            <span>Profile</span>
+            <select value={profile} onChange={(e) => setProfile(e.target.value)}>
+              {PROFILES.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="pl-field">
+            <span>Policy file (optional)</span>
+            <input
+              value={policyFile}
+              onChange={(e) => setPolicyFile(e.target.value)}
+              placeholder="/path/to/policy.json"
+            />
+          </label>
+          <label className="pl-field">
+            <span>Read+write paths</span>
+            <input value={allow} onChange={(e) => setAllow(e.target.value)} placeholder="/tmp/work" />
+          </label>
+          <label className="pl-field">
+            <span>Read-only paths</span>
+            <input value={read} onChange={(e) => setRead(e.target.value)} />
+          </label>
+          <label className="pl-field">
+            <span>Write-only paths</span>
+            <input value={write} onChange={(e) => setWrite(e.target.value)} />
+          </label>
+          <label className="pl-field">
+            <span>Network allow (hosts)</span>
+            <input value={netAllow} onChange={(e) => setNetAllow(e.target.value)} />
+          </label>
+        </div>
+        <label className="pl-check">
+          <input type="checkbox" checked={netBlock} onChange={(e) => setNetBlock(e.target.checked)} />
+          <span>Block network regardless of the profile</span>
+        </label>
+        <div className="pl-row">
+          <button onClick={() => run("explain")} disabled={busy}>
+            Explain
+          </button>
+          <button onClick={() => run("diff")} disabled={busy}>
+            Diff against
+          </button>
+          <select value={baseline} onChange={(e) => setBaseline(e.target.value)}>
+            {PROFILES.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </div>
+        <ErrorText message={error} />
+      </section>
+
+      {explanation !== null && <ExplanationView explanation={explanation} />}
+      {diff !== null && <DiffView diff={diff} baseline={baseline} />}
+    </>
+  );
+}
+
+function ExplanationView({ explanation }: { explanation: PolicyExplanation }) {
+  const { effective, sources, live } = explanation;
+  return (
+    <section className="pl-card">
+      <h2>Effective policy</h2>
+      <div className="pl-grid">
+        <PolicyList label="Read+write" items={effective.allow} />
+        <PolicyList label="Read-only" items={effective.read} />
+        <PolicyList label="Write-only" items={effective.write} />
+        <PolicyList
+          label={`Network allow (${effective.net_block ? "blocked by default" : "open by default"})`}
+          items={effective.net_allow}
+        />
+        <PolicyList label="Allowed commands" items={effective.allow_command} />
+        <PolicyList label="Blocked commands" items={effective.block_command} />
+      </div>
+      <p className="pl-hint">Platform sandbox profile: {effective.platform_profile}</p>
+
+      <div className="pl-staged">
+        <h3>Where it came from</h3>
+        <div className="pl-grid">
+          <PolicyList
+            label={`Profile "${sources.profile}" grants`}
+            items={[
+              ...sources.profile_defaults.allow,
+              ...sources.profile_defaults.read,
+              ...sources.profile_defaults.write,
+            ]}
+          />
+          <PolicyList
+            label={sources.policy_file ? `File ${sources.policy_file.path}` : "Policy file"}
+            items={sources.policy_file ? [JSON.stringify(sources.policy_file.values)] : []}
+          />
+          <PolicyList
+            label="Your overrides"
+            items={[
+              ...sources.overrides.allow,
+              ...sources.overrides.read,
+              ...sources.overrides.write,
+              ...sources.overrides.net_allow,
+            ]}
+          />
+        </div>
+      </div>
+
+      {live !== null && (
+        <div className="pl-staged">
+          <h3>The attached session right now</h3>
+          <p className="pl-hint">
+            A session patched since it started will differ from the resolved policy above.
+          </p>
+          <div className="pl-grid">
+            <PolicyList label="Read" items={live.allow_read} />
+            <PolicyList label="Write" items={live.allow_write} />
+            <PolicyList label="Network allow" items={live.net_allow} />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DiffView({ diff, baseline }: { diff: PolicyDiffResult; baseline: string }) {
+  return (
+    <section className="pl-card">
+      <h2>Diff against {baseline}</h2>
+      {diff.equivalent ? (
+        <p className="pl-accepted">Identical to the {baseline} profile.</p>
+      ) : (
+        <div className="pl-grid">
+          {diff.changed.map((field) => (
+            <div key={field.field} className="pl-list">
+              <span className="pl-list-label">{field.field}</span>
+              <PolicyList label="this policy" items={field.current} />
+              <PolicyList label={baseline} items={field.baseline} />
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function PolicyPanel() {
   const [sessionId, setSessionId] = useState("");
   const [attached, setAttached] = useState<string | null>(null);
@@ -305,6 +569,7 @@ export function PolicyPanel() {
       {snapshot !== null && <SnapshotView snapshot={snapshot} />}
       {attached !== null && <PatchForm onSubmit={onPatch} busy={busy} />}
       {patchResult !== null && <PatchResultView result={patchResult} />}
+      <ResolveSection attached={attached} />
     </div>
   );
 }

@@ -92,9 +92,9 @@ where
         .map_err(|err| format!("sandbox task failed: {err}"))?
 }
 
-/// Build a [`SandboxPolicy`] the way `shadictl` does: network first, then the
-/// profile's paths, then the caller's own on top, so an explicit path can only
-/// widen what the profile granted.
+/// Build a [`SandboxPolicy`] through the same layering shadictl uses, so a
+/// sandbox launched here and one launched from the command line resolve the
+/// same way.
 fn policy_from_config(config: &PolicyConfig) -> Result<SandboxPolicy, String> {
     let profile = match config.profile.as_deref() {
         Some(name) => Some(SandboxProfile::from_name(name).ok_or_else(|| {
@@ -102,59 +102,19 @@ fn policy_from_config(config: &PolicyConfig) -> Result<SandboxPolicy, String> {
         })?),
         None => None,
     };
-    let defaults = profile.map(|p| p.defaults());
 
-    let net_block = config.net_block || defaults.as_ref().map(|d| d.net_block).unwrap_or(false);
-    let mut policy = SandboxPolicy::new().block_network(net_block);
-
-    for destination in &config.net_allow {
-        policy = policy.allow_network_destination(destination.clone());
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        policy = policy.use_minimal_platform_profile();
-    }
-
-    if let Some(defaults) = defaults.as_ref() {
-        policy = apply_paths(policy, &defaults.read, PathMode::Read)?;
-        policy = apply_paths(policy, &defaults.write, PathMode::Write)?;
-        policy = apply_paths(policy, &defaults.allow, PathMode::Allow)?;
-    }
-
-    policy = apply_paths(policy, &config.read, PathMode::Read)?;
-    policy = apply_paths(policy, &config.write, PathMode::Write)?;
-    policy = apply_paths(policy, &config.allow, PathMode::Allow)?;
-
-    Ok(policy)
-}
-
-enum PathMode {
-    Read,
-    Write,
-    Allow,
-}
-
-fn apply_paths(
-    mut policy: SandboxPolicy,
-    paths: &[String],
-    mode: PathMode,
-) -> Result<SandboxPolicy, String> {
-    let label = match mode {
-        PathMode::Read => "read",
-        PathMode::Write => "write",
-        PathMode::Allow => "allow",
+    let overrides = shadi_sandbox::PolicyOverrides {
+        profile,
+        allow: config.allow.iter().map(PathBuf::from).collect(),
+        read: config.read.iter().map(PathBuf::from).collect(),
+        write: config.write.iter().map(PathBuf::from).collect(),
+        net_block: config.net_block,
+        net_allow: config.net_allow.clone(),
+        allow_command: Vec::new(),
     };
-    for path in paths {
-        let resolved = std::fs::canonicalize(path)
-            .map_err(|err| format!("invalid {label} path {path}: {err}"))?;
-        policy = match mode {
-            PathMode::Read => policy.allow_read_path(&resolved),
-            PathMode::Write => policy.allow_write_path(&resolved),
-            PathMode::Allow => policy.allow_read_path(&resolved).allow_write_path(&resolved),
-        };
-    }
-    Ok(policy)
+
+    shadi_sandbox::resolve_policy(&overrides, &shadi_sandbox::PolicyFileValues::default())
+        .map(|resolved| resolved.policy)
 }
 
 /// Launch a sandboxed process (mirrors `shadictl <flags> -- <command>`).

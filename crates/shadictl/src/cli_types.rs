@@ -1101,9 +1101,4 @@ pub(crate) struct ProcessTrustedSecretRule {
     pub(crate) exec_sha256: Option<String>,
 }
 
-#[derive(Debug)]
-pub(crate) struct ResolvedPolicy {
-    pub(crate) policy: SandboxPolicy,
-    pub(crate) blocked: HashSet<String>,
-    pub(crate) allow: HashSet<String>,
-}
+pub(crate) use shadi_sandbox::ResolvedPolicy;

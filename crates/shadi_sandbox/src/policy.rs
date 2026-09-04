@@ -9,6 +9,15 @@ pub enum PlatformSandboxProfile {
     Minimal,
 }
 
+impl PlatformSandboxProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compatibility => "compatibility",
+            Self::Minimal => "minimal",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     allow_read: Vec<PathBuf>,
@@ -56,6 +65,15 @@ impl SandboxProfile {
             "balanced" => Some(Self::Balanced),
             "connected" => Some(Self::Connected),
             _ => None,
+        }
+    }
+
+    /// The name this profile is spelled with on the command line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Balanced => "balanced",
+            Self::Connected => "connected",
         }
     }
 

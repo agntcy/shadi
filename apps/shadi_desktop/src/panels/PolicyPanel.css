@@ -140,3 +140,18 @@
 .pl-axes dd {
   margin: 0;
 }
+
+.pl-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.pl-row select,
+.pl-field select {
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 6px;
+  font: inherit;
+}

@@ -5,10 +5,15 @@ pub mod control;
 pub mod net_proxy;
 pub mod policy;
 pub mod policy_patch;
+pub mod resolve;
 mod platform;
 
 pub use net_proxy::{NetAllowlist, NetProxy};
 pub use policy::{PlatformSandboxProfile, ProfileDefaults, SandboxPolicy, SandboxProfile};
+pub use resolve::{
+    canonicalize_path, default_blocked_commands, describe_policy, is_command_blocked,
+    resolve_policy, PolicyDescription, PolicyFileValues, PolicyOverrides, ResolvedPolicy,
+};
 pub use policy_patch::{
     ControlMessage, ControlResponse, PatchAxisStatus, PolicyPatch, PolicyPatchResponse,
     ProcessResources,

@@ -4,22 +4,19 @@
 //! Policy inspector and editor (agntcy/shadi#116) — replaces `shadictl
 //! shell`'s `/policy query|patch|explain|diff` and the `--profile` presets.
 //!
-//! `query` and `patch` reach a live session over its control socket, the
-//! same client `shadi_sandbox::control` gives the sandbox panel. `explain`
-//! and `diff` stay stubs: their shadictl equivalents resolve a policy file,
-//! a named profile and CLI flags against shadictl's own `Cli` type
-//! (`policy_helpers::resolve_policy`), which is private to that binary and
-//! not yet factored into a form this app can call. That factoring is its
-//! own piece of work, not something to rush alongside the live-session half.
+//! `query` and `patch` reach a live session over its control socket;
+//! `explain` and `diff` resolve a policy from its inputs without one, so
+//! they answer what a set of flags *would* produce as well as what a running
+//! session currently has. Both halves go through `shadi_sandbox`, so the
+//! answers match what `shadictl` would give for the same inputs.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use shadi_sandbox::{control, PolicyPatch, PolicyPatchResponse};
-
-use super::not_implemented;
-
-const PANEL_ISSUE: u32 = 116;
+use shadi_sandbox::{
+    control, PolicyDescription, PolicyFileValues, PolicyOverrides, PolicyPatch,
+    PolicyPatchResponse, ResolvedPolicy, SandboxProfile,
+};
 
 /// Blocking round trip to a session's control socket, off the async runtime
 /// — same reasoning as the sandbox panel's commands: the client is blocking
@@ -69,18 +66,76 @@ pub struct PolicyConfig {
     pub profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolicyExplanation {
-    pub effective: PolicyConfig,
-    /// Human-readable provenance per field, e.g. "profile:strict", "cli:--allow /tmp".
-    pub sources: Vec<String>,
+/// What to resolve a policy from: a named profile, an optional policy file,
+/// and the overrides layered on top — the same three inputs `shadictl policy
+/// explain` takes.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PolicyInputs {
+    pub profile: Option<String>,
+    pub policy_file: Option<String>,
+    pub allow: Vec<String>,
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub net_block: bool,
+    pub net_allow: Vec<String>,
+    pub allow_command: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyExplanation {
+    pub effective: PolicyDescription,
+    pub sources: PolicySources,
+    /// The attached session's live policy, when one was given. A session that
+    /// has been patched since it started will not match `effective`, which is
+    /// what these inputs resolve to rather than what is currently running.
+    pub live: Option<LivePolicySnapshot>,
+}
+
+/// Where each part of the effective policy came from.
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicySources {
+    pub profile: String,
+    pub profile_defaults: ProfileDefaultsView,
+    pub policy_file: Option<PolicyFileSource>,
+    pub overrides: PolicyInputsView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileDefaultsView {
+    pub allow: Vec<String>,
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub net_block: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyFileSource {
+    pub path: String,
+    pub values: PolicyFileValues,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyInputsView {
+    pub allow: Vec<String>,
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub net_block: bool,
+    pub net_allow: Vec<String>,
+    pub allow_command: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PolicyDiff {
-    pub added: Vec<String>,
-    pub removed: Vec<String>,
-    pub changed: Vec<String>,
+    pub equivalent: bool,
+    pub changed: Vec<PolicyFieldDiff>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyFieldDiff {
+    pub field: String,
+    pub current: Vec<String>,
+    pub baseline: Vec<String>,
 }
 
 /// Show the effective policy of the attached session (`/policy query`).
@@ -103,18 +158,148 @@ pub async fn policy_patch(
     blocking(move || control::send_patch(&PathBuf::from(socket_path), &patch)).await
 }
 
-/// Resolved policy plus source inputs (`/policy explain`).
-#[tauri::command]
-pub async fn policy_explain(socket_path: String) -> Result<PolicyExplanation, String> {
-    let _ = socket_path;
-    not_implemented(PANEL_ISSUE)
+fn parse_profile(name: Option<&str>) -> Result<SandboxProfile, String> {
+    match name {
+        Some(name) => SandboxProfile::from_name(name).ok_or_else(|| {
+            format!("unknown profile '{name}'; expected strict, balanced or connected")
+        }),
+        None => Ok(SandboxProfile::Balanced),
+    }
 }
 
-/// Diff effective policy against a baseline profile (`/policy diff`).
+/// Read the sandbox-relevant values out of a policy file. Fields the file
+/// carries for other purposes (shadictl's keychain and trusted-secret rules)
+/// are ignored rather than rejected.
+fn read_policy_file(path: &str) -> Result<PolicyFileValues, String> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read policy file {path}: {err}"))?;
+    serde_json::from_str(&data).map_err(|err| format!("{path} is not a valid policy file: {err}"))
+}
+
+fn resolve(inputs: &PolicyInputs) -> Result<(ResolvedPolicy, SandboxProfile, PolicyFileValues), String> {
+    let profile = parse_profile(inputs.profile.as_deref())?;
+    let file_values = match inputs.policy_file.as_deref() {
+        Some(path) => read_policy_file(path)?,
+        None => PolicyFileValues::default(),
+    };
+
+    let overrides = PolicyOverrides {
+        profile: Some(profile),
+        allow: inputs.allow.iter().map(PathBuf::from).collect(),
+        read: inputs.read.iter().map(PathBuf::from).collect(),
+        write: inputs.write.iter().map(PathBuf::from).collect(),
+        net_block: inputs.net_block,
+        net_allow: inputs.net_allow.clone(),
+        allow_command: inputs.allow_command.clone(),
+    };
+
+    let resolved = shadi_sandbox::resolve_policy(&overrides, &file_values)?;
+    Ok((resolved, profile, file_values))
+}
+
+fn describe(inputs: &PolicyInputs) -> Result<PolicyDescription, String> {
+    let (resolved, _, _) = resolve(inputs)?;
+    Ok(shadi_sandbox::describe_policy(
+        &resolved.policy,
+        &resolved.blocked,
+        &resolved.allow,
+    ))
+}
+
+/// Resolved policy plus source inputs (`/policy explain`).
 #[tauri::command]
-pub async fn policy_diff(socket_path: String, baseline_profile: String) -> Result<PolicyDiff, String> {
-    let _ = (socket_path, baseline_profile);
-    not_implemented(PANEL_ISSUE)
+pub async fn policy_explain(
+    inputs: PolicyInputs,
+    socket_path: Option<String>,
+) -> Result<PolicyExplanation, String> {
+    blocking(move || {
+        let (resolved, profile, file_values) = resolve(&inputs)?;
+        let defaults = profile.defaults();
+
+        let live = match socket_path.as_deref() {
+            Some(path) => control::query_policy(&PathBuf::from(path))
+                .ok()
+                .and_then(|value| serde_json::from_value(value).ok()),
+            None => None,
+        };
+
+        Ok(PolicyExplanation {
+            effective: shadi_sandbox::describe_policy(
+                &resolved.policy,
+                &resolved.blocked,
+                &resolved.allow,
+            ),
+            sources: PolicySources {
+                profile: profile.as_str().to_string(),
+                profile_defaults: ProfileDefaultsView {
+                    allow: defaults.allow,
+                    read: defaults.read,
+                    write: defaults.write,
+                    net_block: defaults.net_block,
+                },
+                policy_file: inputs.policy_file.clone().map(|path| PolicyFileSource {
+                    path,
+                    values: file_values,
+                }),
+                overrides: PolicyInputsView {
+                    allow: inputs.allow.clone(),
+                    read: inputs.read.clone(),
+                    write: inputs.write.clone(),
+                    net_block: inputs.net_block,
+                    net_allow: inputs.net_allow.clone(),
+                    allow_command: inputs.allow_command.clone(),
+                },
+            },
+            live,
+        })
+    })
+    .await
+}
+
+/// Diff a resolved policy against a baseline profile's own (`/policy diff`).
+#[tauri::command]
+pub async fn policy_diff(
+    inputs: PolicyInputs,
+    baseline_profile: String,
+) -> Result<PolicyDiff, String> {
+    blocking(move || {
+        let current = describe(&inputs)?;
+        let baseline = describe(&PolicyInputs {
+            profile: Some(baseline_profile),
+            ..Default::default()
+        })?;
+
+        let mut changed = Vec::new();
+        let mut compare = |field: &str, current: &[String], baseline: &[String]| {
+            if current != baseline {
+                changed.push(PolicyFieldDiff {
+                    field: field.to_string(),
+                    current: current.to_vec(),
+                    baseline: baseline.to_vec(),
+                });
+            }
+        };
+
+        compare("allow", &current.allow, &baseline.allow);
+        compare("read", &current.read, &baseline.read);
+        compare("write", &current.write, &baseline.write);
+        compare("net_allow", &current.net_allow, &baseline.net_allow);
+        compare("allow_command", &current.allow_command, &baseline.allow_command);
+        compare("block_command", &current.block_command, &baseline.block_command);
+        if current.net_block != baseline.net_block {
+            changed.push(PolicyFieldDiff {
+                field: "net_block".to_string(),
+                current: vec![current.net_block.to_string()],
+                baseline: vec![baseline.net_block.to_string()],
+            });
+        }
+
+        Ok(PolicyDiff {
+            equivalent: changed.is_empty(),
+            changed,
+        })
+    })
+    .await
 }
 
 /// The named profile presets `shadictl --profile` accepts.
