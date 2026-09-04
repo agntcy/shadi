@@ -616,7 +616,7 @@ fn grant_path_access(
         ptstrName: sid as *mut u16,
     };
 
-    let mut entry = EXPLICIT_ACCESS_W {
+    let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask,
         grfAccessMode: GRANT_ACCESS,
         grfInheritance: NO_INHERITANCE,
