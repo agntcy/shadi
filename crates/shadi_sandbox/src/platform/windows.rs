@@ -624,7 +624,7 @@ fn grant_path_access(
     };
 
     let mut acl: *mut ACL = std::ptr::null_mut();
-    let result = unsafe { SetEntriesInAclW(1, &mut entry, rollback.dacl as *mut ACL, &mut acl) };
+    let result = unsafe { SetEntriesInAclW(1, &entry, rollback.dacl as *mut ACL, &mut acl) };
     if result != 0 {
         return Err(win32_error_message("SetEntriesInAclW", result));
     }

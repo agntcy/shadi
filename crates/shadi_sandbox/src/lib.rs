@@ -791,7 +791,7 @@ fn load_or_create_hmac_key() -> Result<Vec<u8>, String> {
     } else {
         use rand::RngCore;
         let mut key = vec![0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         let hex_str = hex::encode(&key);
         std::fs::write(&key_path, hex_str.as_bytes()).map_err(|e| e.to_string())?;
         Ok(key)
