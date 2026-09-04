@@ -1,135 +1,43 @@
 use super::*;
-use shadi_sandbox::{PlatformSandboxProfile, SandboxProfile};
+use shadi_sandbox::{PolicyFileValues, PolicyOverrides, SandboxProfile};
 
 pub(crate) fn format_policy(
     policy: &SandboxPolicy,
     blocked: &HashSet<String>,
     allow: &HashSet<String>,
 ) -> Result<String, String> {
-    #[derive(serde::Serialize)]
-    struct PolicyDump {
-        allow: Vec<String>,
-        read: Vec<String>,
-        write: Vec<String>,
-        net_block: bool,
-        net_allow: Vec<String>,
-        platform_profile: String,
-        allow_command: Vec<String>,
-        block_command: Vec<String>,
-    }
-
-    let allow_paths = policy
-        .allow_read()
-        .iter()
-        .filter(|path| policy.allow_write().iter().any(|write| write == *path))
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let read_paths = policy
-        .allow_read()
-        .iter()
-        .filter(|path| !policy.allow_write().iter().any(|write| write == *path))
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let write_paths = policy
-        .allow_write()
-        .iter()
-        .filter(|path| !policy.allow_read().iter().any(|read| read == *path))
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let mut blocked_list = blocked.iter().cloned().collect::<Vec<_>>();
-    blocked_list.sort();
-    let mut allow_list = allow.iter().cloned().collect::<Vec<_>>();
-    allow_list.sort();
-
-    let dump = PolicyDump {
-        allow: allow_paths,
-        read: read_paths,
-        write: write_paths,
-        net_block: policy.net_blocked(),
-        net_allow: policy.net_allow().to_vec(),
-        platform_profile: match policy.platform_profile() {
-            PlatformSandboxProfile::Compatibility => "compatibility".to_string(),
-            PlatformSandboxProfile::Minimal => "minimal".to_string(),
-        },
-        allow_command: allow_list,
-        block_command: blocked_list,
-    };
-
-    serde_json::to_string_pretty(&dump).map_err(|err| err.to_string())
+    let described = shadi_sandbox::describe_policy(policy, blocked, allow);
+    serde_json::to_string_pretty(&described).map_err(|err| err.to_string())
 }
 
+/// Map this binary's `Cli` and `PolicyFile` onto the layering rules in
+/// `shadi_sandbox::resolve`, which the desktop app resolves policy with too.
 pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy, String> {
-    let mut blocked = default_blocked_commands()
-        .into_iter()
-        .map(|cmd| cmd.to_string())
-        .collect::<HashSet<_>>();
-    for cmd in file_policy.block_command.iter() {
-        blocked.insert(cmd.to_string());
-    }
-
-    let mut allow = file_policy
-        .allow_command
-        .iter()
-        .map(|cmd| cmd.to_string())
-        .collect::<HashSet<_>>();
-    for cmd in cli.allow_command.iter() {
-        allow.insert(cmd.to_string());
-    }
-
-    let profile_name = match cli.profile.unwrap_or(LauncherProfile::Balanced) {
-        LauncherProfile::Strict => "strict",
-        LauncherProfile::Balanced => "balanced",
-        LauncherProfile::Connected => "connected",
+    let overrides = PolicyOverrides {
+        profile: cli.profile.map(|profile| match profile {
+            LauncherProfile::Strict => SandboxProfile::Strict,
+            LauncherProfile::Balanced => SandboxProfile::Balanced,
+            LauncherProfile::Connected => SandboxProfile::Connected,
+        }),
+        allow: cli.allow.clone(),
+        read: cli.read.clone(),
+        write: cli.write.clone(),
+        net_block: cli.net_block,
+        net_allow: cli.net_allow.clone(),
+        allow_command: cli.allow_command.clone(),
     };
-    let span = info_span!(
-        "shadi.policy.resolve",
-        policy.allowed_paths = field::Empty,
-        network.mode = field::Empty,
-        policy.profile = %profile_name,
-    );
-    let _guard = span.enter();
 
-    let profile = profile_defaults(cli.profile);
-    let profile_net_block = profile.net_block.unwrap_or(false);
-    let mut policy = SandboxPolicy::new()
-        .block_network(cli.net_block || file_policy.net_block.unwrap_or(profile_net_block));
+    let file_values = PolicyFileValues {
+        allow: file_policy.allow.clone(),
+        read: file_policy.read.clone(),
+        write: file_policy.write.clone(),
+        net_block: file_policy.net_block,
+        net_allow: file_policy.net_allow.clone(),
+        allow_command: file_policy.allow_command.clone(),
+        block_command: file_policy.block_command.clone(),
+    };
 
-    for destination in &file_policy.net_allow {
-        policy = policy.allow_network_destination(destination.clone());
-    }
-    for destination in &cli.net_allow {
-        policy = policy.allow_network_destination(destination.clone());
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        policy = policy.use_minimal_platform_profile();
-    }
-
-    policy = apply_string_paths(policy, &profile.read, PathMode::Read)?;
-    policy = apply_string_paths(policy, &profile.write, PathMode::Write)?;
-    policy = apply_string_paths(policy, &profile.allow, PathMode::Allow)?;
-
-    policy = apply_preset_paths(policy, &file_policy.read, PathMode::Read)?;
-    policy = apply_preset_paths(policy, &file_policy.write, PathMode::Write)?;
-    policy = apply_preset_paths(policy, &file_policy.allow, PathMode::Allow)?;
-
-    policy = apply_paths(policy, &cli.read, PathMode::Read)?;
-    policy = apply_paths(policy, &cli.write, PathMode::Write)?;
-    policy = apply_paths(policy, &cli.allow, PathMode::Allow)?;
-
-    let mut allowed_paths = BTreeSet::new();
-    allowed_paths.extend(policy.allow_read().iter().cloned());
-    allowed_paths.extend(policy.allow_write().iter().cloned());
-    span.record("policy.allowed_paths", &(allowed_paths.len() as i64));
-    let network_mode = if policy.net_blocked() { "blocked" } else { "allowed" };
-    span.record("network.mode", &field::display(network_mode));
-
-    Ok(ResolvedPolicy {
-        policy,
-        blocked,
-        allow,
-    })
+    shadi_sandbox::resolve_policy(&overrides, &file_values)
 }
 
 pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
@@ -158,88 +66,7 @@ pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
     }
 }
 
-pub(crate) fn is_command_blocked(
-    cmd: &str,
-    blocked: &HashSet<String>,
-    allow: &HashSet<String>,
-) -> bool {
-    blocked.contains(cmd) && !allow.contains(cmd)
-}
-
-enum PathMode {
-    Read,
-    Write,
-    Allow,
-}
-
-fn apply_string_paths(
-    mut policy: SandboxPolicy,
-    paths: &[String],
-    mode: PathMode,
-) -> Result<SandboxPolicy, String> {
-    for path in paths.iter() {
-        let path = canonicalize_string_path(path)
-            .map_err(|err| format!("invalid {} path {}: {}", mode.label(), path, err))?;
-        policy = apply_path(policy, &path, &mode);
-    }
-    Ok(policy)
-}
-
-/// Like `apply_string_paths` but silently skips paths that do not exist on
-/// the current operating system.  Used for policy-file `read`/`allow`/`write`
-/// lists so that cross-platform presets (which list paths for all three
-/// platforms) work correctly on every OS without failure.
-fn apply_preset_paths(
-    mut policy: SandboxPolicy,
-    paths: &[String],
-    mode: PathMode,
-) -> Result<SandboxPolicy, String> {
-    for path in paths.iter() {
-        match canonicalize_string_path(path) {
-            Ok(canonical) => {
-                policy = apply_path(policy, &canonical, &mode);
-            }
-            Err(_) => {
-                // Path does not exist on this OS — silently skip.
-                // This is expected for cross-platform presets that list paths
-                // for macOS, Linux, and Windows simultaneously.
-            }
-        }
-    }
-    Ok(policy)
-}
-
-fn apply_paths(
-    mut policy: SandboxPolicy,
-    paths: &[PathBuf],
-    mode: PathMode,
-) -> Result<SandboxPolicy, String> {
-    for path in paths.iter() {
-        let path = canonicalize_path(path)
-            .map_err(|err| format!("invalid {} path {}: {}", mode.label(), path.display(), err))?;
-        policy = apply_path(policy, &path, &mode);
-    }
-    Ok(policy)
-}
-
-fn apply_path(mut policy: SandboxPolicy, path: &PathBuf, mode: &PathMode) -> SandboxPolicy {
-    match mode {
-        PathMode::Read => policy = policy.allow_read_path(path),
-        PathMode::Write => policy = policy.allow_write_path(path),
-        PathMode::Allow => policy = policy.allow_read_path(path).allow_write_path(path),
-    }
-    policy
-}
-
-impl PathMode {
-    fn label(&self) -> &'static str {
-        match self {
-            PathMode::Read => "read",
-            PathMode::Write => "write",
-            PathMode::Allow => "allow",
-        }
-    }
-}
+pub(crate) use shadi_sandbox::is_command_blocked;
 
 pub(crate) fn list_keychain(prefix: Option<&str>) -> Result<(), String> {
     let store = default_secret_store();
@@ -260,14 +87,6 @@ pub(crate) fn list_keychain_with_store(
     }
     keys.sort();
     Ok(keys)
-}
-
-pub(crate) fn canonicalize_path(path: &PathBuf) -> std::io::Result<PathBuf> {
-    std::fs::canonicalize(path)
-}
-
-pub(crate) fn canonicalize_string_path(path: &str) -> std::io::Result<PathBuf> {
-    std::fs::canonicalize(Path::new(path))
 }
 
 pub(crate) fn load_policy_file(path: &Path) -> std::io::Result<PolicyFile> {
@@ -321,42 +140,3 @@ pub(crate) fn parse_key_env(value: &str) -> Result<(&str, &str), String> {
     Ok((key, env))
 }
 
-pub(crate) fn default_blocked_commands() -> HashSet<&'static str> {
-    [
-        "rm",
-        "rmdir",
-        "shred",
-        "srm",
-        "dd",
-        "mkfs",
-        "fdisk",
-        "parted",
-        "wipefs",
-        "chmod",
-        "chown",
-        "chgrp",
-        "chattr",
-        "shutdown",
-        "reboot",
-        "halt",
-        "systemctl",
-        "apt",
-        "brew",
-        "pip",
-        "yum",
-        "pacman",
-        "mv",
-        "cp",
-        "truncate",
-        "sudo",
-        "su",
-        "doas",
-        "pkexec",
-        "scp",
-        "rsync",
-        "sftp",
-        "ftp",
-    ]
-    .into_iter()
-    .collect()
-}

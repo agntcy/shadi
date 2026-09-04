@@ -1,0 +1,157 @@
+.pl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pl-card {
+  background: var(--panel-bg, #ffffff);
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pl-card h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.pl-card h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted-fg, #5b6770);
+}
+
+.pl-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-fg, #5b6770);
+}
+
+.pl-error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--error-fg, #b3261e);
+}
+
+.pl-row {
+  display: flex;
+  gap: 8px;
+}
+
+.pl-row input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.pl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pl-field span {
+  font-size: 12px;
+  color: var(--muted-fg, #5b6770);
+}
+
+.pl-field input {
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.pl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.pl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pl-list-label {
+  font-size: 12px;
+  color: var(--muted-fg, #5b6770);
+}
+
+.pl-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pl-list li {
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.pl-empty {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted-fg, #5b6770);
+}
+
+.pl-staged {
+  border-top: 1px solid var(--panel-border, #d9dee2);
+  padding-top: 12px;
+}
+
+.pl-accepted {
+  margin: 0;
+  color: var(--ok-fg, #2e7d5b);
+  font-weight: 600;
+}
+
+.pl-rejected {
+  margin: 0;
+  color: var(--error-fg, #b3261e);
+  font-weight: 600;
+}
+
+.pl-axes {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.pl-axes dt {
+  color: var(--muted-fg, #5b6770);
+}
+
+.pl-axes dd {
+  margin: 0;
+}
+
+.pl-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.pl-row select,
+.pl-field select {
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border, #d9dee2);
+  border-radius: 6px;
+  font: inherit;
+}
