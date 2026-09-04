@@ -231,6 +231,10 @@ impl NetProxy {
         // between release and rebind and be handed this port (agntcy/shadi#204).
         // Retry a bounded number of times; production restart is not racing
         // other NetProxy::start calls in-process.
+        Self::bind_with_retry(port, allowlist)
+    }
+
+    fn bind_with_retry(port: u16, allowlist: NetAllowlist) -> std::io::Result<Self> {
         const ATTEMPTS: u32 = 8;
         let mut last_err = None;
         for attempt in 0..ATTEMPTS {
@@ -626,13 +630,18 @@ mod tests {
         assert_eq!(&buf, b"hello");
     }
 
+    static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_proxy_ports() -> std::sync::MutexGuard<'static, ()> {
+        PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn proxy_restart_rebinds_to_same_port() {
         // Serialize against other tests that bind port 0 so the OS cannot
         // hand this proxy's just-released port to a sibling NetProxy::start
         // (agntcy/shadi#204).
-        static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_proxy_ports();
 
         // Start proxy, record port, restart it, verify the new proxy answers
         // on the same port — the macOS Seatbelt constraint.
@@ -646,5 +655,18 @@ mod tests {
         // New proxy must actually accept connections on that port.
         let conn = std::net::TcpStream::connect(format!("127.0.0.1:{original_port}"));
         assert!(conn.is_ok(), "restarted proxy not accepting on port {original_port}");
+    }
+
+    #[test]
+    fn bind_with_retry_fails_when_port_held() {
+        let _guard = lock_proxy_ports();
+        let holder = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+        let err = match NetProxy::bind_with_retry(port, NetAllowlist::new(vec![])) {
+            Ok(_) => panic!("held port must not rebind"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        drop(holder);
     }
 }

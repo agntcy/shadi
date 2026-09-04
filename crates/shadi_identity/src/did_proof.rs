@@ -88,7 +88,11 @@ pub fn unwrap_signed_message(envelope: &[u8]) -> Result<VerifiedPayload, Identit
 /// Uses the same `SHADI_SLIM_AUTH=did` / `SLIM_HUMAN_SEED` contract as mesh
 /// join. Shared-secret node auth cannot produce an application-layer proof.
 pub fn sign_message_from_env(agent_id: &str, payload: &[u8]) -> Result<Vec<u8>, IdentityError> {
-    match crate::require_did_auth_from_env(agent_id)? {
+    sign_message_with_auth(crate::require_did_auth_from_env(agent_id)?, payload)
+}
+
+fn sign_message_with_auth(auth: SlimAuth, payload: &[u8]) -> Result<Vec<u8>, IdentityError> {
+    match auth {
         SlimAuth::Did { signing_pem, did, .. } => {
             let identity = AgentIdentity::from_pkcs8_pem(&signing_pem)?;
             if identity.did() != did {
@@ -197,5 +201,68 @@ mod tests {
         let mut envelope = wrap_signed_message(&id, b"original").unwrap();
         envelope.extend_from_slice(b"-tampered");
         assert!(unwrap_signed_message(&envelope).is_err());
+    }
+
+    fn raw_envelope(did: &[u8], sig: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.push(b'\n');
+        out.extend_from_slice(did);
+        out.push(b'\n');
+        out.extend_from_slice(sig);
+        out.push(b'\n');
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn unwrap_rejects_malformed_envelopes() {
+        assert!(unwrap_signed_message(b"SHADI-DID-PROOF/1\nonly-one-line").is_err());
+        assert!(split_envelope(b"NOPE\ndid:key:z\nsig\n").is_err());
+        assert!(unwrap_signed_message(&raw_envelope(b"did:web:example.com", b"c2ln", b"x")).is_err());
+        assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"@@@", b"x")).is_err());
+        assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"YQ", b"x")).is_err());
+        assert!(unwrap_signed_message(&raw_envelope(b"", b"c2ln", b"x")).is_err());
+        assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"", b"x")).is_err());
+        assert!(unwrap_signed_message(&raw_envelope(b"did:key:\xff", b"c2ln", b"x")).is_err());
+        assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"sig\xff", b"x")).is_err());
+    }
+
+    #[test]
+    fn sign_from_env_round_trips_did_mode() {
+        let _guard = crate::auth::lock_slim_auth_env();
+        let identity = AgentIdentity::derive(b"human", "avatar").unwrap();
+        std::env::set_var("SHADI_SLIM_AUTH", "did");
+        std::env::set_var("SLIM_HUMAN_SEED", "human");
+        std::env::set_var("SLIM_MEMBER_DIDS", identity.did());
+        let envelope = sign_message_from_env("avatar", b"from-env").unwrap();
+        let verified = unwrap_signed_message(&envelope).unwrap();
+        assert_eq!(verified.did, identity.did());
+        assert_eq!(verified.payload, b"from-env");
+
+        std::env::remove_var("SHADI_SLIM_AUTH");
+        let err = sign_message_from_env("avatar", b"x").unwrap_err();
+        assert!(matches!(err, IdentityError::Config(_)));
+        std::env::remove_var("SLIM_HUMAN_SEED");
+        std::env::remove_var("SLIM_MEMBER_DIDS");
+    }
+
+    #[test]
+    fn sign_with_auth_rejects_shared_secret_and_mismatched_did() {
+        let err = sign_message_with_auth(SlimAuth::SharedSecret(String::new()), b"x").unwrap_err();
+        assert!(matches!(err, IdentityError::Config(_)));
+
+        let signer = AgentIdentity::generate().unwrap();
+        let other = AgentIdentity::generate().unwrap();
+        let mismatched = SlimAuth::Did {
+            signing_pem: signer.to_pkcs8_pem().unwrap(),
+            did: other.did(),
+            member_jwks: String::new(),
+        };
+        let err = sign_message_with_auth(mismatched, b"x").unwrap_err();
+        match err {
+            IdentityError::Proof(msg) => assert!(msg.contains("does not match"), "{msg}"),
+            other => panic!("expected Proof, got {other}"),
+        }
     }
 }

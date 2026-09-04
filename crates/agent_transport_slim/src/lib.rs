@@ -327,4 +327,20 @@ mod tests {
         let err = channel.recv(&ctx).unwrap_err();
         assert!(matches!(err, SecretError::NotAuthorized));
     }
+
+    #[test]
+    fn recv_accepts_envelope_when_session_did_is_unset() {
+        let identity = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&identity, b"task").unwrap();
+        let session = TestSession {
+            sent: Mutex::new(Vec::new()),
+            recv_data: envelope,
+        };
+        let store = MemoryStore;
+        let allow = AllowVerifier;
+        let channel = SecureAgentChannel::new(&session, &allow, &store).with_signer(&identity);
+        let ctx = SessionContext::new("agent", "session");
+        let payload = channel.recv(&ctx).unwrap();
+        assert_eq!(payload, b"task");
+    }
 }

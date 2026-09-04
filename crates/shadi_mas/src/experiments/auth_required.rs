@@ -323,4 +323,123 @@ mod tests {
         assert!(err.contains("AUTH_REQUIRED denied"));
         assert!(err.contains("exceeded"));
     }
+
+    #[test]
+    fn default_config_matches_published_bounds() {
+        let cfg = AuthRequiredConfig::default();
+        assert_eq!(cfg.policy, AuthRequiredPolicy::ReProve);
+        assert_eq!(cfg.max_attempts, DEFAULT_MAX_ATTEMPTS);
+        assert_eq!(cfg.timeout, DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn from_env_reads_policy_attempts_and_timeout() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SHADI_AUTH_REQUIRED_POLICY");
+        std::env::remove_var("SHADI_AUTH_REQUIRED_MAX_ATTEMPTS");
+        std::env::remove_var("SHADI_AUTH_REQUIRED_TIMEOUT_MS");
+        let defaults = AuthRequiredConfig::from_env();
+        assert_eq!(defaults.policy, AuthRequiredPolicy::ReProve);
+        assert_eq!(defaults.max_attempts, DEFAULT_MAX_ATTEMPTS);
+        assert_eq!(defaults.timeout, DEFAULT_TIMEOUT);
+
+        std::env::set_var("SHADI_AUTH_REQUIRED_POLICY", "ask");
+        std::env::set_var("SHADI_AUTH_REQUIRED_MAX_ATTEMPTS", "5");
+        std::env::set_var("SHADI_AUTH_REQUIRED_TIMEOUT_MS", "250");
+        let parsed = AuthRequiredConfig::from_env();
+        assert_eq!(parsed.policy, AuthRequiredPolicy::Ask);
+        assert_eq!(parsed.max_attempts, 5);
+        assert_eq!(parsed.timeout, Duration::from_millis(250));
+
+        std::env::set_var("SHADI_AUTH_REQUIRED_POLICY", "deny");
+        std::env::set_var("SHADI_AUTH_REQUIRED_MAX_ATTEMPTS", "0");
+        std::env::set_var("SHADI_AUTH_REQUIRED_TIMEOUT_MS", "0");
+        let fallback = AuthRequiredConfig::from_env();
+        assert_eq!(fallback.policy, AuthRequiredPolicy::Deny);
+        assert_eq!(fallback.max_attempts, DEFAULT_MAX_ATTEMPTS);
+        assert_eq!(fallback.timeout, DEFAULT_TIMEOUT);
+
+        std::env::remove_var("SHADI_AUTH_REQUIRED_POLICY");
+        std::env::remove_var("SHADI_AUTH_REQUIRED_MAX_ATTEMPTS");
+        std::env::remove_var("SHADI_AUTH_REQUIRED_TIMEOUT_MS");
+    }
+
+    #[test]
+    fn send_error_propagates_without_retry() {
+        let cfg = AuthRequiredConfig::default();
+        let err = run_auth_required_loop(|| Err("transport down".into()), &cfg, || Ok(String::new()))
+            .expect_err("send failure must surface");
+        assert_eq!(err, "transport down");
+    }
+
+    #[test]
+    fn ask_policy_escalates_then_completes() {
+        let cfg = AuthRequiredConfig {
+            policy: AuthRequiredPolicy::Ask,
+            max_attempts: 2,
+            timeout: Duration::from_secs(1),
+        };
+        let mut n = 0;
+        let mut escalated = 0;
+        let response = run_auth_required_loop(
+            || {
+                n += 1;
+                if n < 3 {
+                    Ok(parked_task())
+                } else {
+                    Ok(completed_message())
+                }
+            },
+            &cfg,
+            || {
+                escalated += 1;
+                Ok("operator-ok".to_string())
+            },
+        )
+        .expect("escalate should complete");
+        assert!(!is_auth_required(&response));
+        assert_eq!(n, 3);
+        assert_eq!(escalated, 1);
+    }
+
+    #[test]
+    fn escalate_failure_denies() {
+        let cfg = AuthRequiredConfig {
+            policy: AuthRequiredPolicy::Ask,
+            max_attempts: 2,
+            timeout: Duration::from_secs(1),
+        };
+        let mut n = 0;
+        let err = run_auth_required_loop(
+            || {
+                n += 1;
+                Ok(parked_task())
+            },
+            &cfg,
+            || Err("no operator".into()),
+        )
+        .expect_err("escalate failure must deny");
+        assert!(err.contains("escalate failed"));
+        assert!(err.contains("no operator"));
+    }
+
+    #[test]
+    fn escalate_timeout_denies() {
+        let cfg = AuthRequiredConfig {
+            policy: AuthRequiredPolicy::Ask,
+            max_attempts: 2,
+            timeout: Duration::from_millis(5),
+        };
+        let err = run_auth_required_loop(
+            || Ok(parked_task()),
+            &cfg,
+            || {
+                std::thread::sleep(Duration::from_millis(20));
+                Ok("late".into())
+            },
+        )
+        .expect_err("slow escalate must time out");
+        assert!(err.contains("timed out"));
+    }
 }
