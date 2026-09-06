@@ -1,8 +1,10 @@
+use agentbridge::local_registry::{LocalAdapterRecord, LocalAdapterRegistry};
 use agentbridge::member_source::{DirLookupOptions, MemberSource, SkillSearchSource};
 
 /// List registered agentbridge adapters.
 ///
-/// `--local` queries the running SLIM node (Phase 2+).
+/// `--local` lists listeners this machine started with
+/// `register --slim-endpoint` (lease files under `$SHADI_TMP_DIR`).
 /// Without `--local`, queries the agntcy Agent Directory for adapters
 /// advertising the standard agentbridge skills, resolving each match to a
 /// real `{name, did, slim_endpoint}` via [`SkillSearchSource`] — the same
@@ -13,9 +15,7 @@ pub fn run(
     github_token: Option<&str>,
 ) -> anyhow::Result<()> {
     if local {
-        println!("Local SLIM node discovery: not yet wired (Phase 3).");
-        println!("Start an adapter with: agentbridge register --tool generic-stdio --command <cmd>");
-        return Ok(());
+        return list_local(&LocalAdapterRegistry::from_env());
     }
 
     println!("Searching Agent Directory ({server_addr}) for agentbridge adapters...\n");
@@ -46,14 +46,54 @@ pub fn run(
     Ok(())
 }
 
+fn list_local(registry: &LocalAdapterRegistry) -> anyhow::Result<()> {
+    let records = registry
+        .list_live()
+        .map_err(|e| anyhow::anyhow!("local discovery failed: {e}"))?;
+    print!("{}", render_local_listing(&records));
+    Ok(())
+}
+
+fn render_local_listing(records: &[LocalAdapterRecord]) -> String {
+    if records.is_empty() {
+        return concat!(
+            "No local agentbridge adapters.\n",
+            "Start one with: agentbridge register --tool <name> --slim-endpoint <host:port>\n"
+        )
+        .to_string();
+    }
+    let mut out = String::from("Local agentbridge adapters:\n");
+    for record in records {
+        out.push_str(&format!(
+            "{}  did={}  slim://{}\n",
+            record.name, record.did, record.slim_endpoint
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn local_discovery_is_a_no_op_stub() {
-        // The `--local` path prints guidance and returns Ok without touching
-        // the network or requiring dirctl.
-        assert!(run(true, "unused-addr:443", None).is_ok());
+    fn local_discovery_empty_registry_is_ok() {
+        let registry = LocalAdapterRegistry::with_dir(std::path::PathBuf::from(
+            "/no/such/agentbridge-local-test-dir",
+        ));
+        assert!(list_local(&registry).is_ok());
+        assert!(render_local_listing(&[]).contains("No local agentbridge adapters"));
+    }
+
+    #[test]
+    fn local_listing_prints_name_did_and_endpoint() {
+        let records = vec![LocalAdapterRecord {
+            name: "copilot".to_string(),
+            did: "did:key:zLocal".to_string(),
+            slim_endpoint: "127.0.0.1:47357".to_string(),
+            pid: 1,
+        }];
+        let rendered = render_local_listing(&records);
+        assert!(rendered.contains("copilot  did=did:key:zLocal  slim://127.0.0.1:47357"));
     }
 }

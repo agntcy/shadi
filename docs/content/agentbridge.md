@@ -464,6 +464,7 @@ corrupting the state machine.
           adapter.rs           ← CliAdapter trait + CliToolAdapter
           context.rs           ← ContextPacket, CodeContext, ArtifactPayload
           dir_registry.rs      ← AgentCard → OASF module wrapping + dirctl integration
+          local_registry.rs    ← on-host leases for `agentbridge list --local`
           member_source.rs     ← MemberSource (skill/DID/explicit list) group-discovery trait
           adapters/
             generic_stdio.rs   ← subprocess JSON protocol adapter
