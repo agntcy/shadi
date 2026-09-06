@@ -588,6 +588,29 @@ fn run_slim_listener(
     app.subscribe(name_ref.clone(), Some(connection_id))
         .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
 
+    let did = match &auth {
+        shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
+        shadi_identity::SlimAuth::SharedSecret(_) => String::new(),
+    };
+    let _local_lease = if did.is_empty() {
+        None
+    } else {
+        match agentbridge::local_registry::LocalAdapterRegistry::from_env().publish(
+            &agentbridge::local_registry::LocalAdapterRecord {
+                name: agent_id.to_string(),
+                did,
+                slim_endpoint: endpoint.to_string(),
+                pid: std::process::id(),
+            },
+        ) {
+            Ok(lease) => Some(lease),
+            Err(err) => {
+                eprintln!("[agentbridge] local registry: {err}");
+                None
+            }
+        }
+    };
+
     if let Some(opts) = dir_publish {
         let did = match &auth {
             shadi_identity::SlimAuth::Did { did, .. } => Some(did.as_str()),

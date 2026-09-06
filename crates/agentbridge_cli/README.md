@@ -54,10 +54,8 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
 agentbridge register --tool claude-code --dir-publish
 ```
 
-Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`.
-
-> **Note:** `cursor-agent` is available as a spec in `coordinate --agents`
-> but does not have a standalone `register` listener yet.
+Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
+`cursor-agent`.
 
 ### `list` — discover registered adapters
 
@@ -65,7 +63,7 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`.
 # Query DIR for registered adapters
 agentbridge list
 
-# Query the running local SLIM node only
+# List listeners this machine started with register --slim-endpoint
 agentbridge list --local
 ```
 

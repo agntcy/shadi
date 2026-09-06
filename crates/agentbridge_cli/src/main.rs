@@ -48,9 +48,9 @@ enum Cmd {
         slim_endpoint: Option<String>,
     },
 
-    /// List available adapters (Agent Directory or local SLIM node).
+    /// List available adapters (Agent Directory or this machine).
     List {
-        /// Query the local SLIM node instead of DIR.
+        /// List listeners started by `register --slim-endpoint` on this host.
         #[arg(long)]
         local: bool,
 
