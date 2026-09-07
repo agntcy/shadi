@@ -11,13 +11,13 @@ name = "shadi_identity"
 
 [dependencies]
 ed25519-dalek = { version = "2.2", features = ["pkcs8", "pem"] }
-pkcs8 = { version = "0.10", features = ["pem"] }
-getrandom = "0.2"
+pkcs8 = { version = "0.11", features = ["pem"] }
+getrandom = "0.4"
 bs58 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 serde_json = "1.0"
-hkdf = "0.12"
-sha2 = "0.10"
+hkdf = "0.13"
+sha2 = "0.11"
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
 # OpenSSH key parsing for the SSH-rooted identity source (agntcy/shadi#140).
 # `encryption` brings bcrypt-pbkdf so passphrase-protected keys work.

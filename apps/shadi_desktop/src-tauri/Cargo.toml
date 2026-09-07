@@ -52,7 +52,7 @@ agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.0", pat
 rcgen = { version = "0.14", features = ["pem"] }
 # Reading github.com/<handle>.keys; rustls-tls to match the rest of the stack
 # and avoid an openssl dependency.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 futures = "0.3"
 tauri-plugin-dialog = "2.7.2"
@@ -61,7 +61,7 @@ tauri-plugin-dialog = "2.7.2"
 [dev-dependencies]
 tempfile = "3.27"
 # Building an ssh-ed25519 public-key line for the GitHub-handle tests.
-base64 = "0.22"
+base64 = "0.23"
 ed25519-dalek = "2.2"
 # Building OpenSSH key fixtures for the 1Password field tests.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519"] }

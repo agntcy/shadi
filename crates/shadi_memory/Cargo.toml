@@ -22,10 +22,10 @@ time = { version = "0.3", features = ["formatting"] }
 # from a single publisher whose old builds are deleted; vendored instead, and
 # openssl-src is bumped like any other dependency.
 [target.'cfg(not(windows))'.dependencies]
-rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 
 [target.'cfg(windows)'.dependencies]
-rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [dev-dependencies]
 tempfile = "3.27"
