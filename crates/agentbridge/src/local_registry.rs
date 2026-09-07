@@ -73,7 +73,10 @@ impl LocalAdapterRegistry {
             return Err("local adapter record needs a DID and slim_endpoint".to_string());
         }
         fs::create_dir_all(&self.dir).map_err(|err| {
-            format!("create local adapter registry {}: {err}", self.dir.display())
+            format!(
+                "create local adapter registry {}: {err}",
+                self.dir.display()
+            )
         })?;
         #[cfg(unix)]
         {
@@ -222,6 +225,9 @@ fn pid_is_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_registry() -> (tempfile::TempDir, LocalAdapterRegistry) {
         let dir = tempfile::tempdir().unwrap();
@@ -253,15 +259,9 @@ mod tests {
         let pid = child.id();
         let _ = child.wait();
         drop(child);
-        let path = registry
-            .dir
-            .join(record_filename("codex", pid).unwrap());
+        let path = registry.dir.join(record_filename("codex", pid).unwrap());
         fs::create_dir_all(&registry.dir).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&sample("codex", pid)).unwrap(),
-        )
-        .unwrap();
+        fs::write(&path, serde_json::to_vec(&sample("codex", pid)).unwrap()).unwrap();
         assert!(registry.list_live().unwrap().is_empty());
         assert!(!path.exists());
     }
@@ -285,6 +285,119 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("unsafe"), "{err}");
+    }
+
+    #[test]
+    fn publish_rejects_empty_did_or_endpoint() {
+        let (_dir, registry) = temp_registry();
+        let pid = std::process::id();
+        let mut no_did = sample("copilot", pid);
+        no_did.did.clear();
+        let err = match registry.publish(&no_did) {
+            Ok(_) => panic!("empty DID must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("DID"), "{err}");
+        let mut no_ep = sample("copilot", pid);
+        no_ep.slim_endpoint.clear();
+        let err = match registry.publish(&no_ep) {
+            Ok(_) => panic!("empty endpoint must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("slim_endpoint"), "{err}");
+    }
+
+    #[test]
+    fn publish_rejects_dash_prefix_and_empty_name() {
+        let (_dir, registry) = temp_registry();
+        assert!(registry
+            .publish(&sample("-copilot", std::process::id()))
+            .is_err());
+        assert!(registry.publish(&sample("", std::process::id())).is_err());
+    }
+
+    #[test]
+    fn publish_fails_when_registry_parent_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, b"x").unwrap();
+        let registry = LocalAdapterRegistry::with_dir(blocked.join("nested"));
+        let err = match registry.publish(&sample("copilot", std::process::id())) {
+            Ok(_) => panic!("file-as-parent must fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("create local adapter registry"), "{err}");
+    }
+
+    #[test]
+    fn from_env_uses_shadi_tmp_dir() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("SHADI_TMP_DIR");
+        std::env::set_var("SHADI_TMP_DIR", tmp.path());
+        let registry = LocalAdapterRegistry::from_env();
+        if let Some(value) = prev {
+            std::env::set_var("SHADI_TMP_DIR", value);
+        } else {
+            std::env::remove_var("SHADI_TMP_DIR");
+        }
+        assert_eq!(registry.dir(), tmp.path().join("agentbridge-local"));
+    }
+
+    #[test]
+    fn list_live_missing_dir_is_empty() {
+        let registry = LocalAdapterRegistry::with_dir(std::path::PathBuf::from(
+            "/no/such/agentbridge-local-test-dir",
+        ));
+        assert!(registry.list_live().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_live_errors_when_registry_path_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-dir");
+        fs::write(&path, b"x").unwrap();
+        let registry = LocalAdapterRegistry::with_dir(path);
+        let err = registry.list_live().unwrap_err();
+        assert!(err.contains("read local adapter registry"), "{err}");
+    }
+
+    #[test]
+    fn list_live_skips_junk_and_deletes_empty_did() {
+        let (_dir, registry) = temp_registry();
+        fs::create_dir_all(registry.dir()).unwrap();
+        fs::write(registry.dir().join("readme.txt"), b"ignore").unwrap();
+        fs::write(registry.dir().join("copilot.json"), b"{}").unwrap();
+        fs::write(registry.dir().join("copilot-abc.json"), b"{}").unwrap();
+        fs::create_dir(registry.dir().join("subdir")).unwrap();
+        fs::write(registry.dir().join("copilot-1.json"), b"not-json").unwrap();
+        let empty_did = registry.dir().join("ghost-1.json");
+        fs::write(
+            &empty_did,
+            serde_json::to_vec(&LocalAdapterRecord {
+                name: "ghost".to_string(),
+                did: String::new(),
+                slim_endpoint: "127.0.0.1:1".to_string(),
+                pid: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let zero = registry.dir().join("zero-0.json");
+        fs::write(&zero, serde_json::to_vec(&sample("zero", 0)).unwrap()).unwrap();
+        assert!(registry.list_live().unwrap().is_empty());
+        assert!(!empty_did.exists());
+        assert!(!zero.exists());
+    }
+
+    #[test]
+    fn lease_filename_helpers_reject_junk() {
+        assert!(record_filename("../evil", 1).is_err());
+        assert!(!looks_like_lease_filename("readme.md"));
+        assert!(!looks_like_lease_filename("copilot.json"));
+        assert!(!looks_like_lease_filename("copilot-abc.json"));
+        assert!(looks_like_lease_filename("copilot-12.json"));
+        assert!(!pid_is_alive(0));
     }
 
     #[test]
