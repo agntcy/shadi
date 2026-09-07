@@ -1,0 +1,136 @@
+# Advisories accepted rather than fixed, for osv-scanner and anything built on
+# it (OpenSSF Scorecard's Vulnerabilities check runs osv-scanner over the
+# lockfiles in this repo).
+#
+# cargo-audit is the gate that matters for this workspace and is configured
+# separately in .cargo/audit.toml; it reads the RUSTSEC database directly and
+# already buckets "unmaintained" and "unsound" as warnings. OSV loses that
+# distinction — RUSTSEC exports informational advisories as ordinary entries
+# with no fixed version — so every one of them counts against the Scorecard
+# score as though it were a remote code execution. Hence this file.
+#
+# Every entry expires so the debt resurfaces instead of being buried.
+
+# --- gtk-rs GTK3 bindings: unmaintained upstream -----------------------------
+# Reached only through Tauri: gtk 0.18 <- muda/tao/wry <- tauri. There is no
+# maintained release to move to; tao, wry and muda are all at their latest
+# versions and still require gtk ^0.18. Upstream ports are unmerged
+# (tauri-apps/tao#1104 is a draft, tauri-apps/wry#1767 is open).
+#
+# tao gates these behind cfg(any(target_os = "linux", dragonfly, freebsd,
+# openbsd, netbsd)), so they are absent from macOS and Windows builds and
+# appear here only because a lockfile covers every platform. They also reach
+# no shipped artifact: shadi_desktop is publish = false / release = false and
+# has no packaging pipeline yet (agntcy/shadi#124).
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+ignoreUntil = 2027-03-04
+reason = "gdkwayland-sys: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+ignoreUntil = 2027-03-04
+reason = "gdk: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+ignoreUntil = 2027-03-04
+reason = "atk: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+ignoreUntil = 2027-03-04
+reason = "gdkx11-sys: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+ignoreUntil = 2027-03-04
+reason = "gtk: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+ignoreUntil = 2027-03-04
+reason = "atk-sys: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+ignoreUntil = 2027-03-04
+reason = "gdkx11: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+ignoreUntil = 2027-03-04
+reason = "gdk-sys: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+ignoreUntil = 2027-03-04
+reason = "gtk3-macros: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+ignoreUntil = 2027-03-04
+reason = "gtk-sys: gtk-rs GTK3 bindings unmaintained; Linux-only, via Tauri, no maintained replacement"
+
+# --- glib unsoundness --------------------------------------------------------
+# A real soundness bug (Iterator/DoubleEndedIterator impls), and unlike the
+# rest it has a fix: glib 0.20.0. It is unreachable while GTK3 is in the tree,
+# because gtk 0.18.2 requires glib ^0.18. Same Linux-only, unshipped scope as
+# the bindings above. Drop both entries when Tauri moves to GTK4.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2027-03-04
+reason = "glib 0.18.5 unsound iterators; fixed in 0.20.0 but blocked by gtk 0.18's glib ^0.18 requirement"
+
+[[IgnoredVulns]]
+id = "GHSA-wrw7-89jp-8q8g"
+ignoreUntil = 2027-03-04
+reason = "same defect as RUSTSEC-2024-0429 under its GHSA id"
+
+# --- unic-*: unmaintained ----------------------------------------------------
+# Via urlpattern 0.3 <- tauri-utils. urlpattern 0.4 replaced unic-ucd-ident
+# with icu_properties, but tauri-utils 2.9.3 (the newest release) pins
+# urlpattern ^0.3, so the newer line is unreachable.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2027-03-04
+reason = "unic-char-range unmaintained; via urlpattern 0.3 <- tauri-utils, which pins ^0.3"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2027-03-04
+reason = "unic-common unmaintained; via urlpattern 0.3 <- tauri-utils, which pins ^0.3"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2027-03-04
+reason = "unic-char-property unmaintained; via urlpattern 0.3 <- tauri-utils, which pins ^0.3"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2027-03-04
+reason = "unic-ucd-version unmaintained; via urlpattern 0.3 <- tauri-utils, which pins ^0.3"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2027-03-04
+reason = "unic-ucd-ident unmaintained; via urlpattern 0.3 <- tauri-utils, which pins ^0.3"
+
+# --- proc-macro-error: unmaintained ------------------------------------------
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2027-03-04
+reason = "proc-macro-error unmaintained; build-time proc macro reached via glib-macros <- glib <- gtk 0.18"
+
+# --- rsa: a genuine vulnerability, not reachable here ------------------------
+# The only entry in this file that is an actual vulnerability. Kept in step
+# with the same advisory in .cargo/audit.toml — update both together.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+ignoreUntil = 2027-03-04
+reason = "Marvin Attack, a timing sidechannel in RSA private-key operations, with no fixed release published. Reaches shadictl through sequoia-openpgp's crypto-rust backend, which only parses certificates and extracts Ed25519 public keys (identity_command::extract_ed25519_public_key); no RSA private-key operation is ever performed, so the vulnerable path is not entered."
