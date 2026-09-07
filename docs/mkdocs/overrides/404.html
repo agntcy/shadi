@@ -1,0 +1,30 @@
+{#-
+  Copyright SHADI Contributors
+  SPDX-License-Identifier: Apache-2.0
+
+  GitHub Pages serves this file for any missing URL, so a <base> is required:
+  relative CSS/JS/home links would otherwise resolve against the missing path.
+-#}
+{% extends "main.html" %}
+
+{% block extrahead %}
+  {{ super() }}
+  <base href="{{ config.site_url }}">
+{% endblock %}
+
+{% block content %}
+  <div class="shadi-not-found">
+    <p class="shadi-not-found__code" aria-hidden="true">404</p>
+    <h1 class="shadi-not-found__title">Page not found</h1>
+    <div class="shadi-not-found__lede">
+      <p>The page you requested does not exist or may have moved.</p>
+      <p>Try the search above, or head back home.</p>
+    </div>
+    <div class="shadi-not-found__actions">
+      <a class="shadi-not-found__btn shadi-not-found__btn--primary" href=".">
+        Back to home
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+      </a>
+    </div>
+  </div>
+{% endblock %}
