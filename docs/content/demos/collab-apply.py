@@ -66,7 +66,7 @@ def code_lines(lines: list[str]) -> list[str]:
             continue
         if is_meta(line):
             continue
-        if line.startswith("agentbridge error:"):
+        if line.startswith("agentbridge error:") or line.startswith("Network error:"):
             return []
         out.append(line.rstrip("\n"))
         if len(out) == 2:

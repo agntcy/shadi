@@ -11,7 +11,8 @@ use std::sync::Arc;
 /// Transfer context from one CLI tool to another.
 ///
 /// `--from` / `--to` accept the same specs as `coordinate`:
-/// `claude-code`, `copilot`, `codex`, `cursor-agent`, `generic-stdio:<cmd>`,
+/// `claude-code`, `copilot`, `codex`, `cursor-agent`, `goose`, `opencode`,
+/// `generic-stdio:<cmd>`,
 /// `slim:<id>`, plus a bare subprocess command (Phase 1 GenericStdio).
 ///
 /// The snapshot is an LLM summary of the source session this cycle, not a

@@ -1,28 +1,33 @@
 # Sample run: round-robin Rust
 
-Four coding-agent CLIs — **claude-code**, **copilot**, **codex**,
-**cursor-agent** — take turns writing a small Rust crate. The moderator
-(`avatar`) owns the file and starts hop 1 with `delegate`. Each turn may
-change **at most two lines of Rust**; `collab-apply.py` drops a third
-line even if the model dumps a whole file. The same reply names the next
-peer (`NEXT <id>`) or ends the problem (`DONE`). The finishing listener
-is the A2A client for that handoff — `avatar` does not pick the order.
+Five coding-agent CLIs — **claude-code**, **copilot**, **codex**,
+**cursor-agent**, **goose** — take turns writing a small Rust crate. The
+moderator (`avatar`) owns the file and starts hop 1 with `delegate`.
+Each turn may change **at most two lines of Rust**; `collab-apply.py`
+drops a third line even if the model dumps a whole file. The same reply
+names the next peer (`NEXT <id>`) or ends the problem (`DONE`). The
+finishing listener is the A2A client for that handoff — `avatar` does
+not pick the order.
 
-The script runs two stubs back to back: `sort_i32` (stable ascending,
-no pre-built `sort`) and `Fifo<T>` (`push` / `pop` / `len` /
-`is_empty`). After each apply, the host runs `cargo test` and follows
-the chosen peer until the tests pass.
+The default problem is `Lru<K, V>`. The scaffold ships many stubs on
+purpose: accessors such as `cap` / `len` / `contains` fit a two-line hop,
+but `get` and `put` (lookup, promote, insert, evict) do not. A live
+five-agent run is meant to take on the order of **twenty hops** before
+`cargo test` is green. Optional `fifo` is a shorter smoke test of the
+same protocol.
 
-This page is one curated transcript of that loop. The next live run may
-choose different peers or write different two-line edits. How to start
-the script is in the [round-robin Rust demo](collab-rust.md).
+This page describes that LRU crate and keeps one real fifo transcript
+as a protocol illustration. It does **not** invent an LRU hop-by-hop
+log — peer choices and exact two-line edits change every run. How to
+start the script is in the [round-robin Rust demo](collab-rust.md).
+`--net-allow` includes `cisco.com` and `*.cisco.com`. Goose uses the
+operator's existing config; this sample does not describe that setup.
 
 | | |
 |---|---|
-| Problems | `sort` and `fifo`, both **SOLVED** |
-| Hops | 7 coding delegates (1 + 6) |
-| Tests | `sort` 5/5 · `fifo` 2/2 |
-| Failed delegates | none |
+| Default problem | `lru` — Vec-backed cache, 10 tests (9 fail on the stub) |
+| Optional problem | `fifo` — four no-op methods |
+| Hop budget | `MAX_CYCLES × N` (default 8 × 5 = 40) |
 | Endpoint | `slim://127.0.0.1:47591` |
 
 ## Listeners
@@ -33,114 +38,104 @@ the script is in the [round-robin Rust demo](collab-rust.md).
 ```text
 Local agentbridge adapters:
 claude-code   did:key:z6MkhRuJ…PZa1  slim://127.0.0.1:47591
-copilot       did:key:z6MkmJUc…MnwT  slim://127.0.0.1:47591
 codex         did:key:z6MkmaFF…uGr6  slim://127.0.0.1:47591
+copilot       did:key:z6MkmJUc…MnwT  slim://127.0.0.1:47591
 cursor-agent  did:key:z6MktdzQ…qS5Q  slim://127.0.0.1:47591
+goose         did:key:z6MkjiDF…aEKD  slim://127.0.0.1:47591
 ```
 
 `avatar` only `delegate`s the coding prompt. After `NEXT <peer>`, that
 same `register` process shares the turn (`…/<tool>-a2a-client` →
-`…/<peer>-a2a`). `DONE` does not send a listener handoff.
+`…/<peer>-a2a`). `DONE` does not send a listener handoff. If tests still
+fail after `DONE`, the orchestrator falls through to the next name in
+the list.
 
-## sort — 1 hop
+## lru — the default problem
 
-Claude replaced the identity stub with a two-line insertion sort and
-wrote `DONE`. `no_prebuilt_sort` reads `src/lib.rs` from disk and
-confirmed there is no `.sort(`.
+The crate is copied from
+[`scaffolds/collab_lru`](scaffolds/collab_lru/src/lib.rs) into
+`/tmp/shadi-collab-demo.*/workspace/lru`. Storage is a single
+`Vec<(K, V)>`: index `0` is least recently used, the last element is
+most recently used. Tests read `src/lib.rs` from disk and fail if the
+impl mentions `HashMap`, `BTreeMap`, `HashSet`, `BTreeSet`, `VecDeque`,
+or `LinkedList`.
 
-| Hop | Agent | Apply | Route | Tests |
-|---|---|---|---|---|
-| 1 | claude-code | `REPLACE` 2 lines at 5 | `DONE` | 5 / 5 |
+| Method | Stub | Why it needs the token |
+|---|---|---|
+| `cap` / `len` / `is_empty` | `0` / `false` | one-line each |
+| `contains` / `peek` | `false` / `None` | scan, no reorder |
+| `recent` / `oldest` / `keys_*` | `None` / empty `Vec` | order views |
+| `pop_lru` / `pop_mru` / `clear` / `touch` | `None` / no-op / `false` | ends and promote |
+| `get` | `None` | find **and** move to MRU |
+| `put` | empty | insert, update, or evict LRU |
 
-Reply:
+Nine of the ten tests fail on the scaffold (`no_std_maps_or_deques`
+already passes). Early hops typically fill `cap` / `len` / `is_empty`.
+Later hops have to leave `get` and `put` unfinished so the next peer
+can add the missing scan or eviction. A one-hop `DONE` (what the old
+`sort_i32` identity stub allowed) cannot turn this crate green.
 
-```text
-REPLACE 5
-let mut items = items;
-for i in 1..items.len() { let mut j = i; while j > 0 && items[j-1] > items[j] { items.swap(j-1, j); j -= 1; } } items
-DONE
-```
+After a live run, inspect `/tmp/shadi-collab-demo.*/logs/lru-turns.log`
+for the apply notes and diffs. Hop count, who wrote `get`, and whether
+goose landed a `REPLACE` all vary with the operator's CLIs and network.
 
-Applied:
+## fifo — optional shorter problem
 
-```diff
- pub fn sort_i32(items: Vec<i32>) -> Vec<i32> {
--    items
-+let mut items = items;
-+for i in 1..items.len() { let mut j = i; while j > 0 && items[j-1] > items[j] { items.swap(j-1, j); j -= 1; } } items
- }
-```
-
-## fifo — 6 hops
-
-Every registered CLI took a coding turn. The two-line cap is why hop 1
-could only replace `push`; the leftover `pop` stub stayed `None` until
-Copilot used both allowed lines on hop 2.
+`PROBLEM=fifo` (or `PROBLEM=both`) still ships the four-method queue.
+The transcript below is one real six-hop solve: four CLIs wrote Rust,
+goose was chosen after a premature `DONE`, that hop was an empty/error
+reply, and claude-code restored the closing `}`.
 
 | Hop | Agent | What landed | A2A next | File |
 |---|---|---|---|---|
-| 1 | claude-code | `push` body only (`self.items.push(_item)`) | copilot | changed |
-| 2 | copilot | full `push` + `pop` (`remove(0)`); old `pop` stub remains | cursor-agent | changed |
-| 3 | cursor-agent | `REPLACE 11` restated `push` — apply no-op | codex | unchanged |
-| 4 | codex | `len` → `self.items.len()` | cursor-agent | changed |
-| 5 | cursor-agent | `#[cfg(false)]` above leftover `pop` stub | copilot | changed |
-| 6 | copilot | `is_empty` → `self.items.is_empty()` | `DONE` | changed |
+| 1 | claude-code | `push` body (`self.items.push(_item)`) | copilot | changed |
+| 2 | copilot | one-line `pop` (`remove(0)`); leftover `None` stub remains | codex | changed |
+| 3 | codex | `len` → `self.items.len()` | cursor-agent | changed |
+| 4 | cursor-agent | `is_empty` → `self.items.is_empty()`; dropped `}` | `DONE` (tests fail) | changed |
+| 5 | goose | empty/error reply | fallback claude-code | unchanged |
+| 6 | claude-code | restore closing `}` | codex | changed; **SOLVED** |
 
 Token path:
 
 ```text
 avatar ──delegate──► claude-code ──NEXT──► copilot
-                                         ──NEXT──► cursor-agent   (no-op apply)
                                          ──NEXT──► codex
-                                         ──NEXT──► cursor-agent   (cfg(false))
-                                         ──NEXT──► copilot ──DONE
+                                         ──NEXT──► cursor-agent ──DONE (tests fail)
+                                         ──fallback──► goose     (no apply)
+                                         ──fallback──► claude-code ──SOLVED
 ```
 
 ### Hop 1 — claude-code
 
 ```text
 REPLACE 11
-self.items.push(_item);
+    pub fn push(&mut self, _item: T) { self.items.push(_item); }
 NEXT copilot
 ```
 
 ```diff
 -    pub fn push(&mut self, _item: T) {}
-+self.items.push(_item);
++    pub fn push(&mut self, _item: T) { self.items.push(_item); }
 ```
 
 ### Hop 2 — copilot
 
 ```text
-REPLACE 11
-    pub fn push(&mut self, item: T) { self.items.push(item); }
+REPLACE 13
     pub fn pop(&mut self) -> Option<T> { if self.items.is_empty() { None } else { Some(self.items.remove(0)) } }
-NEXT cursor-agent
-```
-
-```diff
--self.items.push(_item);
-+    pub fn push(&mut self, item: T) { self.items.push(item); }
-+    pub fn pop(&mut self) -> Option<T> { if self.items.is_empty() { None } else { Some(self.items.remove(0)) } }
-     pub fn pop(&mut self) -> Option<T> {
-         None
-```
-
-### Hop 3 — cursor-agent
-
-Legal `NEXT`, no file change. Reply restated `push` at line 11, which
-already matched.
-
-```text
-REPLACE 11
-    pub fn push(&mut self, item: T) { self.items.push(item); }
 NEXT codex
 ```
 
-### Hop 4 — codex
+```diff
+-    pub fn pop(&mut self) -> Option<T> {
++    pub fn pop(&mut self) -> Option<T> { if self.items.is_empty() { None } else { Some(self.items.remove(0)) } }
+         None
+```
+
+### Hop 3 — codex
 
 ```text
-REPLACE 19
+REPLACE 18
         self.items.len()
 NEXT cursor-agent
 ```
@@ -152,48 +147,57 @@ NEXT cursor-agent
      }
 ```
 
-### Hop 5 — cursor-agent
-
-Hid the leftover stub instead of deleting it. Tests still compile because
-the second `pop` is not built.
+### Hop 4 — cursor-agent
 
 ```text
-REPLACE 13
-#[cfg(false)]
-NEXT copilot
-```
-
-```diff
-     pub fn pop(&mut self) -> Option<T> { … }
-+#[cfg(false)]
-     pub fn pop(&mut self) -> Option<T> {
-         None
-```
-
-### Hop 6 — copilot
-
-```text
-REPLACE 23
-self.items.is_empty()
+REPLACE 22
+        self.items.is_empty()
 DONE
 ```
 
 ```diff
      pub fn is_empty(&self) -> bool {
 -        false
-+self.items.is_empty()
++        self.items.is_empty()
      }
+-}
++        self.items.is_empty()
+```
+
+`DONE` ran while the crate still did not compile, so the orchestrator
+continued.
+
+### Hop 5 — goose
+
+Empty or error reply. `collab-apply.py` left `src/lib.rs` unchanged.
+The token fell back to claude-code.
+
+### Hop 6 — claude-code
+
+```text
+REPLACE 22
+}
+NEXT codex
+```
+
+```diff
+     pub fn is_empty(&self) -> bool {
+         self.items.is_empty()
+     }
+-        self.items.is_empty()
++}
 ```
 
 `cargo test` for `fifo`: 2 passed (`empty_new`, `push_pop_order`).
 
-## What this run showed
+## What a run shows
 
-- Register and `list --local` brought all four adapters up in two seconds.
-- The two-line cap is visible: hop 1 could not finish `Fifo`; hop 2 used
-  both lines and still left a stub that later hops had to deal with.
-- A `NEXT` with a no-op apply (hop 3) still advances the token.
-- `DONE` stops the loop without a listener handoff.
+- Register and `list --local` bring all five adapters up, including
+  goose.
+- The two-line cap is the point of `lru`: one hop cannot finish `get`
+  or `put`.
+- `DONE` with failing tests still advances the token.
+- A failed goose hop does not write tool errors into the crate.
 - Indentation and leftover stubs are not cleaned up — the orchestrator
   only applies the two-line edit and runs tests.
 
@@ -201,9 +205,17 @@ DONE
 
 ```bash
 cargo build -p agntcy-shadi-cli -p agntcy-agentbridge-cli
+bash docs/content/demos/run-collab-demo.sh
+```
+
+Optional shorter queue, or both problems:
+
+```bash
+PROBLEM=fifo MAX_CYCLES=6 bash docs/content/demos/run-collab-demo.sh
 PROBLEM=both MAX_CYCLES=10 bash docs/content/demos/run-collab-demo.sh
 ```
 
-The four CLIs must be on `PATH` and signed in. Raw per-turn files from a
-live run land under `/tmp/shadi-collab-demo.*/logs`
-(`sort-turns.log`, `fifo-turns.log`, `*.reply`).
+The five CLIs must be on `PATH` and signed in. Goose keeps its own
+provider settings. Raw per-turn files from a live run land under
+`/tmp/shadi-collab-demo.*/logs` (`lru-turns.log`, `fifo-turns.log`,
+`*.reply`).

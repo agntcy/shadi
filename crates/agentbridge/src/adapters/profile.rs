@@ -24,10 +24,19 @@ const BUNDLED_CLAUDE: &str = include_str!("../../profiles/claude-code.json");
 const BUNDLED_COPILOT: &str = include_str!("../../profiles/copilot.json");
 const BUNDLED_CODEX: &str = include_str!("../../profiles/codex.json");
 const BUNDLED_CURSOR: &str = include_str!("../../profiles/cursor-agent.json");
+const BUNDLED_GOOSE: &str = include_str!("../../profiles/goose.json");
+const BUNDLED_OPENCODE: &str = include_str!("../../profiles/opencode.json");
 
 /// IDs shipped under `crates/agentbridge/profiles/`.
 pub fn bundled_profile_ids() -> &'static [&'static str] {
-    &["claude-code", "copilot", "codex", "cursor-agent"]
+    &[
+        "claude-code",
+        "copilot",
+        "codex",
+        "cursor-agent",
+        "goose",
+        "opencode",
+    ]
 }
 
 fn bundled_json(id: &str) -> Option<&'static str> {
@@ -36,6 +45,8 @@ fn bundled_json(id: &str) -> Option<&'static str> {
         "copilot" => Some(BUNDLED_COPILOT),
         "codex" => Some(BUNDLED_CODEX),
         "cursor-agent" => Some(BUNDLED_CURSOR),
+        "goose" => Some(BUNDLED_GOOSE),
+        "opencode" => Some(BUNDLED_OPENCODE),
         _ => None,
     }
 }
@@ -120,6 +131,19 @@ pub struct CliProfile {
     pub split_large_prompt: bool,
     #[serde(default)]
     pub extra_args_env: Option<String>,
+    /// When `{env_flags}` appears in `execute.args`, each set host env var
+    /// becomes `flag value` (omitted when unset or empty).
+    #[serde(default)]
+    pub env_flags: Vec<EnvFlag>,
+    /// Host env var names copied onto the child (values never logged).
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    /// Copy every host env var whose name starts with one of these prefixes.
+    #[serde(default)]
+    pub pass_env_prefixes: Vec<String>,
+    /// Copy every host env var whose name ends with one of these suffixes.
+    #[serde(default)]
+    pub pass_env_suffixes: Vec<String>,
     #[serde(default)]
     pub stdin_null: bool,
     pub execute: ExecuteSpec,
@@ -127,6 +151,12 @@ pub struct CliProfile {
     pub session: Option<SessionSpec>,
     #[serde(default)]
     pub result: ResultSpec,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvFlag {
+    pub flag: String,
+    pub env: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -254,6 +284,9 @@ impl ProfileAdapter {
         for (key, value) in &self.profile.env {
             cmd.env(key, value.replace("{workdir}", workdir.as_ref()));
         }
+        for (key, value) in collect_pass_env(&self.profile) {
+            cmd.env(key, value);
+        }
         if self.profile.current_dir_workdir {
             cmd.current_dir(&self.work_dir);
         }
@@ -312,8 +345,71 @@ fn split_large_prompt(
     (Some(context_part), question_part)
 }
 
+/// Host env vars this profile should copy onto the child. Values are not logged.
+fn collect_pass_env(profile: &CliProfile) -> BTreeMap<String, String> {
+    let mut names: Vec<String> = profile.pass_env.clone();
+    if profile.id == "goose" {
+        names.extend(goose_provider_api_key_env_names());
+    }
+    let mut out = BTreeMap::new();
+    for name in names {
+        if let Ok(value) = std::env::var(&name) {
+            if !value.is_empty() {
+                out.insert(name, value);
+            }
+        }
+    }
+    for (key, value) in std::env::vars() {
+        if value.is_empty() {
+            continue;
+        }
+        let prefix = profile
+            .pass_env_prefixes
+            .iter()
+            .any(|prefix| key.starts_with(prefix));
+        let suffix = profile
+            .pass_env_suffixes
+            .iter()
+            .any(|suffix| key.ends_with(suffix));
+        if prefix || suffix {
+            out.insert(key, value);
+        }
+    }
+    out
+}
+
+fn goose_provider_api_key_env_names() -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let dir = PathBuf::from(home).join(".config/goose/custom_providers");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if let Some(name) = value.get("api_key_env").and_then(|v| v.as_str()) {
+            let name = name.trim();
+            if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
 /// Render argv from a profile. `{prompt}` / `{workdir}` / `{system}` /
-/// `{session}` / `{workdir_flags}` / `{extra_args}` are expanded.
+/// `{session}` / `{workdir_flags}` / `{extra_args}` / `{env_flags}` are expanded.
 pub fn render_argv(
     profile: &CliProfile,
     workdir: &str,
@@ -352,6 +448,17 @@ pub fn render_argv(
                 }
             }
             "{extra_args}" => out.extend(extra.iter().cloned()),
+            "{env_flags}" => {
+                for spec in &profile.env_flags {
+                    if let Ok(value) = std::env::var(&spec.env) {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            out.push(spec.flag.clone());
+                            out.push(value.to_string());
+                        }
+                    }
+                }
+            }
             "{prompt}" => out.push(prompt.to_string()),
             other => out.push(
                 other
@@ -557,7 +664,7 @@ mod tests {
 
     #[test]
     fn claude_argv_matches_native_order() {
-        let p = load_bundled("claude-code");
+        let p = load_bundled("claude-code");    
         let argv = render_argv(
             &p,
             "/var/workspace",
@@ -596,6 +703,8 @@ mod tests {
         assert!(load_bundled("claude-code").split_large_prompt);
         assert!(!load_bundled("copilot").split_large_prompt);
         assert!(!load_bundled("cursor-agent").split_large_prompt);
+        assert!(!load_bundled("goose").split_large_prompt);
+        assert!(!load_bundled("opencode").split_large_prompt);
         let long = "x".repeat(600);
         assert!(split_large_prompt(&long, None, false).0.is_none());
         assert!(split_large_prompt(&long, None, true).0.is_some());
@@ -652,6 +761,75 @@ mod tests {
                 "disabled",
                 "hi",
             ]
+        );
+    }
+
+    #[test]
+    fn goose_argv_is_noninteractive_run() {
+        let p = load_bundled("goose");
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("GOOSE_PROVIDER");
+        std::env::remove_var("GOOSE_MODEL");
+        let argv = render_argv(&p, "/ws", "summarize src/", Some("be terse"), None, true);
+        assert_eq!(
+            argv,
+            vec![
+                "run",
+                "--text",
+                "summarize src/",
+                "--no-session",
+                "--quiet",
+                "--system",
+                "be terse",
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_pass_env_copies_api_key_suffix_from_host() {
+        let p = load_bundled("goose");
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGENTBRIDGE_FAKE_API_KEY", "test-key-not-a-secret");
+        let env = collect_pass_env(&p);
+        std::env::remove_var("AGENTBRIDGE_FAKE_API_KEY");
+        assert_eq!(
+            env.get("AGENTBRIDGE_FAKE_API_KEY").map(String::as_str),
+            Some("test-key-not-a-secret")
+        );
+    }
+
+    #[test]
+    fn goose_argv_passes_provider_and_model_from_host_env() {
+        let p = load_bundled("goose");
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("GOOSE_PROVIDER", "openai");
+        std::env::set_var("GOOSE_MODEL", "test-model");
+        let argv = render_argv(&p, "/ws", "hi", None, None, true);
+        std::env::remove_var("GOOSE_PROVIDER");
+        std::env::remove_var("GOOSE_MODEL");
+        assert_eq!(
+            argv,
+            vec![
+                "run",
+                "--text",
+                "hi",
+                "--no-session",
+                "--quiet",
+                "--provider",
+                "openai",
+                "--model",
+                "test-model",
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_argv_uses_auto_and_dir() {
+        let p = load_bundled("opencode");
+        let argv = render_argv(&p, "/ws", "fix the tests", None, None, true);
+        assert_eq!(
+            argv,
+            vec!["run", "--auto", "--dir", "/ws", "fix the tests"]
         );
     }
 

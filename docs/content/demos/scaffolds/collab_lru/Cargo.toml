@@ -1,0 +1,7 @@
+[package]
+name = "collab_lru"
+version = "0.1.0"
+edition = "2021"
+
+# Copied to /tmp by the demo; keep this crate out of the SHADI workspace.
+[workspace]
