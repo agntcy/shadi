@@ -799,6 +799,97 @@ mod tests {
     }
 
     #[test]
+    fn goose_pass_env_harvests_api_key_env_from_custom_providers() {
+        let p = load_bundled("goose");
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let providers = home.path().join(".config/goose/custom_providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(providers.join("notes.txt"), "ignore").unwrap();
+        std::fs::write(providers.join("bad.json"), "{not-json").unwrap();
+        std::fs::write(providers.join("empty.json"), r#"{"api_key_env":"  "}"#).unwrap();
+        std::fs::write(providers.join("none.json"), "{}").unwrap();
+        std::fs::write(
+            providers.join("ok.json"),
+            r#"{"api_key_env":"AGENTBRIDGE_TEST_GOOSE_KEY"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            providers.join("dup.json"),
+            r#"{"api_key_env":"AGENTBRIDGE_TEST_GOOSE_KEY"}"#,
+        )
+        .unwrap();
+        // Directory named *.json: read_to_string fails; skip that entry.
+        std::fs::create_dir(providers.join("dir.json")).unwrap();
+
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("AGENTBRIDGE_TEST_GOOSE_KEY", "test-key-not-a-secret");
+        std::env::set_var("GOOSE_DEMO_FLAG", "1");
+        std::env::set_var("GOOSE_EMPTY", "");
+        let names = goose_provider_api_key_env_names();
+        let env = collect_pass_env(&p);
+        std::env::remove_var("AGENTBRIDGE_TEST_GOOSE_KEY");
+        std::env::remove_var("GOOSE_DEMO_FLAG");
+        std::env::remove_var("GOOSE_EMPTY");
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(names, vec!["AGENTBRIDGE_TEST_GOOSE_KEY".to_string()]);
+        assert_eq!(
+            env.get("AGENTBRIDGE_TEST_GOOSE_KEY").map(String::as_str),
+            Some("test-key-not-a-secret")
+        );
+        assert_eq!(env.get("GOOSE_DEMO_FLAG").map(String::as_str), Some("1"));
+        assert!(!env.contains_key("GOOSE_EMPTY"));
+    }
+
+    #[test]
+    fn goose_provider_api_key_env_names_skips_missing_home_and_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::remove_var("HOME");
+        assert!(goose_provider_api_key_env_names().is_empty());
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home.path());
+        assert!(goose_provider_api_key_env_names().is_empty());
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn collect_pass_env_copies_explicit_pass_env_names() {
+        let mut p = load_bundled("opencode");
+        p.pass_env = vec!["AGENTBRIDGE_TEST_PASS".into()];
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGENTBRIDGE_TEST_PASS", "test-key-not-a-secret");
+        let env = collect_pass_env(&p);
+        std::env::remove_var("AGENTBRIDGE_TEST_PASS");
+        assert_eq!(
+            env.get("AGENTBRIDGE_TEST_PASS").map(String::as_str),
+            Some("test-key-not-a-secret")
+        );
+    }
+
+    #[test]
+    fn goose_env_flags_omit_blank_provider() {
+        let p = load_bundled("goose");
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("GOOSE_PROVIDER", "   ");
+        std::env::remove_var("GOOSE_MODEL");
+        let argv = render_argv(&p, "/ws", "hi", None, None, true);
+        std::env::remove_var("GOOSE_PROVIDER");
+        assert_eq!(
+            argv,
+            vec!["run", "--text", "hi", "--no-session", "--quiet"]
+        );
+    }
+
+    #[test]
     fn goose_argv_passes_provider_and_model_from_host_env() {
         let p = load_bundled("goose");
         let _guard = ENV_LOCK.lock().unwrap();
