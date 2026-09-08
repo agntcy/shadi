@@ -535,6 +535,10 @@ impl CliAdapter for ProfileAdapter {
 mod tests {
     use super::*;
 
+    /// `load_profile` / `render_argv` read process env. Parallel tests must
+    /// not interleave `set_var` with those lookups.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn load_bundled(id: &str) -> CliProfile {
         load_profile(id)
             .expect("profile parse")
@@ -678,12 +682,14 @@ mod tests {
 
     #[test]
     fn load_profile_skips_generic_stdio() {
+        let _guard = ENV_LOCK.lock().unwrap();
         assert!(load_profile("generic-stdio").unwrap().is_none());
-        assert!(load_profile("gemini").unwrap().is_none());
+        assert!(load_profile("no-such-profile").unwrap().is_none());
     }
 
     #[test]
     fn open_profile_adapter_reads_id_and_workdir() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let (id, adapter) = open_profile_adapter("claude-code:/var/ws")
             .unwrap()
             .expect("bundled");
@@ -693,7 +699,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(open_profile_adapter("slim:peer").unwrap().is_none());
-        assert!(open_profile_adapter("gemini").unwrap().is_none());
+        assert!(open_profile_adapter("no-such-profile").unwrap().is_none());
     }
 
     #[test]
@@ -976,6 +982,7 @@ echo '{"result":"ok","session_id":"sid-9"}'
             }"#,
         )
         .unwrap();
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("AGENTBRIDGE_TEST_EXTRA_ARGS", "--flag value");
         let argv = render_argv(&p, "/ws", "hi", None, None, true);
         std::env::remove_var("AGENTBRIDGE_TEST_EXTRA_ARGS");
@@ -984,20 +991,21 @@ echo '{"result":"ok","session_id":"sid-9"}'
 
     #[test]
     fn load_profile_reads_override_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("gemini.json"),
-            r#"{"id":"gemini","bin":"gemini","execute":{"args":["{prompt}"]}}"#,
+            dir.path().join("override-probe.json"),
+            r#"{"id":"override-probe","bin":"probe","execute":{"args":["{prompt}"]}}"#,
         )
         .unwrap();
         let prev = std::env::var("AGENTBRIDGE_PROFILES_DIR").ok();
         std::env::set_var("AGENTBRIDGE_PROFILES_DIR", dir.path());
-        let loaded = load_profile("gemini").unwrap().expect("override");
+        let loaded = load_profile("override-probe").unwrap().expect("override");
         match prev {
             Some(v) => std::env::set_var("AGENTBRIDGE_PROFILES_DIR", v),
             None => std::env::remove_var("AGENTBRIDGE_PROFILES_DIR"),
         }
-        assert_eq!(loaded.id, "gemini");
+        assert_eq!(loaded.id, "override-probe");
         assert!(load_profile_file(&dir.path().join("missing.json"))
             .unwrap()
             .is_none());
