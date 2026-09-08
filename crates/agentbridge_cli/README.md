@@ -50,12 +50,20 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
 shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register --tool codex --slim-endpoint 127.0.0.1:47357
 
+# Goose / OpenCode use the operator's existing CLI config. Host
+# GOOSE_PROVIDER / GOOSE_MODEL are passed as goose run --provider / --model.
+# Host GOOSE_*, OPENAI_*, and *_API_KEY env vars are forwarded to goose.
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+  agentbridge register --tool goose --slim-endpoint 127.0.0.1:47357
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+  agentbridge register --tool opencode --slim-endpoint 127.0.0.1:47357
+
 # Publish an OASF record to the Agent Directory after registering
 agentbridge register --tool claude-code --dir-publish
 ```
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
-`cursor-agent`.
+`cursor-agent`, `goose`, `opencode`.
 
 ### `list` — discover registered adapters
 
@@ -152,6 +160,8 @@ agentbridge coordinate \
 | `copilot` | Local Copilot CLI adapter |
 | `codex` | Local Codex CLI adapter |
 | `cursor-agent` | Local Cursor Agent adapter |
+| `goose` | Local Goose CLI adapter (uses `~/.config/goose`) |
+| `opencode` | Local OpenCode CLI adapter (uses `~/.config/opencode`) |
 | `generic-stdio:<cmd>` | Local subprocess adapter |
 | `slim:<agent-id>` | Remote adapter over SLIM (uses `--slim-endpoint`) |
 | `slim:<agent-id>@<host:port>` | Remote adapter at explicit endpoint |

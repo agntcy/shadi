@@ -1,10 +1,11 @@
 # Shared environment for the DID agent-group demo (docs/content/demos/did-agent-group.md).
 # Source this in EVERY terminal:  source docs/content/demos/demo-env.sh
 #
-# All five member DIDs below are HKDF-derived from SLIM_HUMAN_SEED (salt
+# Member DIDs below are HKDF-derived from SLIM_HUMAN_SEED (salt
 # "shadi-agent-derive") with the agent names avatar / claude-code / codex /
-# copilot / cursor-agent, so they are deterministic for this seed. Change the seed
-# and they all change — re-derive with `/slim whoami` per agent (see the doc).
+# copilot / cursor-agent / goose, so they are deterministic for this seed.
+# Change the seed and they all change — re-derive with `/slim whoami` per
+# agent (see the doc).
 
 export SHADI_SLIM_AUTH=did                         # select DID-JWT admission
 export SLIM_HUMAN_SEED="shadi-demo-human-root-secret"
@@ -23,10 +24,11 @@ export SLIM_ENDPOINT="${SLIM_ENDPOINT:-127.0.0.1:47560}"
 export SLIM_TLS_CERT="$SHADI_TMP_DIR/shadi-slim-mtls/client-avatar.crt"
 export SLIM_TLS_KEY="$SHADI_TMP_DIR/shadi-slim-mtls/client-avatar.key"
 
-# Allow-list = the DID of every member (moderator avatar + 4 coding-agent CLIs).
+# Allow-list = the DID of every member (moderator avatar + coding-agent CLIs).
 export SLIM_MEMBER_DIDS="\
 did:key:z6Mkix7tAk25UD8f4Uy7tTxn1FAErhGZ7rfifBgrvdKgzM82,\
 did:key:z6MkhRuJgsaipjWB6No8RUGD4P7fnn8qGBZKK5C5zGJjPZa1,\
 did:key:z6MkmaFFysqqMsE1q5M6E7LDuoJMaSBv3PkNHz5SwwwnuGr6,\
 did:key:z6MkmJUcT1F6BK21nQv1C2zo46gJJA9hsMGnbdpiN2LrMnwT,\
-did:key:z6MktdzQzm171sAoRZc6cCUPDa8XWxaG8Bi6R3Y4ohP7qS5Q"
+did:key:z6MktdzQzm171sAoRZc6cCUPDa8XWxaG8Bi6R3Y4ohP7qS5Q,\
+did:key:z6MkjiDFxXFe2sM4vXZH8fT3XYLmjNDeVobo4VgNayc7aEKD"

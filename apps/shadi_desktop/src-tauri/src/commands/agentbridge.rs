@@ -76,7 +76,8 @@ pub struct DelegateResult {
 pub struct CoordinateRequest {
     pub goal: String,
     /// `claude-code[:/path]` | `copilot[:/path]` | `codex[:/path]` |
-    /// `cursor-agent[:/path]` | `generic-stdio:<cmd>` |
+    /// `cursor-agent[:/path]` | `goose[:/path]` | `opencode[:/path]` |
+    /// `generic-stdio:<cmd>` |
     /// `slim:<agent-id>[@<host:port>]`, matching
     /// `agentbridge coordinate --agents`.
     pub agent_specs: Vec<String>,

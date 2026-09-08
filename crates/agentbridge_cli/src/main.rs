@@ -17,7 +17,8 @@ struct Cli {
 enum Cmd {
     /// Register and start a CLI tool adapter.
     Register {
-        /// Tool type: generic-stdio | claude-code | copilot | codex | cursor-agent
+        /// Tool type: generic-stdio or a bundled profile id
+        /// (claude-code, copilot, codex, cursor-agent, goose, opencode).
         #[arg(long)]
         tool: String,
 
@@ -66,8 +67,8 @@ enum Cmd {
     /// Hand off context from one CLI tool to another.
     ///
     /// `--from` / `--to` accept the same specs as `coordinate`
-    /// (`claude-code`, `copilot`, `codex`, `cursor-agent`,
-    /// `generic-stdio:<cmd>`, `slim:<id>`). A bare command still opens
+    /// (`claude-code`, `copilot`, `codex`, `cursor-agent`, `goose`,
+    /// `opencode`, `generic-stdio:<cmd>`, `slim:<id>`). A bare command still opens
     /// GenericStdio. The snapshot is an LLM session summary this cycle,
     /// not a true session export.
     Handoff {
@@ -117,7 +118,7 @@ enum Cmd {
         goal: String,
 
         /// Comma-separated agent specs.
-        /// Formats: claude-code, claude-code:/path, generic-stdio:<command>, slim:<agent-id>, slim:<agent-id>@<host:port>
+        /// Formats: claude-code, goose, opencode, claude-code:/path, generic-stdio:<command>, slim:<agent-id>, slim:<agent-id>@<host:port>
         #[arg(long, value_delimiter = ',')]
         agents: Vec<String>,
 

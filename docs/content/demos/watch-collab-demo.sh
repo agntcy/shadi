@@ -10,8 +10,8 @@ if [ -z "$DIR" ]; then
   exit 1
 fi
 
-AGENTS=(claude-code copilot codex cursor-agent)
-FILES=("$DIR/node.log" "$DIR/list-local.log" "$DIR/sort-turns.log" "$DIR/fifo-turns.log")
+AGENTS=(claude-code copilot codex cursor-agent goose)
+FILES=("$DIR/node.log" "$DIR/list-local.log" "$DIR/lru-turns.log" "$DIR/fifo-turns.log")
 for a in "${AGENTS[@]}"; do FILES+=("$DIR/$a-agent.log"); done
 
 echo "Watching: $DIR (Ctrl-C to stop watching; does not affect the running demo)"

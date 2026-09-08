@@ -66,7 +66,7 @@ same machine). SLIM is the authenticated transport bus between them.
 flowchart LR
   subgraph reg["agentbridge register  (one per agent)"]
     direction TB
-    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex | cursor-agent"]
+    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex | cursor-agent | goose | opencode"]
     ca["CliAdapter\nexecute_prompt(prompt) → text"]
     srv["A2A server\nAgentBridgeRequestHandler\nInMemoryTaskStore"]
     tool -- "stdin / stdout" --> ca --> srv
@@ -86,9 +86,18 @@ flowchart LR
   slim <-- "A2A tasks  (text/plain)" --> laa
 ```
 
-`register --tool` accepts `generic-stdio`, `claude-code`, `copilot`, `codex`,
-and `cursor-agent`. After a listener starts, `agentbridge list --local` shows
-it (name, DID, endpoint) from the lease file under `$SHADI_TMP_DIR`.
+`register --tool` accepts `generic-stdio` or a bundled profile id
+(`claude-code`, `copilot`, `codex`, `cursor-agent`, `goose`, `opencode`).
+After a listener starts, `agentbridge list --local` shows it (name, DID,
+endpoint) from the lease file under `$SHADI_TMP_DIR`.
+
+`goose` and `opencode` keep their own provider config (`~/.config/goose`,
+`~/.config/opencode`). Agentbridge does not set a base URL or API key.
+When `GOOSE_PROVIDER` / `GOOSE_MODEL` are set in the host environment,
+the goose listener passes them as `goose run --provider` / `--model`.
+Host `GOOSE_*`, `OPENAI_*`, `*_API_KEY`, and `api_key_env` names from
+the operator's Goose provider files are copied onto that process.
+Extra flags: `GOOSE_ARGS` / `OPENCODE_ARGS`.
 
 Outbound A2A text is wrapped in a DID-proof envelope. Unsigned inbound parks
 as `AUTH_REQUIRED` (re-prove / ask / deny); a forged DID is rejected.
@@ -193,7 +202,8 @@ SHADI_AGENT_ID=claude-code agentbridge handoff \
 ```
 
 `--from` / `--to` accept the same specs as `coordinate` (`claude-code`,
-`copilot`, `codex`, `cursor-agent`, `generic-stdio:<cmd>`, `slim:<id>`).
+`copilot`, `codex`, `cursor-agent`, `goose`, `opencode`,
+`generic-stdio:<cmd>`, `slim:<id>`).
 A bare subprocess command still opens GenericStdio. `--save` /
 `--from-file` persist the packet.
 
