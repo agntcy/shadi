@@ -478,7 +478,7 @@ corrupting the state machine.
     | Native `handoff` specs | ✅ | Same `--from`/`--to` as `coordinate`, including `cursor-agent` and `slim:<id>` |
     | `register --tool cursor-agent` | ✅ | Same sandbox + DID listener as the other tools |
     | `list --local` | ✅ | Live listeners from on-host register leases |
-    | Two-line token-passing coding | ✅ | [Round-robin Rust Demo](demos/collab-rust.md) — `avatar` `delegate` + capped apply + agent-as-A2A-client `handoff --from slim:` until `cargo test` |
+    | Two-line token-passing coding | ✅ | [Round-robin Rust Demo](demos/collab-rust.md) — `avatar` `delegate` + capped apply + agent-as-A2A-client `NEXT` until `cargo test` ([sample run](demos/collab-rust-sample.md)) |
 
     ### What remains
 

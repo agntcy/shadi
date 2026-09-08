@@ -115,6 +115,10 @@ The summary prints each turn's apply note and `diff`, the final `src/lib.rs`,
 and the last `cargo test`. Logs live under `/tmp/shadi-collab-demo.*/logs`
 (`sort-turns.log`, `fifo-turns.log`, per-turn `.prompt` / `.reply` / `.apply`).
 
+A curated transcript of one successful `PROBLEM=both` run (sort in one hop,
+fifo in six, every CLI on the token path) is in
+[Sample run: round-robin Rust](collab-rust-sample.md).
+
 ## Next steps
 
 - The identity and roll-call that precede this loop:
