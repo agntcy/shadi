@@ -1,14 +1,21 @@
 # Sample run: round-robin Rust
 
-Recorded 8 September 2026 on `main` (`80cd393`), after
-[PR #226](https://github.com/agntcy/shadi/pull/226). One invocation of
-[`run-collab-demo.sh`](run-collab-demo.sh) (`PROBLEM=both`, `MAX_CYCLES=10`)
-registered four harness listeners, token-passed two crates, and exited **0**
-in about four minutes.
+Four coding-agent CLIs — **claude-code**, **copilot**, **codex**,
+**cursor-agent** — take turns writing a small Rust crate. The moderator
+(`avatar`) owns the file and starts hop 1 with `delegate`. Each turn may
+change **at most two lines of Rust**; `collab-apply.py` drops a third
+line even if the model dumps a whole file. The same reply names the next
+peer (`NEXT <id>`) or ends the problem (`DONE`). The finishing listener
+is the A2A client for that handoff — `avatar` does not pick the order.
 
-This is a curated transcript, not a guarantee that the next live run
-follows the same hop order or writes the same two lines. How to start the
-script is in the [round-robin Rust demo](collab-rust.md).
+The script runs two stubs back to back: `sort_i32` (stable ascending,
+no pre-built `sort`) and `Fifo<T>` (`push` / `pop` / `len` /
+`is_empty`). After each apply, the host runs `cargo test` and follows
+the chosen peer until the tests pass.
+
+This page is one curated transcript of that loop. The next live run may
+choose different peers or write different two-line edits. How to start
+the script is in the [round-robin Rust demo](collab-rust.md).
 
 | | |
 |---|---|
