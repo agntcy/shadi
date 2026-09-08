@@ -432,7 +432,7 @@ cargo run -p agntcy-shadi-cli -- \
 
 The key may also come from the secret store (`--human-secret <ref>`), which is
 how a 1Password- or keychain-held key is used — see
-[security.md](security.md#secret-backends).
+[1Password backend](security.md#1password-backend).
 
 For an encrypted key, supply the passphrase through the secret store
 (`--ssh-passphrase-secret <ref>`) or `SHADI_SSH_PASSPHRASE`. It is deliberately

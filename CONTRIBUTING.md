@@ -105,6 +105,25 @@ usually a good idea to first open an issue describing the change to solicit
 feedback and guidance. This will increase the likelihood of the PR getting
 merged.
 
+## Documentation
+
+The published site is MkDocs content under `docs/content/`. From the repo
+root:
+
+- `just docs-serve` previews the site with live reload.
+- `just docs-lint` runs the documentation quality checks: spelling via
+  [`typos`](https://github.com/crate-ci/typos), Markdown via
+  [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2),
+  and links via [`lychee`](https://github.com/lycheeverse/lychee).
+
+Install `typos` with `brew install typos-cli` or `cargo install typos-cli`,
+and `lychee` with `brew install lychee` or `cargo install lychee`.
+Markdown linting uses `npx` (Node.js 22+ preferred). Project-specific
+names live in `typos.toml`; Markdown rule exceptions live in
+`.markdownlint-cli2.jsonc`; link-check settings live in `lychee.toml`.
+CI runs the same checks on pull requests and `main` pushes that touch
+docs, Markdown, or the lint configs.
+
 ## Releasing crates
 
 Rust crate releases are driven by `.github/workflows/release-rust.yml` using

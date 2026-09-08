@@ -77,6 +77,30 @@ docs-build:
 docs-serve:
   cd docs/mkdocs && mkdocs serve --livereload --dirty
 
+[group('docs')]
+[doc('Run documentation quality checks.')]
+docs-lint: docs-lint-spelling docs-lint-markdown docs-lint-links
+
+[group('docs')]
+[doc('Spell-check the repository with typos.')]
+docs-lint-spelling:
+  typos
+
+[group('docs')]
+[doc('Lint published Markdown with markdownlint-cli2.')]
+docs-lint-markdown:
+  npx --yes --package markdownlint-cli2@0.23.2 markdownlint-cli2
+
+[group('docs')]
+[doc('Check published Markdown links with lychee.')]
+docs-lint-links:
+  lychee --include-fragments 'docs/content/**/*.md'
+
+[group('docs')]
+[doc('Check Docs lint workflow path filters against GitHub glob rules.')]
+docs-lint-paths:
+  python3 scripts/test_docs_lint_paths.py
+
 [group('profiles')]
 [doc('Print the strict built-in security profile.')]
 secure-profile-strict:

@@ -195,7 +195,7 @@ Export a session snapshot from one tool and import it into another. The
 `ContextPacket` carries conversation history, open files, git diff, and any
 generated artifacts.
 
-```
+```bash
 agentbridge handoff --from claude-code --to copilot
 SHADI_AGENT_ID=claude-code agentbridge handoff \
   --from slim:claude-code --to slim:copilot --slim-endpoint 127.0.0.1:47591
@@ -230,7 +230,7 @@ note).
 
 One tool commissions a specific subtask to another and retrieves the artifact.
 
-```
+```bash
 agentbridge delegate --to codex "write unit tests for src/parser.rs"
 ```
 
@@ -239,7 +239,7 @@ is an A2A artifact containing the generated code.
 
 ### 3. Autonomous multi-round coordination
 
-```
+```bash
 agentbridge coordinate \
   --goal "implement a JSON parser" \
   --agents claude-code,copilot,codex,cursor-agent \
@@ -262,7 +262,7 @@ full A2A server that makes the local adapter reachable to any SLIM peer.
 
 Each adapter registers under the hierarchical name:
 
-```
+```text
 agntcy/shadi/<tool>-a2a
 ```
 
@@ -271,7 +271,7 @@ For example, `--tool copilot` listens as `agntcy/shadi/copilot-a2a`. The
 
 ### Request handler stack
 
-```
+```text
 SlimRpcHandler (shadi_a2a)          ← decodes SLIMRPC frames
   └─ AgentBridgeRequestHandler      ← full A2A protocol surface
        ├─ DefaultRequestHandler      ← routes send/get/list/cancel/subscribe/push
@@ -311,7 +311,7 @@ certificate bundle once with `tools/generate_slim_mtls_certs.sh`.
 
 ### Lifecycle
 
-```
+```text
 register --slim-endpoint 127.0.0.1:47357
   │
   ├─ service.connect()               connect to SLIM node (TLS 1.3)
@@ -335,7 +335,7 @@ The `coordinate` command uses `slim:<agent-id>` specs to reach registered
 adapters. It constructs a `LiveA2ATaskAdapter` per spec, which speaks the
 same SLIMRPC protocol to the listening server:
 
-```
+```text
 coordinate --agents slim:copilot,slim:codex
   │
   ├─ LiveA2ATaskAdapter { peer: agntcy/shadi/copilot-a2a }
@@ -416,7 +416,7 @@ consumed by `agentbridge coordinate`. It provides epoch-disciplined state
 machines that can drive any multi-agent pattern to a deterministic
 finalization outcome.
 
-```
+```text
 SemanticEvent  ──►  CoordinationEngine  ──►  EventOutcome
 (proposal,          (PreferenceEngine,        (Applied,
  vote, tool          DevelopmentEngine,         Finalized,
