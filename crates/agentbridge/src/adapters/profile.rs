@@ -738,25 +738,59 @@ mod tests {
         .unwrap()
     }
 
-    fn write_exec_script(body: &str) -> (tempfile::TempDir, PathBuf) {
+    fn write_session_retry_bin() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agentbridge-profile-test.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        #[cfg(unix)]
+        #[cfg(windows)]
         {
+            let path = dir.path().join("retry.cmd");
+            std::fs::write(
+                &path,
+                r#"@echo off
+echo %* | findstr /C:"--session-id" >nul
+if not errorlevel 1 (
+  echo already in use 1>&2
+  exit /b 1
+)
+echo {"result":"ok","session_id":"sid-9"}
+"#,
+            )
+            .unwrap();
+            (dir, path)
+        }
+        #[cfg(not(windows))]
+        {
+            let path = dir.path().join("retry.sh");
+            std::fs::write(
+                &path,
+                r#"#!/bin/sh
+has_session=0
+for a in "$@"; do
+  [ "$a" = "--session-id" ] && has_session=1
+done
+if [ "$has_session" = 1 ]; then
+  echo "already in use" >&2
+  exit 1
+fi
+echo '{"result":"ok","session_id":"sid-9"}'
+"#,
+            )
+            .unwrap();
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&path).unwrap().permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&path, perms).unwrap();
+            (dir, path)
         }
-        (dir, path)
     }
 
     #[test]
     fn profile_execute_prompt_runs_echo() {
         let adapter = ProfileAdapter::new(echo_profile(""), std::env::temp_dir());
         let out = adapter.execute_prompt("hello-profile").unwrap();
-        assert!(out.contains("hello-profile"), "{out}");
+        assert!(
+            out.contains("hello-profile"),
+            "execute output should echo the prompt"
+        );
         adapter.kill_in_flight();
     }
 
@@ -815,7 +849,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let adapter = ProfileAdapter::new(profile, dir.path());
         let out = adapter.execute_prompt("pinned").unwrap();
-        assert!(out.contains("pinned"), "{out}");
+        assert!(out.contains("pinned"), "execute output should echo the prompt");
     }
 
     #[test]
@@ -849,34 +883,22 @@ mod tests {
 
     #[test]
     fn session_is_stored_and_retried_on_stderr_needle() {
-        let (_dir, script) = write_exec_script(
-            r#"
-has_session=0
-for a in "$@"; do
-  [ "$a" = "--session-id" ] && has_session=1
-done
-if [ "$has_session" = 1 ]; then
-  echo "already in use" >&2
-  exit 1
-fi
-echo '{"result":"ok","session_id":"sid-9"}'
-"#,
-        );
-        let profile = parse_profile(&format!(
-            r#"{{
-              "id": "session",
-              "bin": "{}",
-              "current_dir_workdir": false,
-              "execute": {{ "args": ["{{session}}", "{{prompt}}"] }},
-              "session": {{
-                "json_field": "session_id",
-                "flag": "--session-id",
-                "retry_stderr_contains": "already in use"
-              }},
-              "result": {{ "kind": "json_field", "field": "result" }}
-            }}"#,
-            script.display()
-        ))
+        let (_dir, script) = write_session_retry_bin();
+        let profile = parse_profile(
+            &serde_json::json!({
+                "id": "session",
+                "bin": script.to_string_lossy(),
+                "current_dir_workdir": false,
+                "execute": { "args": ["{session}", "{prompt}"] },
+                "session": {
+                    "json_field": "session_id",
+                    "flag": "--session-id",
+                    "retry_stderr_contains": "already in use"
+                },
+                "result": { "kind": "json_field", "field": "result" }
+            })
+            .to_string(),
+        )
         .unwrap();
         let adapter = ProfileAdapter::new(profile, std::env::temp_dir());
         assert_eq!(adapter.execute_prompt("one").unwrap(), "ok");
@@ -903,7 +925,7 @@ echo '{"result":"ok","session_id":"sid-9"}'
         let adapter = ProfileAdapter::new(profile, std::env::temp_dir());
         let prompt = format!("context\n\n{}", "q".repeat(600));
         let out = adapter.execute_prompt(&prompt).unwrap();
-        assert!(out.contains('q'), "{out}");
+        assert!(out.contains('q'), "split execute should keep the question");
     }
 
     #[test]
