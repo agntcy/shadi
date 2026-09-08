@@ -71,6 +71,7 @@ Each agent's DID is derived from `SLIM_HUMAN_SEED` + its `SHADI_AGENT_ID`:
 | `codex`        | participant | `z6MkmaFFysqqMsE1q5M6E7LDuoJMaSBv3PkNHz5SwwwnuGr6` |
 | `copilot`      | participant | `z6MkmJUcT1F6BK21nQv1C2zo46gJJA9hsMGnbdpiN2LrMnwT` |
 | `cursor-agent` | participant | `z6MktdzQzm171sAoRZc6cCUPDa8XWxaG8Bi6R3Y4ohP7qS5Q` |
+| `goose`        | participant | `z6MkjiDFxXFe2sM4vXZH8fT3XYLmjNDeVobo4VgNayc7aEKD` |
 
 ## 2. Discover a member's DID (optional)
 

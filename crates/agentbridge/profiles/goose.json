@@ -1,0 +1,33 @@
+{
+  "id": "goose",
+  "bin": "goose",
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{workdir}",
+    "TMP": "{workdir}",
+    "TEMP": "{workdir}"
+  },
+  "current_dir_workdir": true,
+  "system_flag": "--system",
+  "extra_args_env": "GOOSE_ARGS",
+  "env_flags": [
+    { "flag": "--provider", "env": "GOOSE_PROVIDER" },
+    { "flag": "--model", "env": "GOOSE_MODEL" }
+  ],
+  "pass_env_prefixes": ["GOOSE_", "OPENAI_"],
+  "pass_env_suffixes": ["_API_KEY"],
+  "stdin_null": true,
+  "execute": {
+    "args": [
+      "run",
+      "--text",
+      "{prompt}",
+      "--no-session",
+      "--quiet",
+      "{env_flags}",
+      "{system}",
+      "{extra_args}"
+    ]
+  },
+  "result": { "kind": "stdout" }
+}
