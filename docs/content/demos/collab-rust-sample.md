@@ -9,25 +9,20 @@ names the next peer (`NEXT <id>`) or ends the problem (`DONE`). The
 finishing listener is the A2A client for that handoff — `avatar` does
 not pick the order.
 
-The default problem is `Lru<K, V>`. The scaffold ships many stubs on
-purpose: accessors such as `cap` / `len` / `contains` fit a two-line hop,
-but `get` and `put` (lookup, promote, insert, evict) do not. A live
-five-agent run is meant to take on the order of **twenty hops** before
-`cargo test` is green. Optional `fifo` is a shorter smoke test of the
-same protocol.
-
-This page describes that LRU crate and keeps one real fifo transcript
-as a protocol illustration. It does **not** invent an LRU hop-by-hop
-log — peer choices and exact two-line edits change every run. How to
-start the script is in the [round-robin Rust demo](collab-rust.md).
-`--net-allow` includes `cisco.com` and `*.cisco.com`. Goose uses the
-operator's existing config; this sample does not describe that setup.
+This page is one live `PROBLEM=lru` transcript (17 hops, **SOLVED**).
+The next run may choose different peers or write different two-line
+edits. How to start the script is in the
+[round-robin Rust demo](collab-rust.md). `--net-allow` includes
+`cisco.com` and `*.cisco.com`. Goose uses the operator's existing
+config; this sample does not describe that setup.
 
 | | |
 |---|---|
-| Default problem | `lru` — Vec-backed cache, 10 tests (9 fail on the stub) |
-| Optional problem | `fifo` — four no-op methods |
-| Hop budget | `MAX_CYCLES × N` (default 8 × 5 = 40) |
+| Problem | `lru` — **SOLVED** after hop 17 |
+| Tests | 10 / 10 |
+| Who wrote | claude-code ×2 · codex ×8 · cursor-agent ×6 · goose ×1 |
+| Not chosen | `copilot` (registered; nobody sent `NEXT copilot`) |
+| Failed delegates | 0 |
 | Endpoint | `slim://127.0.0.1:47591` |
 
 ## Listeners
@@ -50,34 +45,388 @@ same `register` process shares the turn (`…/<tool>-a2a-client` →
 fail after `DONE`, the orchestrator falls through to the next name in
 the list.
 
-## lru — the default problem
+## lru — 17 hops
 
 The crate is copied from
-[`scaffolds/collab_lru`](scaffolds/collab_lru/src/lib.rs) into
-`/tmp/shadi-collab-demo.*/workspace/lru`. Storage is a single
-`Vec<(K, V)>`: index `0` is least recently used, the last element is
-most recently used. Tests read `src/lib.rs` from disk and fail if the
-impl mentions `HashMap`, `BTreeMap`, `HashSet`, `BTreeSet`, `VecDeque`,
-or `LinkedList`.
+[`scaffolds/collab_lru`](scaffolds/collab_lru/src/lib.rs). Storage is a
+single `Vec<(K, V)>`: index `0` is least recently used, the last
+element is most recently used. Tests fail if the impl mentions
+`HashMap`, `BTreeMap`, `HashSet`, `BTreeSet`, `VecDeque`, or
+`LinkedList`.
 
-| Method | Stub | Why it needs the token |
-|---|---|---|
-| `cap` / `len` / `is_empty` | `0` / `false` | one-line each |
-| `contains` / `peek` | `false` / `None` | scan, no reorder |
-| `recent` / `oldest` / `keys_*` | `None` / empty `Vec` | order views |
-| `pop_lru` / `pop_mru` / `clear` / `touch` | `None` / no-op / `false` | ends and promote |
-| `get` | `None` | find **and** move to MRU |
-| `put` | empty | insert, update, or evict LRU |
+Early hops fill one-line accessors. `put` and `get` take two hops
+each. Goose's hop dropped the `clear` signature; the next peer put it
+back. Codex wrote `touch` and `DONE`; tests were already green.
 
-Nine of the ten tests fail on the scaffold (`no_std_maps_or_deques`
-already passes). Early hops typically fill `cap` / `len` / `is_empty`.
-Later hops have to leave `get` and `put` unfinished so the next peer
-can add the missing scan or eviction. A one-hop `DONE` (what the old
-`sort_i32` identity stub allowed) cannot turn this crate green.
+| Hop | Agent | What landed | A2A next |
+|---|---|---|---|
+| 1 | claude-code | `cap` → `self.cap` | codex |
+| 2 | codex | `len` → `self.items.len()` | cursor-agent |
+| 3 | cursor-agent | `is_empty` → `self.items.is_empty()` | codex |
+| 4 | codex | `contains` — scan | cursor-agent |
+| 5 | cursor-agent | `put` — open + insert/evict (2 lines) | codex |
+| 6 | codex | `put` — update existing, then return | cursor-agent |
+| 7 | cursor-agent | `peek` — scan, no reorder | codex |
+| 8 | codex | `pop_lru` — `remove(0)` | cursor-agent |
+| 9 | cursor-agent | `get` — promote to MRU; leftover `None` | codex |
+| 10 | codex | `pop_mru` — `pop()` | **goose** |
+| 11 | goose | `clear` body only (dropped the `fn`) | claude-code |
+| 12 | claude-code | restore `pub fn clear` | codex |
+| 13 | codex | `keys_mru` — reverse collect | cursor-agent |
+| 14 | cursor-agent | `keys_lru` — collect | codex |
+| 15 | codex | `recent` — `last` | cursor-agent |
+| 16 | cursor-agent | `oldest` — `first` | codex |
+| 17 | codex | `touch` — promote or `false` | `DONE` · **SOLVED** |
 
-After a live run, inspect `/tmp/shadi-collab-demo.*/logs/lru-turns.log`
-for the apply notes and diffs. Hop count, who wrote `get`, and whether
-goose landed a `REPLACE` all vary with the operator's CLIs and network.
+Token path:
+
+```text
+avatar ──delegate──► claude-code ──NEXT──► codex
+                                       ──NEXT──► cursor-agent
+                                       ──NEXT──► codex
+                                       ──NEXT──► cursor-agent   (put, 2 lines)
+                                       ──NEXT──► codex          (put update)
+                                       ──NEXT──► cursor-agent
+                                       ──NEXT──► codex
+                                       ──NEXT──► cursor-agent   (get)
+                                       ──NEXT──► codex ──NEXT──► goose
+                                       ──NEXT──► claude-code    (repair clear)
+                                       ──NEXT──► codex
+                                       ──NEXT──► cursor-agent
+                                       ──NEXT──► codex
+                                       ──NEXT──► cursor-agent
+                                       ──NEXT──► codex ──DONE · SOLVED
+```
+
+### Hop 1 — claude-code
+
+```text
+REPLACE 22
+        self.cap
+NEXT codex
+```
+
+```diff
+     pub fn cap(&self) -> usize {
+-        0
++        self.cap
+     }
+```
+
+### Hop 2 — codex
+
+```text
+REPLACE 26
+        self.items.len()
+NEXT cursor-agent
+```
+
+```diff
+     pub fn len(&self) -> usize {
+-        0
++        self.items.len()
+     }
+```
+
+### Hop 3 — cursor-agent
+
+```text
+REPLACE 30
+        self.items.is_empty()
+NEXT codex
+```
+
+```diff
+     pub fn is_empty(&self) -> bool {
+-        false
++        self.items.is_empty()
+     }
+```
+
+### Hop 4 — codex
+
+```text
+REPLACE 34
+        self.items.iter().any(|(k, _)| k == _key)
+NEXT cursor-agent
+```
+
+```diff
+     pub fn contains(&self, _key: &K) -> bool {
+-        false
++        self.items.iter().any(|(k, _)| k == _key)
+     }
+```
+
+### Hop 5 — cursor-agent
+
+Two-line `put`: the signature plus one insert/evict line. The apply
+left a duplicate insert (the two-line cap cannot finish update +
+evict + close).
+
+```text
+REPLACE 48
+    pub fn put(&mut self, _key: K, _value: V) {
+        if self.items.iter().all(|(k, _)| k != &_key) { if self.items.len() >= self.cap { self.items.remove(0); } self.items.push((_key, _value)); } }
+NEXT codex
+```
+
+```diff
+-    pub fn put(&mut self, _key: K, _value: V) {}
++    pub fn put(&mut self, _key: K, _value: V) {
++        if self.items.iter().all(|(k, _)| k != &_key) { if self.items.len() >= self.cap { self.items.remove(0); } self.items.push((_key, _value)); } }
++        if self.items.iter().all(|(k, _)| k != &_key) { if self.items.len() >= self.cap { self.items.remove(0); } self.items.push((_key, _value)); }
++    }
+```
+
+### Hop 6 — codex
+
+```text
+REPLACE 49
+        if let Some(i) = self.items.iter().position(|(k, _)| k == &_key) { self.items.remove(i); self.items.push((_key, _value)); return; }
+NEXT cursor-agent
+```
+
+```diff
+     pub fn put(&mut self, _key: K, _value: V) {
+-        if self.items.iter().all(|(k, _)| k != &_key) { if self.items.len() >= self.cap { self.items.remove(0); } self.items.push((_key, _value)); } }
++        if let Some(i) = self.items.iter().position(|(k, _)| k == &_key) { self.items.remove(i); self.items.push((_key, _value)); return; }
+         if self.items.iter().all(|(k, _)| k != &_key) { if self.items.len() >= self.cap { self.items.remove(0); } self.items.push((_key, _value)); }
+     }
+```
+
+### Hop 7 — cursor-agent
+
+```text
+REPLACE 39
+        self.items.iter().find(|(k, _)| k == _key).map(|(_, v)| v)
+NEXT codex
+```
+
+```diff
+     pub fn peek(&self, _key: &K) -> Option<&V> {
+-        None
++        self.items.iter().find(|(k, _)| k == _key).map(|(_, v)| v)
+     }
+```
+
+### Hop 8 — codex
+
+```text
+REPLACE 54
+        if self.items.is_empty() { None } else { Some(self.items.remove(0)) }
+NEXT cursor-agent
+```
+
+```diff
+     pub fn pop_lru(&mut self) -> Option<(K, V)> {
+-        None
++        if self.items.is_empty() { None } else { Some(self.items.remove(0)) }
+     }
+```
+
+### Hop 9 — cursor-agent
+
+`get` still cannot drop the miss path in the same hop.
+
+```text
+REPLACE 44
+        if let Some(i) = self.items.iter().position(|(k, _)| k == _key) { let p = self.items.remove(i); self.items.push(p); return self.items.last().map(|(_, v)| v); }
+        None
+NEXT codex
+```
+
+```diff
+     pub fn get(&mut self, _key: &K) -> Option<&V> {
++        if let Some(i) = self.items.iter().position(|(k, _)| k == _key) { let p = self.items.remove(i); self.items.push(p); return self.items.last().map(|(_, v)| v); }
+         None
+     }
+```
+
+### Hop 10 — codex
+
+```text
+REPLACE 59
+        self.items.pop()
+NEXT goose
+```
+
+```diff
+     pub fn pop_mru(&mut self) -> Option<(K, V)> {
+-        None
++        self.items.pop()
+     }
+```
+
+### Hop 11 — goose
+
+Goose wrote a real `REPLACE`. It swapped the whole `clear` signature
+for the body, so the crate no longer compiled.
+
+```text
+REPLACE 62
+        self.items.clear()
+NEXT claude-code
+```
+
+```diff
+-    pub fn clear(&mut self) {}
++        self.items.clear()
+```
+
+### Hop 12 — claude-code
+
+```text
+REPLACE 62
+    pub fn clear(&mut self) { self.items.clear(); }
+NEXT codex
+```
+
+```diff
+-        self.items.clear()
++    pub fn clear(&mut self) { self.items.clear(); }
+```
+
+### Hop 13 — codex
+
+```text
+REPLACE 66
+        self.items.iter().rev().map(|(k, _)| k).collect()
+NEXT cursor-agent
+```
+
+```diff
+     pub fn keys_mru(&self) -> Vec<&K> {
+-        Vec::new()
++        self.items.iter().rev().map(|(k, _)| k).collect()
+     }
+```
+
+### Hop 14 — cursor-agent
+
+```text
+REPLACE 71
+        self.items.iter().map(|(k, _)| k).collect()
+NEXT codex
+```
+
+```diff
+     pub fn keys_lru(&self) -> Vec<&K> {
+-        Vec::new()
++        self.items.iter().map(|(k, _)| k).collect()
+     }
+```
+
+### Hop 15 — codex
+
+```text
+REPLACE 75
+        self.items.last().map(|(k, _)| k)
+NEXT cursor-agent
+```
+
+```diff
+     pub fn recent(&self) -> Option<&K> {
+-        None
++        self.items.last().map(|(k, _)| k)
+     }
+```
+
+### Hop 16 — cursor-agent
+
+```text
+REPLACE 79
+        self.items.first().map(|(k, _)| k)
+NEXT codex
+```
+
+```diff
+     pub fn oldest(&self) -> Option<&K> {
+-        None
++        self.items.first().map(|(k, _)| k)
+     }
+```
+
+### Hop 17 — codex
+
+```text
+REPLACE 84
+        if let Some(i) = self.items.iter().position(|(k, _)| k == _key) { let p = self.items.remove(i); self.items.push(p); true } else { false }
+DONE
+```
+
+```diff
+     pub fn touch(&mut self, _key: &K) -> bool {
+-        false
++        if let Some(i) = self.items.iter().position(|(k, _)| k == _key) { let p = self.items.remove(i); self.items.push(p); true } else { false }
+     }
+```
+
+`cargo test` for `lru`: 10 passed.
+
+Impl after hop 17 (tests unchanged):
+
+```rust
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn contains(&self, _key: &K) -> bool {
+        self.items.iter().any(|(k, _)| k == _key)
+    }
+
+    pub fn peek(&self, _key: &K) -> Option<&V> {
+        self.items.iter().find(|(k, _)| k == _key).map(|(_, v)| v)
+    }
+
+    pub fn get(&mut self, _key: &K) -> Option<&V> {
+        if let Some(i) = self.items.iter().position(|(k, _)| k == _key) { let p = self.items.remove(i); self.items.push(p); return self.items.last().map(|(_, v)| v); }
+        None
+    }
+
+    pub fn put(&mut self, _key: K, _value: V) {
+        if let Some(i) = self.items.iter().position(|(k, _)| k == &_key) { self.items.remove(i); self.items.push((_key, _value)); return; }
+        if self.items.iter().all(|(k, _)| k != &_key) { if self.items.len() >= self.cap { self.items.remove(0); } self.items.push((_key, _value)); }
+    }
+
+    pub fn pop_lru(&mut self) -> Option<(K, V)> {
+        if self.items.is_empty() { None } else { Some(self.items.remove(0)) }
+    }
+
+    pub fn pop_mru(&mut self) -> Option<(K, V)> {
+        self.items.pop()
+    }
+
+    pub fn clear(&mut self) { self.items.clear(); }
+
+    pub fn keys_mru(&self) -> Vec<&K> {
+        self.items.iter().rev().map(|(k, _)| k).collect()
+    }
+
+    pub fn keys_lru(&self) -> Vec<&K> {
+        self.items.iter().map(|(k, _)| k).collect()
+    }
+
+    pub fn recent(&self) -> Option<&K> {
+        self.items.last().map(|(k, _)| k)
+    }
+
+    pub fn oldest(&self) -> Option<&K> {
+        self.items.first().map(|(k, _)| k)
+    }
+
+    pub fn touch(&mut self, _key: &K) -> bool {
+        if let Some(i) = self.items.iter().position(|(k, _)| k == _key) { let p = self.items.remove(i); self.items.push(p); true } else { false }
+    }
+```
 
 ## fifo — optional shorter problem
 
@@ -190,13 +539,18 @@ NEXT codex
 
 `cargo test` for `fifo`: 2 passed (`empty_new`, `push_pop_order`).
 
-## What a run shows
+## What these runs showed
 
 - Register and `list --local` bring all five adapters up, including
   goose.
-- The two-line cap is the point of `lru`: one hop cannot finish `get`
-  or `put`.
-- `DONE` with failing tests still advances the token.
+- Agents pick the next peer. This LRU run never sent the token to
+  copilot; fifo did.
+- The two-line cap is visible on `put` (hops 5–6) and `get` (hop 9
+  keeps the `None` miss path).
+- Goose can land a `REPLACE` (hop 11). A broken signature is a later
+  hop's problem — claude-code restored `clear`.
+- `DONE` with a green `cargo test` ends the problem (hop 17). `DONE`
+  with a broken crate still advances the token (fifo hop 4).
 - A failed goose hop does not write tool errors into the crate.
 - Indentation and leftover stubs are not cleaned up — the orchestrator
   only applies the two-line edit and runs tests.

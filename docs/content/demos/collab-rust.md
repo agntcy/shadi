@@ -134,9 +134,9 @@ The summary prints each turn's apply note and `diff`, the final `src/lib.rs`,
 and the last `cargo test`. Logs live under `/tmp/shadi-collab-demo.*/logs`
 (`lru-turns.log`, `fifo-turns.log`, per-turn `.prompt` / `.reply` / `.apply`).
 
-How the LRU crate is shaped, and a shorter fifo transcript of the same
-protocol, is in [Sample run: round-robin Rust](collab-rust-sample.md).
-Hop counts and peer choices vary on every live run.
+A live 17-hop `PROBLEM=lru` transcript (and a shorter fifo run) is in
+[Sample run: round-robin Rust](collab-rust-sample.md). Hop counts and
+peer choices vary on every live run.
 
 ## Next steps
 
