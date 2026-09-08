@@ -93,16 +93,24 @@ pub fn parse_member_spec(
 ) -> Result<Box<dyn MemberSource>, String> {
     if let Some(skill) = spec.strip_prefix("skill:") {
         if skill.is_empty() {
-            return Err(format!("invalid member spec '{spec}': skill: needs a skill name"));
+            return Err(format!(
+                "invalid member spec '{spec}': skill: needs a skill name"
+            ));
         }
-        return Ok(Box::new(SkillSearchSource { skill: skill.to_string(), dir: dir.clone() }));
+        return Ok(Box::new(SkillSearchSource {
+            skill: skill.to_string(),
+            dir: dir.clone(),
+        }));
     }
 
     if let Some(did) = spec.strip_prefix("did:") {
         if did.is_empty() {
             return Err(format!("invalid member spec '{spec}': did: needs a DID"));
         }
-        return Ok(Box::new(DidLookupSource { did: did.to_string(), dir: dir.clone() }));
+        return Ok(Box::new(DidLookupSource {
+            did: did.to_string(),
+            dir: dir.clone(),
+        }));
     }
 
     if let Some(rest) = spec.strip_prefix("explicit:") {
@@ -110,14 +118,18 @@ pub fn parse_member_spec(
             format!("invalid member spec '{spec}': expected explicit:<name>=<did>[@<endpoint>]")
         })?;
         if name.is_empty() {
-            return Err(format!("invalid member spec '{spec}': explicit: needs a name"));
+            return Err(format!(
+                "invalid member spec '{spec}': explicit: needs a name"
+            ));
         }
         let (did, endpoint) = match did_and_endpoint.split_once('@') {
             Some((did, endpoint)) => (did, Some(endpoint.to_string())),
             None => (did_and_endpoint, None),
         };
         if did.is_empty() {
-            return Err(format!("invalid member spec '{spec}': explicit: needs a DID"));
+            return Err(format!(
+                "invalid member spec '{spec}': explicit: needs a DID"
+            ));
         }
         return Ok(Box::new(ExplicitListSource {
             entries: vec![CandidateMember {
@@ -279,7 +291,11 @@ fn extract_candidate(record: &Value) -> Option<CandidateMember> {
             })
         });
 
-    Some(CandidateMember { name, did, slim_endpoint })
+    Some(CandidateMember {
+        name,
+        did,
+        slim_endpoint,
+    })
 }
 
 #[cfg(test)]
@@ -329,7 +345,11 @@ mod tests {
     }
 
     fn test_dir() -> DirLookupOptions {
-        DirLookupOptions { server_addr: "localhost:9999".to_string(), gh_token: None, limit: 10 }
+        DirLookupOptions {
+            server_addr: "localhost:9999".to_string(),
+            gh_token: None,
+            limit: 10,
+        }
     }
 
     #[test]
@@ -340,8 +360,8 @@ mod tests {
         let (script, _dir) = fake_dirctl_script("bafkreitest", &record.to_string());
         std::env::set_var("SHADI_DIRCTL_BINARY", &script);
 
-        let source = parse_member_spec("skill:code_generation/implementation", &test_dir())
-            .expect("parse");
+        let source =
+            parse_member_spec("skill:code_generation/implementation", &test_dir()).expect("parse");
         let candidates = source.resolve().expect("resolve");
 
         std::env::remove_var("SHADI_DIRCTL_BINARY");
@@ -369,13 +389,17 @@ mod tests {
 
     #[test]
     fn parse_member_spec_explicit_with_endpoint() {
-        let source = parse_member_spec("explicit:avatar=did:key:human@127.0.0.1:47560", &test_dir())
-            .expect("parse");
+        let source =
+            parse_member_spec("explicit:avatar=did:key:human@127.0.0.1:47560", &test_dir())
+                .expect("parse");
         let candidates = source.resolve().expect("resolve");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "avatar");
         assert_eq!(candidates[0].did, "did:key:human");
-        assert_eq!(candidates[0].slim_endpoint.as_deref(), Some("127.0.0.1:47560"));
+        assert_eq!(
+            candidates[0].slim_endpoint.as_deref(),
+            Some("127.0.0.1:47560")
+        );
     }
 
     #[test]
@@ -410,13 +434,17 @@ mod tests {
 
     #[test]
     fn parse_member_spec_rejects_explicit_with_empty_name() {
-        let err = parse_member_spec("explicit:=did:key:human", &test_dir()).err().unwrap();
+        let err = parse_member_spec("explicit:=did:key:human", &test_dir())
+            .err()
+            .unwrap();
         assert!(err.contains("needs a name"));
     }
 
     #[test]
     fn parse_member_spec_rejects_explicit_with_empty_did() {
-        let err = parse_member_spec("explicit:avatar=", &test_dir()).err().unwrap();
+        let err = parse_member_spec("explicit:avatar=", &test_dir())
+            .err()
+            .unwrap();
         assert!(err.contains("needs a DID"));
     }
 
@@ -446,7 +474,9 @@ mod tests {
                 slim_endpoint: Some("127.0.0.1:47560".to_string()),
             },
         ];
-        let source = ExplicitListSource { entries: entries.clone() };
+        let source = ExplicitListSource {
+            entries: entries.clone(),
+        };
         assert_eq!(source.resolve().expect("resolve"), entries);
     }
 
@@ -613,7 +643,10 @@ esac
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "claude-code");
-        assert_eq!(candidates[0].slim_endpoint.as_deref(), Some("127.0.0.1:47560"));
+        assert_eq!(
+            candidates[0].slim_endpoint.as_deref(),
+            Some("127.0.0.1:47560")
+        );
     }
 
     #[test]
@@ -622,7 +655,11 @@ esac
         std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
         let result = search_cids(
             &["--skill", "x"],
-            &DirLookupOptions { server_addr: "localhost:9999".to_string(), gh_token: None, limit: 10 },
+            &DirLookupOptions {
+                server_addr: "localhost:9999".to_string(),
+                gh_token: None,
+                limit: 10,
+            },
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         assert!(result.is_err());

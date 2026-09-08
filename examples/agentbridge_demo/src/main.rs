@@ -26,7 +26,7 @@ use std::sync::Arc;
 // ─── Mock CLI adapters ────────────────────────────────────────────────────────
 
 /// Simulates a real CLI coding-agent subprocess. In production this would be
-/// `ClaudeCodeAdapter`, `CopilotAdapter`, `CodexAdapter`, or `CursorAgentAdapter`.
+/// `ProfileAdapter` (JSON under `crates/agentbridge/profiles/`).
 struct MockCodingAgent {
     id: AgentId,
     generated_code: &'static str,
@@ -333,7 +333,7 @@ fn demo_coordination() {
     );
 
     println!("\n[OK] Coordination complete. In production, replace MockCodingAgent with");
-    println!("     ClaudeCodeAdapter, CopilotAdapter, CodexAdapter, CursorAgentAdapter.\n");
+    println!("     ProfileAdapter (crates/agentbridge/profiles/*.json).\n");
 }
 
 // ─── Scenario 3: CliToolAdapter bridge ───────────────────────────────────────

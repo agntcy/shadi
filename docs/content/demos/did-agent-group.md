@@ -34,8 +34,9 @@ It uses only `shadictl` shell commands. You can run it two ways:
   through A2A's `Message` type (SLIM's group/multicast is used underneath A2A via
   the SLIMRPC `Collaborate` RPC, not instead of it), with `slim-src` attribution.
 - **Real coding-agent CLIs in the loop** — `agentbridge` wraps the actual `claude`/
-  `codex`/`copilot` binaries as SLIM/A2A listeners under the same DID identity, so a
-  delegated task really executes on that CLI, not a mock.
+  `codex`/`copilot`/`cursor-agent` binaries as SLIM/A2A listeners under the same
+  DID identity, so a delegated task really executes on that CLI, not a mock.
+  Outbound A2A text is DID-signed; `list --local` shows the listeners on this host.
 
 ## Prerequisites
 
@@ -188,12 +189,11 @@ other member directly, not just moderator → members.
 ## 7. Delegate a real task to the coding-agent CLIs
 
 Everything so far shows *identity* and *messaging*. This step wires in the real
-thing: **`agentbridge`** wraps the actual installed `claude`, `codex`, and `copilot`
-CLI binaries as SLIM/A2A listeners, so a delegated task really invokes that CLI and
-returns its real output — using the *same* DID identity from step 1 (agentbridge
-checks `SHADI_SLIM_AUTH=did` the same way `shadictl` does, no separate setup).
-`cursor-agent` doesn't have an `agentbridge register` listener yet, so it's not part
-of this step (it still participates in the roll call above).
+thing: **`agentbridge`** wraps the actual installed `claude`, `codex`, `copilot`,
+and `cursor-agent` CLIs as SLIM/A2A listeners, so a delegated task really invokes
+that CLI and returns its real output — using the *same* DID identity from step 1
+(agentbridge checks `SHADI_SLIM_AUTH=did` the same way `shadictl` does). Outbound
+A2A text is DID-signed; unsigned inbound parks as `AUTH_REQUIRED`.
 
 **Each agent terminal (e.g. claude-code)** — registers a live adapter backed by the
 real CLI, reachable at `agntcy/shadi/claude-code-a2a`. `agentbridge register
@@ -214,9 +214,23 @@ Starting SLIM A2A listener on 127.0.0.1:47560 as agntcy/shadi/claude-code-a2a ..
 [agentbridge] ready — listening on agntcy/shadi/claude-code-a2a
 ```
 
-Repeat for `codex` and `copilot` (same shape, `--tool codex` / `--tool copilot`).
+Repeat for `codex`, `copilot`, and `cursor-agent` (same shape, `--tool <name>`).
 
-**Moderator terminal** — delegates one real task to each:
+Then, from any terminal, list the listeners this machine just started:
+
+```bash
+target/debug/agentbridge list --local
+```
+```text
+Local agentbridge adapters:
+claude-code  did=did:key:z6MkhRuJ…  slim://127.0.0.1:47560
+codex  did=did:key:z6MkmaFF…  slim://127.0.0.1:47560
+copilot  did=did:key:z6MkmJUc…  slim://127.0.0.1:47560
+cursor-agent  did=did:key:z6MktdzQ…  slim://127.0.0.1:47560
+```
+
+**Moderator terminal** — delegates one real task to each (same shape for
+`cursor-agent`):
 
 ```bash
 target/debug/agentbridge delegate "Reply with exactly the single word: PONG" \
@@ -261,11 +275,17 @@ target/debug/agentbridge delegate \
 capacity or a process with unexpectedly high CPU — built from the other two
 agents' real command output.
 
-This is a genuinely live `claude`/`copilot` process handling the prompt — swap the
-message for any real coding task to see it delegated end to end. `codex`'s success
-depends on your local `codex` CLI/model configuration (an unsupported default model
-returns a `400` from the OpenAI backend, unrelated to SHADI); that's an environment
-issue, not a bug in this wiring.
+This is a genuinely live `claude`/`copilot`/`cursor-agent` process handling the
+prompt — swap the message for any real coding task to see it delegated end to
+end. Native handoff uses the same specs as `coordinate`:
+
+```bash
+target/debug/agentbridge handoff --from copilot --to claude-code
+```
+
+`codex`'s success depends on your local `codex` CLI/model configuration (an
+unsupported default model returns a `400` from the OpenAI backend, unrelated to
+SHADI); that's an environment issue, not a bug in this wiring.
 
 ## How admission works (under the hood)
 
@@ -292,14 +312,15 @@ issue, not a bug in this wiring.
   attribution on its reply-observer stream, but messages surfaced purely through the
   passive listener path have no per-message sender tag yet (the message text itself
   states the sender, which is enough for this demo).
-- `agentbridge register --tool claude-code|codex|copilot` needs that CLI actually
-  installed (and authenticated) on PATH; `cursor-agent` doesn't have a `register`
-  listener yet. A `delegate` failure usually means the target CLI itself errored
-  (auth, unsupported model, etc.), not the SLIM/A2A wiring — the response text
-  includes the real error from that CLI so it's easy to tell apart.
+- `agentbridge register --tool claude-code|codex|copilot|cursor-agent` needs that
+  CLI actually installed (and authenticated) on PATH. A `delegate` failure
+  usually means the target CLI itself errored (auth, unsupported model, etc.),
+  not the SLIM/A2A wiring — the response text includes the real error from that
+  CLI so it's easy to tell apart.
 
 ## Next steps
 
+- Continue with a multi-turn coding loop (two lines of Rust per agent, round-robin until tests pass) in the [Round-robin Rust Demo](collab-rust.md).
 - Read the concept-level model behind this demo in [SLIM and A2A](../slim_a2a.md).
 - See [AgentBridge](../agentbridge.md) for the full CLI coding-agent interconnect this demo exercises.
 - Look up exact `shadictl`/`agentbridge` flags in the [CLI Reference](../cli.md).

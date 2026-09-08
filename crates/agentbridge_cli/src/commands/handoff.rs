@@ -1,16 +1,9 @@
 use agentbridge::{
-    adapters::{
-        claude_code::ClaudeCodeAdapter,
-        codex::CodexAdapter,
-        copilot::CopilotAdapter,
-        cursor_agent::CursorAgentAdapter,
-        generic_stdio::GenericStdioAdapter,
-    },
-    CliAdapter, ContextPacket,
+    adapters::generic_stdio::GenericStdioAdapter, open_profile_adapter, CliAdapter, ContextPacket,
 };
 use shadi_mas::{
-    Epoch, PatternKind, TaskAdapter, TaskEnvelope,
     experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
+    Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -83,6 +76,10 @@ enum HandoffPeer {
         agent_id: String,
         adapter: LiveA2ATaskAdapter,
     },
+    /// The calling process *is* this agent (`SHADI_AGENT_ID` matches
+    /// `slim:<id>`). Snapshot stays local so we do not A2A-deadlock on
+    /// our own listener. Inject is not used on this variant.
+    SelfSlim { agent_id: String },
 }
 
 impl HandoffPeer {
@@ -90,14 +87,31 @@ impl HandoffPeer {
         match self {
             HandoffPeer::Local { label, .. } => label,
             HandoffPeer::Slim { agent_id, .. } => agent_id,
+            HandoffPeer::SelfSlim { agent_id } => agent_id,
         }
     }
 
     fn snapshot(&self) -> Result<ContextPacket, String> {
         match self {
-            HandoffPeer::Local { adapter, .. } => adapter
-                .snapshot_context()
-                .map_err(|e| e.to_string()),
+            HandoffPeer::Local { adapter, .. } => {
+                adapter.snapshot_context().map_err(|e| e.to_string())
+            }
+            HandoffPeer::SelfSlim { agent_id } => {
+                let summary = format!(
+                    "{agent_id} finished a coding turn and is handing off as an A2A client."
+                );
+                let mut pkt = ContextPacket::new(agent_id.clone());
+                pkt.conversation.push(agentbridge::ConversationMessage {
+                    role: "assistant".to_string(),
+                    content: summary.clone(),
+                });
+                pkt.artifacts.push(agentbridge::ArtifactPayload {
+                    name: "session_summary.md".to_string(),
+                    content: summary,
+                    media_type: "text/markdown".to_string(),
+                });
+                Ok(pkt)
+            }
             HandoffPeer::Slim { agent_id, adapter } => {
                 let summary = dispatch_prompt(
                     adapter,
@@ -120,12 +134,17 @@ impl HandoffPeer {
 
     fn inject(&self, ctx: &ContextPacket) -> Result<(), String> {
         match self {
-            HandoffPeer::Local { adapter, .. } => adapter.inject_context(ctx).map_err(|e| e.to_string()),
+            HandoffPeer::Local { adapter, .. } => {
+                adapter.inject_context(ctx).map_err(|e| e.to_string())
+            }
             HandoffPeer::Slim { adapter, .. } => {
                 let prompt = render_inject_prompt(ctx);
                 let _ = dispatch_prompt(adapter, &prompt)?;
                 Ok(())
             }
+            HandoffPeer::SelfSlim { agent_id } => Err(format!(
+                "cannot A2A-inject into self ({agent_id}); destination must be another peer"
+            )),
         }
     }
 }
@@ -162,44 +181,12 @@ fn render_inject_prompt(ctx: &ContextPacket) -> String {
 }
 
 fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
-    if spec.starts_with("claude-code") {
-        let work_dir = spec
-            .strip_prefix("claude-code:")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    if let Some((label, adapter)) =
+        open_profile_adapter(spec).map_err(|e| anyhow::anyhow!("{e}"))?
+    {
         return Ok(HandoffPeer::Local {
-            label: "claude-code".to_string(),
-            adapter: Arc::new(ClaudeCodeAdapter::new("claude-code", work_dir)),
-        });
-    }
-    if spec.starts_with("cursor-agent") {
-        let work_dir = spec
-            .strip_prefix("cursor-agent:")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-        return Ok(HandoffPeer::Local {
-            label: "cursor-agent".to_string(),
-            adapter: Arc::new(CursorAgentAdapter::new("cursor-agent", work_dir)),
-        });
-    }
-    if spec.starts_with("copilot") {
-        let work_dir = spec
-            .strip_prefix("copilot:")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-        return Ok(HandoffPeer::Local {
-            label: "copilot".to_string(),
-            adapter: Arc::new(CopilotAdapter::new("copilot", work_dir)),
-        });
-    }
-    if spec.starts_with("codex") {
-        let work_dir = spec
-            .strip_prefix("codex:")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-        return Ok(HandoffPeer::Local {
-            label: "codex".to_string(),
-            adapter: Arc::new(CodexAdapter::new("codex", work_dir)),
+            label,
+            adapter: Arc::new(adapter),
         });
     }
     if let Some(cmd) = spec.strip_prefix("generic-stdio:") {
@@ -210,10 +197,17 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
             .split_once('@')
             .map(|(id, ep)| (id.to_string(), ep.to_string()))
             .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
+        // Prove as the calling agent (SHADI_AGENT_ID), not a synthetic
+        // "handoff" name — that DID is not on SLIM_MEMBER_DIDS and SLIM
+        // drops discovery with InvalidSignature.
+        let local_id = std::env::var("SHADI_AGENT_ID").unwrap_or_else(|_| "avatar".to_string());
+        if local_id == agent_id {
+            return Ok(HandoffPeer::SelfSlim { agent_id });
+        }
         let config = LiveA2ATaskAdapterConfig {
             endpoint,
-            agent_id: "handoff".to_string(),
-            local_name: Some("agntcy/shadi/handoff-a2a".to_string()),
+            agent_id: local_id.clone(),
+            local_name: Some(format!("agntcy/shadi/{local_id}-a2a")),
             peer_agent_id: agent_id.clone(),
             destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
         };
@@ -257,7 +251,22 @@ mod tests {
         assert_eq!(cursor.label(), "cursor-agent");
         match open_peer("slim:peer@10.0.0.1:9", "127.0.0.1:47357").expect("slim") {
             HandoffPeer::Slim { agent_id, .. } => assert_eq!(agent_id, "peer"),
-            _ => panic!("expected slim peer"),
+            other => panic!("expected slim peer, got {}", other.label()),
+        }
+    }
+
+    #[test]
+    fn slim_from_self_does_not_open_a2a_client_to_own_listener() {
+        let prev = std::env::var("SHADI_AGENT_ID").ok();
+        std::env::set_var("SHADI_AGENT_ID", "claude-code");
+        let peer = open_peer("slim:claude-code", "127.0.0.1:47357").expect("self slim");
+        match peer {
+            HandoffPeer::SelfSlim { agent_id } => assert_eq!(agent_id, "claude-code"),
+            other => panic!("expected SelfSlim, got {}", other.label()),
+        }
+        match prev {
+            Some(value) => std::env::set_var("SHADI_AGENT_ID", value),
+            None => std::env::remove_var("SHADI_AGENT_ID"),
         }
     }
 

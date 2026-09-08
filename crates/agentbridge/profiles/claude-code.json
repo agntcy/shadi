@@ -1,0 +1,36 @@
+{
+  "id": "claude-code",
+  "bin": "claude",
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{workdir}",
+    "TMP": "{workdir}",
+    "TEMP": "{workdir}",
+    "CLAUDE_CODE_TMPDIR": "{workdir}",
+    "CLAUDE_TMPDIR": "{workdir}"
+  },
+  "workdir_flags": ["--add-dir", "{workdir}"],
+  "workdir_flags_on_execute": true,
+  "workdir_flags_on_snapshot": true,
+  "workdir_flags_on_inject": false,
+  "current_dir_workdir": true,
+  "system_flag": "--system-prompt",
+  "split_large_prompt": true,
+  "execute": {
+    "args": [
+      "--print",
+      "--output-format",
+      "json",
+      "{workdir_flags}",
+      "{system}",
+      "{session}",
+      "{prompt}"
+    ]
+  },
+  "session": {
+    "json_field": "session_id",
+    "flag": "--session-id",
+    "retry_stderr_contains": "already in use"
+  },
+  "result": { "kind": "json_field", "field": "result" }
+}

@@ -166,6 +166,15 @@ copilot   did=did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb  slim://1
 Both entries are real, resolved from Directory records `agentbridge list`
 pulled and parsed — not raw `dirctl` stdout.
 
+Listeners on this host (no DIR) are listed the same way after
+`register --slim-endpoint`:
+
+```bash
+target/debug/agentbridge list --local
+```
+
+`register --tool cursor-agent` works the same as copilot/codex.
+
 ## 5. Moderator: create a group by discovering its members
 
 **Terminal M:**

@@ -1,21 +1,16 @@
 use agentbridge::{
     adapter::CliToolAdapter,
-    adapters::{
-        claude_code::ClaudeCodeAdapter,
-        codex::CodexAdapter,
-        copilot::CopilotAdapter,
-        cursor_agent::CursorAgentAdapter,
-        generic_stdio::GenericStdioAdapter,
-    },
+    adapters::generic_stdio::GenericStdioAdapter,
     mas::{
-        AgentId, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch,
-        EventId, EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind,
-        SemanticEvent, SemanticPayload,
+        AgentId, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch, EventId,
+        EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
+        SemanticPayload,
     },
+    open_profile_adapter,
 };
 use shadi_mas::{
-    TaskAdapter, ToolAdapter, ToolCall, ToolProvider, ToolResult,
     experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
+    TaskAdapter, ToolAdapter, ToolCall, ToolProvider, ToolResult,
 };
 use std::sync::{Arc, Mutex};
 
@@ -115,7 +110,11 @@ pub fn run(
                         "  [{}] endorses '{}'{}",
                         voter.id.0,
                         endorsee,
-                        if valid { "" } else { " (unrecognised — skipped)" }
+                        if valid {
+                            ""
+                        } else {
+                            " (unrecognised — skipped)"
+                        }
                     );
                     let ev = vote_event(&voter.id, &endorsee, epoch, valid);
                     runtime.apply(ev);
@@ -129,7 +128,10 @@ pub fn run(
         let ev = proposal_event(last_proposer, epoch, last_code.as_bytes());
         let outcome = runtime.apply(ev);
         if let EventOutcome::Finalized(ref s) = outcome {
-            println!("\n  🏆 Finalized at epoch {} ({} participants)", s.epoch.0, s.participants);
+            println!(
+                "\n  🏆 Finalized at epoch {} ({} participants)",
+                s.epoch.0, s.participants
+            );
         } else {
             println!("\n  (quorum not met — will retry next round)");
         }
@@ -146,7 +148,12 @@ pub fn run(
         }
     }
 
-    finish(&runtime, max_rounds.saturating_sub(1), output, require_human)
+    finish(
+        &runtime,
+        max_rounds.saturating_sub(1),
+        output,
+        require_human,
+    )
 }
 
 // ─── Prompt builders ─────────────────────────────────────────────────────────
@@ -338,10 +345,7 @@ impl ToolAdapter for SlimToolAdapter {
             .unwrap_or("?");
         let epoch = request.epoch.0;
 
-        println!(
-            "\n┌─ A2A ─→ {} [{}] epoch {}",
-            self.agent_id, phase, epoch
-        );
+        println!("\n┌─ A2A ─→ {} [{}] epoch {}", self.agent_id, phase, epoch);
         println!("│  {}", truncate(&prompt, 120));
         println!("└─────────────────────────────────────────────────────────");
 
@@ -361,10 +365,7 @@ impl ToolAdapter for SlimToolAdapter {
         let record = dispatches.get(idx);
         let response_str = record.map(|r| r.response.as_str()).unwrap_or("");
 
-        println!(
-            "\n┌─ A2A ←─ {} ({} ms)",
-            self.agent_id, elapsed_ms
-        );
+        println!("\n┌─ A2A ←─ {} ({} ms)", self.agent_id, elapsed_ms);
         println!("│  {}", truncate(response_str, 120));
         println!("└─────────────────────────────────────────────────────────\n");
 
@@ -396,34 +397,13 @@ fn truncate(s: &str, max: usize) -> String {
 fn build_agents(specs: &[String], slim_endpoint: &str) -> anyhow::Result<Vec<AgentEntry>> {
     let mut agents = Vec::new();
     for spec in specs {
-        let (id_str, tool): (String, Arc<dyn ToolAdapter>) = if spec.starts_with("claude-code") {
-            let work_dir = spec
-                .strip_prefix("claude-code:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(ClaudeCodeAdapter::new("claude-code", work_dir));
-            ("claude-code".to_string(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if spec.starts_with("cursor-agent") {
-            let work_dir = spec
-                .strip_prefix("cursor-agent:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CursorAgentAdapter::new("cursor-agent", work_dir));
-            ("cursor-agent".to_string(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if spec.starts_with("copilot") {
-            let work_dir = spec
-                .strip_prefix("copilot:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CopilotAdapter::new("copilot", work_dir));
-            ("copilot".to_string(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if spec.starts_with("codex") {
-            let work_dir = spec
-                .strip_prefix("codex:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CodexAdapter::new("codex", work_dir));
-            ("codex".to_string(), Arc::new(CliToolAdapter::new(adapter)))
+        let (id_str, tool): (String, Arc<dyn ToolAdapter>) = if let Some((id, adapter)) =
+            open_profile_adapter(spec).map_err(|e| anyhow::anyhow!("{e}"))?
+        {
+            (
+                id,
+                Arc::new(CliToolAdapter::new(Arc::new(adapter))) as Arc<dyn ToolAdapter>,
+            )
         } else if let Some(cmd) = spec.strip_prefix("generic-stdio:") {
             let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
             let prog = parts[0];
@@ -458,9 +438,8 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> anyhow::Result<Vec<Age
             (agent_id, slim_adapter as Arc<dyn ToolAdapter>)
         } else {
             anyhow::bail!(
-                "unknown agent spec '{spec}'. Supported: \
-                 claude-code[:/path], cursor-agent[:/path], \
-                 copilot[:/path], codex[:/path], generic-stdio:<command>, \
+                "unknown agent spec '{spec}'. Supported: a profile id \
+                 (claude-code[:/path], …), generic-stdio:<command>, \
                  slim:<agent-id>[@ <host:port>]"
             );
         };
@@ -506,7 +485,10 @@ mod tests {
 
     #[test]
     fn proposal_prompt_with_prior_references_other_agents() {
-        let prior = vec![(AgentId("claude-code".to_string()), "fn main() {}".to_string())];
+        let prior = vec![(
+            AgentId("claude-code".to_string()),
+            "fn main() {}".to_string(),
+        )];
         let prompt = proposal_prompt("build a parser", 1, &prior);
         assert!(prompt.contains("prior proposals"));
         assert!(prompt.contains("claude-code"));
@@ -522,7 +504,10 @@ mod tests {
     #[test]
     fn build_proposal_list_previews_first_signature_line() {
         let proposals = vec![
-            (AgentId("a".to_string()), "\nfn solve() -> u8 { 0 }\nmore".to_string()),
+            (
+                AgentId("a".to_string()),
+                "\nfn solve() -> u8 { 0 }\nmore".to_string(),
+            ),
             (AgentId("b".to_string()), "struct S;".to_string()),
         ];
         let list = build_proposal_list(&proposals);
@@ -544,7 +529,10 @@ mod tests {
         let event = vote_event(&AgentId("voter".to_string()), "winner", 1, true);
         assert_eq!(event.metadata.event_id.0, "vote-voter-e1");
         match event.payload {
-            SemanticPayload::ToolResult { tool_name, accepted } => {
+            SemanticPayload::ToolResult {
+                tool_name,
+                accepted,
+            } => {
                 assert_eq!(tool_name, "winner");
                 assert!(accepted);
             }
@@ -576,7 +564,10 @@ mod tests {
         ];
         let agents = build_agents(&specs, "127.0.0.1:47357").expect("build");
         let ids: Vec<&str> = agents.iter().map(|a| a.id.0.as_str()).collect();
-        assert_eq!(ids, ["claude-code", "copilot", "codex", "cursor-agent", "peer"]);
+        assert_eq!(
+            ids,
+            ["claude-code", "copilot", "codex", "cursor-agent", "peer"]
+        );
     }
 
     #[test]
