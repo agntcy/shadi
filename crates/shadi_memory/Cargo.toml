@@ -21,6 +21,9 @@ time = { version = "0.3", features = ["formatting"] }
 # OpenSSL, so a dynamic link there means every user installing one themselves
 # from a single publisher whose old builds are deleted; vendored instead, and
 # openssl-src is bumped like any other dependency.
+# Stay on rusqlite 0.37 until SLIM's mls-rs-provider-sqlite leaves ^0.37.
+# Cargo allows only one `links = "sqlite3"` crate; 0.38+ pulls libsqlite3-sys
+# 0.36+ and cannot coexist with SLIM 2.3.0 (still latest).
 [target.'cfg(not(windows))'.dependencies]
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
 

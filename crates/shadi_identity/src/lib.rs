@@ -63,7 +63,7 @@ impl AgentIdentity {
     /// Generate a fresh Ed25519 identity.
     pub fn generate() -> Result<Self, IdentityError> {
         let mut seed = [0u8; 32];
-        getrandom::getrandom(&mut seed).map_err(|e| IdentityError::KeyGen(e.to_string()))?;
+        getrandom::fill(&mut seed).map_err(|e| IdentityError::KeyGen(e.to_string()))?;
         let id = Self {
             signing_key: SigningKey::from_bytes(&seed),
         };
