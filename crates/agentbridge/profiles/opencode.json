@@ -1,0 +1,26 @@
+{
+  "id": "opencode",
+  "bin": "opencode",
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{workdir}",
+    "TMP": "{workdir}",
+    "TEMP": "{workdir}"
+  },
+  "workdir_flags": ["--dir", "{workdir}"],
+  "workdir_flags_on_execute": true,
+  "workdir_flags_on_snapshot": true,
+  "workdir_flags_on_inject": true,
+  "current_dir_workdir": true,
+  "extra_args_env": "OPENCODE_ARGS",
+  "execute": {
+    "args": [
+      "run",
+      "--auto",
+      "{workdir_flags}",
+      "{extra_args}",
+      "{prompt}"
+    ]
+  },
+  "result": { "kind": "stdout" }
+}

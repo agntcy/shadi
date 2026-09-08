@@ -26,6 +26,34 @@
     "system_flag": { "type": "string" },
     "split_large_prompt": { "type": "boolean", "default": false },
     "extra_args_env": { "type": "string" },
+    "env_flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["flag", "env"],
+        "properties": {
+          "flag": { "type": "string", "minLength": 1 },
+          "env": { "type": "string", "minLength": 1 }
+        }
+      },
+      "description": "Expanded in place of `{env_flags}`: each set host env var becomes `flag value`."
+    },
+    "pass_env": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Host env var names copied onto the child. Values are never logged."
+    },
+    "pass_env_prefixes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Copy every host env var whose name starts with one of these prefixes."
+    },
+    "pass_env_suffixes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Copy every host env var whose name ends with one of these suffixes (e.g. `_API_KEY`)."
+    },
     "stdin_null": { "type": "boolean", "default": false },
     "execute": {
       "type": "object",
@@ -35,7 +63,7 @@
         "args": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Tokens: `{prompt}`, `{system}`, `{session}`, `{workdir_flags}`, `{extra_args}`, `{workdir}`."
+          "description": "Tokens: `{prompt}`, `{system}`, `{session}`, `{workdir_flags}`, `{extra_args}`, `{env_flags}`, `{workdir}`."
         }
       }
     },

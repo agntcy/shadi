@@ -1,0 +1,42 @@
+{
+  // markdownlint-cli2 config. Scope is the published MkDocs tree only.
+  "globs": [
+    "docs/content/**/*.md"
+  ],
+  "config": {
+    "default": true,
+    // Prose, tables, and URLs regularly exceed 80 columns.
+    "MD013": false,
+    // MkDocs Material landing pages and card grids use HTML.
+    "MD033": {
+      "allowed_elements": [
+        "a",
+        "button",
+        "div",
+        "h1",
+        "h2",
+        "h3",
+        "img",
+        "p",
+        "path",
+        "picture",
+        "pre",
+        "section",
+        "source",
+        "span",
+        "strong",
+        "svg"
+      ]
+    },
+    // Admonitions, content tabs, and collapsible notes indent like code.
+    "MD046": false,
+    // Existing tables mix compact and padded pipes.
+    "MD060": false,
+    // Landing page uses HTML for the H1.
+    "MD041": false,
+    // Repeated "Commands" / "Global flags" headings live in different sections.
+    "MD024": {
+      "siblings_only": true
+    }
+  }
+}

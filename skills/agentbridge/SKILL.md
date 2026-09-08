@@ -4,12 +4,13 @@ description: >-
   Use SHADI agentbridge to discover local A2A listeners, delegate a task to
   another coding agent, or hand off turn context over SLIM. Use when the user
   asks to list --local, delegate, handoff, collab, or talk to claude-code,
-  copilot, codex, or cursor-agent through agentbridge.
+  copilot, codex, cursor-agent, goose, or opencode through agentbridge.
 ---
 
 # agentbridge — use the interconnect from a harness
 
-You are inside a coding harness (Claude Code, Cursor, Copilot, Codex, …).
+You are inside a coding harness (Claude Code, Cursor, Copilot, Codex,
+Goose, OpenCode, …).
 Do **not** invent A2A frames or SLIMRPC. Call the `agentbridge` CLI. The
 binary is Rust; this skill is the host-agnostic client.
 
@@ -30,6 +31,8 @@ the host skills directory. The folder name must be `agentbridge`.
 | Claude Code | `~/.claude/skills/agentbridge/` or `.claude/skills/agentbridge/` |
 | Cursor | `.cursor/skills/agentbridge/` |
 | GitHub Copilot | `~/.copilot/skills/agentbridge/` |
+| Goose | `~/.config/goose/skills/agentbridge/` |
+| OpenCode | `~/.config/opencode/skills/agentbridge/` |
 | Codex / others | that host’s skills directory, same folder name |
 
 ## Commands (do not invent flags)

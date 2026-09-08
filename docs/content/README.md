@@ -14,6 +14,21 @@ Run locally, from the repo root:
 just docs-serve
 ```
 
+Spell-check and lint the docs with:
+
+```bash
+just docs-lint
+```
+
+That runs [`typos`](https://github.com/crate-ci/typos),
+[`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2), and
+[`lychee`](https://github.com/lycheeverse/lychee).
+Install `typos` with `brew install typos-cli` or `cargo install typos-cli`,
+and `lychee` with `brew install lychee` or `cargo install lychee`.
+Markdown linting uses `npx` (Node.js 22+ preferred). CI runs the same
+checks on pull requests and `main` pushes that touch docs, Markdown, or
+the lint configs.
+
 Or directly with MkDocs:
 
 ```bash

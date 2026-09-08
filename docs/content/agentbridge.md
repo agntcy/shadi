@@ -66,7 +66,7 @@ same machine). SLIM is the authenticated transport bus between them.
 flowchart LR
   subgraph reg["agentbridge register  (one per agent)"]
     direction TB
-    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex | cursor-agent"]
+    tool["CLI tool\ngeneric-stdio | claude-code | copilot | codex | cursor-agent | goose | opencode"]
     ca["CliAdapter\nexecute_prompt(prompt) → text"]
     srv["A2A server\nAgentBridgeRequestHandler\nInMemoryTaskStore"]
     tool -- "stdin / stdout" --> ca --> srv
@@ -86,9 +86,18 @@ flowchart LR
   slim <-- "A2A tasks  (text/plain)" --> laa
 ```
 
-`register --tool` accepts `generic-stdio`, `claude-code`, `copilot`, `codex`,
-and `cursor-agent`. After a listener starts, `agentbridge list --local` shows
-it (name, DID, endpoint) from the lease file under `$SHADI_TMP_DIR`.
+`register --tool` accepts `generic-stdio` or a bundled profile id
+(`claude-code`, `copilot`, `codex`, `cursor-agent`, `goose`, `opencode`).
+After a listener starts, `agentbridge list --local` shows it (name, DID,
+endpoint) from the lease file under `$SHADI_TMP_DIR`.
+
+`goose` and `opencode` keep their own provider config (`~/.config/goose`,
+`~/.config/opencode`). Agentbridge does not set a base URL or API key.
+When `GOOSE_PROVIDER` / `GOOSE_MODEL` are set in the host environment,
+the goose listener passes them as `goose run --provider` / `--model`.
+Host `GOOSE_*`, `OPENAI_*`, `*_API_KEY`, and `api_key_env` names from
+the operator's Goose provider files are copied onto that process.
+Extra flags: `GOOSE_ARGS` / `OPENCODE_ARGS`.
 
 Outbound A2A text is wrapped in a DID-proof envelope. Unsigned inbound parks
 as `AUTH_REQUIRED` (re-prove / ask / deny); a forged DID is rejected.
@@ -186,14 +195,15 @@ Export a session snapshot from one tool and import it into another. The
 `ContextPacket` carries conversation history, open files, git diff, and any
 generated artifacts.
 
-```
+```bash
 agentbridge handoff --from claude-code --to copilot
 SHADI_AGENT_ID=claude-code agentbridge handoff \
   --from slim:claude-code --to slim:copilot --slim-endpoint 127.0.0.1:47591
 ```
 
 `--from` / `--to` accept the same specs as `coordinate` (`claude-code`,
-`copilot`, `codex`, `cursor-agent`, `generic-stdio:<cmd>`, `slim:<id>`).
+`copilot`, `codex`, `cursor-agent`, `goose`, `opencode`,
+`generic-stdio:<cmd>`, `slim:<id>`).
 A bare subprocess command still opens GenericStdio. `--save` /
 `--from-file` persist the packet.
 
@@ -220,7 +230,7 @@ note).
 
 One tool commissions a specific subtask to another and retrieves the artifact.
 
-```
+```bash
 agentbridge delegate --to codex "write unit tests for src/parser.rs"
 ```
 
@@ -229,7 +239,7 @@ is an A2A artifact containing the generated code.
 
 ### 3. Autonomous multi-round coordination
 
-```
+```bash
 agentbridge coordinate \
   --goal "implement a JSON parser" \
   --agents claude-code,copilot,codex,cursor-agent \
@@ -252,7 +262,7 @@ full A2A server that makes the local adapter reachable to any SLIM peer.
 
 Each adapter registers under the hierarchical name:
 
-```
+```text
 agntcy/shadi/<tool>-a2a
 ```
 
@@ -261,7 +271,7 @@ For example, `--tool copilot` listens as `agntcy/shadi/copilot-a2a`. The
 
 ### Request handler stack
 
-```
+```text
 SlimRpcHandler (shadi_a2a)          ← decodes SLIMRPC frames
   └─ AgentBridgeRequestHandler      ← full A2A protocol surface
        ├─ DefaultRequestHandler      ← routes send/get/list/cancel/subscribe/push
@@ -301,7 +311,7 @@ certificate bundle once with `tools/generate_slim_mtls_certs.sh`.
 
 ### Lifecycle
 
-```
+```text
 register --slim-endpoint 127.0.0.1:47357
   │
   ├─ service.connect()               connect to SLIM node (TLS 1.3)
@@ -325,7 +335,7 @@ The `coordinate` command uses `slim:<agent-id>` specs to reach registered
 adapters. It constructs a `LiveA2ATaskAdapter` per spec, which speaks the
 same SLIMRPC protocol to the listening server:
 
-```
+```text
 coordinate --agents slim:copilot,slim:codex
   │
   ├─ LiveA2ATaskAdapter { peer: agntcy/shadi/copilot-a2a }
@@ -406,7 +416,7 @@ consumed by `agentbridge coordinate`. It provides epoch-disciplined state
 machines that can drive any multi-agent pattern to a deterministic
 finalization outcome.
 
-```
+```text
 SemanticEvent  ──►  CoordinationEngine  ──►  EventOutcome
 (proposal,          (PreferenceEngine,        (Applied,
  vote, tool          DevelopmentEngine,         Finalized,

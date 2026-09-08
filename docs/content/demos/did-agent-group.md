@@ -71,6 +71,7 @@ Each agent's DID is derived from `SLIM_HUMAN_SEED` + its `SHADI_AGENT_ID`:
 | `codex`        | participant | `z6MkmaFFysqqMsE1q5M6E7LDuoJMaSBv3PkNHz5SwwwnuGr6` |
 | `copilot`      | participant | `z6MkmJUcT1F6BK21nQv1C2zo46gJJA9hsMGnbdpiN2LrMnwT` |
 | `cursor-agent` | participant | `z6MktdzQzm171sAoRZc6cCUPDa8XWxaG8Bi6R3Y4ohP7qS5Q` |
+| `goose`        | participant | `z6MkjiDFxXFe2sM4vXZH8fT3XYLmjNDeVobo4VgNayc7aEKD` |
 
 ## 2. Discover a member's DID (optional)
 
@@ -126,6 +127,7 @@ everyone in step 5.
 ```bash
 SHADI_AGENT_ID=claude-code target/debug/shadictl shell
 ```
+
 ```text
 /slim join agntcy/shadi/dev-room --timeout 120
 joined group session for channel agntcy/shadi/dev-room as agntcy/shadi/claude-code
@@ -173,6 +175,7 @@ else's, in one call — no `/slim create`/`invite`/`join` needed for this step, 
 session from steps 3–5 above).
 
 **Each terminal — moderator and all four agents — runs the same shape (e.g. claude-code):**
+
 ```text
 /slim a2a-collaborate codex,copilot,cursor-agent,avatar --message Hi, I am claude-code — reporting in --timeout 15
 broadcast "Hi, I am claude-code — reporting in" to 4 peer(s); received:
@@ -208,6 +211,7 @@ SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block --net-allow "$SLIM_
   target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT"
 ```
+
 ```text
 Registered Claude Code adapter (agent id: claude-code, dir: /path/to/shadi)
 Starting SLIM A2A listener on 127.0.0.1:47560 as agntcy/shadi/claude-code-a2a ...
@@ -221,6 +225,7 @@ Then, from any terminal, list the listeners this machine just started:
 ```bash
 target/debug/agentbridge list --local
 ```
+
 ```text
 Local agentbridge adapters:
 claude-code  did=did:key:z6MkhRuJ…  slim://127.0.0.1:47560
@@ -236,6 +241,7 @@ cursor-agent  did=did:key:z6MktdzQ…  slim://127.0.0.1:47560
 target/debug/agentbridge delegate "Reply with exactly the single word: PONG" \
   --to claude-code --agent-id avatar --endpoint "$SLIM_ENDPOINT"
 ```
+
 ```text
 Delegating task 09024c44-... to 'claude-code'...
 Response from 'claude-code' (5518ms):
@@ -243,6 +249,7 @@ PONG
 ```
 
 The listener terminal prints the same round trip from its side:
+
 ```text
 ┌─ A2A recv [claude-code] task ...
 │  Reply with exactly the single word: PONG
@@ -298,7 +305,7 @@ SHADI); that's an environment issue, not a bug in this wiring.
   `unset SHADI_SLIM_AUTH` (then the shell uses `SLIM_SHARED_SECRET`); the same
   `create`/`invite`/`join` commands work, without the DID lines.
 
-## Notes / limitations
+## Notes and limitations
 
 - `/slim join` **blocks** (listening for the moderator's invite) — an agent terminal
   will appear to "hang" until invited, or the timeout elapses. That is expected.
