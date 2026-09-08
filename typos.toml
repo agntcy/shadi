@@ -1,0 +1,22 @@
+# Spell-check config for `typos` (https://github.com/crate-ci/typos).
+# Run locally with `just docs-lint`.
+
+[default]
+extend-ignore-re = [
+  # GNU/BSD nl: number every body line (`nl -ba`).
+  "\\bnl -ba\\b",
+]
+
+[default.extend-identifiers]
+# Windows SDDL well-known SID: Built-in Administrators.
+BA = "BA"
+# Project and ecosystem names that dictionaries may not include.
+AGNTCY = "AGNTCY"
+SHADI = "SHADI"
+SLIM = "SLIM"
+agentbridge = "agentbridge"
+shadictl = "shadictl"
+
+[default.extend-words]
+# Same SID in comments and string literals.
+BA = "BA"

@@ -306,7 +306,7 @@ cargo run -p agntcy-shadi-cli -- --watch-policy --profile balanced -- ./your-age
 
 On startup, `shadictl` prints the control socket path to stderr:
 
-```
+```text
 control socket: /tmp/shadi-ctl-12345.sock
 ```
 

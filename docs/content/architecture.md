@@ -79,6 +79,7 @@ The system can be read as four presentation layers:
 ## Core components
 
 ### Secrets layer
+
 - **OS keystores**: Keychain (macOS/iOS), DPAPI/CNG (Windows), Keystore (Android),
   Secret Service (Linux).
 - **1Password backend** (optional): Cross-platform secret storage via the `op` CLI.
@@ -89,6 +90,7 @@ The system can be read as four presentation layers:
 - **OpenPGP parsing**: `shadictl` uses `sequoia-openpgp` to ingest keys without calling OS `gpg`.
 
 #### Identity derivation and provenance
+
 - **Deterministic derivation**: Agent keys are derived from human identity material
   through a fixed KDF pipeline.
 - **KDF details**: HKDF-SHA256 with salt `shadi-agent-derive`, IKM from human
@@ -100,6 +102,7 @@ The system can be read as four presentation layers:
   and compares with stored values; can also enforce human DID binding checks.
 
 ### Sandbox layer
+
 - **macOS**: Seatbelt profile enforcement for filesystem and network policies.
 - **Windows**: AppContainer + ACL allowlists + Job Objects (kill-on-close).
 - **CLI**: `shadi` provides JSON policy loading, profile defaults, optional command blocklists, process-scoped secret disclosure, and trusted secret delivery.
@@ -109,11 +112,13 @@ The system can be read as four presentation layers:
 - **Operational hardening**: macOS launcher support now resolves relative paths before emitting Seatbelt rules and accounts for required local IPC paths such as 1Password, SLIM runtime state, and temporary trusted-secret broker endpoints.
 
 ### Memory layer
+
 - **Local encrypted store**: SQLCipher-backed SQLite for portable, on-device memory.
 - **Key management**: Encryption keys live in SHADI secrets (keychain backed).
 - **Agent usage**: workloads running on SHADI can persist local state in the encrypted store.
 
 ### Transport layer
+
 - **Identity**: `shadi_identity` authenticates every SLIM peer with a per-agent
   DID-JWT (`SHADI_SLIM_AUTH=did`) instead of a shared secret; group admission
   is checked against an explicit DID allow-list.

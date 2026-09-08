@@ -284,26 +284,31 @@ Controls:
 ## Threat model
 
 ### Secrets and credential theft
+
 - **Stopped**: Reading secrets without verification.
 - **Stopped**: Exfiltration of secrets from disk when keystore access is denied.
 - **Stopped**: Accidental logging of secrets by non-verified sessions.
 - **Mitigated**: In-memory exposure via zeroization and limited lifetime.
 
 ### Identity spoofing / provenance ambiguity
+
 - **Stopped**: Undetected key substitution when `verify-agent-identity` is used.
 - **Mitigated**: Agent ownership ambiguity via stored `human_did` binding + verification.
 
 ### Filesystem abuse
+
 - **Stopped**: Accessing paths outside allowlists (kernel enforcement).
 - **Stopped**: Writing to disallowed paths in sandboxed processes.
 - **Mitigated**: Destructive commands via CLI blocklist.
 
 ### Network abuse
+
 - **Stopped**: Network access when `net_block` is enabled.
 - **Mitigated**: Unapproved endpoints with best-effort `net_allow` guard for
   Python sandbox runners.
 
 ### Agent-to-agent data leakage
+
 - **Stopped**: Unverified peers joining a session; DID-JWT authentication and
   (for groups) an explicit member allow-list gate admission.
 - **Stopped**: Unauthorized peers reading messages; MLS provides confidentiality
@@ -311,6 +316,7 @@ Controls:
 - **Stopped**: Message tampering; MLS provides integrity/authentication.
 
 ### Privilege escalation
+
 - **Mitigated**: Prompt-level or path-level agent reasoning by applying sandbox policy before launch.
 - **Mitigated**: Running blocked commands via CLI blocklist when that feature is used.
 - **Mitigated**: Kernel-level constraints remain even if the agent tries to evade application-layer logic.
