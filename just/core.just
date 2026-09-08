@@ -96,6 +96,11 @@ docs-lint-markdown:
 docs-lint-links:
   lychee --include-fragments 'docs/content/**/*.md'
 
+[group('docs')]
+[doc('Check Docs lint workflow path filters against GitHub glob rules.')]
+docs-lint-paths:
+  python3 scripts/test_docs_lint_paths.py
+
 [group('profiles')]
 [doc('Print the strict built-in security profile.')]
 secure-profile-strict:

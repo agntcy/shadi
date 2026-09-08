@@ -121,7 +121,8 @@ and `lychee` with `brew install lychee` or `cargo install lychee`.
 Markdown linting uses `npx` (Node.js 22+ preferred). Project-specific
 names live in `typos.toml`; Markdown rule exceptions live in
 `.markdownlint-cli2.jsonc`; link-check settings live in `lychee.toml`.
-CI runs the same checks on every pull request.
+CI runs the same checks on pull requests and `main` pushes that touch
+docs, Markdown, or the lint configs.
 
 ## Releasing crates
 

@@ -4,7 +4,25 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "typos.toml"
+      - ".markdownlint-cli2.jsonc"
+      - "lychee.toml"
+      - "just/core.just"
+      - "Justfile"
+      - ".github/workflows/docs-lint.yml"
   pull_request:
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "typos.toml"
+      - ".markdownlint-cli2.jsonc"
+      - "lychee.toml"
+      - "just/core.just"
+      - "Justfile"
+      - ".github/workflows/docs-lint.yml"
   workflow_dispatch:
 
 # Least privilege by default; jobs widen it where they need to.
