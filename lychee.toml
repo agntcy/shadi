@@ -1,0 +1,22 @@
+# Link-check config for `lychee` (https://lychee.cli.rs).
+# Run locally with `just docs-lint-links`.
+
+# MkDocs pretty URLs (`getting_started/`) resolve to `getting_started.md`.
+fallback_extensions = ["md"]
+
+# Skip example URLs inside fenced code and `<pre>` / `<code>`.
+include_verbatim = false
+
+# Do not probe 127.0.0.1 / localhost demo endpoints.
+exclude_loopback = true
+
+max_retries = 3
+retry_wait_time = 2
+timeout = 20
+max_redirects = 10
+
+# Quiet enough for CI; just still prints the command.
+no_progress = true
+
+# In-page anchors are enabled via `--include-fragments` on the just/CI
+# command so both lychee 0.21 and 0.24 accept the same config file.
