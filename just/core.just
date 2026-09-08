@@ -77,6 +77,15 @@ docs-build:
 docs-serve:
   cd docs/mkdocs && mkdocs serve --livereload --dirty
 
+[group('docs')]
+[doc('Run documentation quality checks.')]
+docs-lint: docs-lint-spelling
+
+[group('docs')]
+[doc('Spell-check the repository with typos.')]
+docs-lint-spelling:
+  typos
+
 [group('profiles')]
 [doc('Print the strict built-in security profile.')]
 secure-profile-strict:

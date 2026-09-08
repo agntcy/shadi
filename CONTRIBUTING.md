@@ -105,6 +105,19 @@ usually a good idea to first open an issue describing the change to solicit
 feedback and guidance. This will increase the likelihood of the PR getting
 merged.
 
+## Documentation
+
+The published site is MkDocs content under `docs/content/`. From the repo
+root:
+
+- `just docs-serve` previews the site with live reload.
+- `just docs-lint` runs the documentation quality checks (currently
+  spelling via [`typos`](https://github.com/crate-ci/typos)).
+
+Install `typos` with `brew install typos-cli` or `cargo install typos-cli`.
+Project-specific names live in `typos.toml`. CI runs the same spelling
+check on every pull request.
+
 ## Releasing crates
 
 Rust crate releases are driven by `.github/workflows/release-rust.yml` using
