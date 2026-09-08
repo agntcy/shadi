@@ -1,0 +1,38 @@
+{
+  "id": "cursor-agent",
+  "bin": "cursor-agent",
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{workdir}",
+    "TMP": "{workdir}",
+    "TEMP": "{workdir}"
+  },
+  "workdir_flags": [
+    "--workspace",
+    "{workdir}",
+    "--trust",
+    "--sandbox",
+    "disabled"
+  ],
+  "workdir_flags_on_execute": true,
+  "workdir_flags_on_snapshot": true,
+  "workdir_flags_on_inject": true,
+  "current_dir_workdir": true,
+  "system_flag": "--system-prompt",
+  "execute": {
+    "args": [
+      "--print",
+      "--output-format",
+      "text",
+      "{workdir_flags}",
+      "{system}",
+      "{session}",
+      "{prompt}"
+    ]
+  },
+  "session": {
+    "json_field": "session_id",
+    "flag": "--session-id"
+  },
+  "result": { "kind": "stdout" }
+}

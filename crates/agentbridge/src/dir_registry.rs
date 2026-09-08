@@ -18,9 +18,18 @@ use time::OffsetDateTime;
 /// `dirctl search --author <did>` both work against it.
 pub fn wrap_agent_card(card_json: &Value, did: Option<&str>) -> Value {
     let authors: Vec<&str> = did.into_iter().collect();
-    let name = card_json.get("name").and_then(Value::as_str).unwrap_or("agent");
-    let description = card_json.get("description").and_then(Value::as_str).unwrap_or("");
-    let version = card_json.get("version").and_then(Value::as_str).unwrap_or("0.0.0");
+    let name = card_json
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("agent");
+    let description = card_json
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let version = card_json
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("0.0.0");
     let skills: Vec<Value> = card_json
         .get("skills")
         .and_then(Value::as_array)
@@ -32,7 +41,9 @@ pub fn wrap_agent_card(card_json: &Value, did: Option<&str>) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    let created_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default();
+    let created_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default();
 
     serde_json::json!({
         "name": name,
@@ -104,7 +115,7 @@ pub fn publish_record(
 
     if let Some(token) = github_token {
         cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "github")
-           .env("DIRECTORY_CLIENT_GITHUB_TOKEN", token);
+            .env("DIRECTORY_CLIENT_GITHUB_TOKEN", token);
     }
 
     let output = match cmd.output() {
@@ -156,8 +167,8 @@ fn tempfile_path() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::dirctl_env_lock as env_lock;
+    use super::*;
 
     fn sample_card() -> serde_json::Value {
         serde_json::json!({
@@ -177,7 +188,10 @@ mod tests {
         let record = wrap_agent_card(&card, Some("did:key:z6Mk..."));
         assert_eq!(record["authors"], serde_json::json!(["did:key:z6Mk..."]));
         assert_eq!(record["modules"][0]["name"], "integration/a2a");
-        assert_eq!(record["modules"][0]["data"]["card_schema_version"], "v1.0.0");
+        assert_eq!(
+            record["modules"][0]["data"]["card_schema_version"],
+            "v1.0.0"
+        );
         assert_eq!(record["modules"][0]["data"]["card_data"], card);
     }
 
@@ -195,7 +209,10 @@ mod tests {
         assert_eq!(record["name"], "claude-code");
         assert_eq!(record["schema_version"], "1.0.0");
         assert_eq!(record["version"], "0.1.0");
-        assert_eq!(record["description"], "agentbridge adapter for 'claude-code'.");
+        assert_eq!(
+            record["description"],
+            "agentbridge adapter for 'claude-code'."
+        );
         assert!(record["created_at"].as_str().unwrap().contains('T'));
         assert_eq!(
             record["skills"],

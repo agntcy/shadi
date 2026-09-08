@@ -7,10 +7,11 @@
 #   shows off the DID/moderator role UX. Then all five members run
 #   `/slim a2a-collaborate` — an A2A operation backed by SLIM's group channel — to
 #   broadcast an intro and collect everyone else's (a roll-call full mesh). Finally,
-#   claude-code/codex/copilot register as `agentbridge` adapters backed by the real
-#   installed CLI binaries, and the moderator chains a real task across them: codex
-#   reports real disk usage, copilot ranks real processes by CPU, and claude-code
-#   synthesizes both into an operational report — real work, not a canned reply.
+#   claude-code/codex/copilot/cursor-agent register as `agentbridge` adapters
+#   backed by the real installed CLI binaries (DID-signed A2A, local leases for
+#   `list --local`). The moderator chains a real task across them: cursor-agent
+#   is pinged, codex reports real disk usage, copilot ranks real processes by
+#   CPU, and claude-code synthesizes both into an operational report.
 #
 # Run from the repo root:  bash docs/content/demos/run-demo.sh
 set -uo pipefail
@@ -97,10 +98,10 @@ for p in "${COLLAB_PIDS[@]}"; do wait "$p"; done
 step "Part 2 done."
 
 # --- Part 3: chain a real task across the real coding-agent CLIs (agentbridge) ---
-# claude-code, codex, copilot register as live A2A/SLIM adapters backed by the
-# actual installed CLI binary — the same DID identity from Part 1 carries over
-# automatically (agentbridge checks the same SHADI_SLIM_AUTH=did env). cursor-agent
-# has no `agentbridge register` listener yet, so it's skipped here.
+# claude-code, codex, copilot, and cursor-agent register as live A2A/SLIM
+# adapters. The same DID identity from Part 1 carries over (SHADI_SLIM_AUTH=did).
+# Outbound A2A text is DID-signed; unsigned inbound parks as AUTH_REQUIRED.
+# `list --local` reads the leases those listeners write under $SHADI_TMP_DIR.
 # codex checks real disk usage, copilot ranks real processes by CPU, and
 # claude-code is given both real outputs and asked to synthesize a report — each
 # step depends on the previous agent's real result, not a canned reply.
@@ -113,20 +114,39 @@ step "Part 2 done."
 # CLI's own network/filesystem calls to succeed too. The script continues
 # regardless.
 
-step "Part 3: registering claude-code/codex/copilot as real agentbridge adapters..."
+step "Part 3: registering claude-code/codex/copilot/cursor-agent as real agentbridge adapters..."
+mkdir -p "$HOME/.cursor/projects" "$HOME/.cursor/chats" "$HOME/.codex" "$HOME/.claude"
 REGISTER_PIDS=()
-for a in claude-code codex copilot; do
+for a in claude-code codex copilot cursor-agent; do
   # register --slim-endpoint refuses to start unless it's running under a SHADI
   # sandbox with network blocked by default — Seatbelt/Landlock/AppContainer
   # policies are inherited by child processes, so wrapping it in shadictl is
   # enough to confine whatever CLI tool the adapter spawns to run a task.
-  env SHADI_AGENT_ID="$a" "$BIN" --net-block --net-allow "$SLIM_ENDPOINT" \
-    --read "$SHADI_TMP_DIR" -- \
+  env SHADI_AGENT_ID="$a" TMPDIR="$SHADI_TMP_DIR" "$BIN" --net-block --net-allow "$SLIM_ENDPOINT" \
+    --read "$SHADI_TMP_DIR" --write "$SHADI_TMP_DIR" \
+    --read "$HOME" \
+    --write "$HOME/.cursor" --write "$HOME/.codex" --write "$HOME/.claude" \
+    --write "$HOME/Library/Keychains" --read /opt/homebrew -- \
     "$AB" register --tool "$a" --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
     >"$LOG/$a-agent.log" 2>&1 &
   REGISTER_PIDS+=($!)
 done
-sleep 3
+# Leases appear after each listener binds; a fixed 3s sleep often lists none.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  env SHADI_AGENT_ID=avatar "$AB" list --local >"$LOG/list-local.log" 2>&1 || true
+  n=$(grep -c 'slim://' "$LOG/list-local.log" 2>/dev/null || true)
+  [ "${n:-0}" -ge 4 ] && break
+  sleep 1
+done
+
+step "Part 3: listing local listeners (agentbridge list --local)..."
+env SHADI_AGENT_ID=avatar "$AB" list --local >"$LOG/list-local.log" 2>&1
+
+step "Part 3: pinging cursor-agent (real CLI call)..."
+env SHADI_AGENT_ID=avatar "$AB" delegate \
+  "Reply with exactly the single word: PONG" \
+  --to cursor-agent --agent-id avatar --endpoint "$SLIM_ENDPOINT" \
+  >"$LOG/cursor-agent-delegate.log" 2>&1
 
 step "Part 3: delegating a disk-usage check to codex (real CLI call, can take ~30s)..."
 env SHADI_AGENT_ID=avatar "$AB" delegate \
@@ -172,7 +192,13 @@ for a in claude-code codex copilot cursor-agent; do
   strip <"$LOG/$a-collaborate.log" | grep -iE "^broadcast|^  "
 done
 echo
+echo "================ agentbridge: local listeners ================"
+strip <"$LOG/list-local.log"
+echo
 echo "================ agentbridge: chained real task delegation ================"
+echo "-- cursor-agent: ping --"
+strip <"$LOG/cursor-agent-delegate.log" | sed -n '/^Response from/,$p'
+echo
 echo "-- codex: disk usage --"
 strip <"$LOG/codex-delegate.log" | sed -n '/^Response from/,$p'
 echo

@@ -89,6 +89,8 @@ nav:
       - API Guide: api_integration.md
       - SLIM and A2A: slim_a2a.md
       - Secure Agent Group Demo: demos/did-agent-group.md
+      - Round-robin Rust Demo: demos/collab-rust.md
+      - Round-robin Rust sample run: demos/collab-rust-sample.md
       - AgentBridge: agentbridge.md
       - Mobile: mobile_integration.md
   - Reference:

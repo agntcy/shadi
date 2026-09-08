@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Shell 4 — Coordinate Copilot and Codex over SLIM.
-# Run after Shells 2 and 3 both show:
+# Shell 4 — List local listeners, then coordinate over SLIM.
+# Run after the register shells show:
 #   [agentbridge] ready — listening on agntcy/shadi/<agent>-a2a
 set -euo pipefail
 
@@ -15,14 +15,22 @@ ARTIFACT="${LOG_DIR}/winning_artifact.rs"
 
 GOAL="${1:-implement a function that returns the nth Fibonacci number in Rust}"
 
+echo "Local listeners on this host:"
+cd "${ROOT_DIR}"
+cargo run -p agntcy-agentbridge-cli -- list --local
+echo ""
+
 echo "Coordinating Copilot + Codex over SLIM ..."
 echo "Endpoint : ${SLIM_ENDPOINT}"
 echo "Goal     : ${GOAL}"
 echo "Log      : ${LOG_FILE}"
 echo "Artifact : ${ARTIFACT}"
 echo ""
+echo "Optional: bash scripts/agentbridge_shell5_register_cursor.sh then add slim:cursor-agent"
+echo "Optional native handoff: cargo run -p agntcy-agentbridge-cli -- handoff --from copilot --to codex"
+echo ""
 
-cd "${ROOT_DIR}"
+export SHADI_AGENT_ID=avatar
 cargo run -p agntcy-agentbridge-cli -- coordinate \
   --goal "${GOAL}" \
   --agents slim:copilot,slim:codex \
@@ -30,7 +38,6 @@ cargo run -p agntcy-agentbridge-cli -- coordinate \
   --max-rounds 2 \
   --output "${ARTIFACT}" \
   --slim-endpoint "${SLIM_ENDPOINT}" \
-  --slim-shared-secret "${SLIM_SHARED_SECRET}" \
   2>&1 | tee "${LOG_FILE}"
 
 echo ""
