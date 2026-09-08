@@ -17,7 +17,8 @@ struct Cli {
 enum Cmd {
     /// Register and start a CLI tool adapter.
     Register {
-        /// Tool type: generic-stdio | claude-code | copilot | codex | cursor-agent
+        /// Tool type: generic-stdio or a bundled profile id
+        /// (claude-code, copilot, codex, cursor-agent, goose, opencode).
         #[arg(long)]
         tool: String,
 
@@ -48,9 +49,9 @@ enum Cmd {
         slim_endpoint: Option<String>,
     },
 
-    /// List available adapters (Agent Directory or local SLIM node).
+    /// List available adapters (Agent Directory or this machine).
     List {
-        /// Query the local SLIM node instead of DIR.
+        /// List listeners started by `register --slim-endpoint` on this host.
         #[arg(long)]
         local: bool,
 
@@ -66,8 +67,8 @@ enum Cmd {
     /// Hand off context from one CLI tool to another.
     ///
     /// `--from` / `--to` accept the same specs as `coordinate`
-    /// (`claude-code`, `copilot`, `codex`, `cursor-agent`,
-    /// `generic-stdio:<cmd>`, `slim:<id>`). A bare command still opens
+    /// (`claude-code`, `copilot`, `codex`, `cursor-agent`, `goose`,
+    /// `opencode`, `generic-stdio:<cmd>`, `slim:<id>`). A bare command still opens
     /// GenericStdio. The snapshot is an LLM session summary this cycle,
     /// not a true session export.
     Handoff {
@@ -117,7 +118,7 @@ enum Cmd {
         goal: String,
 
         /// Comma-separated agent specs.
-        /// Formats: claude-code, claude-code:/path, generic-stdio:<command>, slim:<agent-id>, slim:<agent-id>@<host:port>
+        /// Formats: claude-code, goose, opencode, claude-code:/path, generic-stdio:<command>, slim:<agent-id>, slim:<agent-id>@<host:port>
         #[arg(long, value_delimiter = ',')]
         agents: Vec<String>,
 
@@ -156,7 +157,15 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Cmd::Register { tool, command, args, dir_publish, dir_server, gh_token, slim_endpoint } => {
+        Cmd::Register {
+            tool,
+            command,
+            args,
+            dir_publish,
+            dir_server,
+            gh_token,
+            slim_endpoint,
+        } => {
             let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
@@ -169,34 +178,47 @@ fn main() {
                 publish_opts,
             )
         }
-        Cmd::List { local, dir_server, gh_token } => {
-            commands::list::run(local, &dir_server, gh_token.as_deref())
-        }
-        Cmd::Handoff { from, to, save, from_file, slim_endpoint } => {
+        Cmd::List {
+            local,
+            dir_server,
+            gh_token,
+        } => commands::list::run(local, &dir_server, gh_token.as_deref()),
+        Cmd::Handoff {
+            from,
+            to,
+            save,
+            from_file,
+            slim_endpoint,
+        } => {
             if let Some(file) = from_file {
-                commands::handoff::run_from_file(
-                    std::path::Path::new(&file),
-                    &to,
-                    &slim_endpoint,
-                )
+                commands::handoff::run_from_file(std::path::Path::new(&file), &to, &slim_endpoint)
             } else {
                 commands::handoff::run(&from, &to, save.as_deref(), &slim_endpoint)
             }
         }
-        Cmd::Delegate { prompt, to, agent_id, endpoint } => {
-            commands::delegate::run(&prompt, &to, &agent_id, &endpoint)
-        }
-        Cmd::Coordinate { goal, agents, quorum, max_rounds, output, require_human, slim_endpoint } => {
-            commands::coordinate::run(
-                &goal,
-                &agents,
-                quorum,
-                max_rounds,
-                output.as_deref(),
-                require_human,
-                &slim_endpoint,
-            )
-        }
+        Cmd::Delegate {
+            prompt,
+            to,
+            agent_id,
+            endpoint,
+        } => commands::delegate::run(&prompt, &to, &agent_id, &endpoint),
+        Cmd::Coordinate {
+            goal,
+            agents,
+            quorum,
+            max_rounds,
+            output,
+            require_human,
+            slim_endpoint,
+        } => commands::coordinate::run(
+            &goal,
+            &agents,
+            quorum,
+            max_rounds,
+            output.as_deref(),
+            require_human,
+            &slim_endpoint,
+        ),
     };
 
     if let Err(e) = result {
@@ -237,7 +259,12 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Cmd::Coordinate { goal, agents, quorum, .. } => {
+            Cmd::Coordinate {
+                goal,
+                agents,
+                quorum,
+                ..
+            } => {
                 assert_eq!(goal, "build a parser");
                 assert_eq!(agents, ["claude-code", "copilot"]);
                 assert_eq!(quorum, 2);

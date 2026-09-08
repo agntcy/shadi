@@ -11,8 +11,10 @@ use crate::{PlatformSandboxProfile, SandboxError, SandboxPolicy, SandboxedChild}
 const DEFAULT_READ_PATHS: &[&str] = &[
     "/System",
     "/usr/lib",
+    "/usr/bin",
     "/usr/share",
     "/usr/libexec",
+    "/bin",
     "/Library",
     "/etc",
     "/opt/homebrew",
@@ -106,6 +108,13 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     }
 
     rules.push("(allow file-read-data file-read-metadata (literal \"/\"))".to_string());
+    // Node realpathSync lstats these parents before reading HOME or
+    // /opt/homebrew. Metadata only — no directory listing or file contents.
+    for ancestor in ["/Users", "/opt", "/private", "/var", "/usr"] {
+        rules.push(format!(
+            "(allow file-read-metadata (literal \"{ancestor}\"))"
+        ));
+    }
 
     for path in DEFAULT_READ_PATHS {
         rules.push(format!(
@@ -249,6 +258,22 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         // authoritative for audit and is enforced at kernel level on Linux via
         // Landlock ConnectTcp rules).
         rules.push("(allow network-outbound)".to_string());
+        // Node-based CLIs (copilot, codex, cursor-agent) abort in V8 init
+        // unless they can look up the rest of the Mach bootstrap and signal
+        // child processes. net_allow already opens outbound TCP on macOS;
+        // these two rules are the matching runtime allowances.
+        if !compatibility_profile {
+            rules.push("(allow mach-lookup)".to_string());
+            rules.push("(allow signal)".to_string());
+            // V8 / Node abort in InitializeOncePerProcess without POSIX shm.
+            rules.push("(allow ipc-posix-shm)".to_string());
+            rules.push("(allow ipc-posix-sem)".to_string());
+            // Codex and cursor-agent bind an in-process app-server on a
+            // unix socket. File-write on ~/.codex or ~/.cursor is not enough
+            // — Seatbelt gates connect/bind as network unix-socket.
+            rules.push("(allow network-outbound (local unix-socket))".to_string());
+            rules.push("(allow network-inbound (local unix-socket))".to_string());
+        }
     } else if !policy.net_blocked() {
         rules.push("(allow network*)".to_string());
     }
@@ -375,6 +400,7 @@ mod tests {
     #[test]
     fn build_profile_enables_outbound_when_net_allow_destinations_present() {
         let policy = SandboxPolicy::new()
+            .use_minimal_platform_profile()
             .block_network(true)
             .allow_network_destination("1.1.1.1:80")
             .allow_network_destination("127.0.0.1");
@@ -384,6 +410,16 @@ mod tests {
         // Seatbelt cannot filter by destination IP; we just enable outbound.
         assert!(profile.contains("(allow network-outbound)"));
         assert!(!profile.contains("(allow network*)"));
+        assert!(
+            profile.lines().any(|line| line.trim() == "(allow mach-lookup)"),
+            "net_allow should lift mach-lookup so Node CLIs can start"
+        );
+        assert!(profile.contains("(allow signal)"));
+        assert!(profile.contains("(allow ipc-posix-shm)"));
+        assert!(
+            profile.contains("(allow network-outbound (local unix-socket))"),
+            "net_allow should allow local unix sockets for CLI app-servers"
+        );
     }
 
     #[test]
@@ -415,6 +451,9 @@ mod tests {
         let profile = build_profile(&policy).unwrap();
         assert!(profile.contains("/System"));
         assert!(profile.contains("/usr/lib"));
+        assert!(profile.contains("/usr/bin"));
+        assert!(profile.contains("/bin"));
+        assert!(profile.contains("(allow file-read-metadata (literal \"/Users\"))"));
     }
 
     #[test]

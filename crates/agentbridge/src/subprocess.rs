@@ -152,7 +152,10 @@ mod tests {
         let tracked = TrackedSubprocess::new();
         let mut child = stays_alive().spawn().expect("spawn long-running child");
         let pid = child.id();
-        *tracked.active_pid.lock().expect("fresh tracker is not poisoned") = Some(pid);
+        *tracked
+            .active_pid
+            .lock()
+            .expect("fresh tracker is not poisoned") = Some(pid);
         tracked.kill();
         let status = child.wait().expect("wait after kill");
         assert!(!status.success());
@@ -167,7 +170,10 @@ mod tests {
             panic!("poison the tracker's lock");
         })
         .join();
-        assert!(tracked.active_pid.lock().is_err(), "lock should be poisoned");
+        assert!(
+            tracked.active_pid.lock().is_err(),
+            "lock should be poisoned"
+        );
 
         // Both paths skip the pid bookkeeping rather than propagating the
         // poison: the command still runs, and shutdown still returns.

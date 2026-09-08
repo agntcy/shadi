@@ -166,6 +166,15 @@ copilot   did=did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb  slim://1
 Both entries are real, resolved from Directory records `agentbridge list`
 pulled and parsed — not raw `dirctl` stdout.
 
+Listeners on this host (no DIR) are listed the same way after
+`register --slim-endpoint`:
+
+```bash
+target/debug/agentbridge list --local
+```
+
+`register --tool cursor-agent` works the same as copilot/codex.
+
 ## 5. Moderator: create a group by discovering its members
 
 **Terminal M:**
@@ -282,7 +291,7 @@ skipping claude-code (did:key:z6MkkYR1mqCHqEutWUM6bKoqPsPj2diDu8ykXk3cZMGxeQV9):
 
 To actually admit a DID discovered after the group's `App` was created, that
 `App`'s JWKS would need to change live — SLIM has no mutation API for that
-today (see [Notes / limitations](#notes-limitations)). The fix isn't to
+today (see [Notes and limitations](#notes-and-limitations)). The fix isn't to
 retroactively trust it; it's to have included it in the trust superset up
 front. `did:<did>` can't do that before the agent has published anything —
 there's nothing yet for a Directory search to find — but `explicit:` can,
@@ -329,7 +338,7 @@ target/debug/shadictl slim create-group \
   agntcy/shadi/multi-source-room
 ```
 
-## Notes / limitations
+## Notes and limitations
 
 - **`/slim create`, `/slim invite <name>`, `/slim join` are unchanged.** Every
   command in this demo that isn't `create-group`/`invite-from` is the exact,

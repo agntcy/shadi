@@ -50,14 +50,20 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
 shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register --tool codex --slim-endpoint 127.0.0.1:47357
 
+# Goose / OpenCode use the operator's existing CLI config. Host
+# GOOSE_PROVIDER / GOOSE_MODEL are passed as goose run --provider / --model.
+# Host GOOSE_*, OPENAI_*, and *_API_KEY env vars are forwarded to goose.
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+  agentbridge register --tool goose --slim-endpoint 127.0.0.1:47357
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+  agentbridge register --tool opencode --slim-endpoint 127.0.0.1:47357
+
 # Publish an OASF record to the Agent Directory after registering
 agentbridge register --tool claude-code --dir-publish
 ```
 
-Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`.
-
-> **Note:** `cursor-agent` is available as a spec in `coordinate --agents`
-> but does not have a standalone `register` listener yet.
+Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
+`cursor-agent`, `goose`, `opencode`.
 
 ### `list` — discover registered adapters
 
@@ -65,16 +71,27 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`.
 # Query DIR for registered adapters
 agentbridge list
 
-# Query the running local SLIM node only
+# List listeners this machine started with register --slim-endpoint
 agentbridge list --local
 ```
 
 ### `handoff` — transfer context from one tool to another
 
 Snapshot the current session from a source tool and inject it into a destination
-tool. Both tools must be running and speaking the agentbridge JSON protocol.
+tool. Bare names (`claude-code`, `copilot`, …) open local adapters (JSON
+protocol / native CLI). `slim:<id>` is A2A over SLIM: the process proves as
+`SHADI_AGENT_ID` and `SendMessage`s to the peer. When `SHADI_AGENT_ID`
+matches `--from slim:<id>`, that agent is the A2A client — snapshot stays
+local so it does not call its own listener.
 
 ```bash
+# Native tools (same specs as coordinate)
+agentbridge handoff --from claude-code --to copilot
+
+# Finishing agent hands off as an A2A client (collab demo)
+SHADI_AGENT_ID=claude-code agentbridge handoff \
+  --from slim:claude-code --to slim:copilot --slim-endpoint 127.0.0.1:47591
+
 # Basic handoff using subprocess commands directly
 agentbridge handoff \
     --from ./my-source-tool \
@@ -143,6 +160,8 @@ agentbridge coordinate \
 | `copilot` | Local Copilot CLI adapter |
 | `codex` | Local Codex CLI adapter |
 | `cursor-agent` | Local Cursor Agent adapter |
+| `goose` | Local Goose CLI adapter (uses `~/.config/goose`) |
+| `opencode` | Local OpenCode CLI adapter (uses `~/.config/opencode`) |
 | `generic-stdio:<cmd>` | Local subprocess adapter |
 | `slim:<agent-id>` | Remote adapter over SLIM (uses `--slim-endpoint`) |
 | `slim:<agent-id>@<host:port>` | Remote adapter at explicit endpoint |
@@ -172,6 +191,7 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 | `SHADI_SLIM_AUTH` | — | Must be `did` — see below |
 | `SLIM_HUMAN_SEED` | — | Human root secret DID keys are derived from |
 | `SLIM_MEMBER_DIDS` | — | Comma-separated `did:key` allow-list |
+| `SHADI_AUTH_REQUIRED_POLICY` | `reprove` | `reprove` / `ask` / `deny` when a remote task parks |
 | `SLIM_TLS_CERT` / `SLIM_TLS_KEY` | — | mTLS client certificate paths |
 | `SLIM_TLS_CA` | — | CA certificate for server verification |
 
@@ -191,8 +211,13 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 > so this confines whatever CLI tool the adapter spawns with no extra code in
 > agentbridge itself.
 
-## Live SLIM demo (4 terminals)
+## Live SLIM demo
 
-See [scripts/agentbridge_shell*.sh](../../scripts/) for a ready-made 4-terminal
-demo that starts a SLIM node, registers Copilot and Codex as A2A services, and
-runs `coordinate` against them.
+See [scripts/agentbridge_shell*.sh](../../scripts/) (DID admission, sandbox,
+`list --local`), the one-command walkthrough in
+[docs/content/demos/did-agent-group.md](../../docs/content/demos/did-agent-group.md),
+or the two-lines-per-turn coding loop in
+[docs/content/demos/collab-rust.md](../../docs/content/demos/collab-rust.md).
+A harness should load
+[skills/agentbridge](../../skills/agentbridge/SKILL.md) and call these
+commands rather than a new per-CLI adapter.

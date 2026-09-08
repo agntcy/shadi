@@ -34,8 +34,9 @@ It uses only `shadictl` shell commands. You can run it two ways:
   through A2A's `Message` type (SLIM's group/multicast is used underneath A2A via
   the SLIMRPC `Collaborate` RPC, not instead of it), with `slim-src` attribution.
 - **Real coding-agent CLIs in the loop** — `agentbridge` wraps the actual `claude`/
-  `codex`/`copilot` binaries as SLIM/A2A listeners under the same DID identity, so a
-  delegated task really executes on that CLI, not a mock.
+  `codex`/`copilot`/`cursor-agent` binaries as SLIM/A2A listeners under the same
+  DID identity, so a delegated task really executes on that CLI, not a mock.
+  Outbound A2A text is DID-signed; `list --local` shows the listeners on this host.
 
 ## Prerequisites
 
@@ -70,6 +71,7 @@ Each agent's DID is derived from `SLIM_HUMAN_SEED` + its `SHADI_AGENT_ID`:
 | `codex`        | participant | `z6MkmaFFysqqMsE1q5M6E7LDuoJMaSBv3PkNHz5SwwwnuGr6` |
 | `copilot`      | participant | `z6MkmJUcT1F6BK21nQv1C2zo46gJJA9hsMGnbdpiN2LrMnwT` |
 | `cursor-agent` | participant | `z6MktdzQzm171sAoRZc6cCUPDa8XWxaG8Bi6R3Y4ohP7qS5Q` |
+| `goose`        | participant | `z6MkjiDFxXFe2sM4vXZH8fT3XYLmjNDeVobo4VgNayc7aEKD` |
 
 ## 2. Discover a member's DID (optional)
 
@@ -125,6 +127,7 @@ everyone in step 5.
 ```bash
 SHADI_AGENT_ID=claude-code target/debug/shadictl shell
 ```
+
 ```text
 /slim join agntcy/shadi/dev-room --timeout 120
 joined group session for channel agntcy/shadi/dev-room as agntcy/shadi/claude-code
@@ -172,6 +175,7 @@ else's, in one call — no `/slim create`/`invite`/`join` needed for this step, 
 session from steps 3–5 above).
 
 **Each terminal — moderator and all four agents — runs the same shape (e.g. claude-code):**
+
 ```text
 /slim a2a-collaborate codex,copilot,cursor-agent,avatar --message Hi, I am claude-code — reporting in --timeout 15
 broadcast "Hi, I am claude-code — reporting in" to 4 peer(s); received:
@@ -188,12 +192,11 @@ other member directly, not just moderator → members.
 ## 7. Delegate a real task to the coding-agent CLIs
 
 Everything so far shows *identity* and *messaging*. This step wires in the real
-thing: **`agentbridge`** wraps the actual installed `claude`, `codex`, and `copilot`
-CLI binaries as SLIM/A2A listeners, so a delegated task really invokes that CLI and
-returns its real output — using the *same* DID identity from step 1 (agentbridge
-checks `SHADI_SLIM_AUTH=did` the same way `shadictl` does, no separate setup).
-`cursor-agent` doesn't have an `agentbridge register` listener yet, so it's not part
-of this step (it still participates in the roll call above).
+thing: **`agentbridge`** wraps the actual installed `claude`, `codex`, `copilot`,
+and `cursor-agent` CLIs as SLIM/A2A listeners, so a delegated task really invokes
+that CLI and returns its real output — using the *same* DID identity from step 1
+(agentbridge checks `SHADI_SLIM_AUTH=did` the same way `shadictl` does). Outbound
+A2A text is DID-signed; unsigned inbound parks as `AUTH_REQUIRED`.
 
 **Each agent terminal (e.g. claude-code)** — registers a live adapter backed by the
 real CLI, reachable at `agntcy/shadi/claude-code-a2a`. `agentbridge register
@@ -208,20 +211,37 @@ SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block --net-allow "$SLIM_
   target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT"
 ```
+
 ```text
 Registered Claude Code adapter (agent id: claude-code, dir: /path/to/shadi)
 Starting SLIM A2A listener on 127.0.0.1:47560 as agntcy/shadi/claude-code-a2a ...
 [agentbridge] ready — listening on agntcy/shadi/claude-code-a2a
 ```
 
-Repeat for `codex` and `copilot` (same shape, `--tool codex` / `--tool copilot`).
+Repeat for `codex`, `copilot`, and `cursor-agent` (same shape, `--tool <name>`).
 
-**Moderator terminal** — delegates one real task to each:
+Then, from any terminal, list the listeners this machine just started:
+
+```bash
+target/debug/agentbridge list --local
+```
+
+```text
+Local agentbridge adapters:
+claude-code  did=did:key:z6MkhRuJ…  slim://127.0.0.1:47560
+codex  did=did:key:z6MkmaFF…  slim://127.0.0.1:47560
+copilot  did=did:key:z6MkmJUc…  slim://127.0.0.1:47560
+cursor-agent  did=did:key:z6MktdzQ…  slim://127.0.0.1:47560
+```
+
+**Moderator terminal** — delegates one real task to each (same shape for
+`cursor-agent`):
 
 ```bash
 target/debug/agentbridge delegate "Reply with exactly the single word: PONG" \
   --to claude-code --agent-id avatar --endpoint "$SLIM_ENDPOINT"
 ```
+
 ```text
 Delegating task 09024c44-... to 'claude-code'...
 Response from 'claude-code' (5518ms):
@@ -229,6 +249,7 @@ PONG
 ```
 
 The listener terminal prints the same round trip from its side:
+
 ```text
 ┌─ A2A recv [claude-code] task ...
 │  Reply with exactly the single word: PONG
@@ -261,11 +282,17 @@ target/debug/agentbridge delegate \
 capacity or a process with unexpectedly high CPU — built from the other two
 agents' real command output.
 
-This is a genuinely live `claude`/`copilot` process handling the prompt — swap the
-message for any real coding task to see it delegated end to end. `codex`'s success
-depends on your local `codex` CLI/model configuration (an unsupported default model
-returns a `400` from the OpenAI backend, unrelated to SHADI); that's an environment
-issue, not a bug in this wiring.
+This is a genuinely live `claude`/`copilot`/`cursor-agent` process handling the
+prompt — swap the message for any real coding task to see it delegated end to
+end. Native handoff uses the same specs as `coordinate`:
+
+```bash
+target/debug/agentbridge handoff --from copilot --to claude-code
+```
+
+`codex`'s success depends on your local `codex` CLI/model configuration (an
+unsupported default model returns a `400` from the OpenAI backend, unrelated to
+SHADI); that's an environment issue, not a bug in this wiring.
 
 ## How admission works (under the hood)
 
@@ -278,7 +305,7 @@ issue, not a bug in this wiring.
   `unset SHADI_SLIM_AUTH` (then the shell uses `SLIM_SHARED_SECRET`); the same
   `create`/`invite`/`join` commands work, without the DID lines.
 
-## Notes / limitations
+## Notes and limitations
 
 - `/slim join` **blocks** (listening for the moderator's invite) — an agent terminal
   will appear to "hang" until invited, or the timeout elapses. That is expected.
@@ -292,14 +319,15 @@ issue, not a bug in this wiring.
   attribution on its reply-observer stream, but messages surfaced purely through the
   passive listener path have no per-message sender tag yet (the message text itself
   states the sender, which is enough for this demo).
-- `agentbridge register --tool claude-code|codex|copilot` needs that CLI actually
-  installed (and authenticated) on PATH; `cursor-agent` doesn't have a `register`
-  listener yet. A `delegate` failure usually means the target CLI itself errored
-  (auth, unsupported model, etc.), not the SLIM/A2A wiring — the response text
-  includes the real error from that CLI so it's easy to tell apart.
+- `agentbridge register --tool claude-code|codex|copilot|cursor-agent` needs that
+  CLI actually installed (and authenticated) on PATH. A `delegate` failure
+  usually means the target CLI itself errored (auth, unsupported model, etc.),
+  not the SLIM/A2A wiring — the response text includes the real error from that
+  CLI so it's easy to tell apart.
 
 ## Next steps
 
+- Continue with a multi-turn coding loop (two lines of Rust per agent, round-robin until tests pass) in the [Round-robin Rust Demo](collab-rust.md).
 - Read the concept-level model behind this demo in [SLIM and A2A](../slim_a2a.md).
 - See [AgentBridge](../agentbridge.md) for the full CLI coding-agent interconnect this demo exercises.
 - Look up exact `shadictl`/`agentbridge` flags in the [CLI Reference](../cli.md).

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/agntcy/shadi/crates/agentbridge/profiles/schema.json",
+  "title": "agentbridge CLI register profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "bin", "execute"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "bin": { "type": "string", "minLength": 1 },
+    "pin_tmpdir": { "type": "boolean", "default": false },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Environment values; `{workdir}` is substituted."
+    },
+    "workdir_flags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Expanded in place of the `{workdir_flags}` token; `{workdir}` is substituted."
+    },
+    "workdir_flags_on_execute": { "type": "boolean", "default": true },
+    "workdir_flags_on_snapshot": { "type": "boolean", "default": true },
+    "workdir_flags_on_inject": { "type": "boolean", "default": true },
+    "current_dir_workdir": { "type": "boolean", "default": true },
+    "system_flag": { "type": "string" },
+    "split_large_prompt": { "type": "boolean", "default": false },
+    "extra_args_env": { "type": "string" },
+    "env_flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["flag", "env"],
+        "properties": {
+          "flag": { "type": "string", "minLength": 1 },
+          "env": { "type": "string", "minLength": 1 }
+        }
+      },
+      "description": "Expanded in place of `{env_flags}`: each set host env var becomes `flag value`."
+    },
+    "pass_env": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Host env var names copied onto the child. Values are never logged."
+    },
+    "pass_env_prefixes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Copy every host env var whose name starts with one of these prefixes."
+    },
+    "pass_env_suffixes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Copy every host env var whose name ends with one of these suffixes (e.g. `_API_KEY`)."
+    },
+    "stdin_null": { "type": "boolean", "default": false },
+    "execute": {
+      "type": "object",
+      "required": ["args"],
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tokens: `{prompt}`, `{system}`, `{session}`, `{workdir_flags}`, `{extra_args}`, `{env_flags}`, `{workdir}`."
+        }
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["json_field", "flag"],
+      "additionalProperties": false,
+      "properties": {
+        "json_field": { "type": "string" },
+        "flag": { "type": "string" },
+        "retry_stderr_contains": { "type": "string" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["stdout", "json_field", "strip_suffix", "strip_after_first_line"]
+        },
+        "field": { "type": "string" },
+        "prefix": { "type": "string" },
+        "line": { "type": "string" }
+      }
+    }
+  }
+}

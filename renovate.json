@@ -61,6 +61,16 @@
       "enabled": false
     },
     {
+      "description": "rusqlite 0.38+ pulls a second libsqlite3-sys (links=sqlite3) that conflicts with SLIM 2.3.0 → mls-rs-provider-sqlite 0.22 → rusqlite 0.37. Re-enable when slim-persistence moves off rusqlite ^0.37.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "rusqlite"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Low-risk bumps in one PR to keep the review load down.",
       "matchUpdateTypes": [
         "patch",

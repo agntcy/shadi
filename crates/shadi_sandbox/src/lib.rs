@@ -789,7 +789,7 @@ fn load_or_create_hmac_key() -> Result<Vec<u8>, String> {
         let hex_str = std::fs::read_to_string(&key_path).map_err(|e| e.to_string())?;
         hex::decode(hex_str.trim()).map_err(|e| format!("corrupt HMAC key file: {}", e))
     } else {
-        use rand::RngCore;
+        use rand::Rng;
         let mut key = vec![0u8; 32];
         rand::rng().fill_bytes(&mut key);
         let hex_str = hex::encode(&key);
@@ -801,7 +801,7 @@ fn load_or_create_hmac_key() -> Result<Vec<u8>, String> {
 /// Compute HMAC-SHA256 over `path || dacl_sddl`.
 #[cfg(target_os = "windows")]
 fn compute_journal_hmac(key: &[u8], path: &str, dacl_sddl: &str) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;

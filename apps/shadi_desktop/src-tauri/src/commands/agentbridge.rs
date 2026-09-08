@@ -19,11 +19,8 @@
 use std::sync::{Arc, Mutex};
 
 use agentbridge::adapter::CliToolAdapter;
-use agentbridge::adapters::claude_code::ClaudeCodeAdapter;
-use agentbridge::adapters::codex::CodexAdapter;
-use agentbridge::adapters::copilot::CopilotAdapter;
-use agentbridge::adapters::cursor_agent::CursorAgentAdapter;
 use agentbridge::adapters::generic_stdio::GenericStdioAdapter;
+use agentbridge::open_profile_adapter;
 use agentbridge::mas::{
     AgentId, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch, EventId,
     EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
@@ -79,7 +76,8 @@ pub struct DelegateResult {
 pub struct CoordinateRequest {
     pub goal: String,
     /// `claude-code[:/path]` | `copilot[:/path]` | `codex[:/path]` |
-    /// `cursor-agent[:/path]` | `generic-stdio:<cmd>` |
+    /// `cursor-agent[:/path]` | `goose[:/path]` | `opencode[:/path]` |
+    /// `generic-stdio:<cmd>` |
     /// `slim:<agent-id>[@<host:port>]`, matching
     /// `agentbridge coordinate --agents`.
     pub agent_specs: Vec<String>,
@@ -277,35 +275,13 @@ impl ToolAdapter for SlimToolAdapter {
 fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>, String> {
     let mut agents = Vec::new();
     for spec in specs {
-        let (id_str, tool): (String, Arc<dyn ToolAdapter>) = if spec.starts_with("claude-code") {
-            let work_dir = spec
-                .strip_prefix("claude-code:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(ClaudeCodeAdapter::new("claude-code", work_dir));
-            ("claude-code".to_string(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if spec.starts_with("cursor-agent") {
-            let work_dir = spec
-                .strip_prefix("cursor-agent:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CursorAgentAdapter::new("cursor-agent", work_dir));
-            ("cursor-agent".to_string(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if spec.starts_with("copilot") {
-            let work_dir = spec
-                .strip_prefix("copilot:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CopilotAdapter::new("copilot", work_dir));
-            ("copilot".to_string(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if spec.starts_with("codex") {
-            let work_dir = spec
-                .strip_prefix("codex:")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CodexAdapter::new("codex", work_dir));
-            ("codex".to_string(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if let Some(cmd) = spec.strip_prefix("generic-stdio:") {
+        let (id_str, tool): (String, Arc<dyn ToolAdapter>) =
+            if let Some((id, adapter)) = open_profile_adapter(spec).map_err(|e| e.to_string())? {
+                (
+                    id,
+                    Arc::new(CliToolAdapter::new(Arc::new(adapter))) as Arc<dyn ToolAdapter>,
+                )
+            } else if let Some(cmd) = spec.strip_prefix("generic-stdio:") {
             let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
             let prog = parts[0];
             let args: Vec<&str> = if parts.len() > 1 {
@@ -338,9 +314,9 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
             (agent_id, slim_adapter as Arc<dyn ToolAdapter>)
         } else {
             return Err(format!(
-                "unknown agent spec '{spec}'. Supported: claude-code[:/path], \
-                 cursor-agent[:/path], copilot[:/path], codex[:/path], \
-                 generic-stdio:<command>, slim:<agent-id>[@host:port]"
+                "unknown agent spec '{spec}'. Supported: a profile id \
+                 (claude-code[:/path], …), generic-stdio:<command>, \
+                 slim:<agent-id>[@host:port]"
             ));
         };
         agents.push(AgentEntry {

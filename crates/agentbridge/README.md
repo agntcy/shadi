@@ -16,10 +16,10 @@ runtime is specific to coding tools.
 ```
 CLI tools          agentbridge adapters       shadi_mas engine
 ──────────────     ─────────────────────     ─────────────────────────────
-Claude Code    ──► ClaudeCodeAdapter   ──►
-Copilot CLI    ──► CopilotAdapter      ──►
-Codex CLI      ──► CodexAdapter        ──►   MasRuntime<DevelopmentEngine>
-Cursor Agent   ──► CursorAgentAdapter  ──►
+Claude Code    ──► ProfileAdapter      ──►
+Copilot CLI    ──► (profiles/*.json)   ──►
+Codex CLI      ──►                     ──►   MasRuntime<DevelopmentEngine>
+Cursor Agent   ──►                     ──►
 any CLI        ──► GenericStdioAdapter ──►
                         │                         │
                         │  ContextPacket           │  A2A / SLIM / DIR
@@ -30,7 +30,9 @@ any CLI        ──► GenericStdioAdapter ──►
 
 ### `CliAdapter` (trait)
 
-The central abstraction. Implement this to add any coding tool.
+The central abstraction. A new coding CLI is a JSON profile under
+`profiles/` (`ProfileAdapter`). Implement this trait only for a protocol
+that is not argv-driven (for example `GenericStdioAdapter`).
 
 ```rust
 pub trait CliAdapter: Send + Sync {

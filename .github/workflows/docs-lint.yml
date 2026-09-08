@@ -1,0 +1,76 @@
+name: Docs lint
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "typos.toml"
+      - ".markdownlint-cli2.jsonc"
+      - "lychee.toml"
+      - "just/core.just"
+      - "Justfile"
+      - ".github/workflows/docs-lint.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "typos.toml"
+      - ".markdownlint-cli2.jsonc"
+      - "lychee.toml"
+      - "just/core.just"
+      - "Justfile"
+      - ".github/workflows/docs-lint.yml"
+  workflow_dispatch:
+
+# Least privilege by default; jobs widen it where they need to.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spelling:
+    name: Spelling
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check spelling
+        uses: crate-ci/typos@d43b6c087ac471e2ea7b8af622ff15f05c0c365b # v1.50.1
+
+  markdown:
+    name: Markdown
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Lint Markdown
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: docs/content/**/*.md
+
+  links:
+    name: Links
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install lychee
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
+        with:
+          tool: lychee@0.24.2
+      - name: Check links
+        run: lychee --include-fragments 'docs/content/**/*.md'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

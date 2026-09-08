@@ -28,9 +28,9 @@ landlock = "0.4"
 [target.'cfg(target_os = "windows")'.dependencies]
 # AF_UNIX on Windows 10 1803+, for the control-socket client.
 uds_windows = "1.2"
-hmac = "0.12"
-sha2 = "0.10"
-rand = "0.9"
+hmac = "0.13"
+sha2 = "0.11"
+rand = "0.10"
 hex = "0.4"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",

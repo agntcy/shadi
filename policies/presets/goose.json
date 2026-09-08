@@ -1,0 +1,34 @@
+{
+  "_preset": "shadi/goose-v1",
+  "_description": "Safe-launch preset for Goose CLI. Goose reads ~/.config/goose. Use with: shadictl --policy policies/presets/goose.json --allow ~/.config/goose --allow ~/.local/share/goose --allow ~/.local/state/goose --read /opt/homebrew -- goose\n\nAdd your model-provider host to net_allow. On Windows add: --allow %APPDATA%\\goose --allow %LOCALAPPDATA%\\goose",
+  "allow": ["."],
+  "read": [
+    "/usr/local",
+    "/usr/bin",
+    "/usr/lib",
+    "/bin",
+    "/Library",
+    "/opt/homebrew",
+    "/private/etc/ssl",
+    "/private/etc/resolv.conf",
+    "/etc/ssl/certs",
+    "/etc/resolv.conf",
+    "C:\\Windows\\System32",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)"
+  ],
+  "net_block": false,
+  "net_allow": [
+    "github.com",
+    "*.github.com",
+    "*.githubusercontent.com",
+    "cisco.com",
+    "*.cisco.com"
+  ],
+  "block_command": [
+    "curl",
+    "wget",
+    "nc",
+    "netcat"
+  ]
+}

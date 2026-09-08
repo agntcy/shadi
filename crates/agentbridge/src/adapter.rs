@@ -1,6 +1,4 @@
-use shadi_mas::{
-    AgentId, Epoch, ToolAdapter, ToolCall, ToolProvider, ToolResult,
-};
+use shadi_mas::{AgentId, Epoch, ToolAdapter, ToolCall, ToolProvider, ToolResult};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -71,8 +69,7 @@ impl<A: CliAdapter> ToolAdapter for CliToolAdapter<A> {
     }
 
     fn call(&self, request: ToolCall) -> Result<ToolResult, String> {
-        let prompt =
-            String::from_utf8(request.arguments).map_err(|e| e.to_string())?;
+        let prompt = String::from_utf8(request.arguments).map_err(|e| e.to_string())?;
 
         let response = self
             .inner
