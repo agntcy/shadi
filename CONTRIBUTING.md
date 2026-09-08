@@ -112,13 +112,16 @@ root:
 
 - `just docs-serve` previews the site with live reload.
 - `just docs-lint` runs the documentation quality checks: spelling via
-  [`typos`](https://github.com/crate-ci/typos) and Markdown via
-  [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2).
+  [`typos`](https://github.com/crate-ci/typos), Markdown via
+  [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2),
+  and links via [`lychee`](https://github.com/lycheeverse/lychee).
 
-Install `typos` with `brew install typos-cli` or `cargo install typos-cli`.
+Install `typos` with `brew install typos-cli` or `cargo install typos-cli`,
+and `lychee` with `brew install lychee` or `cargo install lychee`.
 Markdown linting uses `npx` (Node.js 22+ preferred). Project-specific
 names live in `typos.toml`; Markdown rule exceptions live in
-`.markdownlint-cli2.jsonc`. CI runs the same checks on every pull request.
+`.markdownlint-cli2.jsonc`; link-check settings live in `lychee.toml`.
+CI runs the same checks on every pull request.
 
 ## Releasing crates
 
