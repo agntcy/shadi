@@ -20,11 +20,6 @@ coverage:
 ignore:
   # Runnable demos and sample artifacts (not built under `cargo llvm-cov --tests`).
   - "examples"
-  # CLI adapters that shell out to external coding-agent binaries not present in CI.
-  - "crates/agentbridge/src/adapters/claude_code.rs"
-  - "crates/agentbridge/src/adapters/codex.rs"
-  - "crates/agentbridge/src/adapters/copilot.rs"
-  - "crates/agentbridge/src/adapters/cursor_agent.rs"
   # Agent Directory discovery/publish — shells out to the external `dirctl` CLI.
   - "crates/agentbridge/src/dir_registry.rs"
   # agentbridge CLI entrypoint and command runners that require a live SLIM node

@@ -102,18 +102,23 @@ The demo uses in-process mock adapters for clarity. The full production stack ad
 | Feature | Where it lives |
 |---------|---------------|
 | Real subprocess communication | `GenericStdioAdapter` (crates/agentbridge) |
-| Claude Code subprocess adapter | `crates/agentbridge/src/adapters/claude_code.rs` |
-| Copilot subprocess adapter | `crates/agentbridge/src/adapters/copilot.rs` |
-| Codex subprocess adapter | `crates/agentbridge/src/adapters/codex.rs` |
-| Cursor Agent subprocess adapter | `crates/agentbridge/src/adapters/cursor_agent.rs` |
+| Coding-CLI profiles | `crates/agentbridge/profiles/*.json` + `ProfileAdapter` |
+| `register --tool cursor-agent` | `crates/agentbridge_cli/src/commands/register.rs` |
+| `list --local` | on-host leases in `crates/agentbridge/src/local_registry.rs` |
+| DID-proof send/recv + `AUTH_REQUIRED` | `shadi_identity::did_proof` + `shadi_mas` auth_required |
+| Native `handoff --from/--to` | same specs as `coordinate` |
 | A2A task delegation | `LiveA2ATaskAdapter` (crates/shadi_mas/src/experiments) |
 | SLIM group broadcast | `LiveSlimMessagingAdapter::group()` |
-| DIR agent discovery | `shadictl dir` subcommand |
+| DIR agent discovery | `shadictl dir` / `agentbridge list` |
 | Context persistence | `shadi_memory::SqlCipherStore` |
 
 ## Running with real agents
 
 ```bash
+# After register --slim-endpoint (under shadictl --net-block):
+agentbridge list --local
+agentbridge handoff --from claude-code --to copilot
+
 # All four agents, staggered vote loop, human approval on result
 agentbridge coordinate \
   --goal "Write fibonacci(n: u64) -> u64 with memoization and doctest" \
@@ -123,5 +128,9 @@ agentbridge coordinate \
   --output result.rs \
   --require-human
 ```
+
+Live multi-turn coding (two lines of Rust per agent, round-robin until
+`cargo test` passes):
+[docs/content/demos/collab-rust.md](../../docs/content/demos/collab-rust.md).
 
 See [docs/content/agentbridge.md](../../docs/content/agentbridge.md) for architecture and roadmap.
