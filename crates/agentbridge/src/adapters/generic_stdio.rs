@@ -65,7 +65,10 @@ impl Io {
     }
 
     #[cfg(test)]
-    fn from_buffers(writer: impl Write + Send + 'static, reader: impl Read + Send + 'static) -> Self {
+    fn from_buffers(
+        writer: impl Write + Send + 'static,
+        reader: impl Read + Send + 'static,
+    ) -> Self {
         Self {
             writer: Box::new(writer),
             reader: BufReader::new(Box::new(reader)),
@@ -79,8 +82,7 @@ impl Io {
 /// newline-delimited JSON protocol defined in this module.
 ///
 /// Any tool that implements the three-command protocol can be driven by this
-/// adapter. Use the more specific adapters in Phase 2+ (claude_code, copilot,
-/// codex) for tool-native protocols.
+/// adapter. Argv-driven coding CLIs use `ProfileAdapter` and a JSON profile.
 pub struct GenericStdioAdapter {
     id: AgentId,
     /// Held to keep the subprocess alive; not accessed after spawning.
@@ -91,7 +93,11 @@ pub struct GenericStdioAdapter {
 impl GenericStdioAdapter {
     /// Spawn `command` (with optional `args`) and return an adapter bound to
     /// that subprocess.
-    pub fn spawn(id: impl Into<String>, command: &str, args: &[&str]) -> Result<Self, CliAdapterError> {
+    pub fn spawn(
+        id: impl Into<String>,
+        command: &str,
+        args: &[&str],
+    ) -> Result<Self, CliAdapterError> {
         let mut child = Command::new(command)
             .args(args)
             .stdin(Stdio::piped())
@@ -115,8 +121,7 @@ impl GenericStdioAdapter {
             .map_err(|_| CliAdapterError::Subprocess("io lock poisoned".to_string()))?;
 
         let line = serde_json::to_string(req)?;
-        writeln!(io.writer, "{line}")
-            .map_err(|e| CliAdapterError::Subprocess(e.to_string()))?;
+        writeln!(io.writer, "{line}").map_err(|e| CliAdapterError::Subprocess(e.to_string()))?;
         io.writer
             .flush()
             .map_err(|e| CliAdapterError::Subprocess(e.to_string()))?;

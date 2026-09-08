@@ -1,6 +1,6 @@
 use shadi_mas::{
-    Epoch, PatternKind, TaskAdapter, TaskEnvelope,
     experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
+    Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
 
 /// Delegate a single task to a remote agentbridge adapter over A2A/SLIM.
@@ -52,7 +52,10 @@ pub fn run(
         .map_err(|e| anyhow::anyhow!("failed to read dispatches: {e}"))?;
 
     if let Some(record) = dispatches.first() {
-        println!("Response from '{to_agent_id}' ({:.0}ms):", record.elapsed_ms);
+        println!(
+            "Response from '{to_agent_id}' ({:.0}ms):",
+            record.elapsed_ms
+        );
         println!("{}", record.response);
     } else {
         println!("Task dispatched successfully.");

@@ -8,13 +8,10 @@ use a2a_server::{
     AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
     ServiceParams as A2AServiceParams,
 };
-use         agentbridge::{
+use agentbridge::{
     adapters::{
-        claude_code::ClaudeCodeAdapter,
-        codex::CodexAdapter,
-        copilot::CopilotAdapter,
-        cursor_agent::CursorAgentAdapter,
         generic_stdio::GenericStdioAdapter,
+        profile::{bundled_profile_ids, load_profile, ProfileAdapter},
     },
     dir_registry::DirError,
     CliAdapter,
@@ -23,9 +20,11 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use shadi_a2a::SlimRpcHandler;
-use slim_bindings::{
-    CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource,
+use shadi_mas::{
+    experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
+    Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
+use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
@@ -50,6 +49,22 @@ pub fn run(
     slim_endpoint: Option<&str>,
     dir_publish: Option<DirPublishOptions>,
 ) -> anyhow::Result<()> {
+    // Coding CLIs are JSON profiles (`ProfileAdapter`). Native modules stay
+    // for local handoff/coordinate; register no longer constructs them.
+    if tool != "generic-stdio" {
+        if let Some(profile) = load_profile(tool).map_err(|e| anyhow::anyhow!("{e}"))? {
+            let work_dir = register_work_dir(command);
+            let id = profile.id.clone();
+            let adapter = Arc::new(ProfileAdapter::new(profile, work_dir.clone()));
+            println!(
+                "Registered {id} adapter from profile (agent id: {}, dir: {})",
+                adapter.agent_id().0,
+                work_dir.display()
+            );
+            return serve_registered(&id, adapter, slim_endpoint, dir_publish);
+        }
+    }
+
     match tool {
         "generic-stdio" => {
             let command = command.ok_or_else(|| {
@@ -57,7 +72,11 @@ pub fn run(
             })?;
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             let adapter = Arc::new(GenericStdioAdapter::spawn(tool, command, &args_ref)?);
-            println!("Registered adapter '{}' (agent id: {})", tool, adapter.agent_id().0);
+            println!(
+                "Registered adapter '{}' (agent id: {})",
+                tool,
+                adapter.agent_id().0
+            );
             if let Some(endpoint) = slim_endpoint {
                 println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
                 run_slim_listener(tool, adapter, endpoint, dir_publish.as_ref())
@@ -70,94 +89,38 @@ pub fn run(
                 std::thread::park();
             }
         }
-        "claude-code" => {
-            let work_dir = command
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(ClaudeCodeAdapter::new("claude-code", &work_dir));
-            println!(
-                "Registered Claude Code adapter (agent id: {}, dir: {})",
-                adapter.agent_id().0,
-                work_dir.display()
-            );
-            if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/claude-code-a2a ...");
-                run_slim_listener("claude-code", adapter, endpoint, dir_publish.as_ref())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            } else {
-                if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir("claude-code", None, best_effort_did("claude-code").as_deref(), opts)?;
-                }
-                println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
-            }
-        }
-        "copilot" => {
-            let work_dir = command
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CopilotAdapter::new("copilot", work_dir));
-            println!("Registered Copilot adapter (agent id: {})", adapter.agent_id().0);
-            if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/copilot-a2a ...");
-                run_slim_listener("copilot", adapter, endpoint, dir_publish.as_ref())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            } else {
-                if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir("copilot", None, best_effort_did("copilot").as_deref(), opts)?;
-                }
-                println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
-            }
-        }
-        "codex" => {
-            let work_dir = command
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CodexAdapter::new("codex", work_dir));
-            println!("Registered Codex adapter (agent id: {})", adapter.agent_id().0);
-            if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/codex-a2a ...");
-                run_slim_listener("codex", adapter, endpoint, dir_publish.as_ref())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            } else {
-                if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir("codex", None, best_effort_did("codex").as_deref(), opts)?;
-                }
-                println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
-            }
-        }
-        "cursor-agent" => {
-            let work_dir = command
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let adapter = Arc::new(CursorAgentAdapter::new("cursor-agent", work_dir));
-            println!(
-                "Registered Cursor Agent adapter (agent id: {})",
-                adapter.agent_id().0
-            );
-            if let Some(endpoint) = slim_endpoint {
-                println!(
-                    "Starting SLIM A2A listener on {endpoint} as agntcy/shadi/cursor-agent-a2a ..."
-                );
-                run_slim_listener("cursor-agent", adapter, endpoint, dir_publish.as_ref())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            } else {
-                if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir(
-                        "cursor-agent",
-                        None,
-                        best_effort_did("cursor-agent").as_deref(),
-                        opts,
-                    )?;
-                }
-                println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
-            }
-        }
         other => {
             anyhow::bail!(
-                "Unknown tool type '{}'. Supported: generic-stdio, claude-code, copilot, codex, cursor-agent.",
-                other
+                "Unknown tool type '{other}'. Bundled profiles: {}. Also: generic-stdio. \
+                 Or drop {{name}}.json in AGENTBRIDGE_PROFILES_DIR.",
+                bundled_profile_ids().join(", ")
             );
         }
+    }
+    Ok(())
+}
+
+fn register_work_dir(command: Option<&str>) -> PathBuf {
+    command
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
+}
+
+fn serve_registered(
+    tool: &str,
+    adapter: Arc<dyn CliAdapter>,
+    slim_endpoint: Option<&str>,
+    dir_publish: Option<DirPublishOptions>,
+) -> anyhow::Result<()> {
+    if let Some(endpoint) = slim_endpoint {
+        println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
+        run_slim_listener(tool, adapter, endpoint, dir_publish.as_ref())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    } else {
+        if let Some(opts) = dir_publish.as_ref() {
+            publish_card_to_dir(tool, None, best_effort_did(tool).as_deref(), opts)?;
+        }
+        println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
     }
     Ok(())
 }
@@ -176,6 +139,7 @@ fn best_effort_did(agent_id: &str) -> Option<String> {
 
 struct AgentBridgeExecutor {
     adapter: Arc<dyn CliAdapter>,
+    slim_endpoint: Option<String>,
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -185,6 +149,137 @@ fn preview(s: &str, max: usize) -> String {
     } else {
         first_line.to_string()
     }
+}
+
+/// Opt-in: the collab demo sets this so a listener that just ran a coding
+/// turn can A2A-dispatch to the peer named in `NEXT <id>`. Off by default
+/// so one-shot `delegate` demos do not sprout extra client sends.
+fn a2a_forward_enabled() -> bool {
+    matches!(
+        std::env::var("AGENTBRIDGE_A2A_FORWARD").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+fn allowed_a2a_peers() -> Vec<String> {
+    std::env::var("AGENTBRIDGE_A2A_PEERS")
+        .unwrap_or_else(|_| "claude-code,copilot,codex,cursor-agent".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Last `NEXT <id>` in the CLI reply. `DONE` or an error reply means no hop.
+fn parse_next_peer(reply: &str) -> Option<String> {
+    if reply.contains("agentbridge error:") {
+        return None;
+    }
+    let mut chosen = None;
+    for line in reply.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (head, rest) = line
+            .split_once(char::is_whitespace)
+            .map(|(h, r)| (h, r.trim()))
+            .unwrap_or((line, ""));
+        if head.eq_ignore_ascii_case("DONE") {
+            return None;
+        }
+        if head.eq_ignore_ascii_case("NEXT") && !rest.is_empty() {
+            chosen = Some(rest.split_whitespace().next().unwrap_or(rest).to_string());
+        }
+    }
+    chosen
+}
+
+fn is_handoff_or_summary_prompt(prompt: &str) -> bool {
+    let start = prompt.trim_start();
+    start.starts_with("HANDOFF from ")
+        || start.starts_with("You are continuing a coding session")
+        || start.starts_with("Summarize this session for handoff")
+        || start.contains("Acknowledge you have received the handoff")
+}
+
+fn is_peer_handoff_packet(prompt: &str) -> bool {
+    prompt.trim_start().starts_with("HANDOFF from ")
+}
+
+fn section_after<'a>(text: &'a str, marker: &str, until: Option<&str>) -> &'a str {
+    let rest = match text.split_once(marker) {
+        Some((_, rest)) => rest,
+        None => return "",
+    };
+    let rest = rest.trim_start_matches('\n');
+    match until {
+        Some(end) => rest
+            .split_once(end)
+            .map(|(head, _)| head)
+            .unwrap_or(rest)
+            .trim(),
+        None => rest.trim(),
+    }
+}
+
+/// Shared turn text for the next peer: last reply, goal, file, tests.
+/// Not an "acknowledge" prompt — that was empty context and wasted a CLI turn.
+fn render_peer_handoff(from: &str, to: &str, inbound: &str, reply: &str) -> String {
+    let goal = section_after(inbound, "GOAL:", Some("HARD RULE:"));
+    let goal = goal.lines().next().unwrap_or(goal).trim();
+    let file = section_after(inbound, "Current src/lib.rs:", Some("Last cargo test:"));
+    let tests = section_after(inbound, "Last cargo test:", None);
+    format!(
+        "HANDOFF from {from} to {to}\n\
+         Do not write Rust. Store this turn; your next coding hop arrives separately.\n\n\
+         ## Last reply from {from}\n{}\n\n\
+         ## GOAL\n{goal}\n\n\
+         ## src/lib.rs when they edited\n{file}\n\n\
+         ## Last cargo test\n{tests}\n",
+        reply.trim()
+    )
+}
+
+fn next_peer_to_forward(self_id: &str, prompt: &str, reply: &str) -> Option<String> {
+    if !a2a_forward_enabled() || is_handoff_or_summary_prompt(prompt) {
+        return None;
+    }
+    let peer = parse_next_peer(reply)?;
+    if peer == self_id {
+        return None;
+    }
+    allowed_a2a_peers()
+        .into_iter()
+        .find(|allowed| allowed == &peer)
+}
+
+/// Send an A2A inject to `to` while proving as `from`.
+///
+/// Uses a distinct SLIM local name (`…-a2a-client`) so this process does
+/// not subscribe as its own listener (`…-a2a`) and deadlock.
+fn dispatch_peer_handoff(
+    from: &str,
+    to: &str,
+    endpoint: &str,
+    inbound_prompt: &str,
+    reply: &str,
+) -> Result<(), String> {
+    let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+        endpoint: endpoint.to_string(),
+        agent_id: from.to_string(),
+        local_name: Some(format!("agntcy/shadi/{from}-a2a-client")),
+        peer_agent_id: to.to_string(),
+        destination: Some(format!("agntcy/shadi/{to}-a2a")),
+    });
+    let prompt = render_peer_handoff(from, to, inbound_prompt, reply);
+    adapter.dispatch(TaskEnvelope {
+        task_id: format!("next-{}", uuid::Uuid::new_v4()),
+        pattern: PatternKind::Development,
+        epoch: Epoch(0),
+        correlation_id: Some(format!("agentbridge-next-{from}-{to}")),
+        body: prompt.into_bytes(),
+    })
 }
 
 #[async_trait]
@@ -207,34 +302,65 @@ impl AgentExecutor for AgentBridgeExecutor {
             .to_string();
 
         let agent_id = self.adapter.agent_id().0.clone();
-        println!(
-            "\n┌─ A2A recv [{agent_id}] task {}",
-            ctx.task_id
-        );
+        println!("\n┌─ A2A recv [{agent_id}] task {}", ctx.task_id);
         println!("│  {}", preview(&prompt, 120));
         println!("└─────────────────────────────────────────────────────────");
 
         let adapter = Arc::clone(&self.adapter);
+        let slim_endpoint = self.slim_endpoint.clone();
         let task_id = ctx.task_id.clone();
         let context_id = ctx.context_id.clone();
         let history = ctx.message.clone().map(|m| vec![m]);
+        let inbound_prompt = prompt.clone();
 
         let respond = async move {
             let started = std::time::Instant::now();
-            let response_text =
-                match tokio::task::spawn_blocking(move || adapter.execute_prompt(&prompt)).await {
+            let response_text = if is_peer_handoff_packet(&prompt) {
+                // Do not run the coding CLI on a peer handoff. The last run
+                // asked the model to "acknowledge" empty context; Claude
+                // died on stdin and Copilot said no files were shared.
+                format!("stored handoff ({})", preview(&prompt, 80))
+            } else {
+                let prompt_for_cli = prompt;
+                match tokio::task::spawn_blocking(move || adapter.execute_prompt(&prompt_for_cli))
+                    .await
+                {
                     Ok(Ok(text)) => text,
                     Ok(Err(e)) => format!("agentbridge error: {e}"),
-                    Err(join_err) => format!("agentbridge error: adapter task panicked: {join_err}"),
-                };
+                    Err(join_err) => {
+                        format!("agentbridge error: adapter task panicked: {join_err}")
+                    }
+                }
+            };
             let elapsed_ms = started.elapsed().as_millis();
 
-            println!(
-                "\n┌─ A2A send [{agent_id}] ({} ms)",
-                elapsed_ms
-            );
+            println!("\n┌─ A2A send [{agent_id}] ({} ms)", elapsed_ms);
             println!("│  {}", preview(&response_text, 120));
             println!("└─────────────────────────────────────────────────────────\n");
+
+            if let Some(peer) = next_peer_to_forward(&agent_id, &inbound_prompt, &response_text) {
+                if let Some(endpoint) = slim_endpoint.clone() {
+                    let from = agent_id.clone();
+                    let to = peer.clone();
+                    let inbound = inbound_prompt.clone();
+                    let reply = response_text.clone();
+                    let forwarded = tokio::task::spawn_blocking(move || {
+                        dispatch_peer_handoff(&from, &to, &endpoint, &inbound, &reply)
+                    })
+                    .await;
+                    match forwarded {
+                        Ok(Ok(())) => println!(
+                            "┌─ A2A client [{agent_id}] → {peer}\n│  NEXT dispatched by this listener\n└─────────────────────────────────────────────────────────\n"
+                        ),
+                        Ok(Err(err)) => println!(
+                            "┌─ A2A client [{agent_id}] → {peer}\n│  dispatch failed: {err}\n└─────────────────────────────────────────────────────────\n"
+                        ),
+                        Err(join_err) => println!(
+                            "┌─ A2A client [{agent_id}] → {peer}\n│  dispatch panicked: {join_err}\n└─────────────────────────────────────────────────────────\n"
+                        ),
+                    }
+                }
+            }
 
             let response = Message {
                 message_id: new_message_id(),
@@ -313,7 +439,10 @@ impl AgentBridgeRequestHandler {
     ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
-                AgentBridgeExecutor { adapter },
+                AgentBridgeExecutor {
+                    adapter,
+                    slim_endpoint: slim_endpoint.map(str::to_string),
+                },
                 InMemoryTaskStore::new(),
             ),
             ready,
@@ -450,7 +579,10 @@ impl RequestHandler for AgentBridgeRequestHandler {
         _params: &A2AServiceParams,
         _req: GetExtendedAgentCardRequest,
     ) -> Result<AgentCard, A2AError> {
-        Ok(build_agent_card(&self.agent_id, self.slim_endpoint.as_deref()))
+        Ok(build_agent_card(
+            &self.agent_id,
+            self.slim_endpoint.as_deref(),
+        ))
     }
 }
 
@@ -575,7 +707,11 @@ fn run_slim_listener(
 
     let tls = resolve_client_tls(Some(agent_id))?;
 
-    let service = Service::new(format!("agentbridge-listener-{}-{}", agent_id, std::process::id()));
+    let service = Service::new(format!(
+        "agentbridge-listener-{}-{}",
+        agent_id,
+        std::process::id()
+    ));
     let connection_id = service
         .connect(build_client_config(endpoint, &tls))
         .map_err(|e| format!("SLIM connect failed: {e:?}"))?;
@@ -705,7 +841,10 @@ fn resolve_client_tls(agent_id: Option<&str>) -> Result<TlsMaterial, String> {
             let base = slim_tls_dir();
             let candidates = if let Some(id) = agent_id {
                 vec![
-                    (base.join(format!("client-{id}.crt")), base.join(format!("client-{id}.key"))),
+                    (
+                        base.join(format!("client-{id}.crt")),
+                        base.join(format!("client-{id}.key")),
+                    ),
                     (base.join("client.crt"), base.join("client.key")),
                 ]
             } else {
@@ -715,7 +854,8 @@ fn resolve_client_tls(agent_id: Option<&str>) -> Result<TlsMaterial, String> {
                 .into_iter()
                 .find(|(c, k)| c.is_file() && k.is_file())
                 .ok_or_else(|| {
-                    "no SLIM client certificate found; set SLIM_TLS_CERT and SLIM_TLS_KEY".to_string()
+                    "no SLIM client certificate found; set SLIM_TLS_CERT and SLIM_TLS_KEY"
+                        .to_string()
                 })?
         }
     };
@@ -755,9 +895,8 @@ fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
 }
 
 fn parse_name(name: &str) -> Result<Name, String> {
-    Name::from_string(name.to_string()).map_err(|e| {
-        format!("invalid SLIM name '{name}': {e} (expected org/namespace/agent)")
-    })
+    Name::from_string(name.to_string())
+        .map_err(|e| format!("invalid SLIM name '{name}': {e} (expected org/namespace/agent)"))
 }
 
 #[derive(Debug)]
@@ -810,11 +949,7 @@ fn admit_incoming_message(mut req: SendMessageRequest) -> IncomingAdmission {
 }
 
 fn task_ids_from(req: &SendMessageRequest) -> (String, String) {
-    let task_id = req
-        .message
-        .task_id
-        .clone()
-        .unwrap_or_else(new_task_id);
+    let task_id = req.message.task_id.clone().unwrap_or_else(new_task_id);
     let context_id = req
         .message
         .context_id
@@ -890,7 +1025,10 @@ fn publish_card_to_dir(
     let card_json = serde_json::to_value(&card)?;
     let record = agentbridge::dir_registry::wrap_agent_card(&card_json, did);
 
-    println!("Publishing AgentCard for '{agent_id}' to {}...", opts.server);
+    println!(
+        "Publishing AgentCard for '{agent_id}' to {}...",
+        opts.server
+    );
     match agentbridge::dir_registry::publish_record(&record, opts.server, opts.gh_token) {
         Ok(cid) => println!("Published. CID: {cid}"),
         Err(DirError::DirctlNotFound) => {
@@ -905,6 +1043,15 @@ fn publish_card_to_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_tool_lists_profiles_and_generic_stdio() {
+        let err = run("gemini", None, &[], None, None).expect_err("no gemini profile");
+        let msg = err.to_string();
+        assert!(msg.contains("claude-code"));
+        assert!(msg.contains("generic-stdio"));
+        assert!(msg.contains("AGENTBRIDGE_PROFILES_DIR"));
+    }
 
     #[test]
     fn require_sandbox_enforced_rejects_unsandboxed_and_permissive() {
@@ -938,6 +1085,98 @@ mod tests {
         assert_eq!(preview("short", 20), "short");
     }
 
+    #[test]
+    fn parse_next_peer_reads_last_next_and_ignores_done() {
+        assert_eq!(
+            parse_next_peer("REPLACE 5\nv\nNEXT copilot\n").as_deref(),
+            Some("copilot")
+        );
+        assert_eq!(parse_next_peer("REPLACE 5\nv\nDONE\n"), None);
+        assert_eq!(
+            parse_next_peer("NEXT copilot\nNEXT cursor-agent\n").as_deref(),
+            Some("cursor-agent")
+        );
+        assert_eq!(
+            parse_next_peer("agentbridge error: boom\nNEXT copilot"),
+            None
+        );
+    }
+
+    #[test]
+    fn next_peer_to_forward_is_opt_in_and_allow_listed() {
+        let prev_fwd = std::env::var("AGENTBRIDGE_A2A_FORWARD").ok();
+        let prev_peers = std::env::var("AGENTBRIDGE_A2A_PEERS").ok();
+        std::env::remove_var("AGENTBRIDGE_A2A_FORWARD");
+        assert_eq!(
+            next_peer_to_forward("claude-code", "coding hop", "NEXT copilot"),
+            None
+        );
+        std::env::set_var("AGENTBRIDGE_A2A_FORWARD", "1");
+        std::env::set_var("AGENTBRIDGE_A2A_PEERS", "claude-code,copilot,codex");
+        assert_eq!(
+            next_peer_to_forward("claude-code", "coding hop", "NEXT copilot").as_deref(),
+            Some("copilot")
+        );
+        assert_eq!(
+            next_peer_to_forward("claude-code", "coding hop", "NEXT claude-code"),
+            None
+        );
+        assert_eq!(
+            next_peer_to_forward("claude-code", "coding hop", "NEXT unknown"),
+            None
+        );
+        assert_eq!(
+            next_peer_to_forward(
+                "claude-code",
+                "You are continuing a coding session from copilot.",
+                "NEXT codex"
+            ),
+            None
+        );
+        assert_eq!(
+            next_peer_to_forward(
+                "claude-code",
+                "HANDOFF from copilot to claude-code\nDo not write Rust.",
+                "NEXT codex"
+            ),
+            None
+        );
+        match prev_fwd {
+            Some(v) => std::env::set_var("AGENTBRIDGE_A2A_FORWARD", v),
+            None => std::env::remove_var("AGENTBRIDGE_A2A_FORWARD"),
+        }
+        match prev_peers {
+            Some(v) => std::env::set_var("AGENTBRIDGE_A2A_PEERS", v),
+            None => std::env::remove_var("AGENTBRIDGE_A2A_PEERS"),
+        }
+    }
+
+    #[test]
+    fn render_peer_handoff_shares_reply_file_and_tests() {
+        let inbound = "\
+You are claude-code on hop 1
+GOAL: implement Fifo
+HARD RULE: two lines
+Current src/lib.rs:
+ 1| pub fn push() {}
+Last cargo test:
+test push ... FAILED
+";
+        let text = render_peer_handoff(
+            "claude-code",
+            "codex",
+            inbound,
+            "REPLACE 11\nself.items.push(_item);\nNEXT codex",
+        );
+        assert!(text.starts_with("HANDOFF from claude-code to codex"));
+        assert!(text.contains("REPLACE 11"));
+        assert!(text.contains("self.items.push(_item)"));
+        assert!(text.contains("implement Fifo"));
+        assert!(text.contains("pub fn push() {}"));
+        assert!(text.contains("test push ... FAILED"));
+        assert!(!text.contains("Acknowledge"));
+    }
+
     fn sample_request(text: impl Into<String>) -> SendMessageRequest {
         SendMessageRequest {
             message: Message::new(Role::User, vec![Part::text(text.into())]),
@@ -967,11 +1206,7 @@ mod tests {
             let text = String::from_utf8(envelope.clone()).unwrap();
             text.lines().nth(2).unwrap().to_string()
         };
-        let forged = format!(
-            "SHADI-DID-PROOF/1\n{}\n{}\ntask",
-            impostor.did(),
-            sig_line
-        );
+        let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
         match admit_incoming_message(sample_request(forged)) {
             IncomingAdmission::Forged { reason, .. } => {
                 assert!(reason.contains("forged DID"), "{reason}");
@@ -1036,8 +1271,14 @@ mod tests {
     fn build_agent_card_includes_default_skills() {
         let card = build_agent_card("codex", None);
         assert_eq!(card.skills.len(), 3);
-        assert!(card.skills.iter().any(|s| s.id.contains("task_decomposition")));
-        assert!(card.skills.iter().any(|s| s.id.contains("agent_coordination")));
+        assert!(card
+            .skills
+            .iter()
+            .any(|s| s.id.contains("task_decomposition")));
+        assert!(card
+            .skills
+            .iter()
+            .any(|s| s.id.contains("agent_coordination")));
         assert!(card.skills.iter().any(|s| s.id.contains("text_completion")));
     }
 

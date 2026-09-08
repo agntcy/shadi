@@ -9,11 +9,7 @@ use agentbridge::member_source::{DirLookupOptions, MemberSource, SkillSearchSour
 /// advertising the standard agentbridge skills, resolving each match to a
 /// real `{name, did, slim_endpoint}` via [`SkillSearchSource`] — the same
 /// discovery technique a SLIM group moderator uses to pull in members.
-pub fn run(
-    local: bool,
-    server_addr: &str,
-    github_token: Option<&str>,
-) -> anyhow::Result<()> {
+pub fn run(local: bool, server_addr: &str, github_token: Option<&str>) -> anyhow::Result<()> {
     if local {
         return list_local(&LocalAdapterRegistry::from_env());
     }
@@ -29,7 +25,9 @@ pub fn run(
         },
     };
 
-    let candidates = source.resolve().map_err(|e| anyhow::anyhow!("DIR search failed: {e}"))?;
+    let candidates = source
+        .resolve()
+        .map_err(|e| anyhow::anyhow!("DIR search failed: {e}"))?;
 
     if candidates.is_empty() {
         println!("No agentbridge adapters found in DIR.");

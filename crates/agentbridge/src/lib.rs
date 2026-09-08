@@ -11,7 +11,10 @@ pub mod subprocess;
 
 pub use shadi_mas;
 
-pub use adapter::{CliAdapter, CliAdapterError, CliToolAdapter, prompt_tool_call};
+pub use adapter::{prompt_tool_call, CliAdapter, CliAdapterError, CliToolAdapter};
+pub use adapters::profile::{
+    bundled_profile_ids, load_profile, open_profile_adapter, CliProfile, ProfileAdapter,
+};
 pub use context::{ArtifactPayload, CodeContext, ContextPacket, ConversationMessage, FileSnapshot};
 pub use subprocess::TrackedSubprocess;
 

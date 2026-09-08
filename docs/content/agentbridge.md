@@ -52,7 +52,8 @@ cargo run -p agentbridge_demo -- --scenario bridge
 ```
 
 See [examples/agentbridge_demo/README.md](https://github.com/agntcy/shadi/blob/main/examples/agentbridge_demo/README.md)
-for step-by-step instructions and the live 4-terminal SLIM demo.
+for the in-process scenarios, and [scripts/agentbridge_shell*.sh](https://github.com/agntcy/shadi/blob/main/scripts/)
+or [the DID agent-group demo](demos/did-agent-group.md) for a live SLIM run.
 
 ## Architecture
 
@@ -85,8 +86,12 @@ flowchart LR
   slim <-- "A2A tasks  (text/plain)" --> laa
 ```
 
-`cursor-agent` doesn't have a `register` listener yet (`register --tool cursor-agent`
-is not implemented) — it participates as a `coordinate` peer only (see below).
+`register --tool` accepts `generic-stdio`, `claude-code`, `copilot`, `codex`,
+and `cursor-agent`. After a listener starts, `agentbridge list --local` shows
+it (name, DID, endpoint) from the lease file under `$SHADI_TMP_DIR`.
+
+Outbound A2A text is wrapped in a DID-proof envelope. Unsigned inbound parks
+as `AUTH_REQUIRED` (re-prove / ask / deny); a forged DID is rejected.
 
 ### Coordination loop
 
@@ -139,8 +144,9 @@ sequenceDiagram
   participant EX as AgentBridgeExecutor
   participant AD as CliAdapter
 
-  CO->>SL: SendMessage(task envelope)
+  CO->>SL: SendMessage(DID-proof envelope)
   SL->>SV: SLIMRPC frame
+  SV->>SV: unwrap DID-proof (unsigned → AUTH_REQUIRED, forged → Rejected)
   SV->>EX: execute(context)
   EX->>EX: strip "body:\n" envelope header
   EX->>AD: execute_prompt(prompt)
@@ -152,6 +158,26 @@ sequenceDiagram
   SL-->>CO: Task{Completed}
 ```
 
+## Use from a harness
+
+Coding harnesses (Claude Code, Cursor, Copilot, Codex) should **call the
+`agentbridge` CLI**, not speak SLIMRPC themselves. Install the skill pack
+by copying [`skills/agentbridge/`](https://github.com/agntcy/shadi/tree/main/skills/agentbridge)
+to the host skills directory (folder name must be `agentbridge`):
+
+| Host | Destination |
+|---|---|
+| Claude Code | `~/.claude/skills/agentbridge/` or `.claude/skills/agentbridge/` |
+| Cursor | `.cursor/skills/agentbridge/` |
+| GitHub Copilot | `~/.copilot/skills/agentbridge/` |
+| Codex / others | that host’s skills directory, same folder name |
+
+The skill only documents existing flags: `list --local`, `delegate`,
+`handoff --from slim:… --to slim:…`. Source
+[demo-env.sh](demos/demo-env.sh) so DID auth is set. A fifth CLI on the
+**register** side is a JSON profile under `crates/agentbridge/profiles/`,
+not a new Rust adapter.
+
 ## Three interaction models
 
 ### 1. Context handoff
@@ -162,6 +188,8 @@ generated artifacts.
 
 ```
 agentbridge handoff --from claude-code --to copilot
+SHADI_AGENT_ID=claude-code agentbridge handoff \
+  --from slim:claude-code --to slim:copilot --slim-endpoint 127.0.0.1:47591
 ```
 
 `--from` / `--to` accept the same specs as `coordinate` (`claude-code`,
@@ -169,12 +197,24 @@ agentbridge handoff --from claude-code --to copilot
 A bare subprocess command still opens GenericStdio. `--save` /
 `--from-file` persist the packet.
 
-The snapshot is an LLM summary of the source session this cycle, not a
-true session export.
+Bare tool names open a **local** `CliAdapter` (`snapshot_context` /
+`inject_context`). `slim:<id>` is A2A: `LiveA2ATaskAdapter` proves as
+`SHADI_AGENT_ID` and `SendMessage`s to `agntcy/shadi/<id>-a2a`. When
+`SHADI_AGENT_ID` matches `--from slim:<id>`, the source is that agent
+acting as an A2A *client* — snapshot stays local so the process does not
+call its own listener; only the destination inject is an A2A task.
 
-1. Source adapter → `snapshot_context()` → `ContextPacket` (LLM summary)
+The [round-robin Rust demo](demos/collab-rust.md) does not call `handoff`
+from `avatar`. After a coding turn the `register` listener reads `NEXT
+<peer>` and dispatches that inject itself (`AGENTBRIDGE_A2A_FORWARD=1`).
+
+The snapshot is an LLM summary of the source session this cycle, not a
+true session export (except the self-`slim:` case, which is a short local
+note).
+
+1. Source → `ContextPacket` (local snapshot, or A2A summary if `avatar` reads a remote `slim:` peer)
 2. Optional `--save` of the packet
-3. Destination adapter → `inject_context(packet)`
+3. Destination → `inject_context` (local) or A2A inject prompt (`slim:`)
 
 ### 2. Task delegation
 
@@ -306,7 +346,7 @@ shared SLIM bus, so two trust boundaries matter.
 
 A registered adapter forwards every incoming A2A task straight to the local CLI
 tool (`execute_prompt` → subprocess). Some adapters run their tool with elevated
-permissions — for example, `CopilotAdapter` invokes `copilot --allow-all-tools`
+permissions — for example, the Copilot profile invokes `copilot --allow-all-tools`
 so it can act non-interactively.
 
 !!! warning "Any peer able to reach the listener can drive local code execution"
@@ -424,23 +464,27 @@ corrupting the state machine.
     | `CliAdapter` trait | ✅ | Unified interface for any coding tool |
     | `ContextPacket` | ✅ | Portable session snapshot with JSON serde |
     | Generic subprocess adapter | ✅ | `GenericStdioAdapter` — newline-delimited JSON protocol |
-    | Native adapters | ✅ | `ClaudeCodeAdapter`, `CopilotAdapter`, `CodexAdapter`, `CursorAgentAdapter` |
+    | Register profiles | ✅ | `ProfileAdapter` + `crates/agentbridge/profiles/*.json` (no per-CLI Rust) |
     | `CliToolAdapter` bridge | ✅ | Any `CliAdapter` → `shadi_mas::ToolAdapter` |
     | DIR registration | ✅ | Real AgentCard (skills + SLIM endpoint) published to DIR's `integration/a2a` OASF module, DID carried in `authors` |
     | DIR-driven group discovery | ✅ | `MemberSource` (skill search / DID lookup / explicit list) resolves SLIM group trust sets from Directory — see the [Agent Directory Discovery Demo](demos/dir-group-discovery.md) |
     | `agentbridge` library | ✅ | `crates/agentbridge` |
     | CLI binary | ✅ | `agentbridge register \| list \| handoff \| delegate \| coordinate` |
-    | Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register` and `coordinate` |
+    | Live A2A transport | ✅ | `LiveA2ATaskAdapter` wired into `register`, `delegate`, `handoff --from/--to slim:…`, and `coordinate` |
     | Quorum-vote finalization | ✅ | `DevelopmentEngine` — autonomous, no human required |
     | SLIM group relay | ✅ | `shadictl slim a2a-collaborate` (SLIMRPC `Collaborate` RPC via `shadi_a2a::A2AGroupChannel`) — see [SLIM and A2A](slim_a2a.md) |
     | DID-identified secure groups | ✅ | Moderator-invited channels admitted against a per-agent DID allow-list — see the [Secure Agent Group Demo](demos/did-agent-group.md) |
+    | Application-layer DID proof | ✅ | Send/recv bound to `did:key`; forged DID rejected; `AUTH_REQUIRED` re-prove/ask/deny |
+    | Native `handoff` specs | ✅ | Same `--from`/`--to` as `coordinate`, including `cursor-agent` and `slim:<id>` |
+    | `register --tool cursor-agent` | ✅ | Same sandbox + DID listener as the other tools |
+    | `list --local` | ✅ | Live listeners from on-host register leases |
+    | Two-line token-passing coding | ✅ | [Round-robin Rust Demo](demos/collab-rust.md) — `avatar` `delegate` + capped apply + agent-as-A2A-client `handoff --from slim:` until `cargo test` |
 
     ### What remains
 
     | Requirement | Detail |
     |-------------|--------|
     | `shadi_memory` ContextPacket persistence | `SqlCipherStore` wire-up in `crates/shadi_memory/` |
-    | `register --tool cursor-agent` | Not yet implemented; `cursor-agent` is currently reachable only via `coordinate` |
 
     ### Does the existing middleware help?
 
@@ -468,10 +512,7 @@ corrupting the state machine.
           member_source.rs     ← MemberSource (skill/DID/explicit list) group-discovery trait
           adapters/
             generic_stdio.rs   ← subprocess JSON protocol adapter
-            claude_code.rs     ← Claude Code native adapter
-            copilot.rs         ← GitHub Copilot CLI adapter
-            codex.rs           ← OpenAI Codex CLI adapter
-            cursor_agent.rs    ← Cursor Agent adapter
+            profile.rs         ← ProfileAdapter (JSON under profiles/)
       agentbridge_cli/          ← binary (agentbridge)
         src/
           main.rs
@@ -497,6 +538,7 @@ corrupting the state machine.
 ## Next steps
 
 - Try the [Secure Agent Group Demo](demos/did-agent-group.md) for a full multi-agent, DID-identified walkthrough.
+- Try the [Round-robin Rust Demo](demos/collab-rust.md) for a multi-turn loop where each agent may write at most two lines and chooses the next A2A peer.
 - Try the [Agent Directory Discovery Demo](demos/dir-group-discovery.md) to form and grow a group by discovering members in DIR instead of naming them by hand.
 - Review the transport layer in [SLIM and A2A](slim_a2a.md).
 - See sandboxing guidance for running bridged tools in [Sandbox and Policies](sandbox.md).
