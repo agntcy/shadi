@@ -23,8 +23,8 @@ entry point that tells you where to go and in what order.
 
 !!! note
 
-	If you are completely new to the project, start with [Getting Started](getting_started.md)
-	first and come back here once the local launcher path is working.
+    If you are completely new to the project, start with [Getting Started](getting_started.md)
+    first and come back here once the local launcher path is working.
 
 ## Choose a Workflow
 
@@ -47,8 +47,8 @@ For a typical sandboxed agent workflow, this is the practical order:
 
 !!! info
 
-	The most common operator failure mode is not a code bug. It is a mismatch
-	between policy, secret availability, launch order, or shared transport configuration.
+    The most common operator failure mode is not a code bug. It is a mismatch
+    between policy, secret availability, launch order, or shared transport configuration.
 
 ## Troubleshooting Map
 

@@ -14,15 +14,17 @@ Run locally, from the repo root:
 just docs-serve
 ```
 
-Spell-check the docs and the rest of the repository with:
+Spell-check and lint the docs with:
 
 ```bash
 just docs-lint
 ```
 
-That runs [`typos`](https://github.com/crate-ci/typos). Install it with
-`brew install typos-cli` or `cargo install typos-cli`. CI runs the same
-check on every pull request.
+That runs [`typos`](https://github.com/crate-ci/typos) and
+[`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2).
+Install `typos` with `brew install typos-cli` or `cargo install typos-cli`.
+Markdown linting uses `npx` (Node.js 22+ preferred). CI runs the same
+checks on every pull request.
 
 Or directly with MkDocs:
 

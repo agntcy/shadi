@@ -109,4 +109,3 @@ binary, and the Visual C++ runtime it needs is declared as a WinGet dependency.
 Once `shadictl` is installed, continue to [Getting Started](getting_started.md)
 to build from source, inspect the sandbox policy, and run your first
 sandboxed command.
-```

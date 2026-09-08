@@ -111,12 +111,14 @@ The published site is MkDocs content under `docs/content/`. From the repo
 root:
 
 - `just docs-serve` previews the site with live reload.
-- `just docs-lint` runs the documentation quality checks (currently
-  spelling via [`typos`](https://github.com/crate-ci/typos)).
+- `just docs-lint` runs the documentation quality checks: spelling via
+  [`typos`](https://github.com/crate-ci/typos) and Markdown via
+  [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2).
 
 Install `typos` with `brew install typos-cli` or `cargo install typos-cli`.
-Project-specific names live in `typos.toml`. CI runs the same spelling
-check on every pull request.
+Markdown linting uses `npx` (Node.js 22+ preferred). Project-specific
+names live in `typos.toml`; Markdown rule exceptions live in
+`.markdownlint-cli2.jsonc`. CI runs the same checks on every pull request.
 
 ## Releasing crates
 

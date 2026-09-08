@@ -79,12 +79,17 @@ docs-serve:
 
 [group('docs')]
 [doc('Run documentation quality checks.')]
-docs-lint: docs-lint-spelling
+docs-lint: docs-lint-spelling docs-lint-markdown
 
 [group('docs')]
 [doc('Spell-check the repository with typos.')]
 docs-lint-spelling:
   typos
+
+[group('docs')]
+[doc('Lint published Markdown with markdownlint-cli2.')]
+docs-lint-markdown:
+  npx --yes --package markdownlint-cli2@0.23.2 markdownlint-cli2
 
 [group('profiles')]
 [doc('Print the strict built-in security profile.')]
