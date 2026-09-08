@@ -50,9 +50,9 @@ agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.2.0", pat
 # mTLS bootstrap without an openssl binary — the desktop app has to work on a
 # clean Windows install too (agntcy/shadi#123).
 rcgen = { version = "0.14", features = ["pem"] }
-# Reading github.com/<handle>.keys; rustls-tls to match the rest of the stack
+# Reading github.com/<handle>.keys; rustls to match the rest of the stack
 # and avoid an openssl dependency.
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 futures = "0.3"
 tauri-plugin-dialog = "2.7.2"
