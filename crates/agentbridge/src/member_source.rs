@@ -13,16 +13,67 @@
 use std::process::Command;
 
 use serde_json::Value;
+use shadi_a2a::{A2ABinding, A2ALocator};
 
 use crate::dir_registry::dirctl_binary;
 
 /// A directory-resolved (or manually-named) agent, ready to be admitted into
 /// a group's DID trust set and/or invited into a live session.
+///
+/// `did` is the portable name. `slim_endpoint` / `a2a_url` are locators that
+/// can change when the agent moves; look the DID up again to refresh them.
+/// Local aliases for the DID: the tool name and the SLIM channel
+/// (`agntcy/shadi/<name>-a2a`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateMember {
     pub name: String,
     pub did: String,
     pub slim_endpoint: Option<String>,
+    pub a2a_url: Option<String>,
+    /// Official unicast binding for [`Self::a2a_url`] (`GRPC`, `JSONRPC`,
+    /// `HTTP+JSON`). `None` when there is no HTTP locator.
+    pub a2a_binding: Option<A2ABinding>,
+}
+
+impl CandidateMember {
+    /// SLIM locator: the local node this agent attached to.
+    pub fn slim_locator(&self) -> Option<A2ALocator> {
+        let node = self.slim_endpoint.as_deref()?.trim();
+        if node.is_empty() {
+            return None;
+        }
+        Some(A2ALocator::slim(node))
+    }
+
+    /// Current official A2A unicast locator, if this candidate advertises one.
+    pub fn unicast_locator(&self) -> Option<A2ALocator> {
+        let url = self.a2a_url.as_deref()?.trim();
+        if url.is_empty() {
+            return None;
+        }
+        let binding = self.a2a_binding.unwrap_or(A2ABinding::Grpc);
+        if !binding.is_unicast() {
+            return None;
+        }
+        Some(A2ALocator::new(binding, url))
+    }
+
+    /// Every current locator (SLIM node first, then unicast).
+    pub fn locators(&self) -> Vec<A2ALocator> {
+        let mut out = Vec::new();
+        if let Some(locator) = self.slim_locator() {
+            out.push(locator);
+        }
+        if let Some(locator) = self.unicast_locator() {
+            out.push(locator);
+        }
+        out
+    }
+
+    /// Dispatch locator: prefer unicast when both exist (same as NEXT).
+    pub fn preferred_locator(&self) -> Option<A2ALocator> {
+        self.unicast_locator().or_else(|| self.slim_locator())
+    }
 }
 
 /// A technique for resolving a set of candidate group members.
@@ -136,6 +187,8 @@ pub fn parse_member_spec(
                 name: name.to_string(),
                 did: did.to_string(),
                 slim_endpoint: endpoint,
+                a2a_url: None,
+                a2a_binding: None,
             }],
         }));
     }
@@ -158,6 +211,103 @@ pub fn resolve_members(
         resolved.extend(source.resolve()?);
     }
     Ok(resolved)
+}
+
+/// SLIM channel advertised for a registered adapter (`agntcy/shadi/<id>-a2a`).
+pub fn slim_channel_name(agent_id: &str) -> String {
+    format!("agntcy/shadi/{agent_id}-a2a")
+}
+
+/// True when `query` is the tool name or its SLIM channel (aliases for the DID).
+pub fn matches_local_alias(name: &str, query: &str) -> bool {
+    let query = query.trim();
+    query == name || query == slim_channel_name(name) || query == format!("{name}-a2a")
+}
+
+/// True when `query` is a DID (`did:key:…`, `did:web:…`, …), including the
+/// member-spec form `did:did:key:…`.
+pub fn parse_peer_did(query: &str) -> Option<String> {
+    let trimmed = query.trim();
+    if let Some(rest) = trimmed.strip_prefix("did:did:") {
+        if rest.is_empty() {
+            return None;
+        }
+        return Some(format!("did:{rest}"));
+    }
+    if trimmed.starts_with("did:") {
+        let method_and_id = &trimmed["did:".len()..];
+        if method_and_id.contains(':') && !method_and_id.starts_with(':') {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Resolve an agent by DID (portable name) or local adapter name.
+///
+/// Order: on-host leases, then Agent Directory by author DID. A URL is never
+/// the name — pass it separately as a locator override after this returns.
+pub fn resolve_adapter_peer(
+    query: &str,
+    registry: &crate::local_registry::LocalAdapterRegistry,
+    dir: Option<&DirLookupOptions>,
+) -> Result<CandidateMember, String> {
+    match registry.resolve_live(query) {
+        Ok(record) => return Ok(record.to_candidate()),
+        Err(err) if err.contains("ambiguous") => return Err(err),
+        Err(_) => {}
+    }
+    let Some(did) = parse_peer_did(query) else {
+        return Err(format!(
+            "no live adapter named '{query}'. Use the DID from `list --local` \
+             (`--to did:key:…`) so a URL change still finds the same agent"
+        ));
+    };
+    let Some(dir) = dir else {
+        return Err(format!(
+            "DID {did} is not listening on this host. Publish it to DIR or \
+             pass --a2a-url as a locator override (the DID remains the name)"
+        ));
+    };
+    let found = DidLookupSource {
+        did: did.clone(),
+        dir: dir.clone(),
+    }
+    .resolve()?;
+    found
+        .into_iter()
+        .find(|c| c.did == did)
+        .ok_or_else(|| {
+            format!(
+                "DID {did} was not found locally or in the Agent Directory. \
+                 Re-register the adapter (new URL, same DID) or pass --a2a-url"
+            )
+        })
+}
+
+/// Resolve a portable name (DID, tool name, or SLIM channel) to locators.
+///
+/// The name stays the DID. Locators are the current SLIM node and/or unicast
+/// `{binding, url}` from the live lease or DIR card.
+pub fn resolve_locator(
+    query: &str,
+    registry: &crate::local_registry::LocalAdapterRegistry,
+    dir: Option<&DirLookupOptions>,
+) -> Result<(CandidateMember, Vec<A2ALocator>), String> {
+    let peer = resolve_adapter_peer(query, registry, dir)?;
+    let locators = peer.locators();
+    Ok((peer, locators))
+}
+
+/// Resolve a portable name to the current unicast locator only.
+pub fn resolve_unicast_locator(
+    query: &str,
+    registry: &crate::local_registry::LocalAdapterRegistry,
+    dir: Option<&DirLookupOptions>,
+) -> Result<(CandidateMember, Option<A2ALocator>), String> {
+    let peer = resolve_adapter_peer(query, registry, dir)?;
+    let locator = peer.unicast_locator();
+    Ok((peer, locator))
 }
 
 // ---------------------------------------------------------------------------
@@ -280,22 +430,62 @@ fn extract_candidate(record: &Value) -> Option<CandidateMember> {
         .unwrap_or("(unnamed)")
         .to_string();
 
-    let slim_endpoint = card
+    let supported = card
         .get("supportedInterfaces")
         .and_then(Value::as_array)
-        .and_then(|ifaces| {
-            ifaces.iter().find_map(|iface| {
-                let url = iface.get("url")?.as_str()?;
-                let rest = url.strip_prefix("slim://")?;
-                Some(rest.split('/').next().unwrap_or(rest).to_string())
-            })
-        });
+        .cloned()
+        .unwrap_or_default();
+
+    let slim_endpoint = supported.iter().find_map(|iface| {
+        let url = iface.get("url")?.as_str()?;
+        let rest = url.strip_prefix("slim://")?;
+        Some(rest.split('/').next().unwrap_or(rest).to_string())
+    });
+    let (a2a_binding, a2a_url) = supported
+        .iter()
+        .find_map(unicast_locator_from_interface)
+        .map(|(binding, url)| (Some(binding), Some(url)))
+        .unwrap_or((None, None));
 
     Some(CandidateMember {
         name,
         did,
         slim_endpoint,
+        a2a_url,
+        a2a_binding,
     })
+}
+
+fn unicast_locator_from_interface(iface: &Value) -> Option<(A2ABinding, String)> {
+    let url = iface.get("url")?.as_str()?;
+    if url.starts_with("slim://") {
+        return None;
+    }
+    let binding_raw = iface
+        .get("protocolBinding")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let binding = if binding_raw.is_empty() {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            A2ABinding::Grpc
+        } else {
+            return None;
+        }
+    } else {
+        A2ABinding::parse(binding_raw).ok()?
+    };
+    if !binding.is_unicast() {
+        return None;
+    }
+    let url = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else if url.contains("://") {
+        url.to_string()
+    } else {
+        // a2a-lf strips `http://` on some agent-card URLs.
+        format!("http://{url}")
+    };
+    Some((binding, url))
 }
 
 #[cfg(test)]
@@ -329,6 +519,271 @@ mod tests {
         assert_eq!(candidate.name, "copilot");
         assert_eq!(candidate.did, "did:key:z6Mk...");
         assert_eq!(candidate.slim_endpoint.as_deref(), Some("127.0.0.1:47357"));
+    }
+
+    #[test]
+    fn extract_candidate_reads_grpc_url_even_when_http_prefix_was_stripped() {
+        let record = serde_json::json!({
+            "authors": ["did:key:zGrpc"],
+            "modules": [{
+                "name": "integration/a2a",
+                "data": {
+                    "card_data": {
+                        "name": "copilot",
+                        "supportedInterfaces": [{
+                            "url": "127.0.0.1:50051",
+                            "protocolBinding": "GRPC",
+                            "protocolVersion": "1.0",
+                        }],
+                    },
+                    "card_schema_version": "v1.0.0",
+                },
+            }],
+        });
+        let candidate = extract_candidate(&record).expect("candidate");
+        assert_eq!(candidate.did, "did:key:zGrpc");
+        assert_eq!(candidate.a2a_url.as_deref(), Some("http://127.0.0.1:50051"));
+        assert_eq!(candidate.a2a_binding, Some(A2ABinding::Grpc));
+        assert_eq!(candidate.slim_endpoint, None);
+        assert_eq!(
+            candidate.unicast_locator().unwrap().display_uri(),
+            "grpc://127.0.0.1:50051"
+        );
+    }
+
+    #[test]
+    fn extract_candidate_reads_jsonrpc_and_http_json_bindings() {
+        let jsonrpc = serde_json::json!({
+            "authors": ["did:key:zJson"],
+            "modules": [{
+                "name": "integration/a2a",
+                "data": {
+                    "card_data": {
+                        "name": "copilot",
+                        "supportedInterfaces": [{
+                            "url": "http://127.0.0.1:8080",
+                            "protocolBinding": "JSONRPC",
+                            "protocolVersion": "1.0",
+                        }],
+                    },
+                    "card_schema_version": "v1.0.0",
+                },
+            }],
+        });
+        let candidate = extract_candidate(&jsonrpc).expect("jsonrpc");
+        assert_eq!(candidate.a2a_binding, Some(A2ABinding::Jsonrpc));
+        assert_eq!(candidate.a2a_url.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(
+            candidate.unicast_locator().unwrap().display_uri(),
+            "jsonrpc://127.0.0.1:8080"
+        );
+
+        let rest = serde_json::json!({
+            "authors": ["did:key:zRest"],
+            "modules": [{
+                "name": "integration/a2a",
+                "data": {
+                    "card_data": {
+                        "name": "codex",
+                        "supportedInterfaces": [{
+                            "url": "127.0.0.1:8081",
+                            "protocolBinding": "HTTP+JSON",
+                            "protocolVersion": "1.0",
+                        }],
+                    },
+                    "card_schema_version": "v1.0.0",
+                },
+            }],
+        });
+        let candidate = extract_candidate(&rest).expect("http+json");
+        assert_eq!(candidate.a2a_binding, Some(A2ABinding::HttpJson));
+        assert_eq!(candidate.a2a_url.as_deref(), Some("http://127.0.0.1:8081"));
+    }
+
+    #[test]
+    fn parse_peer_did_accepts_did_key_and_member_spec_form() {
+        assert_eq!(
+            parse_peer_did("did:key:z6Mkabc").as_deref(),
+            Some("did:key:z6Mkabc")
+        );
+        assert_eq!(
+            parse_peer_did("did:did:key:z6Mkabc").as_deref(),
+            Some("did:key:z6Mkabc")
+        );
+        assert_eq!(parse_peer_did("copilot"), None);
+        assert_eq!(parse_peer_did("did:"), None);
+        assert_eq!(parse_peer_did("did:did:"), None);
+        assert_eq!(
+            parse_peer_did("  did:key:z6Mkabc  ").as_deref(),
+            Some("did:key:z6Mkabc")
+        );
+    }
+
+    #[test]
+    fn locators_skip_empty_urls_and_slim_unicast_binding() {
+        let empty = CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zEmpty".to_string(),
+            slim_endpoint: Some("   ".to_string()),
+            a2a_url: Some(String::new()),
+            a2a_binding: None,
+        };
+        assert!(empty.slim_locator().is_none());
+        assert!(empty.unicast_locator().is_none());
+
+        let slim_as_unicast = CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zSlim".to_string(),
+            slim_endpoint: None,
+            a2a_url: Some("http://127.0.0.1:9".to_string()),
+            a2a_binding: Some(A2ABinding::Slim),
+        };
+        assert!(slim_as_unicast.unicast_locator().is_none());
+    }
+
+    #[test]
+    fn unicast_locator_from_interface_infers_http_and_skips_non_unicast() {
+        let http = serde_json::json!({"url": "http://127.0.0.1:9"});
+        assert_eq!(
+            unicast_locator_from_interface(&http),
+            Some((A2ABinding::Grpc, "http://127.0.0.1:9".to_string()))
+        );
+        let https = serde_json::json!({"url": "https://example.test"});
+        assert_eq!(
+            unicast_locator_from_interface(&https),
+            Some((A2ABinding::Grpc, "https://example.test".to_string()))
+        );
+        let bare = serde_json::json!({"url": "127.0.0.1:9"});
+        assert!(unicast_locator_from_interface(&bare).is_none());
+        let slim = serde_json::json!({
+            "url": "http://127.0.0.1:9",
+            "protocolBinding": "SLIMRPC"
+        });
+        assert!(unicast_locator_from_interface(&slim).is_none());
+        let grpc_scheme = serde_json::json!({
+            "url": "grpc://127.0.0.1:9",
+            "protocolBinding": "GRPC"
+        });
+        assert_eq!(
+            unicast_locator_from_interface(&grpc_scheme),
+            Some((A2ABinding::Grpc, "grpc://127.0.0.1:9".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_peer_requires_dir_for_unknown_did() {
+        let (_dir, registry) = temp_registry();
+        let err = resolve_adapter_peer("did:key:zMissing", &registry, None).unwrap_err();
+        assert!(err.contains("not listening on this host"), "{err}");
+        assert!(err.contains("did:key:zMissing"), "{err}");
+    }
+
+    fn temp_registry() -> (tempfile::TempDir, crate::local_registry::LocalAdapterRegistry) {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            crate::local_registry::LocalAdapterRegistry::with_dir(dir.path().to_path_buf());
+        (dir, registry)
+    }
+
+    fn grpc_lease(name: &str, did: &str, url: &str) -> crate::local_registry::LocalAdapterRecord {
+        crate::local_registry::LocalAdapterRecord {
+            name: name.to_string(),
+            did: did.to_string(),
+            slim_endpoint: String::new(),
+            a2a_url: url.to_string(),
+            a2a_binding: A2ABinding::Grpc,
+            pid: std::process::id(),
+        }
+    }
+
+    #[test]
+    fn resolve_adapter_peer_uses_local_lease_by_name_or_did() {
+        let (_dir, registry) = temp_registry();
+        let _lease = registry
+            .publish(&grpc_lease(
+                "copilot",
+                "did:key:zCopilot",
+                "http://127.0.0.1:50151",
+            ))
+            .unwrap();
+        let by_name = resolve_adapter_peer("copilot", &registry, None).expect("name");
+        assert_eq!(by_name.did, "did:key:zCopilot");
+        assert_eq!(
+            by_name.a2a_url.as_deref(),
+            Some("http://127.0.0.1:50151")
+        );
+        let by_did = resolve_adapter_peer("did:key:zCopilot", &registry, None).expect("did");
+        assert_eq!(by_did.name, "copilot");
+        assert_eq!(by_did.a2a_url, by_name.a2a_url);
+    }
+
+    #[test]
+    fn resolve_adapter_peer_follows_did_after_url_change() {
+        let (_dir, registry) = temp_registry();
+        let mut record = grpc_lease("copilot", "did:key:zSame", "http://127.0.0.1:50151");
+        let _first = registry.publish(&record).unwrap();
+        record.a2a_url = "http://127.0.0.1:50152".to_string();
+        let _second = registry.publish(&record).unwrap();
+        let found = resolve_adapter_peer("did:key:zSame", &registry, None).expect("moved");
+        assert_eq!(found.a2a_url.as_deref(), Some("http://127.0.0.1:50152"));
+        assert_eq!(found.a2a_binding, Some(A2ABinding::Grpc));
+        assert_eq!(found.name, "copilot");
+    }
+
+    #[test]
+    fn resolve_unicast_locator_follows_did_when_binding_changes() {
+        let (_dir, registry) = temp_registry();
+        let mut record = grpc_lease("copilot", "did:key:zSame", "http://127.0.0.1:50151");
+        let _first = registry.publish(&record).unwrap();
+        record.a2a_url = "http://127.0.0.1:8080".to_string();
+        record.a2a_binding = A2ABinding::Jsonrpc;
+        let _second = registry.publish(&record).unwrap();
+        let (peer, locator) =
+            resolve_unicast_locator("did:key:zSame", &registry, None).expect("moved");
+        assert_eq!(peer.name, "copilot");
+        let locator = locator.expect("unicast locator");
+        assert_eq!(locator.binding, A2ABinding::Jsonrpc);
+        assert_eq!(locator.url, "http://127.0.0.1:8080");
+        assert_eq!(locator.display_uri(), "jsonrpc://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn resolve_locator_returns_slim_node_for_slim_only_lease() {
+        let (_dir, registry) = temp_registry();
+        let mut record = grpc_lease("copilot", "did:key:zSlim", "");
+        record.a2a_url.clear();
+        record.slim_endpoint = "127.0.0.1:47357".to_string();
+        let _lease = registry.publish(&record).unwrap();
+        let (peer, locators) =
+            resolve_locator("agntcy/shadi/copilot-a2a", &registry, None).expect("channel alias");
+        assert_eq!(peer.did, "did:key:zSlim");
+        assert_eq!(locators.len(), 1);
+        assert_eq!(locators[0].binding, A2ABinding::Slim);
+        assert_eq!(locators[0].display_uri(), "slim://127.0.0.1:47357");
+        assert_eq!(peer.preferred_locator(), Some(locators[0].clone()));
+    }
+
+    #[test]
+    fn resolve_adapter_peer_rejects_ambiguous_did_and_missing_name() {
+        let (_dir, registry) = temp_registry();
+        let _a = registry
+            .publish(&grpc_lease(
+                "copilot",
+                "did:key:zShared",
+                "http://127.0.0.1:50151",
+            ))
+            .unwrap();
+        let _b = registry
+            .publish(&grpc_lease(
+                "codex",
+                "did:key:zShared",
+                "http://127.0.0.1:50152",
+            ))
+            .unwrap();
+        let err = resolve_adapter_peer("did:key:zShared", &registry, None).unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        let missing = resolve_adapter_peer("goose", &registry, None).unwrap_err();
+        assert!(missing.contains("did:key"), "{missing}");
     }
 
     #[test]
@@ -467,11 +922,15 @@ mod tests {
                 name: "avatar".to_string(),
                 did: "did:key:human".to_string(),
                 slim_endpoint: None,
+                a2a_url: None,
+                a2a_binding: None,
             },
             CandidateMember {
                 name: "claude-code".to_string(),
                 did: "did:key:agent".to_string(),
                 slim_endpoint: Some("127.0.0.1:47560".to_string()),
+                a2a_url: None,
+                a2a_binding: None,
             },
         ];
         let source = ExplicitListSource {
@@ -647,6 +1106,20 @@ esac
             candidates[0].slim_endpoint.as_deref(),
             Some("127.0.0.1:47560")
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_adapter_peer_reports_dir_miss_when_card_did_differs() {
+        let _guard = env_lock().lock().expect("lock");
+        let record = a2a_record("copilot", "did:key:zOther", "127.0.0.1:47357");
+        let (script, _dir) = fake_dirctl_script("bafkreiother", &record.to_string());
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let (_tmp, registry) = temp_registry();
+        let err = resolve_adapter_peer("did:key:zWanted", &registry, Some(&test_dir())).unwrap_err();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert!(err.contains("was not found"), "{err}");
+        assert!(err.contains("did:key:zWanted"), "{err}");
     }
 
     #[test]

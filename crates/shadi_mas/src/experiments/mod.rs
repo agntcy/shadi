@@ -14,7 +14,7 @@ pub use auth_required::{
     AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
 };
 use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
-use shadi_a2a::A2AChannelBuilder;
+use shadi_a2a::{insert_dest_did, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator};
 use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
@@ -86,6 +86,14 @@ pub struct LiveA2ATaskAdapterConfig {
     pub local_name: Option<String>,
     pub peer_agent_id: String,
     pub destination: Option<String>,
+    /// When set, dispatch over official A2A unicast to this URL instead of SLIM.
+    /// Locator only — [`Self::peer_did`] is the portable name.
+    pub a2a_url: Option<String>,
+    /// Binding for [`Self::a2a_url`]. `None` means gRPC (old callers).
+    pub a2a_binding: Option<A2ABinding>,
+    /// Recipient DID. Set as `a2a-dst-did` on unicast sends so a shared URL
+    /// cannot execute a task meant for a different agent.
+    pub peer_did: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -157,6 +165,75 @@ impl LiveA2ATaskAdapter {
     }
 
     fn send_signed_task(
+        &self,
+        task: &TaskEnvelope,
+        signed_text: &str,
+    ) -> Result<SendMessageResponse, String> {
+        if let Some(a2a_url) = self.config.a2a_url.as_deref() {
+            let locator = A2ALocator::new(
+                self.config.a2a_binding.unwrap_or(A2ABinding::Grpc),
+                a2a_url,
+            );
+            if locator.binding.is_unicast() {
+                return self.send_signed_task_unicast(task, signed_text, &locator);
+            }
+        }
+        self.send_signed_task_slim(task, signed_text)
+    }
+
+    fn send_signed_task_unicast(
+        &self,
+        task: &TaskEnvelope,
+        signed_text: &str,
+        locator: &A2ALocator,
+    ) -> Result<SendMessageResponse, String> {
+        let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
+            .map_err(|e| e.to_string())?;
+        let proven_did = match &auth {
+            shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
+            shadi_identity::SlimAuth::SharedSecret(_) => {
+                return Err(
+                    "application auth requires an agent DID; shared-secret node auth is not enough"
+                        .to_string(),
+                );
+            }
+        };
+        let session = SessionContext::new(
+            &self.config.agent_id,
+            format!("mas-task-session-{}", task.task_id),
+        )
+        .with_proven_did(proven_did);
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
+        let locator = locator.clone();
+        runtime.block_on(async {
+            let via = locator.display_uri();
+            let channel = A2AChannel::connect(locator, Arc::new(DidProofVerifier), session)
+                .await
+                .map_err(|err| format!("A2A connect {via}: {err}"))?;
+            let client = A2AClient::new(Box::new(channel));
+            let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
+            if let Some(peer_did) = self.config.peer_did.as_deref() {
+                message = insert_dest_did(message, peer_did);
+            }
+            let request = SendMessageRequest {
+                message,
+                configuration: None,
+                metadata: None,
+                tenant: None,
+            };
+            let response = client
+                .send_message(&request)
+                .await
+                .map_err(|err| format!("failed to send A2A task {}: {}", task.task_id, err))?;
+            client.destroy().await.ok();
+            Ok(response)
+        })
+    }
+
+    fn send_signed_task_slim(
         &self,
         task: &TaskEnvelope,
         signed_text: &str,
@@ -678,6 +755,9 @@ mod transport_tests {
             local_name: None,
             peer_agent_id: "peer".to_string(),
             destination: None,
+            a2a_url: None,
+            a2a_binding: None,
+            peer_did: None,
         });
         assert!(adapter.dispatches().expect("lock").is_empty());
     }

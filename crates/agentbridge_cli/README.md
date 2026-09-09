@@ -16,14 +16,16 @@ cargo install --path crates/agentbridge_cli
 
 ### `register` — start an adapter server
 
-Wrap a CLI tool as an agentbridge adapter and keep it running as a SLIM A2A
-service so remote callers can reach it.
+Wrap a CLI tool as an agentbridge adapter and keep it running as an A2A
+service so remote callers can reach it over SLIMRPC and/or official A2A
+unicast (gRPC, JSON-RPC, or HTTP+JSON).
 
-> **Security:** `register --slim-endpoint` refuses to start unless it's running
-> under a SHADI sandbox with network blocked by default — wrap it in `shadictl`,
-> as shown below, and `--read` the directory holding the SLIM mTLS client
-> certificate (`$SHADI_TMP_DIR/shadi-slim-mtls` in the demos) so the listener
-> can still read its own cert under the sandbox. On macOS, resolve
+> **Security:** `register --slim-endpoint` and `register --a2a-listen` refuse
+> to start unless they're running under a SHADI sandbox with network blocked
+> by default — wrap them in `shadictl`, as shown below, and `--read` the
+> directory holding certificates (`$SHADI_TMP_DIR/shadi-slim-mtls` for SLIM,
+> `$SHADI_TMP_DIR/shadi-a2a-tls` for non-loopback unicast) so the listener can
+> still read its own cert under the sandbox. On macOS, resolve
 > `$SHADI_TMP_DIR` to its real path first (`cd "$SHADI_TMP_DIR" && pwd -P`) —
 > `/tmp` is a symlink to `/private/tmp`, and Seatbelt's sandbox rules don't
 > match a path reached through the symlink if the rule was generated for the
@@ -71,7 +73,7 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 # Query DIR for registered adapters
 agentbridge list
 
-# List listeners this machine started with register --slim-endpoint
+# List listeners this machine started with register --slim-endpoint / --a2a-listen
 agentbridge list --local
 ```
 
@@ -111,14 +113,28 @@ agentbridge handoff \
 
 ### `delegate` — send a single task to a remote adapter
 
-Dispatch one prompt to a remote agentbridge adapter over A2A/SLIM and print
-the response.
+Dispatch one prompt to a remote agentbridge adapter over A2A and print
+the response. `--to` is a DID (`did:key:…`) or a local alias from
+`list --local`. The URL is a locator: `delegate` looks it up from the
+current lease (or DIR). `--a2a-url` overrides the locator only and must
+be paired with `--to did:key:…`. Locator URIs (`jsonrpc://host:port`)
+carry the binding; a bare `http://` still means gRPC unless
+`--a2a-binding` is set. `https://` gRPC client TLS is not wired yet.
 
 ```bash
 agentbridge delegate "write unit tests for src/parser.rs" \
-  --to codex \
-  --agent-id avatar \
-  --endpoint 127.0.0.1:47357
+  --to did:key:z6Mk… \
+  --agent-id avatar
+
+# Constrained unicast without a SLIM node (loopback plaintext)
+shadictl --net-block --net-allow 127.0.0.1:50051 -- \
+  agentbridge register --tool copilot --a2a-listen 127.0.0.1:50051
+# JSON-RPC / HTTP+JSON: add --a2a-binding jsonrpc or --a2a-binding http+json
+
+agentbridge list --local
+agentbridge delegate "write unit tests for src/parser.rs" \
+  --to did:key:z6Mk… \
+  --agent-id avatar
 ```
 
 ### `coordinate` — autonomous multi-round coordination
@@ -192,8 +208,9 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 | `SLIM_HUMAN_SEED` | — | Human root secret DID keys are derived from |
 | `SLIM_MEMBER_DIDS` | — | Comma-separated `did:key` allow-list |
 | `SHADI_AUTH_REQUIRED_POLICY` | `reprove` | `reprove` / `ask` / `deny` when a remote task parks |
-| `SLIM_TLS_CERT` / `SLIM_TLS_KEY` | — | mTLS client certificate paths |
-| `SLIM_TLS_CA` | — | CA certificate for server verification |
+| `SLIM_TLS_CERT` / `SLIM_TLS_KEY` | — | SLIM mTLS client certificate paths (not used for gRPC) |
+| `SLIM_TLS_CA` | — | CA certificate for SLIM server verification |
+| `A2A_TLS_CERT` / `A2A_TLS_KEY` | `$SHADI_TMP_DIR/shadi-a2a-tls/server.{crt,key}` | TLS 1.3 for non-loopback `--a2a-listen`. Do not reuse `SLIM_TLS_*`. Verify with `openssl x509 -text -noout`. |
 
 > ⚠️ **Security:** `register`, `delegate`, and `coordinate` (for `slim:` agent
 > specs) authenticate to the SLIM mesh via DID/keys only — set
@@ -204,9 +221,10 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 > into every demo script.
 >
 > That decides *who* may send a task. It doesn't constrain *what* the task can
-> do once it runs, so `register --slim-endpoint` separately refuses to start
-> unless it's running under a SHADI sandbox with network blocked by default —
-> wrap it in `shadictl --net-block --net-allow <slim-endpoint> --`. Kernel
+> do once it runs, so `register --slim-endpoint` and `register --a2a-listen`
+> separately refuse to start unless they're running under a SHADI sandbox
+> with network blocked by default — wrap them in
+> `shadictl --net-block --net-allow <listen-addr> --`. Kernel
 > sandboxes (Seatbelt/Landlock/AppContainer) are inherited by child processes,
 > so this confines whatever CLI tool the adapter spawns with no extra code in
 > agentbridge itself.

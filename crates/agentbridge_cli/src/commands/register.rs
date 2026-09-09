@@ -1,9 +1,13 @@
+use std::fs;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use a2a::event::StreamResponse;
 use a2a::*;
+use a2a_grpc::GrpcHandler;
+use a2a_pb::proto::a2a_service_server::A2aServiceServer;
 use a2a_server::{
     AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
     ServiceParams as A2AServiceParams,
@@ -14,12 +18,13 @@ use agentbridge::{
         profile::{bundled_profile_ids, load_profile, ProfileAdapter},
     },
     dir_registry::DirError,
+    local_registry::{LocalAdapterRecord, LocalAdapterRegistry},
     CliAdapter,
 };
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use shadi_a2a::SlimRpcHandler;
+use shadi_a2a::{A2ABinding, SlimRpcHandler};
 use shadi_mas::{
     experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
     Epoch, PatternKind, TaskAdapter, TaskEnvelope,
@@ -28,6 +33,8 @@ use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsS
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
+use tonic::transport::server::TcpIncoming;
+use tonic::transport::Server as TonicServer;
 
 /// Agent Directory server + auth to publish this adapter's `AgentCard` to.
 pub struct DirPublishOptions<'a> {
@@ -39,14 +46,17 @@ pub struct DirPublishOptions<'a> {
 ///
 /// When `slim_endpoint` is provided the adapter is also exposed as an A2A
 /// service over SLIMRPC, reachable at `agntcy/shadi/<tool>-a2a`. When
-/// `dir_publish` is provided, the adapter's real `AgentCard` — with its SLIM
-/// endpoint and DID, if a SLIM listener is running — is published to the
-/// Agent Directory before the adapter starts serving.
+/// `a2a_listen` is provided it is exposed on an official A2A unicast binding
+/// (`grpc`, `jsonrpc`, or `http+json`) at that `host:port`. When `dir_publish`
+/// is provided, the adapter's real `AgentCard` is published to the Agent
+/// Directory before the adapter starts serving.
 pub fn run(
     tool: &str,
     command: Option<&str>,
     args: &[String],
     slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
 ) -> anyhow::Result<()> {
     // Coding CLIs are JSON profiles (`ProfileAdapter`). Native modules stay
@@ -61,7 +71,14 @@ pub fn run(
                 adapter.agent_id().0,
                 work_dir.display()
             );
-            return serve_registered(&id, adapter, slim_endpoint, dir_publish);
+            return serve_registered(
+                &id,
+                adapter,
+                slim_endpoint,
+                a2a_listen,
+                a2a_binding,
+                dir_publish,
+            );
         }
     }
 
@@ -77,13 +94,25 @@ pub fn run(
                 tool,
                 adapter.agent_id().0
             );
-            if let Some(endpoint) = slim_endpoint {
-                println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
-                run_slim_listener(tool, adapter, endpoint, dir_publish.as_ref())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if slim_endpoint.is_some() || a2a_listen.is_some() {
+                start_listeners(
+                    tool,
+                    adapter,
+                    slim_endpoint,
+                    a2a_listen,
+                    a2a_binding,
+                    dir_publish,
+                )?;
             } else {
                 if let Some(opts) = dir_publish.as_ref() {
-                    publish_card_to_dir(tool, None, best_effort_did(tool).as_deref(), opts)?;
+                    publish_card_to_dir(
+                        tool,
+                        None,
+                        None,
+                        A2ABinding::Grpc,
+                        best_effort_did(tool).as_deref(),
+                        opts,
+                    )?;
                 }
                 println!("Adapter is running. Press Ctrl-C to stop.");
                 std::thread::park();
@@ -110,17 +139,87 @@ fn serve_registered(
     tool: &str,
     adapter: Arc<dyn CliAdapter>,
     slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
 ) -> anyhow::Result<()> {
-    if let Some(endpoint) = slim_endpoint {
-        println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
-        run_slim_listener(tool, adapter, endpoint, dir_publish.as_ref())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-    } else {
+    if slim_endpoint.is_none() && a2a_listen.is_none() {
         if let Some(opts) = dir_publish.as_ref() {
-            publish_card_to_dir(tool, None, best_effort_did(tool).as_deref(), opts)?;
+            publish_card_to_dir(
+                tool,
+                None,
+                None,
+                a2a_binding,
+                best_effort_did(tool).as_deref(),
+                opts,
+            )?;
         }
         println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
+        return Ok(());
+    }
+    start_listeners(
+        tool,
+        adapter,
+        slim_endpoint,
+        a2a_listen,
+        a2a_binding,
+        dir_publish,
+    )
+}
+
+fn start_listeners(
+    tool: &str,
+    adapter: Arc<dyn CliAdapter>,
+    slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
+    dir_publish: Option<DirPublishOptions>,
+) -> anyhow::Result<()> {
+    if let Some(listen) = a2a_listen {
+        println!(
+            "Starting A2A {} listener on {listen} ...",
+            a2a_binding.as_protocol_binding()
+        );
+        if slim_endpoint.is_some() {
+            let http_adapter = Arc::clone(&adapter);
+            let http_tool = tool.to_string();
+            let http_listen = listen.to_string();
+            std::thread::spawn(move || {
+                if let Err(err) = run_unicast_listener(
+                    &http_tool,
+                    http_adapter,
+                    &http_listen,
+                    a2a_binding,
+                    None,
+                    false,
+                ) {
+                    eprintln!("[agentbridge] {} listener: {err}", a2a_binding.as_protocol_binding());
+                }
+            });
+        } else {
+            run_unicast_listener(
+                tool,
+                adapter,
+                listen,
+                a2a_binding,
+                dir_publish.as_ref(),
+                true,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            return Ok(());
+        }
+    }
+    if let Some(endpoint) = slim_endpoint {
+        println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
+        run_slim_listener(
+            tool,
+            adapter,
+            endpoint,
+            a2a_listen,
+            a2a_binding,
+            dir_publish.as_ref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     Ok(())
 }
@@ -254,23 +353,93 @@ fn next_peer_to_forward(self_id: &str, prompt: &str, reply: &str) -> Option<Stri
         .find(|allowed| allowed == &peer)
 }
 
+/// Where `NEXT <peer>` should go. DID is the name; URL / SLIM endpoint are locators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandoffTarget {
+    peer_agent_id: String,
+    peer_did: Option<String>,
+    a2a_url: Option<String>,
+    a2a_binding: Option<A2ABinding>,
+    slim_endpoint: Option<String>,
+}
+
+/// Resolve a `NEXT` peer from on-host leases. Prefer the unicast locator when
+/// the lease has one so an HTTP-only collab can token-pass without a SLIM node.
+fn resolve_handoff_target(
+    to: &str,
+    slim_fallback: Option<&str>,
+    registry: &LocalAdapterRegistry,
+) -> Result<HandoffTarget, String> {
+    match registry.resolve_live(to) {
+        Ok(record) => {
+            let a2a_url = if record.a2a_url.is_empty() {
+                None
+            } else {
+                Some(record.a2a_url)
+            };
+            let a2a_binding = a2a_url.as_ref().map(|_| record.a2a_binding);
+            let slim_endpoint = if !record.slim_endpoint.is_empty() {
+                Some(record.slim_endpoint)
+            } else {
+                slim_fallback.map(str::to_string)
+            };
+            if a2a_url.is_none() && slim_endpoint.is_none() {
+                return Err(format!(
+                    "live adapter '{to}' has no A2A locator or SLIM endpoint"
+                ));
+            }
+            Ok(HandoffTarget {
+                peer_agent_id: record.name,
+                peer_did: if record.did.is_empty() {
+                    None
+                } else {
+                    Some(record.did)
+                },
+                a2a_url,
+                a2a_binding,
+                slim_endpoint,
+            })
+        }
+        Err(err) if err.contains("ambiguous") => Err(err),
+        Err(_) => match slim_fallback {
+            Some(endpoint) => Ok(HandoffTarget {
+                peer_agent_id: to.to_string(),
+                peer_did: None,
+                a2a_url: None,
+                a2a_binding: None,
+                slim_endpoint: Some(endpoint.to_string()),
+            }),
+            None => Err(format!(
+                "no live locator for '{to}'; peer must appear in `list --local` \
+                 (A2A locator or SLIM endpoint) so NEXT can be dispatched without a SLIM node"
+            )),
+        },
+    }
+}
+
 /// Send an A2A inject to `to` while proving as `from`.
 ///
-/// Uses a distinct SLIM local name (`…-a2a-client`) so this process does
-/// not subscribe as its own listener (`…-a2a`) and deadlock.
+/// gRPC uses the peer's current lease URL and DID. SLIM uses a distinct
+/// local name (`…-a2a-client`) so this process does not subscribe as its
+/// own listener (`…-a2a`) and deadlock.
 fn dispatch_peer_handoff(
     from: &str,
     to: &str,
-    endpoint: &str,
+    slim_fallback: Option<&str>,
     inbound_prompt: &str,
     reply: &str,
 ) -> Result<(), String> {
+    let registry = LocalAdapterRegistry::from_env();
+    let target = resolve_handoff_target(to, slim_fallback, &registry)?;
     let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
-        endpoint: endpoint.to_string(),
+        endpoint: target.slim_endpoint.clone().unwrap_or_default(),
         agent_id: from.to_string(),
         local_name: Some(format!("agntcy/shadi/{from}-a2a-client")),
-        peer_agent_id: to.to_string(),
-        destination: Some(format!("agntcy/shadi/{to}-a2a")),
+        peer_agent_id: target.peer_agent_id.clone(),
+        destination: Some(format!("agntcy/shadi/{}-a2a", target.peer_agent_id)),
+        a2a_url: target.a2a_url,
+        a2a_binding: target.a2a_binding,
+        peer_did: target.peer_did,
     });
     let prompt = render_peer_handoff(from, to, inbound_prompt, reply);
     adapter.dispatch(TaskEnvelope {
@@ -339,26 +508,25 @@ impl AgentExecutor for AgentBridgeExecutor {
             println!("└─────────────────────────────────────────────────────────\n");
 
             if let Some(peer) = next_peer_to_forward(&agent_id, &inbound_prompt, &response_text) {
-                if let Some(endpoint) = slim_endpoint.clone() {
-                    let from = agent_id.clone();
-                    let to = peer.clone();
-                    let inbound = inbound_prompt.clone();
-                    let reply = response_text.clone();
-                    let forwarded = tokio::task::spawn_blocking(move || {
-                        dispatch_peer_handoff(&from, &to, &endpoint, &inbound, &reply)
-                    })
-                    .await;
-                    match forwarded {
-                        Ok(Ok(())) => println!(
-                            "┌─ A2A client [{agent_id}] → {peer}\n│  NEXT dispatched by this listener\n└─────────────────────────────────────────────────────────\n"
-                        ),
-                        Ok(Err(err)) => println!(
-                            "┌─ A2A client [{agent_id}] → {peer}\n│  dispatch failed: {err}\n└─────────────────────────────────────────────────────────\n"
-                        ),
-                        Err(join_err) => println!(
-                            "┌─ A2A client [{agent_id}] → {peer}\n│  dispatch panicked: {join_err}\n└─────────────────────────────────────────────────────────\n"
-                        ),
-                    }
+                let from = agent_id.clone();
+                let to = peer.clone();
+                let inbound = inbound_prompt.clone();
+                let reply = response_text.clone();
+                let slim_fallback = slim_endpoint.clone();
+                let forwarded = tokio::task::spawn_blocking(move || {
+                    dispatch_peer_handoff(&from, &to, slim_fallback.as_deref(), &inbound, &reply)
+                })
+                .await;
+                match forwarded {
+                    Ok(Ok(())) => println!(
+                        "┌─ A2A client [{agent_id}] → {peer}\n│  NEXT dispatched by this listener\n└─────────────────────────────────────────────────────────\n"
+                    ),
+                    Ok(Err(err)) => println!(
+                        "┌─ A2A client [{agent_id}] → {peer}\n│  dispatch failed: {err}\n└─────────────────────────────────────────────────────────\n"
+                    ),
+                    Err(join_err) => println!(
+                        "┌─ A2A client [{agent_id}] → {peer}\n│  dispatch panicked: {join_err}\n└─────────────────────────────────────────────────────────\n"
+                    ),
                 }
             }
 
@@ -427,14 +595,20 @@ struct AgentBridgeRequestHandler {
     inner: DefaultRequestHandler,
     ready: Arc<Notify>,
     agent_id: String,
+    agent_did: Option<String>,
     slim_endpoint: Option<String>,
+    a2a_listen: Option<String>,
+    a2a_binding: A2ABinding,
 }
 
 impl AgentBridgeRequestHandler {
     fn new(
         adapter: Arc<dyn CliAdapter>,
         agent_id: &str,
+        agent_did: Option<&str>,
         slim_endpoint: Option<&str>,
+        a2a_listen: Option<&str>,
+        a2a_binding: A2ABinding,
         ready: Arc<Notify>,
     ) -> Self {
         Self {
@@ -447,7 +621,12 @@ impl AgentBridgeRequestHandler {
             ),
             ready,
             agent_id: agent_id.to_string(),
+            agent_did: agent_did
+                .filter(|did| !did.is_empty())
+                .map(str::to_string),
             slim_endpoint: slim_endpoint.map(str::to_string),
+            a2a_listen: a2a_listen.map(str::to_string),
+            a2a_binding,
         }
     }
 }
@@ -460,6 +639,9 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
         self.ready.notify_waiters();
+        if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), &req.message) {
+            return Ok(rejected_forged_did(&req, &reason));
+        }
         match admit_incoming_message(req) {
             IncomingAdmission::Proven { request, did } => {
                 tracing::info!(%did, "admitted A2A message with proven agent DID");
@@ -480,6 +662,15 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.ready.notify_waiters();
+        if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), &req.message) {
+            let task = rejected_forged_did(&req, &reason);
+            return Ok(Box::pin(futures::stream::once(async move {
+                match task {
+                    SendMessageResponse::Task(task) => Ok(StreamResponse::Task(task)),
+                    SendMessageResponse::Message(message) => Ok(StreamResponse::Message(message)),
+                }
+            })));
+        }
         match admit_incoming_message(req) {
             IncomingAdmission::Proven { request, did } => {
                 tracing::info!(%did, "admitted A2A stream with proven agent DID");
@@ -582,6 +773,8 @@ impl RequestHandler for AgentBridgeRequestHandler {
         Ok(build_agent_card(
             &self.agent_id,
             self.slim_endpoint.as_deref(),
+            self.a2a_listen.as_deref(),
+            self.a2a_binding,
         ))
     }
 }
@@ -591,14 +784,30 @@ impl RequestHandler for AgentBridgeRequestHandler {
 /// Used both to answer local `get_extended_agent_card` A2A calls and as the
 /// card published to the Agent Directory — one source of truth for what
 /// this adapter's card looks like.
-fn build_agent_card(agent_id: &str, slim_endpoint: Option<&str>) -> AgentCard {
-    let supported_interfaces = match slim_endpoint {
-        Some(endpoint) => vec![AgentInterface::new(
+fn build_agent_card(
+    agent_id: &str,
+    slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
+) -> AgentCard {
+    let mut supported_interfaces = Vec::new();
+    if let Some(endpoint) = slim_endpoint {
+        supported_interfaces.push(AgentInterface::new(
             format!("slim://{endpoint}/agntcy/shadi/{agent_id}-a2a"),
             TRANSPORT_PROTOCOL_SLIMRPC,
-        )],
-        None => Vec::new(),
-    };
+        ));
+    }
+    if let Some(listen) = a2a_listen {
+        let url = if listen.contains("://") {
+            listen.to_string()
+        } else {
+            format!("http://{listen}")
+        };
+        supported_interfaces.push(AgentInterface::new(
+            url,
+            a2a_binding.as_protocol_binding(),
+        ));
+    }
 
     AgentCard {
         name: agent_id.to_string(),
@@ -673,11 +882,13 @@ fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String
         return Ok(());
     }
     Err(format!(
-        "agentbridge register --slim-endpoint requires running under a SHADI sandbox with \
+        "agentbridge register --slim-endpoint / --a2a-listen requires running under a SHADI sandbox with \
          network blocked by default — a remote-reachable listener must not execute tasks \
          unsandboxed. Launch as:\n\n  \
          shadictl --net-block --net-allow {endpoint} -- agentbridge register --tool {agent_id} \
-         --slim-endpoint {endpoint} ...\n"
+         --slim-endpoint {endpoint} ...\n  \
+         or: shadictl --net-block --net-allow {endpoint} -- agentbridge register --tool {agent_id} \
+         --a2a-listen {endpoint} ...\n"
     ))
 }
 
@@ -690,6 +901,8 @@ fn run_slim_listener(
     agent_id: &str,
     adapter: Arc<dyn CliAdapter>,
     endpoint: &str,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
     dir_publish: Option<&DirPublishOptions>,
 ) -> Result<(), String> {
     let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
@@ -734,8 +947,12 @@ fn run_slim_listener(
         match agentbridge::local_registry::LocalAdapterRegistry::from_env().publish(
             &agentbridge::local_registry::LocalAdapterRecord {
                 name: agent_id.to_string(),
-                did,
+                did: did.clone(),
                 slim_endpoint: endpoint.to_string(),
+                a2a_url: a2a_listen
+                    .map(advertised_a2a_url)
+                    .unwrap_or_default(),
+                a2a_binding,
                 pid: std::process::id(),
             },
         ) {
@@ -752,7 +969,7 @@ fn run_slim_listener(
             shadi_identity::SlimAuth::Did { did, .. } => Some(did.as_str()),
             shadi_identity::SlimAuth::SharedSecret(_) => None,
         };
-        if let Err(e) = publish_card_to_dir(agent_id, Some(endpoint), did, opts) {
+        if let Err(e) = publish_card_to_dir(agent_id, Some(endpoint), a2a_listen, a2a_binding, did, opts) {
             eprintln!("[agentbridge] DIR publish failed: {e}");
         }
     }
@@ -771,7 +988,10 @@ fn run_slim_listener(
     let handler = Arc::new(AgentBridgeRequestHandler::new(
         adapter,
         agent_id,
+        (!did.is_empty()).then_some(did.as_str()),
         Some(endpoint),
+        a2a_listen,
+        a2a_binding,
         ready,
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
@@ -870,12 +1090,16 @@ fn slim_tls_dir() -> PathBuf {
         .join("shadi-slim-mtls")
 }
 
-fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
-    let endpoint_url = if endpoint.contains("://") {
+fn slim_client_endpoint(endpoint: &str) -> String {
+    if endpoint.contains("://") {
         endpoint.to_string()
     } else {
         format!("https://{endpoint}")
-    };
+    }
+}
+
+fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
+    let endpoint_url = slim_client_endpoint(endpoint);
     let mut config = ClientConfig::default();
     config.endpoint = endpoint_url;
     config.tls = TlsClientConfig {
@@ -996,6 +1220,21 @@ fn rejected_forged_did(req: &SendMessageRequest, reason: &str) -> SendMessageRes
     })
 }
 
+/// The URL is not the name. If the caller addressed a DID, only that agent
+/// may execute — even when several agents are reachable at the same locator.
+fn wrong_destination_reason(listener_did: Option<&str>, message: &Message) -> Option<String> {
+    let dest = shadi_a2a::dest_did_from_message(message)?;
+    match listener_did {
+        Some(mine) if mine == dest => None,
+        Some(mine) => Some(format!(
+            "destination DID {dest} is not this agent ({mine}); URL is only a locator"
+        )),
+        None => Some(format!(
+            "destination DID {dest} set but this listener has no agent DID"
+        )),
+    }
+}
+
 fn extract_text(message: &Message) -> String {
     let text = message
         .parts
@@ -1010,6 +1249,248 @@ fn extract_text(message: &Message) -> String {
     }
 }
 
+fn a2a_tls_dir() -> PathBuf {
+    std::env::var_os("SHADI_TMP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("shadi-a2a-tls")
+}
+
+fn is_loopback_addr(addr: &SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
+
+fn advertised_a2a_url(listen: &str) -> String {
+    if listen.contains("://") {
+        return listen.to_string();
+    }
+    match listen.parse::<SocketAddr>() {
+        Ok(addr) if is_loopback_addr(&addr) => format!("http://{addr}"),
+        Ok(addr) => format!("https://{addr}"),
+        Err(_) => format!("http://{listen}"),
+    }
+}
+
+fn a2a_server_tls_paths(addr: &SocketAddr) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    if is_loopback_addr(addr) {
+        return Ok(None);
+    }
+    let cert = std::env::var_os("A2A_TLS_CERT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| a2a_tls_dir().join("server.crt"));
+    let key = std::env::var_os("A2A_TLS_KEY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| a2a_tls_dir().join("server.key"));
+    if !cert.is_file() || !key.is_file() {
+        return Err(format!(
+            "non-loopback --a2a-listen {addr} requires TLS 1.3. Set A2A_TLS_CERT and A2A_TLS_KEY \
+             (PEM files), or place server.crt/server.key under $SHADI_TMP_DIR/shadi-a2a-tls. \
+             Do not reuse SLIM_TLS_*. Loopback http://127.0.0.1 is allowed without certificates."
+        ));
+    }
+    Ok(Some((cert, key)))
+}
+
+/// rustls + tonic-tls, not tonic `ServerTlsConfig`. Enabling tonic's native TLS
+/// feature (`_tls-any`) makes SLIM `https://` clients fail under workspace tests.
+fn grpc_server_tls_config(
+    addr: &SocketAddr,
+) -> Result<Option<Arc<a2a_grpc::rustls::ServerConfig>>, String> {
+    let Some((cert, key)) = a2a_server_tls_paths(addr)? else {
+        return Ok(None);
+    };
+    let cert_pem = fs::read(&cert).map_err(|e| format!("read A2A_TLS_CERT {}: {e}", cert.display()))?;
+    let key_pem = fs::read(&key).map_err(|e| format!("read A2A_TLS_KEY {}: {e}", key.display()))?;
+    let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse A2A_TLS_CERT {}: {e}", cert.display()))?;
+    if certs.is_empty() {
+        return Err(format!("A2A_TLS_CERT {} has no certificates", cert.display()));
+    }
+    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+        .map_err(|e| format!("parse A2A_TLS_KEY {}: {e}", key.display()))?
+        .ok_or_else(|| format!("A2A_TLS_KEY {} has no private key", key.display()))?;
+    let mut config = a2a_grpc::rustls::ServerConfig::builder_with_protocol_versions(&[
+        &a2a_grpc::rustls::version::TLS13,
+    ])
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| format!("A2A gRPC TLS identity: {e}"))?;
+    config.alpn_protocols = vec![tonic_tls::ALPN_H2.to_vec()];
+    Ok(Some(Arc::new(config)))
+}
+
+fn run_unicast_listener(
+    agent_id: &str,
+    adapter: Arc<dyn CliAdapter>,
+    listen: &str,
+    a2a_binding: A2ABinding,
+    dir_publish: Option<&DirPublishOptions>,
+    register_locally: bool,
+) -> Result<(), String> {
+    require_sandbox_enforced(agent_id, listen)?;
+    let addr: SocketAddr = listen.parse().map_err(|e| {
+        format!("invalid --a2a-listen '{listen}' (expected host:port): {e}")
+    })?;
+
+    let auth = shadi_identity::require_did_auth_from_env(agent_id)
+        .map_err(|e| format!("A2A {} auth error: {e}", a2a_binding.as_protocol_binding()))?;
+    let did = match &auth {
+        shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
+        shadi_identity::SlimAuth::SharedSecret(_) => {
+            return Err(format!(
+                "A2A {} listen requires an agent DID (SHADI_SLIM_AUTH=did); shared-secret node auth is not enough",
+                a2a_binding.as_protocol_binding()
+            ));
+        }
+    };
+
+    let a2a_url = advertised_a2a_url(listen);
+
+    eprintln!(
+        "⚠️  Incoming A2A tasks on {a2a_url} ({}) are executed by the local '{agent_id}' CLI tool. \
+         Only expose this listener to trusted peers. Agent identity is the DID proof on the message, not TLS.",
+        a2a_binding.as_protocol_binding()
+    );
+
+    let _local_lease = if register_locally {
+        match LocalAdapterRegistry::from_env().publish(&LocalAdapterRecord {
+            name: agent_id.to_string(),
+            did: did.clone(),
+            slim_endpoint: String::new(),
+            a2a_url: a2a_url.clone(),
+            a2a_binding,
+            pid: std::process::id(),
+        }) {
+            Ok(lease) => Some(lease),
+            Err(err) => {
+                eprintln!("[agentbridge] local registry: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(opts) = dir_publish {
+        if let Err(e) =
+            publish_card_to_dir(agent_id, None, Some(listen), a2a_binding, Some(did.as_str()), opts)
+        {
+            eprintln!("[agentbridge] DIR publish failed: {e}");
+        }
+    }
+
+    let ready = Arc::new(Notify::new());
+    let adapter_for_shutdown = Arc::clone(&adapter);
+    let handler = Arc::new(AgentBridgeRequestHandler::new(
+        adapter,
+        agent_id,
+        Some(did.as_str()),
+        None,
+        Some(listen),
+        a2a_binding,
+        ready,
+    ));
+
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
+
+    runtime.block_on(async move {
+        println!(
+            "[agentbridge] ready — A2A {} on {a2a_url}",
+            a2a_binding.as_protocol_binding()
+        );
+        println!("[agentbridge] Press Ctrl-C to stop.");
+        match a2a_binding {
+            A2ABinding::Slim => {
+                Err("SLIM uses --slim-endpoint, not --a2a-listen".to_string())
+            }
+            A2ABinding::Grpc => {
+                let grpc_service = A2aServiceServer::new(GrpcHandler::new(handler));
+                match grpc_server_tls_config(&addr)? {
+                    Some(tls) => {
+                        let incoming = TcpIncoming::bind(addr)
+                            .map_err(|e| format!("bind A2A gRPC {addr}: {e}"))?;
+                        let incoming = tonic_tls::rustls::TlsIncoming::new(incoming, tls);
+                        tokio::select! {
+                            result = TonicServer::builder()
+                                .add_service(grpc_service)
+                                .serve_with_incoming(incoming) => {
+                                result.map_err(|e| format!("A2A gRPC server error: {e}"))
+                            }
+                            _ = tokio::signal::ctrl_c() => {
+                                println!("\n[agentbridge] shutting down...");
+                                adapter_for_shutdown.kill_in_flight();
+                                Ok(())
+                            }
+                        }
+                    }
+                    None => {
+                        tokio::select! {
+                            result = TonicServer::builder()
+                                .add_service(grpc_service)
+                                .serve(addr) => {
+                                result.map_err(|e| format!("A2A gRPC server error: {e}"))
+                            }
+                            _ = tokio::signal::ctrl_c() => {
+                                println!("\n[agentbridge] shutting down...");
+                                adapter_for_shutdown.kill_in_flight();
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+            A2ABinding::Jsonrpc | A2ABinding::HttpJson => {
+                let router = match a2a_binding {
+                    A2ABinding::Jsonrpc => a2a_server::jsonrpc::jsonrpc_router(handler),
+                    A2ABinding::HttpJson => a2a_server::rest::rest_router(handler),
+                    A2ABinding::Grpc | A2ABinding::Slim => unreachable!(),
+                };
+                tokio::select! {
+                    result = serve_http_router(addr, router) => result,
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\n[agentbridge] shutting down...");
+                        adapter_for_shutdown.kill_in_flight();
+                        Ok(())
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn serve_http_router(addr: SocketAddr, router: axum::Router) -> Result<(), String> {
+    match a2a_server_tls_paths(&addr)? {
+        None => {
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|e| format!("bind A2A HTTP {addr}: {e}"))?;
+            axum::serve(listener, router)
+                .await
+                .map_err(|e| format!("A2A HTTP server error: {e}"))
+        }
+        Some((cert, key)) => {
+            use a2a_server::tls::axum_server;
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "A2A HTTP TLS from {} / {}: {e}",
+                        cert.display(),
+                        key.display()
+                    )
+                })?;
+            axum_server::bind_rustls(addr, config)
+                .serve(router.into_make_service())
+                .await
+                .map_err(|e| format!("A2A HTTPS server error: {e}"))
+        }
+    }
+}
+
 // ─── DIR publish ──────────────────────────────────────────────────────────────
 
 /// Publish `agent_id`'s real `AgentCard` — wrapped in DIR's `integration/a2a`
@@ -1018,10 +1499,12 @@ fn extract_text(message: &Message) -> String {
 fn publish_card_to_dir(
     agent_id: &str,
     slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
     did: Option<&str>,
     opts: &DirPublishOptions,
 ) -> anyhow::Result<()> {
-    let card = build_agent_card(agent_id, slim_endpoint);
+    let card = build_agent_card(agent_id, slim_endpoint, a2a_listen, a2a_binding);
     let card_json = serde_json::to_value(&card)?;
     let record = agentbridge::dir_registry::wrap_agent_card(&card_json, did);
 
@@ -1046,7 +1529,8 @@ mod tests {
 
     #[test]
     fn unknown_tool_lists_profiles_and_generic_stdio() {
-        let err = run("gemini", None, &[], None, None).expect_err("no gemini profile");
+        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None)
+            .expect_err("no gemini profile");
         let msg = err.to_string();
         assert!(msg.contains("claude-code"));
         assert!(msg.contains("generic-stdio"));
@@ -1187,6 +1671,115 @@ test push ... FAILED
     }
 
     #[test]
+    fn wrong_destination_did_is_rejected_even_on_the_same_url() {
+        let message = shadi_a2a::insert_dest_did(
+            Message::new(Role::User, vec![Part::text("task".to_string())]),
+            "did:key:zOther",
+        );
+        let reason = wrong_destination_reason(Some("did:key:zMine"), &message).expect("mismatch");
+        assert!(reason.contains("did:key:zOther"), "{reason}");
+        assert!(reason.contains("locator"), "{reason}");
+        assert!(wrong_destination_reason(Some("did:key:zOther"), &message).is_none());
+        let unlabeled = Message::new(Role::User, vec![Part::text("task".to_string())]);
+        assert!(wrong_destination_reason(Some("did:key:zMine"), &unlabeled).is_none());
+        let unlabeled_reason =
+            wrong_destination_reason(None, &message).expect("dest DID with no listener DID");
+        assert!(unlabeled_reason.contains("no agent DID"), "{unlabeled_reason}");
+    }
+
+    fn scratch_registry() -> (PathBuf, LocalAdapterRegistry) {
+        let dir = std::env::temp_dir().join(format!(
+            "ab-handoff-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        (dir.clone(), LocalAdapterRegistry::with_dir(dir))
+    }
+
+    fn handoff_record(
+        name: &str,
+        did: &str,
+        slim: &str,
+        url: &str,
+    ) -> LocalAdapterRecord {
+        LocalAdapterRecord {
+            name: name.to_string(),
+            did: did.to_string(),
+            slim_endpoint: slim.to_string(),
+            a2a_url: url.to_string(),
+            a2a_binding: A2ABinding::Grpc,
+            pid: std::process::id(),
+        }
+    }
+
+    #[test]
+    fn resolve_handoff_target_prefers_grpc_url_from_lease() {
+        let (dir, registry) = scratch_registry();
+        let _lease = registry
+            .publish(&handoff_record(
+                "copilot",
+                "did:key:zCopilot",
+                "127.0.0.1:47357",
+                "http://127.0.0.1:50151",
+            ))
+            .unwrap();
+        let target =
+            resolve_handoff_target("copilot", Some("127.0.0.1:9"), &registry).expect("lease");
+        assert_eq!(target.peer_agent_id, "copilot");
+        assert_eq!(target.peer_did.as_deref(), Some("did:key:zCopilot"));
+        assert_eq!(
+            target.a2a_url.as_deref(),
+            Some("http://127.0.0.1:50151")
+        );
+        assert_eq!(
+            target.slim_endpoint.as_deref(),
+            Some("127.0.0.1:47357")
+        );
+        let by_did = resolve_handoff_target("did:key:zCopilot", None, &registry).expect("did");
+        assert_eq!(by_did.a2a_url, target.a2a_url);
+        drop(_lease);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_handoff_target_uses_grpc_only_lease_without_slim() {
+        let (dir, registry) = scratch_registry();
+        let _lease = registry
+            .publish(&handoff_record(
+                "codex",
+                "did:key:zCodex",
+                "",
+                "http://127.0.0.1:50152",
+            ))
+            .unwrap();
+        let target = resolve_handoff_target("codex", None, &registry).expect("grpc-only");
+        assert_eq!(
+            target.a2a_url.as_deref(),
+            Some("http://127.0.0.1:50152")
+        );
+        assert_eq!(target.slim_endpoint, None);
+        drop(_lease);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_handoff_target_falls_back_to_slim_when_peer_is_unlisted() {
+        let (dir, registry) = scratch_registry();
+        let target = resolve_handoff_target("claude-code", Some("127.0.0.1:47357"), &registry)
+            .expect("slim fallback");
+        assert_eq!(target.peer_agent_id, "claude-code");
+        assert_eq!(target.a2a_url, None);
+        assert_eq!(
+            target.slim_endpoint.as_deref(),
+            Some("127.0.0.1:47357")
+        );
+        let err = resolve_handoff_target("claude-code", None, &registry).unwrap_err();
+        assert!(err.contains("list --local"), "{err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn admit_unsigned_message_parks_auth_required() {
         match admit_incoming_message(sample_request("plain task")) {
             IncomingAdmission::AuthRequired { reason, .. } => {
@@ -1253,7 +1846,7 @@ test push ... FAILED
 
     #[test]
     fn build_agent_card_sets_slim_interface_when_endpoint_given() {
-        let card = build_agent_card("copilot", Some("127.0.0.1:47357"));
+        let card = build_agent_card("copilot", Some("127.0.0.1:47357"), None, A2ABinding::Grpc);
         assert_eq!(card.name, "copilot");
         assert_eq!(card.supported_interfaces.len(), 1);
         let iface = &card.supported_interfaces[0];
@@ -1263,13 +1856,13 @@ test push ... FAILED
 
     #[test]
     fn build_agent_card_has_no_interfaces_without_endpoint() {
-        let card = build_agent_card("copilot", None);
+        let card = build_agent_card("copilot", None, None, A2ABinding::Grpc);
         assert!(card.supported_interfaces.is_empty());
     }
 
     #[test]
     fn build_agent_card_includes_default_skills() {
-        let card = build_agent_card("codex", None);
+        let card = build_agent_card("codex", None, None, A2ABinding::Grpc);
         assert_eq!(card.skills.len(), 3);
         assert!(card
             .skills
@@ -1280,6 +1873,96 @@ test push ... FAILED
             .iter()
             .any(|s| s.id.contains("agent_coordination")));
         assert!(card.skills.iter().any(|s| s.id.contains("text_completion")));
+    }
+
+    #[test]
+    fn build_agent_card_sets_grpc_interface_when_listen_given() {
+        let card = build_agent_card(
+            "copilot",
+            None,
+            Some("127.0.0.1:50051"),
+            A2ABinding::Grpc,
+        );
+        assert_eq!(card.supported_interfaces.len(), 1);
+        let iface = &card.supported_interfaces[0];
+        assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_GRPC);
+        // a2a-lf strips `http://` on GRPC interfaces (A2A card convention).
+        assert_eq!(iface.url, "127.0.0.1:50051");
+    }
+
+    #[test]
+    fn build_agent_card_sets_jsonrpc_interface_when_binding_given() {
+        let card = build_agent_card(
+            "copilot",
+            None,
+            Some("127.0.0.1:8080"),
+            A2ABinding::Jsonrpc,
+        );
+        let iface = &card.supported_interfaces[0];
+        assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_JSONRPC);
+        assert!(iface.url.contains("127.0.0.1:8080"), "{}", iface.url);
+    }
+
+    #[test]
+    fn advertised_a2a_url_uses_http_on_loopback_and_https_elsewhere() {
+        assert_eq!(
+            advertised_a2a_url("127.0.0.1:50051"),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(advertised_a2a_url("[::1]:50051"), "http://[::1]:50051");
+        assert_eq!(
+            advertised_a2a_url("0.0.0.0:50051"),
+            "https://0.0.0.0:50051"
+        );
+        assert_eq!(
+            advertised_a2a_url("https://example.test:443"),
+            "https://example.test:443"
+        );
+    }
+
+    #[test]
+    fn grpc_server_tls_loopback_is_plaintext() {
+        let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        assert!(grpc_server_tls_config(&loopback).unwrap().is_none());
+        let v6: SocketAddr = "[::1]:9".parse().unwrap();
+        assert!(grpc_server_tls_config(&v6).unwrap().is_none());
+    }
+
+    #[test]
+    fn grpc_server_tls_non_loopback_requires_cert_files() {
+        let prev_cert = std::env::var_os("A2A_TLS_CERT");
+        let prev_key = std::env::var_os("A2A_TLS_KEY");
+        let prev_tmp = std::env::var_os("SHADI_TMP_DIR");
+        std::env::remove_var("A2A_TLS_CERT");
+        std::env::remove_var("A2A_TLS_KEY");
+        let tmp = std::env::temp_dir().join(format!(
+            "shadi-a2a-tls-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::create_dir_all(&tmp);
+        std::env::set_var("SHADI_TMP_DIR", &tmp);
+        let addr: SocketAddr = "0.0.0.0:9443".parse().unwrap();
+        let err = grpc_server_tls_config(&addr).expect_err("non-loopback needs cert files");
+        assert!(err.contains("TLS 1.3"), "{err}");
+        assert!(err.contains("A2A_TLS_CERT"), "{err}");
+        assert!(err.contains("Do not reuse SLIM_TLS_"), "{err}");
+        match prev_cert {
+            Some(v) => std::env::set_var("A2A_TLS_CERT", v),
+            None => std::env::remove_var("A2A_TLS_CERT"),
+        }
+        match prev_key {
+            Some(v) => std::env::set_var("A2A_TLS_KEY", v),
+            None => std::env::remove_var("A2A_TLS_KEY"),
+        }
+        match prev_tmp {
+            Some(v) => std::env::set_var("SHADI_TMP_DIR", v),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1298,8 +1981,9 @@ test push ... FAILED
         assert_eq!(cfg.endpoint, "https://node:1");
         assert_eq!(cfg.tls.tls_version, "tls1.3");
         assert!(!cfg.tls.insecure);
-        assert!(build_client_config("https://node:1", &tls)
-            .endpoint
-            .starts_with("https://"));
+        assert_eq!(
+            build_client_config("https://node:1", &tls).endpoint,
+            "https://node:1"
+        );
     }
 }

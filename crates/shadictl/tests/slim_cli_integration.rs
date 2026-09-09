@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Upper-bound waits, sized so the A2A-over-SLIMRPC round-trip survives the ~2-4x
-// slowdown under coverage instrumentation (cargo-llvm-cov). `wait_for_file` /
+// slowdown under coverage instrumentation (cargo-llvm-cov). `wait_for_ready_file` /
 // `wait_for_child_output` return as soon as the file/child is ready, so the extra
 // headroom costs nothing on normal runs (~13s) while keeping the coverage job green.
 const READY_FILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -92,7 +92,7 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
         .spawn()
         .expect("spawn shadictl slim a2a-echo-peer");
 
-    wait_for_file(&ready_file, READY_FILE_TIMEOUT);
+    wait_for_ready_file(&ready_file, READY_FILE_TIMEOUT, &mut peer);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_shadictl"))
         .args([
@@ -180,7 +180,7 @@ fn given_did_auth_when_member_peer_and_sender_run_then_round_trip_succeeds() {
         .spawn()
         .expect("spawn shadictl slim a2a-echo-peer (did)");
 
-    wait_for_file(&ready_file, READY_FILE_TIMEOUT);
+    wait_for_ready_file(&ready_file, READY_FILE_TIMEOUT, &mut peer);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_shadictl"))
         .args([
@@ -263,7 +263,7 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_task_round_trip
         .spawn()
         .expect("spawn shadictl slim a2a-echo-peer");
 
-    wait_for_file(&ready_file, READY_FILE_TIMEOUT);
+    wait_for_ready_file(&ready_file, READY_FILE_TIMEOUT, &mut peer);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_shadictl"))
         .args([
@@ -378,16 +378,36 @@ fn prepend_windows_openssl_bin(command: &mut Command) {
     command.env("PATH", joined);
 }
 
-fn wait_for_file(path: &Path, timeout: Duration) {
+fn wait_for_ready_file(path: &Path, timeout: Duration, child: &mut Child) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if path.is_file() {
             return;
         }
+        if let Some(status) = child.try_wait().expect("poll peer status") {
+            let stdout = read_child_pipe(child.stdout.take());
+            let stderr = read_child_pipe(child.stderr.take());
+            panic!(
+                "peer exited before {}; status={:?} stdout={} stderr={}",
+                path.display(),
+                status.code(),
+                stdout,
+                stderr
+            );
+        }
         thread::sleep(Duration::from_millis(50));
     }
 
-    panic!("timed out waiting for {}", path.display());
+    let _ = child.kill();
+    let _ = child.wait();
+    let stdout = read_child_pipe(child.stdout.take());
+    let stderr = read_child_pipe(child.stderr.take());
+    panic!(
+        "timed out waiting for {}; peer stdout={} stderr={}",
+        path.display(),
+        stdout,
+        stderr
+    );
 }
 
 fn wait_for_child_output(child: &mut Child, timeout: Duration) -> (std::process::ExitStatus, String, String) {

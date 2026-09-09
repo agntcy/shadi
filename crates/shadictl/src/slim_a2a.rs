@@ -238,6 +238,7 @@ impl RequestHandler for SlimA2AHandler {
 }
 
 pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String> {
+    slim_config::tls::provider::initialize_crypto_provider();
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
     let auth = resolve_slim_auth(&args.agent_id)?;
     let peer_name = slim_name(&args.agent_id);
@@ -505,6 +506,7 @@ pub(crate) fn parse_shell_a2a_collaborate_args(
 }
 
 fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
+    slim_config::tls::provider::initialize_crypto_provider();
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
     let auth = resolve_slim_auth(&args.agent_id)?;
     let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
@@ -594,6 +596,7 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
 /// every member plays both roles (see the SLIMRPC collaborative channel
 /// extension spec). Runs for `--timeout-seconds` before shutting down.
 fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, String> {
+    slim_config::tls::provider::initialize_crypto_provider();
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
     let auth = resolve_slim_auth(&args.agent_id)?;
     let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;

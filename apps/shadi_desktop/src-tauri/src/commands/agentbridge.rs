@@ -197,6 +197,9 @@ pub async fn agentbridge_delegate(
             local_name: Some(format!("agntcy/shadi/{agent_id}-a2a")),
             peer_agent_id: to.clone(),
             destination: Some(format!("agntcy/shadi/{to}-a2a")),
+            a2a_url: None,
+            a2a_binding: None,
+            peer_did: None,
         };
         let adapter = LiveA2ATaskAdapter::new(config);
 
@@ -306,6 +309,9 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
                 local_name: Some("agntcy/shadi/coordinator-a2a".to_string()),
                 peer_agent_id: agent_id.clone(),
                 destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+                a2a_url: None,
+                a2a_binding: None,
+                peer_did: None,
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
                 inner: LiveA2ATaskAdapter::new(config),

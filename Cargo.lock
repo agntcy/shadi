@@ -27,6 +27,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "a2a-grpc"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7cc973d3da105d402a96978a4f3006a24535e3205d7201ca374ffc0af44593c"
+dependencies = [
+ "a2a-client-lf",
+ "a2a-lf",
+ "a2a-pb",
+ "a2a-server-lf",
+ "async-trait",
+ "futures",
+ "http",
+ "prost",
+ "rustls",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-tls",
+ "tonic-types",
+ "tracing",
+]
+
+[[package]]
 name = "a2a-lf"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -164,6 +187,7 @@ dependencies = [
 name = "agntcy-agentbridge"
 version = "0.1.5"
 dependencies = [
+ "agntcy-shadi-a2a",
  "agntcy-shadi-mas",
  "libc",
  "serde",
@@ -181,7 +205,9 @@ dependencies = [
 name = "agntcy-agentbridge-cli"
 version = "0.1.5"
 dependencies = [
+ "a2a-grpc",
  "a2a-lf",
+ "a2a-pb",
  "a2a-server-lf",
  "agntcy-agentbridge",
  "agntcy-shadi-a2a",
@@ -190,14 +216,19 @@ dependencies = [
  "agntcy-shadi-mas",
  "agntcy-shadi-sandbox",
  "agntcy-slim-bindings",
+ "agntcy-slim-config",
  "agntcy-slim-rpc",
  "anyhow",
  "async-trait",
+ "axum",
  "clap",
  "futures",
+ "rustls-pemfile",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
+ "tonic-tls",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -208,15 +239,21 @@ name = "agntcy-shadi-a2a"
 version = "0.1.5"
 dependencies = [
  "a2a-client-lf",
+ "a2a-grpc",
  "a2a-lf",
+ "a2a-pb",
  "a2a-server-lf",
  "a2a-slimrpc",
  "agntcy-shadi-agent-secrets",
  "agntcy-slim-bindings",
  "async-stream",
  "async-trait",
+ "axum",
  "futures",
+ "serde",
+ "serde_json",
  "tokio",
+ "tonic",
 ]
 
 [[package]]
@@ -7534,6 +7571,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework 3.7.0",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
