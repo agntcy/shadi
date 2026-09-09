@@ -612,10 +612,70 @@ mod tests {
         );
         assert_eq!(parse_peer_did("copilot"), None);
         assert_eq!(parse_peer_did("did:"), None);
+        assert_eq!(parse_peer_did("did:did:"), None);
         assert_eq!(
             parse_peer_did("  did:key:z6Mkabc  ").as_deref(),
             Some("did:key:z6Mkabc")
         );
+    }
+
+    #[test]
+    fn locators_skip_empty_urls_and_slim_unicast_binding() {
+        let empty = CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zEmpty".to_string(),
+            slim_endpoint: Some("   ".to_string()),
+            a2a_url: Some(String::new()),
+            a2a_binding: None,
+        };
+        assert!(empty.slim_locator().is_none());
+        assert!(empty.unicast_locator().is_none());
+
+        let slim_as_unicast = CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zSlim".to_string(),
+            slim_endpoint: None,
+            a2a_url: Some("http://127.0.0.1:9".to_string()),
+            a2a_binding: Some(A2ABinding::Slim),
+        };
+        assert!(slim_as_unicast.unicast_locator().is_none());
+    }
+
+    #[test]
+    fn unicast_locator_from_interface_infers_http_and_skips_non_unicast() {
+        let http = serde_json::json!({"url": "http://127.0.0.1:9"});
+        assert_eq!(
+            unicast_locator_from_interface(&http),
+            Some((A2ABinding::Grpc, "http://127.0.0.1:9".to_string()))
+        );
+        let https = serde_json::json!({"url": "https://example.test"});
+        assert_eq!(
+            unicast_locator_from_interface(&https),
+            Some((A2ABinding::Grpc, "https://example.test".to_string()))
+        );
+        let bare = serde_json::json!({"url": "127.0.0.1:9"});
+        assert!(unicast_locator_from_interface(&bare).is_none());
+        let slim = serde_json::json!({
+            "url": "http://127.0.0.1:9",
+            "protocolBinding": "SLIMRPC"
+        });
+        assert!(unicast_locator_from_interface(&slim).is_none());
+        let grpc_scheme = serde_json::json!({
+            "url": "grpc://127.0.0.1:9",
+            "protocolBinding": "GRPC"
+        });
+        assert_eq!(
+            unicast_locator_from_interface(&grpc_scheme),
+            Some((A2ABinding::Grpc, "grpc://127.0.0.1:9".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_peer_requires_dir_for_unknown_did() {
+        let (_dir, registry) = temp_registry();
+        let err = resolve_adapter_peer("did:key:zMissing", &registry, None).unwrap_err();
+        assert!(err.contains("not listening on this host"), "{err}");
+        assert!(err.contains("did:key:zMissing"), "{err}");
     }
 
     fn temp_registry() -> (tempfile::TempDir, crate::local_registry::LocalAdapterRegistry) {
@@ -1046,6 +1106,20 @@ esac
             candidates[0].slim_endpoint.as_deref(),
             Some("127.0.0.1:47560")
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_adapter_peer_reports_dir_miss_when_card_did_differs() {
+        let _guard = env_lock().lock().expect("lock");
+        let record = a2a_record("copilot", "did:key:zOther", "127.0.0.1:47357");
+        let (script, _dir) = fake_dirctl_script("bafkreiother", &record.to_string());
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let (_tmp, registry) = temp_registry();
+        let err = resolve_adapter_peer("did:key:zWanted", &registry, Some(&test_dir())).unwrap_err();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert!(err.contains("was not found"), "{err}");
+        assert!(err.contains("did:key:zWanted"), "{err}");
     }
 
     #[test]

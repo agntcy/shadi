@@ -805,6 +805,66 @@ mod tests {
         channel.destroy().await.expect("destroy transport");
     }
 
+    #[tokio::test]
+    async fn connect_rejects_slim_locator_and_https_grpc() {
+        let slim = match A2AChannel::connect(
+            A2ALocator::slim("127.0.0.1:47357"),
+            Arc::new(AllowVerifier),
+            SessionContext::new("client", "reject"),
+        )
+        .await
+        {
+            Ok(_) => panic!("SLIM locator must not use A2AChannel::connect"),
+            Err(err) => err,
+        };
+        assert!(
+            slim.message.contains("A2AChannelBuilder"),
+            "{}",
+            slim.message
+        );
+
+        let https = match A2AChannel::connect(
+            A2ALocator::parse("https://example.test:443").unwrap(),
+            Arc::new(AllowVerifier),
+            SessionContext::new("client", "reject"),
+        )
+        .await
+        {
+            Ok(_) => panic!("https gRPC must be rejected until a2a-rs#162"),
+            Err(err) => err,
+        };
+        assert!(
+            https.message.contains("a2a-rs#162"),
+            "{}",
+            https.message
+        );
+    }
+
+    #[test]
+    fn response_to_message_synthesizes_task_status_when_empty() {
+        let task = Task {
+            id: "task-9".to_string(),
+            context_id: "ctx".to_string(),
+            status: TaskStatus {
+                state: TaskState::Completed,
+                message: None,
+                timestamp: None,
+            },
+            artifacts: None,
+            history: None,
+            metadata: None,
+        };
+        let message = response_to_message(SendMessageResponse::Task(task));
+        let text = message
+            .parts
+            .iter()
+            .filter_map(Part::as_text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("task-9"), "{text}");
+        assert!(text.contains("Completed"), "{text}");
+    }
+
     #[test]
     fn dest_did_is_a_routing_key_not_a_locator() {
         let message = insert_dest_did(
@@ -1042,6 +1102,29 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(text.contains("echo:ping"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn echo_executor_cancel_emits_canceled_task() {
+        let ctx = a2a_server::ExecutorContext {
+            message: None,
+            task_id: "task-cancel".to_string(),
+            stored_task: None,
+            context_id: "ctx-cancel".to_string(),
+            metadata: None,
+            user: None,
+            service_params: Default::default(),
+            tenant: None,
+        };
+        let mut stream = a2a_server::AgentExecutor::cancel(&EchoExecutor, ctx);
+        let event = stream.next().await.expect("event").expect("ok");
+        match event {
+            StreamResponse::Task(task) => {
+                assert_eq!(task.id, "task-cancel");
+                assert_eq!(task.status.state, TaskState::Canceled);
+            }
+            other => panic!("expected canceled task, got {other:?}"),
+        }
     }
 
     #[tokio::test]

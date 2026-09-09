@@ -370,5 +370,41 @@ mod tests {
         assert_eq!(back, A2ABinding::HttpJson);
         let empty: A2ABinding = serde_json::from_str("\"\"").unwrap();
         assert_eq!(empty, A2ABinding::Grpc);
+        let slim = serde_json::to_value(A2ABinding::Slim).unwrap();
+        assert_eq!(slim, serde_json::Value::String("SLIMRPC".to_string()));
+    }
+
+    #[test]
+    fn binding_from_str_display_and_unknown() {
+        assert_eq!("grpc".parse::<A2ABinding>().unwrap(), A2ABinding::Grpc);
+        assert_eq!(A2ABinding::Slim.to_string(), "slim");
+        assert_eq!(
+            A2ABinding::Slim.as_protocol_binding(),
+            TRANSPORT_PROTOCOL_SLIMRPC
+        );
+        let err = A2ABinding::parse("ftp").unwrap_err();
+        assert!(err.contains("unknown A2A binding"), "{err}");
+    }
+
+    #[test]
+    fn locator_from_str_display_errors_and_http_origin() {
+        let loc: A2ALocator = "grpc://127.0.0.1:9".parse().unwrap();
+        assert_eq!(loc.to_string(), "grpc://127.0.0.1:9");
+        assert!(A2ALocator::parse("").unwrap_err().contains("empty"));
+        assert!(A2ALocator::parse("not-a-locator")
+            .unwrap_err()
+            .contains("unrecognized A2A locator"));
+        let hyphen = A2ALocator::parse("http-json://127.0.0.1:8080").unwrap();
+        assert_eq!(hyphen.binding, A2ABinding::HttpJson);
+        let nested = A2ALocator::parse("grpc://https://example.test:443").unwrap();
+        assert_eq!(nested.url, "https://example.test:443");
+        assert_eq!(
+            http_origin("https://example.test", true),
+            "https://example.test"
+        );
+        assert_eq!(http_origin("example.test", true), "https://example.test");
+        let bare = A2ALocator::new(A2ABinding::Grpc, "127.0.0.1:9");
+        assert_eq!(bare.url, "http://127.0.0.1:9");
+        assert!(strip_scheme_ci("g", "grpc://").is_none());
     }
 }
