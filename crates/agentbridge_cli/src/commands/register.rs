@@ -1089,12 +1089,18 @@ fn slim_tls_dir() -> PathBuf {
         .join("shadi-slim-mtls")
 }
 
+fn slim_client_endpoint(endpoint: &str) -> String {
+    let rest = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+        .unwrap_or(endpoint);
+    // See shadictl slim_shell::resolve_client_endpoint_value — tonic `_tls-any`
+    // plus SLIM's own rustls connector cannot share an `https://` URI.
+    format!("http://{rest}")
+}
+
 fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
-    let endpoint_url = if endpoint.contains("://") {
-        endpoint.to_string()
-    } else {
-        format!("https://{endpoint}")
-    };
+    let endpoint_url = slim_client_endpoint(endpoint);
     let mut config = ClientConfig::default();
     config.endpoint = endpoint_url;
     config.tls = TlsClientConfig {
@@ -1931,18 +1937,19 @@ test push ... FAILED
     }
 
     #[test]
-    fn build_client_config_prefixes_https_and_sets_tls() {
+    fn build_client_config_prefixes_http_and_sets_tls() {
         let tls = TlsMaterial {
             cert: PathBuf::from("/c"),
             key: PathBuf::from("/k"),
             ca: PathBuf::from("/a"),
         };
         let cfg = build_client_config("node:1", &tls);
-        assert_eq!(cfg.endpoint, "https://node:1");
+        assert_eq!(cfg.endpoint, "http://node:1");
         assert_eq!(cfg.tls.tls_version, "tls1.3");
         assert!(!cfg.tls.insecure);
-        assert!(build_client_config("https://node:1", &tls)
-            .endpoint
-            .starts_with("https://"));
+        assert_eq!(
+            build_client_config("https://node:1", &tls).endpoint,
+            "http://node:1"
+        );
     }
 }
