@@ -381,6 +381,7 @@ impl SlimShellState {
 }
 
 pub(crate) fn run_foreground_node() -> Result<(), String> {
+    slim_config::tls::provider::initialize_crypto_provider();
     let endpoint = resolve_endpoint();
     let server_config = build_server_config()?;
     let service = Service::new(node_service_name());

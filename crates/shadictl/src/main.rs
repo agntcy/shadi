@@ -221,6 +221,10 @@ fn run_named_command(command: Commands) -> ExitCode {
 }
 
 fn run_slim_command(command: SlimCli) -> ExitCode {
+    // a2a-grpc / tonic-tls enable rustls `ring` beside SLIM's aws-lc-rs.
+    // rustls then skips auto-install; mTLS connect hangs or fails before
+    // a2a-echo-peer can write --ready-file (Windows CI).
+    slim_config::tls::provider::initialize_crypto_provider();
     match command.command {
         SlimCommand::StartNode => match slim_shell::run_foreground_node() {
             Ok(()) => ExitCode::from(0),

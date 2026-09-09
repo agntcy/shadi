@@ -175,6 +175,8 @@ fn main() {
                 .add_directive(tracing::Level::WARN.into()),
         )
         .init();
+    // Same as shadictl: a2a-grpc enables rustls `ring` beside SLIM aws-lc-rs.
+    slim_config::tls::provider::initialize_crypto_provider();
 
     let cli = Cli::parse();
 

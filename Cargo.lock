@@ -216,6 +216,7 @@ dependencies = [
  "agntcy-shadi-mas",
  "agntcy-shadi-sandbox",
  "agntcy-slim-bindings",
+ "agntcy-slim-config",
  "agntcy-slim-rpc",
  "anyhow",
  "async-trait",
