@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/agntcy/shadi/compare/agntcy-shadi-slim-mas-v0.1.3...agntcy-shadi-slim-mas-v0.1.4) - 2026-09-09
+
+### Fixed
+
+- *(deps)* update patch and minor ([#223](https://github.com/agntcy/shadi/pull/223))
+
 ## [0.1.3](https://github.com/agntcy/shadi/compare/agntcy-shadi-slim-mas-v0.1.2...agntcy-shadi-slim-mas-v0.1.3) - 2026-08-20
 
 ### Other
