@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.2.4...agntcy-shadi-agent-transport-slim-v0.2.5) - 2026-09-09
+
+### Added
+
+- *(agentbridge)* prove agent DID and ship native handoff ([#215](https://github.com/agntcy/shadi/pull/215))
+
 ## [0.2.4](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.2.3...agntcy-shadi-agent-transport-slim-v0.2.4) - 2026-09-03
 
 ### Other

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.1.5...agntcy-agentbridge-v0.2.0) - 2026-09-09
+
+### Added
+
+- *(a2a)* add pluggable unicast bindings beside SLIM ([#233](https://github.com/agntcy/shadi/pull/233))
+- *(agentbridge)* add Goose and OpenCode profile adapters ([#232](https://github.com/agntcy/shadi/pull/232))
+- *(agentbridge)* add harness skill and JSON register profiles ([#226](https://github.com/agntcy/shadi/pull/226))
+- *(agentbridge)* implement list --local via register leases ([#221](https://github.com/agntcy/shadi/pull/221))
+- *(agentbridge)* prove agent DID and ship native handoff ([#215](https://github.com/agntcy/shadi/pull/215))
+
+### Other
+
+- *(demos)* introduce the sample run without the dated header ([#229](https://github.com/agntcy/shadi/pull/229))
+
 ## [0.1.5](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.1.4...agntcy-agentbridge-v0.1.5) - 2026-09-03
 
 ### Fixed

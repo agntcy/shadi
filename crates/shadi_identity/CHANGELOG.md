@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.1.3...agntcy-shadi-identity-v0.2.0) - 2026-09-09
+
+### Added
+
+- *(agentbridge)* prove agent DID and ship native handoff ([#215](https://github.com/agntcy/shadi/pull/215))
+
+### Fixed
+
+- *(deps)* update patch and minor ([#223](https://github.com/agntcy/shadi/pull/223))
+
 ## [0.1.3](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.1.2...agntcy-shadi-identity-v0.1.3) - 2026-08-26
 
 ### Added

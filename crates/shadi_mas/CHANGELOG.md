@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-mas-v0.1.5...agntcy-shadi-mas-v0.2.0) - 2026-09-09
+
+### Added
+
+- *(a2a)* add pluggable unicast bindings beside SLIM ([#233](https://github.com/agntcy/shadi/pull/233))
+- *(agentbridge)* prove agent DID and ship native handoff ([#215](https://github.com/agntcy/shadi/pull/215))
+
 ## [0.1.5](https://github.com/agntcy/shadi/compare/agntcy-shadi-mas-v0.1.4...agntcy-shadi-mas-v0.1.5) - 2026-09-03
 
 ### Other

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.7...agntcy-shadi-cli-v0.1.8) - 2026-09-09
+
+### Added
+
+- *(a2a)* add pluggable unicast bindings beside SLIM ([#233](https://github.com/agntcy/shadi/pull/233))
+
+### Fixed
+
+- *(deps)* update patch and minor ([#223](https://github.com/agntcy/shadi/pull/223))
+
 ## [0.1.7](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.6...agntcy-shadi-cli-v0.1.7) - 2026-09-03
 
 ### Added
