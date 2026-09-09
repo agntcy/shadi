@@ -1299,17 +1299,25 @@ fn grpc_server_tls_config(
     let Some((cert, key)) = a2a_server_tls_paths(addr)? else {
         return Ok(None);
     };
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+
     let cert_pem = fs::read(&cert).map_err(|e| format!("read A2A_TLS_CERT {}: {e}", cert.display()))?;
     let key_pem = fs::read(&key).map_err(|e| format!("read A2A_TLS_KEY {}: {e}", key.display()))?;
-    let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
+    // rustls-pki-types ≥ 1.9 `PemObject` replaces archived rustls-pemfile
+    // (RUSTSEC-2025-0134). Certs stay on disk via A2A_TLS_CERT / A2A_TLS_KEY.
+    let certs = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("parse A2A_TLS_CERT {}: {e}", cert.display()))?;
     if certs.is_empty() {
         return Err(format!("A2A_TLS_CERT {} has no certificates", cert.display()));
     }
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
-        .map_err(|e| format!("parse A2A_TLS_KEY {}: {e}", key.display()))?
-        .ok_or_else(|| format!("A2A_TLS_KEY {} has no private key", key.display()))?;
+    let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| {
+        if matches!(e, rustls_pki_types::pem::Error::NoItemsFound) {
+            format!("A2A_TLS_KEY {} has no private key", key.display())
+        } else {
+            format!("parse A2A_TLS_KEY {}: {e}", key.display())
+        }
+    })?;
     let mut config = a2a_grpc::rustls::ServerConfig::builder_with_protocol_versions(&[
         &a2a_grpc::rustls::version::TLS13,
     ])
@@ -1961,6 +1969,42 @@ test push ... FAILED
         match prev_tmp {
             Some(v) => std::env::set_var("SHADI_TMP_DIR", v),
             None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn grpc_server_tls_rejects_empty_pem() {
+        let prev_cert = std::env::var_os("A2A_TLS_CERT");
+        let prev_key = std::env::var_os("A2A_TLS_KEY");
+        let tmp = std::env::temp_dir().join(format!(
+            "shadi-a2a-tls-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::create_dir_all(&tmp);
+        let cert = tmp.join("empty.crt");
+        let key = tmp.join("empty.key");
+        fs::write(&cert, b"").unwrap();
+        fs::write(&key, b"").unwrap();
+        std::env::set_var("A2A_TLS_CERT", &cert);
+        std::env::set_var("A2A_TLS_KEY", &key);
+        let addr: SocketAddr = "0.0.0.0:9443".parse().unwrap();
+        let err = grpc_server_tls_config(&addr).expect_err("empty PEM is not a cert");
+        assert!(
+            err.contains("has no certificates"),
+            "{err}"
+        );
+        match prev_cert {
+            Some(v) => std::env::set_var("A2A_TLS_CERT", v),
+            None => std::env::remove_var("A2A_TLS_CERT"),
+        }
+        match prev_key {
+            Some(v) => std::env::set_var("A2A_TLS_KEY", v),
+            None => std::env::remove_var("A2A_TLS_KEY"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }

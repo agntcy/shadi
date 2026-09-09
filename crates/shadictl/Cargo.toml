@@ -50,7 +50,9 @@ signal-hook = "0.4"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
+# CNG instead of crypto-rust: the RustCrypto `rsa` crate is RUSTSEC-2023-0071
+# (Marvin) with no patched release. We only parse Ed25519 from OpenPGP certs.
+sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-cng", "compression-deflate", "compression-bzip2"] }
 uds_windows = "1.2"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
@@ -60,7 +62,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(not(windows))'.dependencies]
-sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
+# Nettle is Sequoia's default backend and is already installed in CI/release
+# (nettle-dev / brew nettle). Drops the unpatched RustCrypto `rsa` crate.
+sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-nettle", "compression-deflate", "compression-bzip2"] }
 
 [dev-dependencies]
 # Building OpenSSH key fixtures for the SSH identity tests (agntcy/shadi#140).

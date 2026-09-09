@@ -125,12 +125,3 @@ reason = "unic-ucd-ident unmaintained; via urlpattern 0.3 <- tauri-utils, which 
 id = "RUSTSEC-2024-0370"
 ignoreUntil = 2027-03-04
 reason = "proc-macro-error unmaintained; build-time proc macro reached via glib-macros <- glib <- gtk 0.18"
-
-# --- rsa: a genuine vulnerability, not reachable here ------------------------
-# The only entry in this file that is an actual vulnerability. Kept in step
-# with the same advisory in .cargo/audit.toml — update both together.
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2023-0071"
-ignoreUntil = 2027-03-04
-reason = "Marvin Attack, a timing sidechannel in RSA private-key operations, with no fixed release published. Reaches shadictl through sequoia-openpgp's crypto-rust backend, which only parses certificates and extracts Ed25519 public keys (identity_command::extract_ed25519_public_key); no RSA private-key operation is ever performed, so the vulnerable path is not entered."
