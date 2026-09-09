@@ -258,6 +258,10 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         // authoritative for audit and is enforced at kernel level on Linux via
         // Landlock ConnectTcp rules).
         rules.push("(allow network-outbound)".to_string());
+        // A2A gRPC `--a2a-listen` binds a TCP port. Seatbelt outbound-only
+        // would accept register then fail inside tonic with "transport error".
+        rules.push("(allow network-bind)".to_string());
+        rules.push("(allow network-inbound)".to_string());
         // Node-based CLIs (copilot, codex, cursor-agent) abort in V8 init
         // unless they can look up the rest of the Mach bootstrap and signal
         // child processes. net_allow already opens outbound TCP on macOS;
@@ -409,6 +413,11 @@ mod tests {
 
         // Seatbelt cannot filter by destination IP; we just enable outbound.
         assert!(profile.contains("(allow network-outbound)"));
+        assert!(
+            profile.contains("(allow network-bind)"),
+            "net_allow should allow TCP listen for --a2a-listen"
+        );
+        assert!(profile.contains("(allow network-inbound)"));
         assert!(!profile.contains("(allow network*)"));
         assert!(
             profile.lines().any(|line| line.trim() == "(allow mach-lookup)"),

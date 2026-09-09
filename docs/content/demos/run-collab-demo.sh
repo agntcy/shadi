@@ -16,23 +16,46 @@
 #   fifo  — Fifo<T> queue
 #
 # Run from the repo root:  bash docs/content/demos/run-collab-demo.sh
+# Same fifo/lru outcome over official A2A unicast (no SLIM node):
+#   TRANSPORT=grpc PROBLEM=fifo bash docs/content/demos/run-collab-demo.sh
+#   TRANSPORT=jsonrpc PROBLEM=fifo bash docs/content/demos/run-collab-demo.sh
 set -uo pipefail
 cd "$(dirname "$0")/../../.."   # repo root
 
-BIN=target/debug/shadictl
+BIN="${CARGO_TARGET_DIR:-target}/debug/shadictl"
 [ -x "$BIN" ] || { echo "building shadictl…"; cargo build -p agntcy-shadi-cli || exit 1; }
-AB=target/debug/agentbridge
+AB="${CARGO_TARGET_DIR:-target}/debug/agentbridge"
 [ -x "$AB" ] || { echo "building agentbridge…"; cargo build -p agntcy-agentbridge-cli || exit 1; }
+BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
+AB="$(cd "$(dirname "$AB")" && pwd)/$(basename "$AB")"
 APPLY=docs/content/demos/collab-apply.py
 [ -f "$APPLY" ] || { echo "missing $APPLY"; exit 1; }
 
-SHADI_TMP_DIR_RAW="$(mktemp -d /tmp/shadi-collab-demo.XXXXXX)"
-export SHADI_TMP_DIR="$(cd "$SHADI_TMP_DIR_RAW" && pwd -P)"
+TRANSPORT="${TRANSPORT:-slim}"
+unicast_transport() {
+  case "$TRANSPORT" in
+    grpc|jsonrpc|http+json) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if [ -z "${SHADI_TMP_DIR:-}" ]; then
+  SHADI_TMP_DIR_RAW="$(mktemp -d /tmp/shadi-collab-demo.XXXXXX)"
+  export SHADI_TMP_DIR="$(cd "$SHADI_TMP_DIR_RAW" && pwd -P)"
+else
+  mkdir -p "$SHADI_TMP_DIR"
+  export SHADI_TMP_DIR="$(cd "$SHADI_TMP_DIR" && pwd -P)"
+fi
 export SLIM_ENDPOINT="${SLIM_ENDPOINT:-127.0.0.1:47591}"
+A2A_BASE_PORT="${A2A_BASE_PORT:-50151}"
 # shellcheck source=/dev/null
 source docs/content/demos/demo-env.sh
-bash tools/generate_slim_mtls_certs.sh "$SHADI_TMP_DIR/shadi-slim-mtls" >/dev/null 2>&1 \
-  || { echo "mTLS generation failed"; exit 1; }
+if unicast_transport; then
+  # clap register --slim-endpoint reads SLIM_ENDPOINT. Unicast-only must not dual-listen.
+  unset SLIM_ENDPOINT
+else
+  bash tools/generate_slim_mtls_certs.sh "$SHADI_TMP_DIR/shadi-slim-mtls" >/dev/null 2>&1 \
+    || { echo "mTLS generation failed"; exit 1; }
+fi
 
 LOG="$SHADI_TMP_DIR/logs"; mkdir -p "$LOG"
 WS="$SHADI_TMP_DIR/workspace"; mkdir -p "$WS"
@@ -49,11 +72,15 @@ strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 
 step "logs: $LOG"
 step "watch live:  bash docs/content/demos/watch-collab-demo.sh"
+step "transport: $TRANSPORT"
 
-step "starting SLIM node..."
-"$BIN" slim start-node >"$LOG/node.log" 2>&1 &
-NODE_PID=$!
-sleep 2
+NODE_PID=""
+if ! unicast_transport; then
+  step "starting SLIM node..."
+  "$BIN" slim start-node >"$LOG/node.log" 2>&1 &
+  NODE_PID=$!
+  sleep 2
+fi
 
 step "registering ${#AGENTS[@]} agentbridge adapters..."
 REGISTER_PIDS=()
@@ -74,12 +101,25 @@ export AGENTBRIDGE_A2A_FORWARD=1
 export AGENTBRIDGE_A2A_PEERS="${AGENTS[*]}"
 AGENTBRIDGE_A2A_PEERS="${AGENTBRIDGE_A2A_PEERS// /,}"
 
-# SLIM plus cisco.com (and subdomains). COLLAB_NET_ALLOW adds more hosts.
+# SLIM or per-agent gRPC listen ports, plus cisco.com (and subdomains).
+# COLLAB_NET_ALLOW adds more hosts.
 NET_ALLOW_FLAGS=(
-  --net-allow "$SLIM_ENDPOINT"
   --net-allow cisco.com
   --net-allow "*.cisco.com"
 )
+A2A_LISTEN_ADDRS=()
+if unicast_transport; then
+  i=0
+  for _a in "${AGENTS[@]}"; do
+    A2A_LISTEN_ADDRS+=("127.0.0.1:$((A2A_BASE_PORT + i))")
+    i=$((i + 1))
+  done
+  for listen in "${A2A_LISTEN_ADDRS[@]}"; do
+    NET_ALLOW_FLAGS+=(--net-allow "$listen")
+  done
+else
+  NET_ALLOW_FLAGS+=(--net-allow "$SLIM_ENDPOINT")
+fi
 if [ -n "${COLLAB_NET_ALLOW:-}" ]; then
   IFS=',' read -r -a EXTRA_NET <<<"$COLLAB_NET_ALLOW"
   for dest in "${EXTRA_NET[@]}"; do
@@ -90,23 +130,52 @@ if [ -n "${COLLAB_NET_ALLOW:-}" ]; then
   done
 fi
 
+EXTRA_READ=()
+if [ -n "${AGENTBRIDGE_PROFILES_DIR:-}" ]; then
+  EXTRA_READ+=(--read "$AGENTBRIDGE_PROFILES_DIR" --read "$PWD")
+fi
+
+i=0
 for a in "${AGENTS[@]}"; do
-  env SHADI_AGENT_ID="$a" TMPDIR="$SHADI_TMP_DIR" \
-    AGENTBRIDGE_A2A_FORWARD=1 AGENTBRIDGE_A2A_PEERS="$AGENTBRIDGE_A2A_PEERS" \
+  register_args=(register --tool "$a" --command "$WS")
+  if unicast_transport; then
+    register_args+=(--a2a-listen "${A2A_LISTEN_ADDRS[$i]}" --a2a-binding "$TRANSPORT")
+  else
+    register_args+=(--slim-endpoint "$SLIM_ENDPOINT")
+  fi
+  register_env=(
+    SHADI_AGENT_ID="$a"
+    TMPDIR="$SHADI_TMP_DIR"
+    AGENTBRIDGE_A2A_FORWARD=1
+    AGENTBRIDGE_A2A_PEERS="$AGENTBRIDGE_A2A_PEERS"
+    PYTHONDONTWRITEBYTECODE=1
+  )
+  if [ -n "${AGENTBRIDGE_PROFILES_DIR:-}" ]; then
+    register_env+=(AGENTBRIDGE_PROFILES_DIR="$AGENTBRIDGE_PROFILES_DIR")
+  fi
+  env "${register_env[@]}" \
     "$BIN" --net-block "${NET_ALLOW_FLAGS[@]}" \
     --read "$SHADI_TMP_DIR" --write "$SHADI_TMP_DIR" \
     --read "$HOME" \
     --write "$CURSOR_HOME" --write "$CODEX_HOME_DIR" --write "$CLAUDE_HOME" \
     --write "$GOOSE_CONFIG" --write "$GOOSE_SHARE" --write "$GOOSE_STATE" \
-    --write "$KEYCHAINS" --read /opt/homebrew -- \
-    "$AB" register --tool "$a" --command "$WS" --slim-endpoint "$SLIM_ENDPOINT" \
+    --write "$KEYCHAINS" --read /opt/homebrew --read /usr \
+    --read "$(dirname "$AB")" --read "$(dirname "$BIN")" "${EXTRA_READ[@]}" -- \
+    "$AB" "${register_args[@]}" \
     >"$LOG/$a-agent.log" 2>&1 &
   REGISTER_PIDS+=($!)
+  i=$((i + 1))
 done
 # Leases appear after each listener binds; a fixed 3s sleep often lists none.
+LEASE_MARK="slim://"
+case "$TRANSPORT" in
+  grpc) LEASE_MARK="grpc://" ;;
+  jsonrpc) LEASE_MARK="jsonrpc://" ;;
+  http+json) LEASE_MARK="http+json://" ;;
+esac
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   env SHADI_AGENT_ID=avatar "$AB" list --local >"$LOG/list-local.log" 2>&1 || true
-  n=$(grep -c 'slim://' "$LOG/list-local.log" 2>/dev/null || true)
+  n=$(grep -c "$LEASE_MARK" "$LOG/list-local.log" 2>/dev/null || true)
   [ "${n:-0}" -ge "${#AGENTS[@]}" ] && break
   sleep 1
 done
@@ -392,8 +461,10 @@ case "$PROBLEM" in
 esac
 
 for p in "${REGISTER_PIDS[@]}"; do kill -INT "$p" 2>/dev/null; wait "$p" 2>/dev/null; done
-kill "$NODE_PID" 2>/dev/null
-wait "$NODE_PID" 2>/dev/null
+if [ -n "$NODE_PID" ]; then
+  kill "$NODE_PID" 2>/dev/null
+  wait "$NODE_PID" 2>/dev/null
+fi
 
 echo
 echo "================ local listeners ================"

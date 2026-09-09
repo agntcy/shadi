@@ -1,15 +1,32 @@
 # SLIM and A2A
 
-SHADI carries [A2A](https://a2a-protocol.org/) traffic over the SLIM data
-plane instead of raw HTTP: SLIM provides the authenticated, encrypted
-transport (mTLS, and MLS between group members), and A2A provides the
-conversation semantics (tasks, messages, streaming).
+[A2A](https://a2a-protocol.org/) is the conversation protocol (tasks,
+messages, streaming). SHADI's wrapper (`shadi_a2a`) sits in front of the
+official Rust SDK from
+[`a2aproject/a2a-rs`](https://github.com/a2aproject/a2a-rs) and keeps the
+same DID-proof verifier on every binding.
 
-SHADI's A2A wrapper (`shadi_a2a`) is built on the official Rust SDK from
-[`a2aproject/a2a-rs`](https://github.com/a2aproject/a2a-rs) — its core
-protocol, client, server, and SLIMRPC bindings — with SHADI's outbound
-verifier gate kept in front of the transport, and its own DID-based identity
-model underneath.
+Official A2A bindings in this tree:
+
+| Binding | When to use | Identity |
+|---|---|---|
+| **gRPC** (`lf.a2a.v1.A2aService` via `a2a-grpc`) | Constrained unicast without a SLIM node. Address the peer by DID (`delegate --to did:key:…`); the current locator is looked up from the local lease or DIR. `--a2a-url` is a locator override only. | Application DID on the message (`did:key` proof, plus `a2a-dst-did` for the recipient). Loopback may be plaintext HTTP; any other bind needs TLS 1.3 from `A2A_TLS_CERT` / `A2A_TLS_KEY` (not `SLIM_TLS_*`). |
+| **JSON-RPC** | Same DID addressing over `jsonrpc://` (HTTP JSON-RPC). | Same DID proof. HTTPS clients are wired (reqwest). |
+| **HTTP+JSON** | Same DID addressing over `http+json://` (REST). | Same DID proof. HTTPS clients are wired (reqwest). |
+| **SLIMRPC** | Mesh, mTLS to a SLIM node, MLS in groups. `register --slim-endpoint`. Locator is `slim://host:port` (the channel path is not an address). | Same DID proof on the message, plus SLIM node auth. |
+
+Collaborate is an A2A group API (roster `{agent_id, did, url}`). On
+gRPC / JSON-RPC / HTTP+JSON it fans out unicast `SendMessage` and tags
+replies with `a2a-src-did`. SLIM may keep native multicast. MLS,
+`/slim create|invite|join`, and SLIM names are SLIM-binding-only — they
+are not reimplemented on the HTTP bindings.
+
+Constrained unicast without a SLIM node: the
+[A2A unicast demo](demos/a2a-grpc.md) (`delegate --to did:key:…`, locator
+move, dest-DID reject, fifo `cargo test`;
+[sample run](demos/a2a-grpc-sample.md)). Paid-CLI token-passing on the
+same bindings: `TRANSPORT=grpc|jsonrpc|http+json` on the
+[round-robin Rust demo](demos/collab-rust.md).
 
 ## Point-to-point: `a2a-send` / `a2a-echo-peer`
 
@@ -24,13 +41,16 @@ tasks to each other one-on-one.
 
 ## Group messaging: `a2a-collaborate`
 
-`shadictl slim a2a-collaborate` broadcasts one A2A `Message` to every other
-member of a SLIM group channel and streams back everyone else's messages —
-the SLIMRPC `Collaborate` RPC, with each reply tagged by sender
-(`metadata["slim-src"]`). Every member both sends its own message and listens
-for everyone else's in the same call, so the mesh is a genuine many-to-many:
-every agent reaches every other agent directly, not just moderator to
-members.
+`shadictl slim a2a-collaborate` is the SLIM binding of A2A Collaborate: it
+broadcasts one A2A `Message` to every other member of a SLIM group channel
+and streams back everyone else's messages — the SLIMRPC `Collaborate` RPC,
+with each reply tagged by sender (`metadata["slim-src"]`). Every member both
+sends its own message and listens for everyone else's in the same call, so
+the mesh is a genuine many-to-many: every agent reaches every other agent
+directly, not just moderator to members.
+
+gRPC Collaborate is the same API with unicast fan-out (`A2AGroupChannel::grpc`);
+it does not create a SLIM channel or run MLS.
 
 ```bash
 cargo run -p agntcy-shadi-cli -- slim a2a-collaborate \
@@ -46,8 +66,9 @@ formed and admitted.
 
 ## Secure agent groups: identity, moderator role, and admission
 
-Group membership itself is managed through `shadictl`'s interactive shell,
-not the one-shot CLI above:
+SLIM group membership (mesh invite, MLS, SLIM names) is managed through
+`shadictl`'s interactive shell, not the one-shot CLI above and not the gRPC
+binding:
 
 | Shell command | Effect |
 |---|---|

@@ -6,7 +6,7 @@ mod commands;
 #[command(
     name = "agentbridge",
     about = "Interconnect CLI coding agents (Claude Code, Copilot, Codex, …) \
-             via A2A / SLIM with autonomous coordination."
+             via A2A (SLIMRPC, gRPC, JSON-RPC, or HTTP+JSON) with autonomous coordination."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -47,11 +47,21 @@ enum Cmd {
         /// SLIM_MEMBER_DIDS) — shared secrets are not supported.
         #[arg(long, env = "SLIM_ENDPOINT")]
         slim_endpoint: Option<String>,
+
+        /// Start an official A2A unicast listener (`host:port`). Loopback may
+        /// be plaintext HTTP; any other bind requires A2A_TLS_CERT / A2A_TLS_KEY
+        /// (TLS 1.3). Does not use SLIM_TLS_*. One binding per listen.
+        #[arg(long)]
+        a2a_listen: Option<String>,
+
+        /// Official A2A binding for `--a2a-listen`: grpc, jsonrpc, or http+json.
+        #[arg(long, default_value = "grpc", value_parser = shadi_a2a::A2ABinding::parse_unicast)]
+        a2a_binding: shadi_a2a::A2ABinding,
     },
 
     /// List available adapters (Agent Directory or this machine).
     List {
-        /// List listeners started by `register --slim-endpoint` on this host.
+        /// List listeners started by `register --slim-endpoint` / `--a2a-listen` on this host.
         #[arg(long)]
         local: bool,
 
@@ -98,7 +108,8 @@ enum Cmd {
         /// Prompt or task description to send.
         prompt: String,
 
-        /// Agent ID of the destination adapter (must be registered and listening).
+        /// Agent DID (`did:key:…`) or local alias from `list --local`.
+        /// The DID is the portable name; URLs are locators and can change.
         #[arg(long)]
         to: String,
 
@@ -109,6 +120,17 @@ enum Cmd {
         /// SLIM node endpoint.
         #[arg(long, env = "SLIM_ENDPOINT", default_value = "127.0.0.1:47357")]
         endpoint: String,
+
+        /// Locator override (`grpc://host:port`, `jsonrpc://host:port`,
+        /// `http+json://host:port`, or a bare `http(s)://` URL). Does not
+        /// identify the peer — pass `--to did:key:…` as the name.
+        #[arg(long)]
+        a2a_url: Option<String>,
+
+        /// Binding for a bare `--a2a-url http://…` (ignored when the URL
+        /// already has a locator scheme). Default is grpc.
+        #[arg(long, value_parser = shadi_a2a::A2ABinding::parse_unicast)]
+        a2a_binding: Option<shadi_a2a::A2ABinding>,
     },
 
     /// Run autonomous multi-round coordination toward a programming goal.
@@ -165,6 +187,8 @@ fn main() {
             dir_server,
             gh_token,
             slim_endpoint,
+            a2a_listen,
+            a2a_binding,
         } => {
             let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
@@ -175,6 +199,8 @@ fn main() {
                 command.as_deref(),
                 &args,
                 slim_endpoint.as_deref(),
+                a2a_listen.as_deref(),
+                a2a_binding,
                 publish_opts,
             )
         }
@@ -201,7 +227,16 @@ fn main() {
             to,
             agent_id,
             endpoint,
-        } => commands::delegate::run(&prompt, &to, &agent_id, &endpoint),
+            a2a_url,
+            a2a_binding,
+        } => commands::delegate::run(
+            &prompt,
+            &to,
+            &agent_id,
+            &endpoint,
+            a2a_url.as_deref(),
+            a2a_binding,
+        ),
         Cmd::Coordinate {
             goal,
             agents,
@@ -295,6 +330,66 @@ mod tests {
                 assert_eq!(to, "copilot");
             }
             _ => panic!("expected handoff subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_register_a2a_listen_and_delegate_a2a_url() {
+        let register = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "copilot",
+            "--a2a-listen",
+            "127.0.0.1:50051",
+        ])
+        .expect("parse register");
+        match register.command {
+            Cmd::Register {
+                a2a_listen,
+                a2a_binding,
+                ..
+            } => {
+                assert_eq!(a2a_listen.as_deref(), Some("127.0.0.1:50051"));
+                assert_eq!(a2a_binding, shadi_a2a::A2ABinding::Grpc);
+            }
+            _ => panic!("expected register subcommand"),
+        }
+
+        let jsonrpc = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "copilot",
+            "--a2a-listen",
+            "127.0.0.1:8080",
+            "--a2a-binding",
+            "jsonrpc",
+        ])
+        .expect("parse register jsonrpc");
+        match jsonrpc.command {
+            Cmd::Register { a2a_binding, .. } => {
+                assert_eq!(a2a_binding, shadi_a2a::A2ABinding::Jsonrpc);
+            }
+            _ => panic!("expected register subcommand"),
+        }
+
+        let delegate = Cli::try_parse_from([
+            "agentbridge",
+            "delegate",
+            "hello",
+            "--to",
+            "copilot",
+            "--a2a-url",
+            "http://127.0.0.1:50051",
+        ])
+        .expect("parse delegate");
+        match delegate.command {
+            Cmd::Delegate { a2a_url, to, .. } => {
+                assert_eq!(to, "copilot");
+                assert_eq!(a2a_url.as_deref(), Some("http://127.0.0.1:50051"));
+            }
+            _ => panic!("expected delegate subcommand"),
         }
     }
 }

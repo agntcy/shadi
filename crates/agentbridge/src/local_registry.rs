@@ -5,26 +5,58 @@
 //!
 //! `list --local` cannot ask a dataplane SLIM client for "who is listening"
 //! (that needs the controller channel). Instead each `register --slim-endpoint`
-//! writes a lease under `$SHADI_TMP_DIR/agentbridge-local` (or the process
-//! temp dir). `list --local` reads those files and drops any whose pid is
-//! gone, so a killed listener does not stay listed.
+//! or `--a2a-listen` writes a lease under `$SHADI_TMP_DIR/agentbridge-local`
+//! (or the process temp dir). `list --local` reads those files and drops any
+//! whose pid is gone, so a killed listener does not stay listed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use shadi_a2a::A2ABinding;
 
 use crate::member_source::{CandidateMember, MemberSource};
 
 const REGISTRY_DIRNAME: &str = "agentbridge-local";
 
-/// One locally registered SLIM listener.
+/// One locally registered listener (SLIM and/or official A2A unicast).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalAdapterRecord {
     pub name: String,
     pub did: String,
+    #[serde(default)]
     pub slim_endpoint: String,
+    /// Unicast A2A URL (`http://127.0.0.1:port`), empty when SLIM-only.
+    #[serde(default)]
+    pub a2a_url: String,
+    /// Official binding for [`Self::a2a_url`]. Missing on old leases → gRPC.
+    #[serde(default)]
+    pub a2a_binding: A2ABinding,
     pub pid: u32,
+}
+
+impl LocalAdapterRecord {
+    pub fn to_candidate(&self) -> CandidateMember {
+        CandidateMember {
+            name: self.name.clone(),
+            did: self.did.clone(),
+            slim_endpoint: if self.slim_endpoint.is_empty() {
+                None
+            } else {
+                Some(self.slim_endpoint.clone())
+            },
+            a2a_url: if self.a2a_url.is_empty() {
+                None
+            } else {
+                Some(self.a2a_url.clone())
+            },
+            a2a_binding: if self.a2a_url.is_empty() {
+                None
+            } else {
+                Some(self.a2a_binding)
+            },
+        }
+    }
 }
 
 /// Directory of listener lease files.
@@ -69,8 +101,8 @@ impl LocalAdapterRegistry {
         if !is_safe_agent_name(&record.name) {
             return Err(format!("unsafe agent name '{}'", record.name));
         }
-        if record.did.is_empty() || record.slim_endpoint.is_empty() {
-            return Err("local adapter record needs a DID and slim_endpoint".to_string());
+        if record.did.is_empty() || (record.slim_endpoint.is_empty() && record.a2a_url.is_empty()) {
+            return Err("local adapter record needs a DID and slim_endpoint or a2a_url".to_string());
         }
         fs::create_dir_all(&self.dir).map_err(|err| {
             format!(
@@ -136,6 +168,41 @@ impl LocalAdapterRegistry {
         records.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
         Ok(records)
     }
+
+    /// Live listeners whose DID or adapter name matches `query`.
+    ///
+    /// DID is the portable name. A tool name (`copilot`) is a local alias for
+    /// whatever DID currently holds that lease. Two live records with the
+    /// same DID or the same name are returned so the caller can treat them
+    /// as ambiguous.
+    pub fn find_live(&self, query: &str) -> Result<Vec<LocalAdapterRecord>, String> {
+        let records = self.list_live()?;
+        if let Some(did) = crate::member_source::parse_peer_did(query) {
+            Ok(records.into_iter().filter(|r| r.did == did).collect())
+        } else {
+            Ok(records
+                .into_iter()
+                .filter(|r| crate::member_source::matches_local_alias(&r.name, query))
+                .collect())
+        }
+    }
+
+    /// Unique live listener for `query`, or an error if none / more than one.
+    pub fn resolve_live(&self, query: &str) -> Result<LocalAdapterRecord, String> {
+        let matches = self.find_live(query)?;
+        match matches.len() {
+            0 => Err(format!(
+                "no live agentbridge adapter matching '{query}'. \
+                 Address the agent by DID (`did:key:…`) after `list --local`, \
+                 or pass --a2a-url only as a locator override with --to <did>"
+            )),
+            1 => Ok(matches.into_iter().next().expect("len 1")),
+            n => Err(format!(
+                "ambiguous: {n} live adapters match '{query}'. \
+                 Two agents can share a URL; use the DID as the name"
+            )),
+        }
+    }
 }
 
 /// [`MemberSource`] over the on-host lease directory.
@@ -149,11 +216,7 @@ impl MemberSource for LocalRegistrySource {
             .registry
             .list_live()?
             .into_iter()
-            .map(|record| CandidateMember {
-                name: record.name,
-                did: record.did,
-                slim_endpoint: Some(record.slim_endpoint),
-            })
+            .map(|record| record.to_candidate())
             .collect())
     }
 }
@@ -240,6 +303,8 @@ mod tests {
             name: name.to_string(),
             did: "did:key:zTest".to_string(),
             slim_endpoint: "127.0.0.1:47357".to_string(),
+            a2a_url: String::new(),
+            a2a_binding: A2ABinding::Grpc,
             pid,
         }
     }
@@ -304,7 +369,11 @@ mod tests {
             Ok(_) => panic!("empty endpoint must be rejected"),
             Err(err) => err,
         };
-        assert!(err.contains("slim_endpoint"), "{err}");
+        assert!(err.contains("a2a_url") || err.contains("slim_endpoint"), "{err}");
+        no_ep.a2a_url = "http://127.0.0.1:9".to_string();
+        registry
+            .publish(&no_ep)
+            .expect("gRPC-only lease with DID and a2a_url must be accepted");
     }
 
     #[test]
@@ -378,6 +447,8 @@ mod tests {
                 name: "ghost".to_string(),
                 did: String::new(),
                 slim_endpoint: "127.0.0.1:1".to_string(),
+                a2a_url: String::new(),
+                a2a_binding: A2ABinding::Grpc,
                 pid: 1,
             })
             .unwrap(),
@@ -413,8 +484,76 @@ mod tests {
                 name: "cursor-agent".to_string(),
                 did: "did:key:zTest".to_string(),
                 slim_endpoint: Some("127.0.0.1:47357".to_string()),
+                a2a_url: None,
+                a2a_binding: None,
             }]
         );
+    }
+
+    #[test]
+    fn resolve_live_follows_did_when_url_changes() {
+        let (_dir, registry) = temp_registry();
+        let pid = std::process::id();
+        let mut first = sample("copilot", pid);
+        first.did = "did:key:zSame".to_string();
+        first.slim_endpoint.clear();
+        first.a2a_url = "http://127.0.0.1:50051".to_string();
+        let _lease = registry.publish(&first).unwrap();
+        assert_eq!(
+            registry.resolve_live("did:key:zSame").unwrap().a2a_url,
+            "http://127.0.0.1:50051"
+        );
+        first.a2a_url = "http://127.0.0.1:50052".to_string();
+        let _lease = registry.publish(&first).unwrap();
+        let found = registry.resolve_live("did:key:zSame").unwrap();
+        assert_eq!(found.a2a_url, "http://127.0.0.1:50052");
+        assert_eq!(found.a2a_binding, A2ABinding::Grpc);
+        assert_eq!(found.name, "copilot");
+    }
+
+    #[test]
+    fn resolve_live_accepts_slim_channel_alias() {
+        let (_dir, registry) = temp_registry();
+        let mut record = sample("copilot", std::process::id());
+        record.did = "did:key:zChan".to_string();
+        let _lease = registry.publish(&record).unwrap();
+        let found = registry
+            .resolve_live("agntcy/shadi/copilot-a2a")
+            .expect("channel");
+        assert_eq!(found.did, "did:key:zChan");
+        assert_eq!(found.name, "copilot");
+    }
+
+    #[test]
+    fn old_lease_without_binding_defaults_to_grpc() {
+        let raw = serde_json::json!({
+            "name": "copilot",
+            "did": "did:key:zOld",
+            "slim_endpoint": "",
+            "a2a_url": "http://127.0.0.1:50051",
+            "pid": 1
+        });
+        let record: LocalAdapterRecord = serde_json::from_value(raw).unwrap();
+        assert_eq!(record.a2a_binding, A2ABinding::Grpc);
+        assert_eq!(
+            record.to_candidate().unicast_locator().unwrap().display_uri(),
+            "grpc://127.0.0.1:50051"
+        );
+    }
+
+    #[test]
+    fn resolve_live_treats_shared_did_as_ambiguous() {
+        let (_dir, registry) = temp_registry();
+        let pid = std::process::id();
+        let mut a = sample("copilot", pid);
+        a.did = "did:key:zShared".to_string();
+        let mut b = sample("codex", pid);
+        b.did = "did:key:zShared".to_string();
+        let _la = registry.publish(&a).unwrap();
+        let _lb = registry.publish(&b).unwrap();
+        let err = registry.resolve_live("did:key:zShared").unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(registry.resolve_live("copilot").is_ok());
     }
 
     fn dead_child() -> std::process::Child {

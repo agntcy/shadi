@@ -40,16 +40,23 @@ PROBLEM=lru bash docs/content/demos/run-collab-demo.sh
 PROBLEM=fifo MAX_CYCLES=6 bash docs/content/demos/run-collab-demo.sh
 PROBLEM=both MAX_CYCLES=10 bash docs/content/demos/run-collab-demo.sh
 COLLAB_AGENTS=goose,claude-code PROBLEM=lru MAX_CYCLES=12 bash docs/content/demos/run-collab-demo.sh
+TRANSPORT=grpc PROBLEM=fifo bash docs/content/demos/run-collab-demo.sh
 ```
 
 `--net-allow` includes `cisco.com` and `*.cisco.com`. Add more hosts with
 `COLLAB_NET_ALLOW=host.example.com` (comma-separated).
 
-The script starts a SLIM node, registers the adapters under
+The script starts a SLIM node (unless `TRANSPORT=grpc`), registers the adapters under
 `shadictl --net-block` (DID-signed A2A, `list --local` leases), then
 token-passes: `avatar` `delegate`s the coding prompt → the finishing
 listener A2A-dispatches `NEXT` to the chosen peer → apply-capped-edit →
 `cargo test` → `avatar` follows that choice for the next coding hop.
+
+`TRANSPORT=grpc` (or `jsonrpc` / `http+json`) skips the SLIM node and uses
+`register --a2a-listen --a2a-binding` plus DID→locator lookup for the same
+fifo/lru finishing condition. A no-CLI loopback run that reproduces that
+fifo `cargo test` outcome is [A2A unicast](a2a-grpc.md)
+([sample run](a2a-grpc-sample.md)).
 
 ## What this shows
 

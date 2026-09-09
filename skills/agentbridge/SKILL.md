@@ -14,10 +14,14 @@ Goose, OpenCode, …).
 Do **not** invent A2A frames or SLIMRPC. Call the `agentbridge` CLI. The
 binary is Rust; this skill is the host-agnostic client.
 
-Prerequisites (host, not you): `agentbridge` on `PATH`, a SLIM node, and
-`docs/content/demos/demo-env.sh` sourced (`SHADI_SLIM_AUTH=did`,
-`SLIM_HUMAN_SEED`, `SLIM_MEMBER_DIDS`). Default endpoint is
-`$SLIM_ENDPOINT` or `127.0.0.1:47357` (collab demo uses `47591`).
+Prerequisites (host, not you): `agentbridge` on `PATH`. For SLIM hops, a
+SLIM node and `docs/content/demos/demo-env.sh` sourced (`SHADI_SLIM_AUTH=did`,
+`SLIM_HUMAN_SEED`, `SLIM_MEMBER_DIDS`). Default SLIM endpoint is
+`$SLIM_ENDPOINT` or `127.0.0.1:47357` (collab demo uses `47591`). Constrained
+unicast can skip SLIM: `register --a2a-listen --a2a-binding grpc|jsonrpc|http+json`,
+then `delegate --to did:key:…`. The DID is the name (aliases: tool name,
+`agntcy/shadi/<name>-a2a`). The locator is the local SLIM node or a unicast
+`{binding, url}` and can change.
 
 Your agent id is `$SHADI_AGENT_ID` (default `avatar`).
 
@@ -41,6 +45,6 @@ the host skills directory. The folder name must be `agentbridge`.
 2. Send one task — [references/delegate.md](references/delegate.md)
 3. Share a turn with a peer — [references/handoff.md](references/handoff.md)
 
-Typical collab hop: `list --local` → `delegate` to a `slim://` peer →
-read the `REPLACE`/`NEXT` reply. The host may apply the edit; you do not
-write A2A yourself.
+Typical collab hop: `list --local` → `delegate --to did:key:…` (or a local
+alias) → read the `REPLACE`/`NEXT` reply. The host may apply the
+edit; you do not write A2A yourself. `handoff` stays on SLIM.

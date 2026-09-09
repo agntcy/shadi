@@ -27,6 +27,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "a2a-grpc"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7cc973d3da105d402a96978a4f3006a24535e3205d7201ca374ffc0af44593c"
+dependencies = [
+ "a2a-client-lf",
+ "a2a-lf",
+ "a2a-pb",
+ "a2a-server-lf",
+ "async-trait",
+ "futures",
+ "http",
+ "prost",
+ "rustls",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-tls",
+ "tonic-types",
+ "tracing",
+]
+
+[[package]]
 name = "a2a-lf"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -164,6 +187,7 @@ dependencies = [
 name = "agntcy-agentbridge"
 version = "0.1.5"
 dependencies = [
+ "agntcy-shadi-a2a",
  "agntcy-shadi-mas",
  "libc",
  "serde",
@@ -181,7 +205,9 @@ dependencies = [
 name = "agntcy-agentbridge-cli"
 version = "0.1.5"
 dependencies = [
+ "a2a-grpc",
  "a2a-lf",
+ "a2a-pb",
  "a2a-server-lf",
  "agntcy-agentbridge",
  "agntcy-shadi-a2a",
@@ -193,11 +219,13 @@ dependencies = [
  "agntcy-slim-rpc",
  "anyhow",
  "async-trait",
+ "axum",
  "clap",
  "futures",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -208,15 +236,21 @@ name = "agntcy-shadi-a2a"
 version = "0.1.5"
 dependencies = [
  "a2a-client-lf",
+ "a2a-grpc",
  "a2a-lf",
+ "a2a-pb",
  "a2a-server-lf",
  "a2a-slimrpc",
  "agntcy-shadi-agent-secrets",
  "agntcy-slim-bindings",
  "async-stream",
  "async-trait",
+ "axum",
  "futures",
+ "serde",
+ "serde_json",
  "tokio",
+ "tonic",
 ]
 
 [[package]]
@@ -7518,6 +7552,7 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -9471,6 +9506,7 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",

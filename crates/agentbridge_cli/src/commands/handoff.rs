@@ -211,6 +211,9 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
             local_name: Some(format!("agntcy/shadi/{local_id}-a2a")),
             peer_agent_id: agent_id.clone(),
             destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+            a2a_url: None,
+            a2a_binding: None,
+            peer_did: None,
         };
         return Ok(HandoffPeer::Slim {
             agent_id,

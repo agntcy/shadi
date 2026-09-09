@@ -1,12 +1,13 @@
 # agentbridge — General-Purpose Agent Interconnect over A2A
 
 agentbridge is the layer of SHADI that bridges agents over the
-[A2A protocol](slim_a2a.md) — via SLIM transport, DID identity, DIR
-discovery, and `shadi_mas` for autonomous multi-round coordination — so they
-can exchange context, delegate tasks to each other, and coordinate
-autonomously toward a shared goal. Nothing in that mechanism is specific to
-any one kind of agent: any agent that speaks A2A, or the simpler agentbridge
-subprocess protocol (`GenericStdioAdapter`), can be bridged this way.
+[A2A protocol](slim_a2a.md) — via a pluggable A2A transport (SLIMRPC or
+standard gRPC), DID identity, DIR discovery, and `shadi_mas` for autonomous
+multi-round coordination — so they can exchange context, delegate tasks to
+each other, and coordinate autonomously toward a shared goal. Nothing in that
+mechanism is specific to any one kind of agent: any agent that speaks A2A, or
+the simpler agentbridge subprocess protocol (`GenericStdioAdapter`), can be
+bridged this way.
 
 Today's built-in adapters happen to target CLI coding tools — Claude Code,
 GitHub Copilot CLI, OpenAI Codex CLI, Cursor Agent — because interconnecting
@@ -28,8 +29,8 @@ lost. There was no standard way to:
 - Have multiple agents propose solutions and converge on the best one without human mediation.
 
 agentbridge solves this using the existing SHADI infrastructure: A2A for task
-delegation, SLIM for transport, DIR for discovery, and `shadi_mas` for
-autonomous multi-round coordination — the same general-purpose stack that
+delegation, SLIMRPC or gRPC for transport, DIR for discovery, and `shadi_mas`
+for autonomous multi-round coordination — the same general-purpose stack that
 would bridge any other kind of agent, applied here to coding tools first.
 
 ## Quick start
@@ -60,7 +61,11 @@ or [the DID agent-group demo](demos/did-agent-group.md) for a live SLIM run.
 ### Deployment topology
 
 `register` and `coordinate` run on separate hosts (or separate terminals on the
-same machine). SLIM is the authenticated transport bus between them.
+same machine). Unicast A2A can use a SLIM node (`--slim-endpoint`) or
+official A2A unicast (`--a2a-listen` / `--a2a-binding` / `delegate --a2a-url`) without one.
+`handoff` and `coordinate` stay on SLIM in this slice. Identity is always
+the application DID on the message, not the URL. Address a peer by that DID;
+look up the current gRPC URL or SLIM name when it moves.
 
 ```mermaid
 flowchart LR
@@ -89,7 +94,7 @@ flowchart LR
 `register --tool` accepts `generic-stdio` or a bundled profile id
 (`claude-code`, `copilot`, `codex`, `cursor-agent`, `goose`, `opencode`).
 After a listener starts, `agentbridge list --local` shows it (name, DID,
-endpoint) from the lease file under `$SHADI_TMP_DIR`.
+`slim://…` and/or `http://…`) from the lease file under `$SHADI_TMP_DIR`.
 
 `goose` and `opencode` keep their own provider config (`~/.config/goose`,
 `~/.config/opencode`). Agentbridge does not set a base URL or API key.
@@ -253,10 +258,26 @@ agentbridge coordinate \
 5. When `accepted_votes ≥ quorum` → `EventOutcome::Finalized` → loop exits.
 6. The winning artifact is written to disk. Human approval is optional.
 
-## A2A server — how `register` exposes an adapter over SLIM
+## A2A server — how `register` exposes an adapter
 
-When `agentbridge register` is called with `--slim-endpoint`, it starts a
-full A2A server that makes the local adapter reachable to any SLIM peer.
+When `agentbridge register` is called with `--slim-endpoint` and/or
+`--a2a-listen`, it starts a full A2A server that makes the local adapter
+reachable to peers on that binding. Both paths share
+`AgentBridgeRequestHandler` and the same DID-proof admission.
+
+`--a2a-listen host:port` plus `--a2a-binding grpc|jsonrpc|http+json` serves
+one official A2A binding (default `grpc` → `lf.a2a.v1.A2aService`). The DID
+is the portable name (aliases: tool name, SLIM channel
+`agntcy/shadi/<name>-a2a`). The locator is the local SLIM node
+(`slim://host:port`) and/or a unicast `{binding, url}`, looked up from the
+lease or DIR. Loopback (`127.0.0.1`, `::1`) may be plaintext HTTP. Any other
+bind, including `0.0.0.0`, requires TLS 1.3 from `A2A_TLS_CERT` /
+`A2A_TLS_KEY` (or `$SHADI_TMP_DIR/shadi-a2a-tls/{server.crt,server.key}`).
+Do not reuse `SLIM_TLS_*`. Verify operator-supplied certificates with
+`openssl x509 -text -noout -in <cert>` before use (expiration, RSA ≥ 2048 or
+P-256+, SHA-2 signatures; self-signed only for lab). `https://` **gRPC**
+client TLS is not wired (a2aproject/a2a-rs#162); JSON-RPC and HTTP+JSON
+clients use reqwest and can speak HTTPS.
 
 ### SLIM address
 
@@ -272,7 +293,9 @@ For example, `--tool copilot` listens as `agntcy/shadi/copilot-a2a`. The
 ### Request handler stack
 
 ```text
-SlimRpcHandler (shadi_a2a)          ← decodes SLIMRPC frames
+SlimRpcHandler (shadi_a2a)          ← SLIMRPC frames
+GrpcHandler (a2a-grpc)              ← official A2A gRPC (tonic)
+jsonrpc_router / rest_router        ← official JSON-RPC / HTTP+JSON (axum)
   └─ AgentBridgeRequestHandler      ← full A2A protocol surface
        ├─ DefaultRequestHandler      ← routes send/get/list/cancel/subscribe/push
        │    └─ AgentBridgeExecutor   ← executes the task against the CliAdapter
@@ -402,12 +425,13 @@ allow-list.
 
 ### Transport authentication
 
-Peer-to-peer A2A traffic runs over SLIMRPC with mutual TLS. The listener resolves
-a client certificate from `SLIM_TLS_CERT` / `SLIM_TLS_KEY` / `SLIM_TLS_CA`, an
-agent-specific fallback, or a generic fallback (see
+SLIMRPC peer-to-peer A2A uses mutual TLS to the SLIM node. The listener
+resolves a client certificate from `SLIM_TLS_CERT` / `SLIM_TLS_KEY` /
+`SLIM_TLS_CA`, an agent-specific fallback, or a generic fallback (see
 [TLS certificate resolution](#tls-certificate-resolution)). Generate the bundle
 with `tools/generate_slim_mtls_certs.sh` and keep the CA private to the peers you
-trust.
+trust. gRPC listeners use a separate `A2A_TLS_*` pair and must not reuse those
+SLIM files.
 
 ## Multi-agent coordination layer (`shadi_mas`)
 
@@ -488,7 +512,7 @@ corrupting the state machine.
     | Native `handoff` specs | ✅ | Same `--from`/`--to` as `coordinate`, including `cursor-agent` and `slim:<id>` |
     | `register --tool cursor-agent` | ✅ | Same sandbox + DID listener as the other tools |
     | `list --local` | ✅ | Live listeners from on-host register leases |
-    | Two-line token-passing coding | ✅ | [Round-robin Rust Demo](demos/collab-rust.md) — `avatar` `delegate` + capped apply + agent-as-A2A-client `NEXT` until `cargo test` ([sample run](demos/collab-rust-sample.md)) |
+    | Two-line token-passing coding | ✅ | [Round-robin Rust Demo](demos/collab-rust.md) — `avatar` `delegate` + capped apply + agent-as-A2A-client `NEXT` until `cargo test` ([sample run](demos/collab-rust-sample.md)). Same fifo outcome over official A2A unicast without a SLIM node: [A2A unicast](demos/a2a-grpc.md) ([sample run](demos/a2a-grpc-sample.md)). |
 
     ### What remains
 
@@ -501,7 +525,7 @@ corrupting the state machine.
     **Yes — substantially.** Every component of the target architecture existed or
     was extended from existing SHADI infrastructure:
 
-    - **A2A**: `shadi_a2a::A2AChannelBuilder` and `a2a-slimrpc` provide identity-verified A2A over SLIMRPC. `LiveA2ATaskAdapter` in `shadi_mas` is a ready-made task dispatcher.
+    - **A2A**: `shadi_a2a::A2AChannel` / `A2AChannelBuilder` provide identity-verified A2A over SLIMRPC or gRPC. `LiveA2ATaskAdapter` in `shadi_mas` is a ready-made task dispatcher.
     - **SLIM**: `agent_transport_slim::NativeSlimSession` and `LiveSlimMessagingAdapter` provide group and point-to-point messaging. The `LiveSlimGroupSender` handles multi-agent broadcast with receipt acknowledgements.
     - **DIR**: `shadictl dir` subcommand already integrates with `agntcy/dir`. OASF records are the natural format for adapter agent cards.
     - **shadi_mas**: The `DevelopmentEngine` required a new `PatternKind` and engine implementation, but the runtime, epoch discipline, adapter traits, and test infrastructure were already in place.

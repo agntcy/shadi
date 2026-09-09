@@ -22,6 +22,7 @@ tmp/
 
 # Editors
 .vscode/
+.cursor/
 
 # OS
 .DS_Store
