@@ -33,7 +33,8 @@ use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsS
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
-use tonic::transport::{Identity, Server as TonicServer, ServerTlsConfig};
+use tonic::transport::server::TcpIncoming;
+use tonic::transport::Server as TonicServer;
 
 /// Agent Directory server + auth to publish this adapter's `AgentCard` to.
 pub struct DirPublishOptions<'a> {
@@ -1090,13 +1091,11 @@ fn slim_tls_dir() -> PathBuf {
 }
 
 fn slim_client_endpoint(endpoint: &str) -> String {
-    let rest = endpoint
-        .strip_prefix("https://")
-        .or_else(|| endpoint.strip_prefix("http://"))
-        .unwrap_or(endpoint);
-    // See shadictl slim_shell::resolve_client_endpoint_value — tonic `_tls-any`
-    // plus SLIM's own rustls connector cannot share an `https://` URI.
-    format!("http://{rest}")
+    if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("https://{endpoint}")
+    }
 }
 
 fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
@@ -1292,14 +1291,33 @@ fn a2a_server_tls_paths(addr: &SocketAddr) -> Result<Option<(PathBuf, PathBuf)>,
     Ok(Some((cert, key)))
 }
 
-fn grpc_server_tls(addr: &SocketAddr) -> Result<Option<ServerTlsConfig>, String> {
+/// rustls + tonic-tls, not tonic `ServerTlsConfig`. Enabling tonic's native TLS
+/// feature (`_tls-any`) makes SLIM `https://` clients fail under workspace tests.
+fn grpc_server_tls_config(
+    addr: &SocketAddr,
+) -> Result<Option<Arc<a2a_grpc::rustls::ServerConfig>>, String> {
     let Some((cert, key)) = a2a_server_tls_paths(addr)? else {
         return Ok(None);
     };
     let cert_pem = fs::read(&cert).map_err(|e| format!("read A2A_TLS_CERT {}: {e}", cert.display()))?;
     let key_pem = fs::read(&key).map_err(|e| format!("read A2A_TLS_KEY {}: {e}", key.display()))?;
-    let identity = Identity::from_pem(cert_pem, key_pem);
-    Ok(Some(ServerTlsConfig::new().identity(identity)))
+    let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse A2A_TLS_CERT {}: {e}", cert.display()))?;
+    if certs.is_empty() {
+        return Err(format!("A2A_TLS_CERT {} has no certificates", cert.display()));
+    }
+    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+        .map_err(|e| format!("parse A2A_TLS_KEY {}: {e}", key.display()))?
+        .ok_or_else(|| format!("A2A_TLS_KEY {} has no private key", key.display()))?;
+    let mut config = a2a_grpc::rustls::ServerConfig::builder_with_protocol_versions(&[
+        &a2a_grpc::rustls::version::TLS13,
+    ])
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| format!("A2A gRPC TLS identity: {e}"))?;
+    config.alpn_protocols = vec![tonic_tls::ALPN_H2.to_vec()];
+    Ok(Some(Arc::new(config)))
 }
 
 fn run_unicast_listener(
@@ -1390,22 +1408,38 @@ fn run_unicast_listener(
                 Err("SLIM uses --slim-endpoint, not --a2a-listen".to_string())
             }
             A2ABinding::Grpc => {
-                let tls = grpc_server_tls(&addr)?;
                 let grpc_service = A2aServiceServer::new(GrpcHandler::new(handler));
-                let mut builder = TonicServer::builder();
-                if let Some(tls) = tls {
-                    builder = builder
-                        .tls_config(tls)
-                        .map_err(|e| format!("A2A gRPC TLS config: {e}"))?;
-                }
-                tokio::select! {
-                    result = builder.add_service(grpc_service).serve(addr) => {
-                        result.map_err(|e| format!("A2A gRPC server error: {e}"))
+                match grpc_server_tls_config(&addr)? {
+                    Some(tls) => {
+                        let incoming = TcpIncoming::bind(addr)
+                            .map_err(|e| format!("bind A2A gRPC {addr}: {e}"))?;
+                        let incoming = tonic_tls::rustls::TlsIncoming::new(incoming, tls);
+                        tokio::select! {
+                            result = TonicServer::builder()
+                                .add_service(grpc_service)
+                                .serve_with_incoming(incoming) => {
+                                result.map_err(|e| format!("A2A gRPC server error: {e}"))
+                            }
+                            _ = tokio::signal::ctrl_c() => {
+                                println!("\n[agentbridge] shutting down...");
+                                adapter_for_shutdown.kill_in_flight();
+                                Ok(())
+                            }
+                        }
                     }
-                    _ = tokio::signal::ctrl_c() => {
-                        println!("\n[agentbridge] shutting down...");
-                        adapter_for_shutdown.kill_in_flight();
-                        Ok(())
+                    None => {
+                        tokio::select! {
+                            result = TonicServer::builder()
+                                .add_service(grpc_service)
+                                .serve(addr) => {
+                                result.map_err(|e| format!("A2A gRPC server error: {e}"))
+                            }
+                            _ = tokio::signal::ctrl_c() => {
+                                println!("\n[agentbridge] shutting down...");
+                                adapter_for_shutdown.kill_in_flight();
+                                Ok(())
+                            }
+                        }
                     }
                 }
             }
@@ -1889,9 +1923,9 @@ test push ... FAILED
     #[test]
     fn grpc_server_tls_loopback_is_plaintext() {
         let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
-        assert!(grpc_server_tls(&loopback).unwrap().is_none());
+        assert!(grpc_server_tls_config(&loopback).unwrap().is_none());
         let v6: SocketAddr = "[::1]:9".parse().unwrap();
-        assert!(grpc_server_tls(&v6).unwrap().is_none());
+        assert!(grpc_server_tls_config(&v6).unwrap().is_none());
     }
 
     #[test]
@@ -1912,7 +1946,7 @@ test push ... FAILED
         let _ = fs::create_dir_all(&tmp);
         std::env::set_var("SHADI_TMP_DIR", &tmp);
         let addr: SocketAddr = "0.0.0.0:9443".parse().unwrap();
-        let err = grpc_server_tls(&addr).expect_err("non-loopback needs cert files");
+        let err = grpc_server_tls_config(&addr).expect_err("non-loopback needs cert files");
         assert!(err.contains("TLS 1.3"), "{err}");
         assert!(err.contains("A2A_TLS_CERT"), "{err}");
         assert!(err.contains("Do not reuse SLIM_TLS_"), "{err}");
@@ -1937,19 +1971,19 @@ test push ... FAILED
     }
 
     #[test]
-    fn build_client_config_prefixes_http_and_sets_tls() {
+    fn build_client_config_prefixes_https_and_sets_tls() {
         let tls = TlsMaterial {
             cert: PathBuf::from("/c"),
             key: PathBuf::from("/k"),
             ca: PathBuf::from("/a"),
         };
         let cfg = build_client_config("node:1", &tls);
-        assert_eq!(cfg.endpoint, "http://node:1");
+        assert_eq!(cfg.endpoint, "https://node:1");
         assert_eq!(cfg.tls.tls_version, "tls1.3");
         assert!(!cfg.tls.insecure);
         assert_eq!(
             build_client_config("https://node:1", &tls).endpoint,
-            "http://node:1"
+            "https://node:1"
         );
     }
 }

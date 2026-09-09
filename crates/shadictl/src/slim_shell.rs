@@ -673,14 +673,12 @@ fn resolve_endpoint() -> String {
 }
 
 fn resolve_client_endpoint_value(endpoint: &str) -> String {
-    let rest = endpoint
-        .strip_prefix("https://")
-        .or_else(|| endpoint.strip_prefix("http://"))
-        .unwrap_or(endpoint);
-    // tonic 0.14 `_tls-any` (pulled in by A2A gRPC ServerTlsConfig) rejects
-    // `https://` unless Endpoint has tonic's own TlsConnector. SLIM applies
-    // rustls itself from TlsClientConfig, so the URI must stay `http://`.
-    format!("http://{rest}")
+    let endpoint = endpoint.to_string();
+    if endpoint.contains("://") {
+        endpoint
+    } else {
+        format!("https://{endpoint}")
+    }
 }
 
 fn resolve_local_name() -> Result<String, String> {
@@ -973,17 +971,17 @@ mod tests {
     }
 
     #[test]
-    fn given_bare_endpoint_when_resolving_client_endpoint_then_http_is_added() {
+    fn given_bare_endpoint_when_resolving_client_endpoint_then_https_is_added() {
         let endpoint = resolve_client_endpoint_value("127.0.0.1:47357");
 
-        assert_eq!(endpoint, "http://127.0.0.1:47357");
+        assert_eq!(endpoint, "https://127.0.0.1:47357");
     }
 
     #[test]
-    fn given_url_endpoint_when_resolving_client_endpoint_then_https_becomes_http() {
+    fn given_url_endpoint_when_resolving_client_endpoint_then_it_is_preserved() {
         let endpoint = resolve_client_endpoint_value("https://127.0.0.1:47357");
 
-        assert_eq!(endpoint, "http://127.0.0.1:47357");
+        assert_eq!(endpoint, "https://127.0.0.1:47357");
     }
 
     #[test]
@@ -1155,7 +1153,7 @@ mod tests {
 
         let config = build_client_config_for_endpoint("127.0.0.1:47357", &tls);
 
-        assert_eq!(config.endpoint, "http://127.0.0.1:47357");
+        assert_eq!(config.endpoint, "https://127.0.0.1:47357");
         match config.tls.source {
             TlsSource::File { cert, key } => {
                 assert_eq!(cert, "/tmp/client.crt");
