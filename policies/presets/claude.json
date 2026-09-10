@@ -1,7 +1,7 @@
 {
   "_preset": "shadi/claude-v1",
-  "_description": "Safe-launch preset for Anthropic Claude Code CLI (Bun binary). Use with: shadictl --policy policies/presets/claude.json --allow ~/.claude --allow ~/.local/bin --allow ~/.local/share/claude -- claude\n\nOn Windows add: --allow %LOCALAPPDATA%\\claude --allow %LOCALAPPDATA%\\Programs\\claude",
-  "allow": ["."],
+  "_description": "Safe-launch preset for Anthropic Claude Code CLI (Bun binary). Use with: shadictl --policy policies/presets/claude.json -- claude\n\nOn Windows also add: --allow %LOCALAPPDATA%\\claude --allow %LOCALAPPDATA%\\Programs\\claude",
+  "allow": [".", "~/.claude", "~/.claude.json", "~/.local/bin", "~/.local/share/claude"],
   "read": [
     "/usr/local",
     "/usr/bin",
