@@ -180,13 +180,10 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
 
     // Allow /tmp unconditionally, same tier as /dev — many tools keep
     // scratch/session state directly under /tmp/<name>, not under $TMPDIR.
-    // This has to stay a built-in rather than something a caller opts into
-    // via `--allow /tmp`: canonicalize_path() resolves /tmp to its symlink
-    // target /private/tmp before a caller-supplied path ever reaches here,
-    // so an lstat-style metadata read on the literal `/tmp` entry itself
-    // (e.g. Node's `fs.mkdir` existence check) would still be denied even
-    // with /private/tmp allowed. Both spellings need their own rule, and
-    // only a hardcoded default can list the pre-resolution literal.
+    // Both the symlink and its /private/tmp target need their own rule
+    // (same reason /etc needs /private/etc), so this can't be a caller
+    // `--allow /tmp`: canonicalize_path() would resolve away the literal
+    // before it reaches here.
     rules.push("(allow file-read* file-write* (subpath \"/tmp\"))".to_string());
     rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
 
