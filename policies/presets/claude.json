@@ -1,7 +1,7 @@
 {
   "_preset": "shadi/claude-v1",
-  "_description": "Safe-launch preset for Anthropic Claude Code CLI (Bun binary). Use with: shadictl --policy policies/presets/claude.json -- claude\n\nOn Windows also add: --allow %LOCALAPPDATA%\\claude --allow %LOCALAPPDATA%\\Programs\\claude",
-  "allow": [".", "~/.claude", "~/.claude.json", "~/.local/bin", "~/.local/share/claude"],
+  "_description": "Safe-launch preset for Anthropic Claude Code CLI (Bun binary). Recommended: redirect Claude's config out of the real ~/.claude before launching, so the sandbox never needs access to it (it holds session history, memory, and other projects' data, not just this run's config): CLAUDE_CONFIG_DIR=\"$PWD/.claude-sandboxed\" shadictl --policy policies/presets/claude.json -- claude\n\nIf you'd rather share your real Claude Code state into the sandbox instead, drop CLAUDE_CONFIG_DIR and add: --allow ~/.claude --allow ~/.claude.json\n\nOn Windows also add: --allow %LOCALAPPDATA%\\claude --allow %LOCALAPPDATA%\\Programs\\claude",
+  "allow": [".", "~/.local/bin", "~/.local/share/claude"],
   "read": [
     "/usr/local",
     "/usr/bin",
