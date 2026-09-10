@@ -24,7 +24,7 @@ a2a-grpc = { version = "0.3.5" }
 a2a-pb = { version = "0.2.0" }
 tonic = { version = "0.14", features = ["transport"] }
 tonic-tls = { version = "0.7", default-features = false, features = ["rustls"] }
-rustls-pemfile = "2"
+rustls-pki-types = "1.9"
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.3.0", path = "../agent_secrets" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.0", path = "../shadi_identity" }
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.1.4", path = "../shadi_sandbox" }
