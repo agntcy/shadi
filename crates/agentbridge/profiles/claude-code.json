@@ -7,8 +7,7 @@
     "TMP": "{workdir}",
     "TEMP": "{workdir}",
     "CLAUDE_CODE_TMPDIR": "{workdir}",
-    "CLAUDE_TMPDIR": "{workdir}",
-    "CLAUDE_CONFIG_DIR": "{workdir}/.claude-config"
+    "CLAUDE_TMPDIR": "{workdir}"
   },
   "workdir_flags": ["--add-dir", "{workdir}"],
   "workdir_flags_on_execute": true,
