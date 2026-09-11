@@ -15,6 +15,7 @@ OS-level sandboxing, encrypted local memory, and secure transport.
 - Integrating into an agent or app? Start with the [API Guide](api_integration.md).
 - Looking for flags and commands? See the [CLI Reference](cli.md).
 - Connecting CLI coding tools autonomously? Start with [AgentBridge](agentbridge.md).
+- Coordinating a team of agents? Start with [SHADI MAS](shadi-mas.md), then [ASSEMBLY and CONVERGE](assembly-converge.md).
 
 ## Why SHADI
 
@@ -51,6 +52,8 @@ SHADI presents the runtime as four product layers:
 - Python bindings for secrets, memory, and sandboxed execution.
 - CLI workflows for policy, identity, key management, and sandbox execution.
 - Example agents and demos, including a SecOps workflow against real GitHub signals.
+- **SHADI MAS**: epoch-disciplined coordination runtime (`shadi_mas`) that
+  drives ASSEMBLY / CONVERGE and the class engines AgentBridge consumes.
 - **agentbridge**: interconnect Claude Code, Copilot, Codex, Cursor Agent, and
   other CLI coding tools via A2A, SLIM, and DIR with autonomous coordination
   toward a shared goal.

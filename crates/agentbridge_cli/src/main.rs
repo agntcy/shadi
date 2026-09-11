@@ -170,6 +170,16 @@ enum Cmd {
         /// SLIM_MEMBER_DIDS) — shared secrets are not supported.
         #[arg(long, env = "SLIM_ENDPOINT", default_value = "127.0.0.1:47357")]
         slim_endpoint: String,
+
+        /// Coordination pattern. Each value is a CONVERGE class.
+        /// `development` (default) is propose/vote for code.
+        /// `preference`, `cascade`, and `resource` use the scalar paper driver.
+        #[arg(long, default_value = "development", value_parser = shadi_mas::PatternKind::parse_cli)]
+        pattern: shadi_mas::PatternKind,
+
+        /// Run ASSEMBLY first and infer the CONVERGE class from agent replies.
+        #[arg(long)]
+        assembly: bool,
     },
 }
 
@@ -254,6 +264,8 @@ fn main() {
             output,
             require_human,
             slim_endpoint,
+            pattern,
+            assembly,
         } => commands::coordinate::run(
             &goal,
             &agents,
@@ -262,6 +274,8 @@ fn main() {
             output.as_deref(),
             require_human,
             &slim_endpoint,
+            pattern,
+            assembly,
         ),
     };
 
@@ -307,11 +321,40 @@ mod tests {
                 goal,
                 agents,
                 quorum,
+                pattern,
+                assembly,
                 ..
             } => {
                 assert_eq!(goal, "build a parser");
                 assert_eq!(agents, ["claude-code", "copilot"]);
                 assert_eq!(quorum, 2);
+                assert_eq!(pattern, shadi_mas::PatternKind::Development);
+                assert!(!assembly);
+            }
+            _ => panic!("expected coordinate subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_coordinate_converge_pattern_and_assembly() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "coordinate",
+            "--goal",
+            "share a renewable stock",
+            "--agents",
+            "goose,goose",
+            "--pattern",
+            "resource",
+            "--assembly",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Coordinate {
+                pattern, assembly, ..
+            } => {
+                assert_eq!(pattern, shadi_mas::PatternKind::Resource);
+                assert!(assembly);
             }
             _ => panic!("expected coordinate subcommand"),
         }

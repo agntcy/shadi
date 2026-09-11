@@ -139,8 +139,11 @@ agentbridge delegate "write unit tests for src/parser.rs" \
 
 ### `coordinate` — autonomous multi-round coordination
 
-Run `MasRuntime<DevelopmentEngine>` across a set of agents until a winning code
-artifact is produced. Agents propose, vote, and converge without human mediation.
+Default `--pattern development` is CONVERGE on `DevelopmentEngine` until a
+winning code artifact is produced. `--pattern preference|cascade|resource`
+uses the scalar paper CONVERGE driver. `--assembly` asks the team to model
+the problem first and infer the class. The group protocol is documented in
+[ASSEMBLY and CONVERGE](../../docs/content/assembly-converge.md).
 
 ```bash
 # Local agents (in-process subprocess adapters)
