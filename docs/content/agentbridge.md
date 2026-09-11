@@ -109,9 +109,14 @@ as `AUTH_REQUIRED` (re-prove / ask / deny); a forged DID is rejected.
 
 ### Coordination loop
 
-Each epoch has two phases: every agent proposes a code artifact, then every
-agent votes on the best one. Finalization fires as soon as endorsements reach
-the quorum — triggered by applying the last proposal of the epoch.
+`coordinate --pattern development` (default) is CONVERGE for a **code**
+class: every agent proposes a code artifact, then every agent votes on
+the best one. Finalization fires as soon as endorsements reach the
+quorum — triggered by applying the last proposal of the epoch.
+
+The same two group phases cover any class. `--assembly` asks the team to
+model the problem first. `--pattern preference|cascade|resource` runs
+CONVERGE on a paper engine. See [ASSEMBLY and CONVERGE](assembly-converge.md).
 
 ```mermaid
 sequenceDiagram
@@ -191,6 +196,11 @@ The skill only documents existing flags: `list --local`, `delegate`,
 [demo-env.sh](demos/demo-env.sh) so DID auth is set. A fifth CLI on the
 **register** side is a JSON profile under `crates/agentbridge/profiles/`,
 not a new Rust adapter.
+
+ASSEMBLY / CONVERGE hops load [`skills/assembly`](https://github.com/agntcy/shadi/tree/main/skills/assembly)
+and [`skills/converge`](https://github.com/agntcy/shadi/tree/main/skills/converge)
+the same way. Do not paste those files into `--text`. See
+[ASSEMBLY and CONVERGE](assembly-converge.md#agent-skills).
 
 ## Three interaction models
 
@@ -435,39 +445,28 @@ SLIM files.
 
 ## Multi-agent coordination layer (`shadi_mas`)
 
-`shadi_mas` is the coordination runtime that sits above the transport layer,
-consumed by `agentbridge coordinate`. It provides epoch-disciplined state
-machines that can drive any multi-agent pattern to a deterministic
-finalization outcome.
+`agentbridge coordinate` is a driver for [SHADI MAS](shadi-mas.md). That
+crate owns epochs, engines, and ASSEMBLY / CONVERGE. This page only
+covers how AgentBridge feeds it.
 
-```text
-SemanticEvent  ──►  CoordinationEngine  ──►  EventOutcome
-(proposal,          (PreferenceEngine,        (Applied,
- vote, tool          DevelopmentEngine,         Finalized,
- result, …)          …)                         Rejected,
-                                               Deferred)
-```
+`coordinate` builds a roster, optionally runs ASSEMBLY, then constructs
+`MasRuntime<E>` for the class and turns tool replies into
+`SemanticEvent`s. `--pattern development` (default) uses
+`DevelopmentEngine`. `--pattern preference|cascade|resource` uses the
+scalar paper driver. `--assembly` infers the class first. See
+[ASSEMBLY and CONVERGE](assembly-converge.md).
 
-Engines are wrapped in `MasRuntime<E>` which tracks the full history of applied
-transitions and exposes `engine()` / `engine_mut()` for inspection.
-
-| Engine | Pattern | Finalization criterion |
-|--------|---------|----------------------|
-| `PreferenceEngine` | Consensus on a scalar value | Median of proposals when quorum is met |
-| `DevelopmentEngine` | Consensus on a code artifact | Most-endorsed artifact when quorum is met |
-
-Three adapter traits connect the runtime to real infrastructure:
-
-| Trait | Implementation | Purpose |
-|-------|---------------|---------|
-| `MessagingAdapter` | `RecordingMessagingAdapter` / `LiveSlimMessagingAdapter` | Publish events to SLIM |
-| `TaskAdapter` | `RecordingTaskAdapter` / `LiveA2ATaskAdapter` | Dispatch A2A tasks |
-| `ToolAdapter` | `RecordingToolAdapter` / `CommandToolAdapter` / `CliToolAdapter` | Invoke LLMs / CLI tools |
+`LiveA2ATaskAdapter` (in `shadi_mas::experiments`) is the live task
+dispatch used by `delegate`, `handoff --from/--to slim:…`, and
+`coordinate` over SLIM or official A2A unicast. `CliToolAdapter` is
+AgentBridge’s `ToolAdapter` over a local CLI profile.
 
 ### `DevelopmentEngine` — the coordination core
 
-`DevelopmentEngine` is a `CoordinationEngine` that coordinates code artifacts
-rather than scalar numeric values (unlike `PreferenceEngine`).
+`DevelopmentEngine` is the CONVERGE engine for a shared code artifact.
+`agentbridge coordinate --pattern development` (default) stays here.
+ASSEMBLY, other classes, skills, and halt rules are in
+[ASSEMBLY and CONVERGE](assembly-converge.md).
 
 | Event | Payload | Effect |
 |-------|---------|--------|
@@ -555,22 +554,15 @@ corrupting the state machine.
             list.rs
             handoff.rs
             delegate.rs        ← single-shot A2A dispatch
-            coordinate.rs      ← MasRuntime<DevelopmentEngine> loop
-      shadi_mas/               ← coordination runtime
-        src/
-          engines/
-            development.rs     ← DevelopmentEngine
-            preference.rs      ← PreferenceEngine (existing)
-          experiments/
-            mod.rs             ← live adapters + experiment runners
-        tests/
-          integration_slim.rs  ← SLIM node integration tests (run with --include-ignored)
+            coordinate.rs      ← MasRuntime driver (ASSEMBLY / CONVERGE)
+      shadi_mas/               ← coordination runtime (SHADI MAS)
     examples/
       agentbridge_demo/         ← self-contained demo (no infrastructure needed)
     ```
 
 ## Next steps
 
+- Read [SHADI MAS](shadi-mas.md) for the coordination runtime, then [ASSEMBLY and CONVERGE](assembly-converge.md) for the group protocol.
 - Try the [Secure Agent Group Demo](demos/did-agent-group.md) for a full multi-agent, DID-identified walkthrough.
 - Try the [Round-robin Rust Demo](demos/collab-rust.md) for a multi-turn loop where each agent may write at most two lines and chooses the next A2A peer.
 - Try the [Agent Directory Discovery Demo](demos/dir-group-discovery.md) to form and grow a group by discovering members in DIR instead of naming them by hand.

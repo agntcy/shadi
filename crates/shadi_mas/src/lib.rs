@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod adapters;
+mod assembly;
 pub mod experiments;
 mod runtime;
 mod types;
@@ -9,13 +10,17 @@ mod types;
 pub mod engines;
 
 pub use adapters::{
-    MessagingAdapter, TaskAdapter, TaskEnvelope, ToolAdapter, ToolCall, ToolProvider,
-    ToolResult,
+    MessagingAdapter, TaskAdapter, TaskEnvelope, ToolAdapter, ToolCall, ToolProvider, ToolResult,
+};
+pub use assembly::{infer_pattern, AssemblySession};
+pub use engines::converge::{
+    parse_announce, parse_converge_vote, ConvergeController, ConvergeSurface,
 };
 pub use runtime::{AppliedTransition, CoordinationEngine, MasRuntime};
 pub use types::{
-    AgentId, Epoch, EventId, EventMetadata, EventOutcome, EventSource, FinalizationSummary,
-    PatternKind, RejectReason, RuntimeCounters, SemanticEvent, SemanticPayload,
+    AgentId, ConvergeBallot, ConvergeDecision, ConvergeHalt, ConvergeSignal, Epoch, EventId,
+    EventMetadata, EventOutcome, EventSource, FinalizationSummary, PatternKind, ProtocolPhase,
+    RejectReason, RuntimeCounters, ScalarProposal, SemanticEvent, SemanticPayload,
 };
 
 pub mod integrations {

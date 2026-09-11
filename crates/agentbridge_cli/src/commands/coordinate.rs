@@ -2,9 +2,12 @@ use agentbridge::{
     adapter::CliToolAdapter,
     adapters::generic_stdio::GenericStdioAdapter,
     mas::{
-        AgentId, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch, EventId,
-        EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
-        SemanticPayload,
+        infer_pattern, parse_announce, parse_converge_vote, AgentId, AssemblySession,
+        CascadeEngine, CascadeEngineConfig, ConvergeBallot, ConvergeController, ConvergeHalt,
+        ConvergeSurface, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch,
+        EventId, EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind,
+        PreferenceEngine, PreferenceEngineConfig, ResourceEngine, ResourceEngineConfig,
+        SemanticEvent, SemanticPayload,
     },
     open_profile_adapter,
 };
@@ -40,6 +43,8 @@ pub fn run(
     output: Option<&str>,
     require_human: bool,
     slim_endpoint: &str,
+    pattern: PatternKind,
+    assembly: bool,
 ) -> anyhow::Result<()> {
     let agents = build_agents(agent_specs, slim_endpoint)?;
     if agents.is_empty() {
@@ -47,6 +52,17 @@ pub fn run(
             "no agents specified — use --agents claude-code,cursor-agent,copilot,codex \
              or --agents generic-stdio:<cmd>"
         );
+    }
+
+    let mut pattern = pattern;
+    if assembly || pattern == PatternKind::Unmapped {
+        pattern = run_assembly(goal, &agents, pattern)?;
+    }
+    if pattern.is_converge_class() {
+        return run_converge(goal, &agents, max_rounds, pattern);
+    }
+    if pattern == PatternKind::Unmapped {
+        anyhow::bail!("ASSEMBLY inferred an unmapped class; CONVERGE will not start");
     }
 
     let effective_quorum = quorum.min(agents.len());
@@ -154,6 +170,156 @@ pub fn run(
         output,
         require_human,
     )
+}
+
+fn run_assembly(
+    goal: &str,
+    agents: &[AgentEntry],
+    seed: PatternKind,
+) -> anyhow::Result<PatternKind> {
+    let mut session = AssemblySession::default();
+    if seed.is_converge_class() {
+        session.inferred = Some(seed);
+    }
+    println!("─── ASSEMBLY: model the problem ───");
+    println!("Goal: {goal}\n");
+    for agent in agents {
+        let prompt = format!(
+            "phase=ASSEMBLY\nGoal: {goal}\n\
+             Understand this problem with your peers. Propose a system model.\n\
+             You may name a class beyond Preference, Cascade, or Resource.\n\
+             End with one line: CLASS <name>\nNo other protocol."
+        );
+        match invoke_tool(&agent.tool, &prompt, &agent.id.0, "assembly", 0) {
+            Ok(text) => {
+                println!("  [{}] {}", agent.id.0, truncate(&text, 160));
+                session.ingest(text);
+            }
+            Err(e) => println!("  [{}] ASSEMBLY failed: {e}", agent.id.0),
+        }
+    }
+    let inferred = session
+        .inferred
+        .or_else(|| infer_pattern(goal))
+        .unwrap_or(PatternKind::Unmapped);
+    println!("ASSEMBLY inferred {}\n", inferred.as_str());
+    Ok(inferred)
+}
+
+fn run_converge(
+    goal: &str,
+    agents: &[AgentEntry],
+    max_rounds: u64,
+    pattern: PatternKind,
+) -> anyhow::Result<()> {
+    let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
+    match pattern {
+        PatternKind::Preference => {
+            let cfg = PreferenceEngineConfig::line_with_participants(ids.clone(), 8.0, 0.75)
+                .map_err(anyhow::Error::msg)?;
+            let engine = PreferenceEngine::new(Epoch(0), cfg);
+            drive_converge(goal, agents, engine, max_rounds.max(1))
+        }
+        PatternKind::Cascade => {
+            let cfg = CascadeEngineConfig::scaled(ids.clone()).map_err(anyhow::Error::msg)?;
+            let horizon = max_rounds.min(cfg.paper_horizon()).max(1);
+            let engine = CascadeEngine::new(Epoch(0), cfg);
+            drive_converge(goal, agents, engine, horizon)
+        }
+        PatternKind::Resource => {
+            let cfg = ResourceEngineConfig::scaled(ids.clone()).map_err(anyhow::Error::msg)?;
+            let horizon = max_rounds.min(cfg.paper_horizon).max(1);
+            let engine = ResourceEngine::new(Epoch(0), cfg);
+            drive_converge(goal, agents, engine, horizon)
+        }
+        _ => anyhow::bail!("CONVERGE requires preference, cascade, or resource"),
+    }
+}
+
+fn drive_converge<E: ConvergeSurface>(
+    goal: &str,
+    agents: &[AgentEntry],
+    engine: E,
+    horizon: u64,
+) -> anyhow::Result<()> {
+    let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
+    let mut runtime = MasRuntime::new(engine);
+    let mut ctl = ConvergeController::new(ids, horizon, runtime.engine().lower_is_better(), 3);
+    println!(
+        "Starting CONVERGE: {} agents, pattern={}, horizon={horizon}",
+        agents.len(),
+        runtime.engine().pattern().as_str()
+    );
+    println!("Goal: {goal}\n");
+
+    for epoch in 0..horizon {
+        if ctl.halt().is_some() {
+            break;
+        }
+        println!("─── CONVERGE epoch {epoch}: announce ───");
+        ctl.begin_epoch();
+        let mut last = EventOutcome::Applied;
+        for agent in agents {
+            let view = runtime.engine().local_view(&agent.id);
+            let fallback = runtime.engine().current_value(&agent.id).unwrap_or(0.0);
+            let prompt = format!(
+                "phase=CONVERGE\nGoal: {goal}\nepoch={epoch}\n{view}\n\
+                 Announce the printed local value. Do not compute the next number.\n\
+                 ANNOUNCE value=<f64> agent={} epoch={epoch}\nThen VOTE CONTINUE or VOTE STOP.\n",
+                agent.id.0
+            );
+            let announced = match invoke_tool(&agent.tool, &prompt, &agent.id.0, "converge", epoch)
+            {
+                Ok(text) => {
+                    println!("  [{}] {}", agent.id.0, truncate(&text, 120));
+                    if let Some(decision) = parse_converge_vote(&text) {
+                        ctl.vote(ConvergeBallot {
+                            participant: agent.id.clone(),
+                            decision,
+                        });
+                    }
+                    parse_announce(&text).unwrap_or(fallback)
+                }
+                Err(e) => {
+                    println!("  [{}] announce failed: {e}", agent.id.0);
+                    fallback
+                }
+            };
+            let ev = runtime.engine().announce_event(
+                &agent.id,
+                epoch,
+                announced,
+                &format!("ann-{}-e{epoch}", agent.id.0),
+            );
+            last = runtime.apply(ev);
+        }
+        if let EventOutcome::Finalized(ref summary) = last {
+            let metric = runtime.engine().metric();
+            let signal = ctl.record_metric(summary.epoch, metric);
+            println!(
+                "  finalized epoch {} metric={:.6} delta={:.6} improved={}",
+                summary.epoch.0, signal.metric, signal.delta, signal.improved
+            );
+        }
+        if ctl.conclude_votes().is_some() {
+            break;
+        }
+    }
+
+    match ctl.halt() {
+        Some(ConvergeHalt::MajorityStop) => println!("CONVERGE halt: majority STOP"),
+        Some(ConvergeHalt::Plateau) => println!("CONVERGE halt: plateau"),
+        Some(ConvergeHalt::PaperHorizon) => println!("CONVERGE halt: paper horizon"),
+        Some(ConvergeHalt::NoSolution) => println!("CONVERGE halt: no solution"),
+        Some(ConvergeHalt::Unmapped) => println!("CONVERGE halt: unmapped class"),
+        None => println!("CONVERGE halt: max rounds"),
+    }
+    let c = runtime.engine().counters();
+    println!(
+        "Counters: applied={} finalized={} rejected={} deferred={}",
+        c.applied, c.finalized, c.rejected, c.deferred
+    );
+    Ok(())
 }
 
 // ─── Prompt builders ─────────────────────────────────────────────────────────
@@ -577,5 +743,76 @@ mod tests {
     fn build_agents_rejects_unknown_specs() {
         let specs = vec!["totally-unknown".to_string()];
         assert!(build_agents(&specs, "127.0.0.1:47357").is_err());
+    }
+
+    struct ReplyTool(&'static str);
+
+    impl ToolAdapter for ReplyTool {
+        fn provider(&self) -> ToolProvider {
+            ToolProvider::AgentSkills
+        }
+
+        fn call(&self, request: ToolCall) -> Result<ToolResult, String> {
+            Ok(ToolResult {
+                provider: ToolProvider::AgentSkills,
+                tool_name: request.tool_name,
+                payload: self.0.as_bytes().to_vec(),
+                target: request.target,
+                correlation_id: request.correlation_id,
+                epoch: request.epoch,
+            })
+        }
+    }
+
+    fn mock_agents(reply: &'static str, n: usize) -> Vec<AgentEntry> {
+        (0..n)
+            .map(|i| AgentEntry {
+                id: AgentId::from(i.to_string().as_str()),
+                tool: Arc::new(ReplyTool(reply)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn assembly_infers_preference_from_class_line() {
+        let inferred = run_assembly(
+            "share scores",
+            &mock_agents("CLASS preference\nNEXT 1", 2),
+            PatternKind::Unmapped,
+        )
+        .expect("assembly");
+        assert_eq!(inferred, PatternKind::Preference);
+    }
+
+    #[test]
+    fn assembly_unknown_class_is_unmapped() {
+        let inferred = run_assembly(
+            "open markets",
+            &mock_agents("CLASS matching-markets\nDONE", 2),
+            PatternKind::Unmapped,
+        )
+        .expect("assembly");
+        assert_eq!(inferred, PatternKind::Unmapped);
+    }
+
+    #[test]
+    fn unmapped_assembly_does_not_select_a_converge_engine() {
+        let inferred = run_assembly(
+            "matching markets",
+            &mock_agents("CLASS matching-markets", 2),
+            PatternKind::Unmapped,
+        )
+        .unwrap();
+        assert_eq!(inferred, PatternKind::Unmapped);
+        assert!(!inferred.is_converge_class());
+    }
+
+    #[test]
+    fn drive_converge_halts_when_all_vote_stop() {
+        let agents = mock_agents("ANNOUNCE value=0.0\nVOTE STOP", 2);
+        let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
+        let cfg = PreferenceEngineConfig::line_with_participants(ids, 8.0, 0.75).expect("cfg");
+        let engine = PreferenceEngine::new(Epoch(0), cfg);
+        drive_converge("share scores", &agents, engine, 8).expect("converge");
     }
 }

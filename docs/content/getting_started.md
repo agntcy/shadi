@@ -154,6 +154,7 @@ After the first successful sandboxed command, choose the track that matches your
 - Run the end-to-end local demo: [Operations](operations.md)
 - Integrate SHADI into an agent or app: [API Guide](api_integration.md)
 - Review the system model before deploying: [Architecture](architecture.md)
+- Coordinate a team of agents: [SHADI MAS](shadi-mas.md) and [ASSEMBLY and CONVERGE](assembly-converge.md)
 
 ## Recommended Reading Order
 
@@ -163,4 +164,5 @@ If you want a practical progression through the docs, use this sequence:
 2. [Sandbox and Policies](sandbox.md)
 3. [Operations](operations.md)
 4. [Security Notes](security.md)
-5. [CLI Reference](cli.md)
+5. [SHADI MAS](shadi-mas.md)
+6. [CLI Reference](cli.md)
