@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-mas-v0.2.0...agntcy-shadi-mas-v0.3.0) - 2026-09-11
+
+### Added
+
+- *(mas)* add ASSEMBLY and CONVERGE group protocol ([#240](https://github.com/agntcy/shadi/pull/240))
+
 ### Changed
 
 - Crate README now matches the tree and points at
