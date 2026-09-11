@@ -58,6 +58,7 @@ pub fn run(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     // Coding CLIs are JSON profiles (`ProfileAdapter`). Native modules stay
     // for local handoff/coordinate; register no longer constructs them.
@@ -78,6 +79,7 @@ pub fn run(
                 a2a_listen,
                 a2a_binding,
                 dir_publish,
+                verbose,
             );
         }
     }
@@ -102,6 +104,7 @@ pub fn run(
                     a2a_listen,
                     a2a_binding,
                     dir_publish,
+                    verbose,
                 )?;
             } else {
                 if let Some(opts) = dir_publish.as_ref() {
@@ -142,6 +145,7 @@ fn serve_registered(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     if slim_endpoint.is_none() && a2a_listen.is_none() {
         if let Some(opts) = dir_publish.as_ref() {
@@ -164,6 +168,7 @@ fn serve_registered(
         a2a_listen,
         a2a_binding,
         dir_publish,
+        verbose,
     )
 }
 
@@ -174,6 +179,7 @@ fn start_listeners(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     if let Some(listen) = a2a_listen {
         println!(
@@ -192,6 +198,7 @@ fn start_listeners(
                     a2a_binding,
                     None,
                     false,
+                    verbose,
                 ) {
                     eprintln!("[agentbridge] {} listener: {err}", a2a_binding.as_protocol_binding());
                 }
@@ -204,6 +211,7 @@ fn start_listeners(
                 a2a_binding,
                 dir_publish.as_ref(),
                 true,
+                verbose,
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             return Ok(());
@@ -218,6 +226,7 @@ fn start_listeners(
             a2a_listen,
             a2a_binding,
             dir_publish.as_ref(),
+            verbose,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
@@ -239,6 +248,7 @@ fn best_effort_did(agent_id: &str) -> Option<String> {
 struct AgentBridgeExecutor {
     adapter: Arc<dyn CliAdapter>,
     slim_endpoint: Option<String>,
+    verbose: bool,
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -247,6 +257,18 @@ fn preview(s: &str, max: usize) -> String {
         format!("{}…", &first_line[..max])
     } else {
         first_line.to_string()
+    }
+}
+
+/// Print a request/response body inside the `┌─ .../└─` box: every line
+/// when `verbose`, a single truncated preview line otherwise.
+fn print_body(s: &str, max: usize, verbose: bool) {
+    if verbose {
+        for line in s.lines() {
+            println!("│  {line}");
+        }
+    } else {
+        println!("│  {}", preview(s, max));
     }
 }
 
@@ -472,11 +494,12 @@ impl AgentExecutor for AgentBridgeExecutor {
 
         let agent_id = self.adapter.agent_id().0.clone();
         println!("\n┌─ A2A recv [{agent_id}] task {}", ctx.task_id);
-        println!("│  {}", preview(&prompt, 120));
+        print_body(&prompt, 120, self.verbose);
         println!("└─────────────────────────────────────────────────────────");
 
         let adapter = Arc::clone(&self.adapter);
         let slim_endpoint = self.slim_endpoint.clone();
+        let verbose = self.verbose;
         let task_id = ctx.task_id.clone();
         let context_id = ctx.context_id.clone();
         let history = ctx.message.clone().map(|m| vec![m]);
@@ -504,7 +527,7 @@ impl AgentExecutor for AgentBridgeExecutor {
             let elapsed_ms = started.elapsed().as_millis();
 
             println!("\n┌─ A2A send [{agent_id}] ({} ms)", elapsed_ms);
-            println!("│  {}", preview(&response_text, 120));
+            print_body(&response_text, 120, verbose);
             println!("└─────────────────────────────────────────────────────────\n");
 
             if let Some(peer) = next_peer_to_forward(&agent_id, &inbound_prompt, &response_text) {
@@ -610,12 +633,14 @@ impl AgentBridgeRequestHandler {
         a2a_listen: Option<&str>,
         a2a_binding: A2ABinding,
         ready: Arc<Notify>,
+        verbose: bool,
     ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
                 AgentBridgeExecutor {
                     adapter,
                     slim_endpoint: slim_endpoint.map(str::to_string),
+                    verbose,
                 },
                 InMemoryTaskStore::new(),
             ),
@@ -904,6 +929,7 @@ fn run_slim_listener(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<&DirPublishOptions>,
+    verbose: bool,
 ) -> Result<(), String> {
     let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
 
@@ -993,6 +1019,7 @@ fn run_slim_listener(
         a2a_listen,
         a2a_binding,
         ready,
+        verbose,
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
@@ -1335,6 +1362,7 @@ fn run_unicast_listener(
     a2a_binding: A2ABinding,
     dir_publish: Option<&DirPublishOptions>,
     register_locally: bool,
+    verbose: bool,
 ) -> Result<(), String> {
     require_sandbox_enforced(agent_id, listen)?;
     let addr: SocketAddr = listen.parse().map_err(|e| {
@@ -1398,6 +1426,7 @@ fn run_unicast_listener(
         Some(listen),
         a2a_binding,
         ready,
+        verbose,
     ));
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -1537,7 +1566,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_lists_profiles_and_generic_stdio() {
-        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None)
+        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None, false)
             .expect_err("no gemini profile");
         let msg = err.to_string();
         assert!(msg.contains("claude-code"));
