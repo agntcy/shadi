@@ -1,7 +1,7 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Synchronous Jacobi preference engine (Thm. preference-linear).
+//! Synchronous Jacobi preference engine (theorem preference-linear).
 //!
 //! Each epoch, every participant announces its current `z_i` as a
 //! [`ScalarProposal`](crate::types::ScalarProposal). When the full round set
@@ -623,5 +623,72 @@ mod tests {
             rt.apply(ev),
             EventOutcome::Rejected(RejectReason::IncompatiblePayload)
         );
+    }
+
+    #[test]
+    fn config_rejects_invalid_instances() {
+        assert!(PreferenceEngineConfig::new(vec![], vec![], vec![], BETA).is_err());
+        assert!(PreferenceEngineConfig::line(1, 8.0, BETA).is_err());
+        assert!(PreferenceEngineConfig::line(3, 8.0, 0.0).is_err());
+        let ids = vec![AgentId::from("0"), AgentId::from("1")];
+        assert!(
+            PreferenceEngineConfig::new(ids.clone(), vec![vec![1], vec![0]], vec![0.0], BETA)
+                .is_err()
+        );
+        assert!(
+            PreferenceEngineConfig::new(ids, vec![vec![5], vec![0]], vec![0.0, 1.0], BETA).is_err()
+        );
+        let mut inbox = BTreeMap::new();
+        inbox.insert(0, 1.0);
+        let cfg = paper_line();
+        assert!(cfg.jacobi(1, &inbox).is_err());
+    }
+
+    #[test]
+    fn nan_local_tool_and_recovery_sources() {
+        let mut rt = engine_from(vec![0.0, 4.0, 8.0]);
+        assert_eq!(
+            rt.apply(announce("nan", 0, 0, f64::NAN)),
+            EventOutcome::Rejected(RejectReason::IncompatiblePayload)
+        );
+
+        let mut local = announce("local", 0, 0, 0.0);
+        local.metadata.source = EventSource::Local;
+        assert_eq!(rt.apply(local), EventOutcome::Applied);
+
+        let mut tool = announce("tool", 0, 1, 4.0);
+        tool.metadata.source = EventSource::Tool("1".into());
+        assert_eq!(rt.apply(tool), EventOutcome::Applied);
+
+        let mut task = announce("task", 0, 2, 8.0);
+        task.metadata.source = EventSource::Task("t".into());
+        assert_eq!(
+            rt.apply(task),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
+        let mut recovery = announce("rec", 0, 2, 8.0);
+        recovery.metadata.source = EventSource::Recovery;
+        assert_eq!(
+            rt.apply(recovery),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
+    }
+
+    #[test]
+    fn surface_exposes_local_view() {
+        let engine = PreferenceEngine::new(Epoch(0), paper_line());
+        let id = AgentId::from("0");
+        let unknown = AgentId::from("ghost");
+        assert_eq!(engine.pattern(), PatternKind::Preference);
+        assert!(engine.lower_is_better());
+        assert_eq!(engine.current_value(&id), Some(0.0));
+        assert_eq!(engine.current_value(&unknown), None);
+        assert!(engine.local_view(&id).contains("z_i="));
+        assert!(engine.local_view(&unknown).is_empty());
+        assert_eq!(engine.z_star().len(), 3);
+        assert_eq!(engine.config().participants.len(), 3);
+        assert_eq!(engine.counters().applied, 0);
+        let ev = engine.announce_event(&id, 0, 0.0, "s");
+        assert_eq!(ev.pattern, PatternKind::Preference);
     }
 }

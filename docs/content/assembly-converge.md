@@ -138,7 +138,7 @@ transcripts do not break. New hops should use `ANNOUNCE`.
 **Development** (code artifacts): each peer proposes `ExternalBytes`
 and endorses via `ToolResult`. Halt is quorum on the winning artifact,
 or `--max-rounds`. See
-[AgentBridge → DevelopmentEngine](agentbridge.md#developmentengine-the-coordination-core).
+[AgentBridge → DevelopmentEngine](agentbridge.md#developmentengine).
 
 A future class uses the same phase and a new announce form. Do not
 force every class through `value=<f64>`.
@@ -216,8 +216,8 @@ into `--text`.
 
 | Skill | Folder | When it applies |
 |-------|--------|-----------------|
-| ASSEMBLY | [`skills/assembly/`](https://github.com/agntcy/shadi/tree/main/skills/assembly) | Hop prints `phase=ASSEMBLY` |
-| CONVERGE | [`skills/converge/`](https://github.com/agntcy/shadi/tree/main/skills/converge) | Hop prints `phase=CONVERGE` and the class uses a printed local view |
+| ASSEMBLY | [`skills/assembly/`](../../skills/assembly/SKILL.md) | Hop prints `phase=ASSEMBLY` |
+| CONVERGE | [`skills/converge/`](../../skills/converge/SKILL.md) | Hop prints `phase=CONVERGE` and the class uses a printed local view |
 
 `skills/converge` as shipped teaches the scalar announce / `VOTE`
 form. A class with a different state type (including development)

@@ -197,8 +197,8 @@ The skill only documents existing flags: `list --local`, `delegate`,
 **register** side is a JSON profile under `crates/agentbridge/profiles/`,
 not a new Rust adapter.
 
-ASSEMBLY / CONVERGE hops load [`skills/assembly`](https://github.com/agntcy/shadi/tree/main/skills/assembly)
-and [`skills/converge`](https://github.com/agntcy/shadi/tree/main/skills/converge)
+ASSEMBLY / CONVERGE hops load [`skills/assembly`](../../skills/assembly/SKILL.md)
+and [`skills/converge`](../../skills/converge/SKILL.md)
 the same way. Do not paste those files into `--text`. See
 [ASSEMBLY and CONVERGE](assembly-converge.md#agent-skills).
 
@@ -461,7 +461,7 @@ dispatch used by `delegate`, `handoff --from/--to slim:…`, and
 `coordinate` over SLIM or official A2A unicast. `CliToolAdapter` is
 AgentBridge’s `ToolAdapter` over a local CLI profile.
 
-### `DevelopmentEngine` — the coordination core
+### DevelopmentEngine
 
 `DevelopmentEngine` is the CONVERGE engine for a shared code artifact.
 `agentbridge coordinate --pattern development` (default) stays here.

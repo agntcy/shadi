@@ -242,5 +242,36 @@ mod tests {
         );
         assert_eq!(parse_converge_vote("STOP"), Some(ConvergeDecision::Stop));
         assert_eq!(parse_converge_vote("NEXT goose-1"), None);
+        assert_eq!(parse_announce("ANNOUNCE 3.25 extra"), Some(3.25));
+        assert_eq!(
+            parse_converge_vote("CONTINUE"),
+            Some(ConvergeDecision::Continue)
+        );
+    }
+
+    #[test]
+    fn unmapped_and_higher_is_better() {
+        let mut ctl = ConvergeController::new(ids(), 8, false, 3);
+        ctl.mark_unmapped();
+        assert_eq!(ctl.halt(), Some(ConvergeHalt::Unmapped));
+        assert_eq!(ctl.conclude_votes(), Some(ConvergeHalt::Unmapped));
+
+        let mut stock = ConvergeController::new(ids(), 8, false, 3);
+        stock.begin_epoch();
+        let first = stock.record_metric(Epoch(0), 10.0);
+        assert!(first.improved);
+        let second = stock.record_metric(Epoch(1), 12.0);
+        assert!(second.improved);
+        stock.vote(ConvergeBallot {
+            participant: AgentId::from("ghost"),
+            decision: ConvergeDecision::Stop,
+        });
+        assert_eq!(stock.conclude_votes(), None);
+        stock.begin_epoch();
+        stock.vote(ConvergeBallot {
+            participant: AgentId::from("a"),
+            decision: ConvergeDecision::Continue,
+        });
+        assert_eq!(stock.conclude_votes(), None);
     }
 }

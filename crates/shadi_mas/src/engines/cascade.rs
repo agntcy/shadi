@@ -363,4 +363,117 @@ mod tests {
             EventOutcome::Rejected(RejectReason::IncompatiblePattern)
         );
     }
+
+    #[test]
+    fn scaled_rejects_a_single_stage() {
+        assert!(CascadeEngineConfig::scaled(ids(1)).is_err());
+    }
+
+    #[test]
+    fn reject_paths_and_source_aliases() {
+        use crate::types::{EventMetadata, EventSource, SemanticPayload};
+
+        let cfg = CascadeEngineConfig::scaled(ids(2)).expect("cfg");
+        let mut rt = MasRuntime::new(CascadeEngine::new(Epoch(0), cfg));
+        let id0 = rt.engine().config().participants[0].clone();
+        let id1 = rt.engine().config().participants[1].clone();
+
+        assert_eq!(
+            rt.apply(rt.engine().announce_event(&id0, 3, 1.0, "future")),
+            EventOutcome::Deferred {
+                expected: Epoch(0),
+                received: Epoch(3)
+            }
+        );
+
+        let first = rt.engine().announce_event(&id0, 0, 1.0, "dup");
+        assert_eq!(rt.apply(first.clone()), EventOutcome::Applied);
+        assert_eq!(
+            rt.apply(first),
+            EventOutcome::Rejected(RejectReason::DuplicateEvent)
+        );
+        assert_eq!(
+            rt.apply(rt.engine().announce_event(&id0, 0, 2.0, "again")),
+            EventOutcome::Rejected(RejectReason::DuplicateEvent)
+        );
+
+        let mut ghost = rt.engine().announce_event(&id0, 0, 1.0, "ghost");
+        ghost.payload = SemanticPayload::ScalarProposal(ScalarProposal {
+            participant: AgentId::from("ghost"),
+            value: 1.0,
+        });
+        ghost.metadata.source = EventSource::Peer(AgentId::from("ghost"));
+        assert_eq!(
+            rt.apply(ghost),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
+
+        let bytes = SemanticEvent {
+            pattern: PatternKind::Cascade,
+            metadata: EventMetadata {
+                event_id: EventId::from("bytes"),
+                correlation_id: None,
+                epoch: Epoch(0),
+                source: EventSource::Peer(id1.clone()),
+            },
+            payload: SemanticPayload::ExternalBytes(b"nope".to_vec()),
+        };
+        assert_eq!(
+            rt.apply(bytes),
+            EventOutcome::Rejected(RejectReason::IncompatiblePayload)
+        );
+
+        let nan = rt.engine().announce_event(&id1, 0, f64::NAN, "nan");
+        assert_eq!(
+            rt.apply(nan),
+            EventOutcome::Rejected(RejectReason::IncompatiblePayload)
+        );
+
+        let mut local = rt.engine().announce_event(&id1, 0, 4.0, "local");
+        local.metadata.source = EventSource::Local;
+        assert_eq!(
+            rt.apply(local),
+            EventOutcome::Finalized(FinalizationSummary {
+                epoch: Epoch(0),
+                participants: 2,
+                selected_value: 2,
+            })
+        );
+
+        let mut tool = rt.engine().announce_event(&id0, 1, 4.0, "tool");
+        tool.metadata.source = EventSource::Tool(id0.0.clone());
+        assert_eq!(rt.apply(tool), EventOutcome::Applied);
+        let mut task = rt.engine().announce_event(&id1, 1, 4.0, "task");
+        task.metadata.source = EventSource::Task("t".into());
+        assert_eq!(
+            rt.apply(task),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
+        let mut recovery = rt.engine().announce_event(&id1, 1, 4.0, "rec");
+        recovery.metadata.source = EventSource::Recovery;
+        assert_eq!(
+            rt.apply(recovery),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
+    }
+
+    #[test]
+    fn surface_and_formula_are_defined() {
+        let cfg = CascadeEngineConfig::scaled(ids(3)).expect("cfg");
+        let engine = CascadeEngine::new(Epoch(0), cfg);
+        let id = engine.config().participants[0].clone();
+        let unknown = AgentId::from("ghost");
+        assert_eq!(engine.pattern(), PatternKind::Cascade);
+        assert!(engine.lower_is_better());
+        assert_eq!(engine.current_value(&id), Some(4.0));
+        assert_eq!(engine.current_value(&unknown), None);
+        assert!(engine.local_view(&id).contains("last_order="));
+        assert!(engine.local_view(&unknown).is_empty());
+        assert_eq!(engine.inventory().len(), 3);
+        assert_eq!(engine.last_q().len(), 3);
+        assert!(engine.formula_value(0) >= 0.0);
+        assert!(engine.formula_value(2) >= 0.0);
+        assert_eq!(engine.config().paper_horizon(), 8);
+        assert_eq!(engine.counters().applied, 0);
+    }
 }
