@@ -57,6 +57,11 @@ enum Cmd {
         /// Official A2A binding for `--a2a-listen`: grpc, jsonrpc, or http+json.
         #[arg(long, default_value = "grpc", value_parser = shadi_a2a::A2ABinding::parse_unicast)]
         a2a_binding: shadi_a2a::A2ABinding,
+
+        /// Print the full text of every A2A request/response instead of a
+        /// truncated one-line preview.
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -201,6 +206,7 @@ fn main() {
             slim_endpoint,
             a2a_listen,
             a2a_binding,
+            verbose,
         } => {
             let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
@@ -214,6 +220,7 @@ fn main() {
                 a2a_listen.as_deref(),
                 a2a_binding,
                 publish_opts,
+                verbose,
             )
         }
         Cmd::List {
@@ -393,10 +400,12 @@ mod tests {
             Cmd::Register {
                 a2a_listen,
                 a2a_binding,
+                verbose,
                 ..
             } => {
                 assert_eq!(a2a_listen.as_deref(), Some("127.0.0.1:50051"));
                 assert_eq!(a2a_binding, shadi_a2a::A2ABinding::Grpc);
+                assert!(!verbose, "--verbose should default to false");
             }
             _ => panic!("expected register subcommand"),
         }
@@ -416,6 +425,19 @@ mod tests {
             Cmd::Register { a2a_binding, .. } => {
                 assert_eq!(a2a_binding, shadi_a2a::A2ABinding::Jsonrpc);
             }
+            _ => panic!("expected register subcommand"),
+        }
+
+        let verbose = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "copilot",
+            "--verbose",
+        ])
+        .expect("parse register verbose");
+        match verbose.command {
+            Cmd::Register { verbose, .. } => assert!(verbose),
             _ => panic!("expected register subcommand"),
         }
 
