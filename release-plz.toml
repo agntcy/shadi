@@ -1,6 +1,9 @@
 [workspace]
 release_always = false
 publish = true
+# A library crate's artifact is the crates.io release; a GitHub release for it
+# carries no assets. Only the two crates that ship binaries get one.
+git_release_enable = false
 publish_no_verify = true
 publish_timeout = "30m"
 
@@ -18,3 +21,11 @@ release = false
 name = "shadi_desktop"
 publish = false
 release = false
+
+[[package]]
+name = "agntcy-shadi-cli"
+git_release_enable = true
+
+[[package]]
+name = "agntcy-agentbridge-cli"
+git_release_enable = true
