@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.2.0...agntcy-agentbridge-v0.2.1) - 2026-09-11
+
+### Added
+
+- *(mas)* add ASSEMBLY and CONVERGE group protocol ([#240](https://github.com/agntcy/shadi/pull/240))
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.1.5...agntcy-agentbridge-v0.2.0) - 2026-09-09
 
 ### Added
