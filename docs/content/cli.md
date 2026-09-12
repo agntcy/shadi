@@ -740,6 +740,8 @@ equivalent of `create`/`invite`.
 ## shadictl slim-mas (`shadictl slim-mas`)
 
 `shadictl slim-mas` evaluates SLIM multi-agent membership rules from a TOML config.
+This is the `slim_mas` crate. It is not [SHADI MAS](shadi-mas.md)
+(`shadi_mas`), which owns coordination engines and ASSEMBLY / CONVERGE.
 
 ### Global flags
 
@@ -781,4 +783,5 @@ Exit codes:
 
 - Walk through a full example in [Sandbox and Policies](sandbox.md) or the [Secure Agent Group Demo](demos/did-agent-group.md).
 - Try the discovery-driven equivalent in the [Agent Directory Discovery Demo](demos/dir-group-discovery.md).
+- Coordination runtime: [SHADI MAS](shadi-mas.md). `agentbridge coordinate --assembly` and `--pattern` are in [ASSEMBLY and CONVERGE](assembly-converge.md#cli).
 - See the underlying security model in [Security Notes](security.md).

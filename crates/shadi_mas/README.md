@@ -1,26 +1,36 @@
 # shadi_mas
 
-`shadi_mas` is the coordination runtime for SHADI multi-agent systems. It owns
-group and coordination semantics: round-tagged events, epoch discipline, duplicate
-and stale-event rejection, finalization rules, and the state machines that drive
-concrete coordination patterns.
+`shadi_mas` (`agntcy-shadi-mas`) is the coordination runtime for SHADI
+multi-agent systems. It owns group semantics: epochs, event discipline,
+finalization, and the engines that apply a class update.
 
-## Role in the SHADI workspace
+The site page is [SHADI MAS](../../docs/content/shadi-mas.md). The two
+group phases are
+[ASSEMBLY and CONVERGE](../../docs/content/assembly-converge.md).
 
+This crate does not own transport, identity, sandboxing, or the
+`agentbridge` CLI. It is also not `slim_mas` (SLIM group membership /
+`shadictl slim-mas`).
+
+## Role
+
+```text
+agentbridge coordinate
+        │
+        ▼
+   MasRuntime<E>
+        │
+        ▼
+ CoordinationEngine     development | preference | cascade | resource
+        │
+        ▼
+ MessagingAdapter / TaskAdapter / ToolAdapter
 ```
-shadi_mas  ←  coordination logic (this crate)
-shadi_a2a  ←  A2A task and agent interaction
-agent_transport_slim  ←  secure MLS-backed messaging transport
-agentbridge ←  CLI coding-agent adapter layer built on top of shadi_mas
-```
 
-Tool integration is modeled as a provider-aware adapter boundary with support
-for both MCP tools and AgentSkills-defined skills, so the same coordination
-runtime works with any LLM backend.
+A `ToolAdapter` may call MCP or an Agent Skill. Engines see
+`SemanticEvent` values only.
 
-## Core abstractions
-
-### `CoordinationEngine` (trait)
+## Event loop
 
 ```rust
 pub trait CoordinationEngine: Send + Sync {
@@ -30,37 +40,46 @@ pub trait CoordinationEngine: Send + Sync {
 }
 ```
 
-Engines consume `SemanticEvent` values and return `EventOutcome`:
-`Applied`, `Deferred`, `Finalized(summary)`, or `Rejected(reason)`.
+`MasRuntime<E>` forwards `apply()` and records every
+`AppliedTransition` on `history()`. Outcomes are `Applied`,
+`Deferred`, `Finalized`, or `Rejected` (duplicate, stale epoch, wrong
+pattern or payload, unknown participant).
 
-### `MasRuntime<E>`
+## ASSEMBLY and CONVERGE
 
-Wraps any engine with history tracking and a single `apply()` entry point.
-History accumulates every `AppliedTransition` for audit and replay.
+- **ASSEMBLY** — `AssemblySession` infers a class from `CLASS <name>`
+  or keywords. An unimplemented token is `PatternKind::Unmapped`.
+- **CONVERGE** — peers announce local state in the form the class
+  requires; the engine applies the update after a full epoch.
 
-### Adapter traits
-
-| Trait | Purpose |
-|-------|---------|
-| `MessagingAdapter` | Publish events to SLIM topics (real or recording) |
-| `TaskAdapter` | Dispatch A2A tasks (real or recording) |
-| `ToolAdapter` | Invoke LLM tools via MCP or AgentSkills |
+The protocol is not limited to numbers. `DevelopmentEngine` is CONVERGE
+for a code artifact. The paper examples use `ConvergeController`.
+`Unmapped` must not start a solver. Do not claim an LLM proved a
+theorem (`proves_llm_mas` is not a runtime flag).
 
 ## Engines
 
-### `PreferenceEngine`
+| Engine | Local state | Finalization |
+|--------|-------------|--------------|
+| `DevelopmentEngine` | `ExternalBytes` artifact | Quorum of `ToolResult` endorsements |
+| `PreferenceEngine` | `ScalarProposal` (`z_i`) | Jacobi step on a full inbox |
+| `CascadeEngine` | last order | Order-up-to + smoothing |
+| `ResourceEngine` | last extraction | Dual step and stock |
 
-Aggregates numeric proposals (votes) per epoch and finalizes with the median
-when a quorum is reached. Used for consensus on scalar decisions.
+`PreferenceEngine` is not a median vote. After a full epoch it sets
 
-### `DevelopmentEngine`
+```text
+z_i ← (c_i + 2β Σ_{j∈N_i} z_j) / (1 + 2β d_i)
+```
 
-Coordinates multiple agents toward a shared code artifact:
+The unique fixed point is `z* = (I + 2β L)⁻¹ c`.
 
-- Each agent submits a code proposal via `SemanticPayload::ExternalBytes`.
-- Agents endorse proposals via `SemanticPayload::ToolResult { accepted: true }`.
-- Finalization selects the artifact with the most endorsements when quorum is met.
-- `max_rounds` provides a safety cutoff to prevent infinite loops.
+`agentbridge coordinate --pattern development` (default) uses
+`DevelopmentEngine`. `--pattern preference|cascade|resource` uses the
+scalar CONVERGE driver. `--assembly` infers the class first.
+
+To add a class: implement `CoordinationEngine` under `src/engines/`,
+export it from `engines/mod.rs`, and add a `PatternKind` variant.
 
 ```rust
 let config = DevelopmentEngineConfig::new(
@@ -70,11 +89,8 @@ let config = DevelopmentEngineConfig::new(
 );
 let mut runtime = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
 
-// Each agent submits a proposal.
 runtime.apply(dev_event("claude", b"fn parse(input: &str) -> Ast { ... }"));
 runtime.apply(dev_event("copilot", b"fn parse(s: &str) -> Result<Ast> { ... }"));
-
-// Votes determine the winner; quorum triggers finalization.
 runtime.apply(vote_event("codex", "copilot"));
 runtime.apply(dev_event("codex", b"fn parse(s: &str) -> Option<Ast> { ... }"));
 // → EventOutcome::Finalized(summary)
@@ -82,44 +98,25 @@ runtime.apply(dev_event("codex", b"fn parse(s: &str) -> Option<Ast> { ... }"));
 let winner = runtime.engine().selected_artifact(Epoch(0)).unwrap();
 ```
 
-### Extending with new engines
+## Adapters
 
-Add `crates/shadi_mas/src/engines/<pattern>.rs`, implement `CoordinationEngine`,
-and export from `engines/mod.rs`. The runtime, adapter, and test infrastructure
-work without modification.
+Traits in `adapters.rs`: `MessagingAdapter`, `TaskAdapter`,
+`ToolAdapter`.
 
-## Experiments module
+`shadi_mas::experiments` provides `RecordingMessagingAdapter`,
+`RecordingTaskAdapter`, and `LiveA2ATaskAdapter` (A2A over SLIMRPC or
+official unicast, DID-proof envelopes, `AUTH_REQUIRED` handling).
+AgentBridge supplies `CliToolAdapter`.
 
-`shadi_mas::experiments` contains:
+`LiveA2ATaskAdapter` uses TLS 1.3 and SLIM client certificates from
+`SLIM_TLS_CERT` / `SLIM_TLS_KEY` / `SLIM_TLS_CA` or
+`$SHADI_TMP_DIR/shadi-slim-mtls/`. Verify those files
+(`openssl x509 -text -noout -in <cert>`): not expired; RSA ≥ 2048 or
+P-256+; SHA-2 signatures; self-signed only for lab. Do not hardcode
+certificates or keys.
 
-- **`RecordingMessagingAdapter`** / **`RecordingTaskAdapter`** / **`RecordingToolAdapter`** — in-memory test doubles with full inspection.
-- **`LiveSlimMessagingAdapter`** — real SLIM group or point-to-point transport.
-- **`LiveA2ATaskAdapter`** — real A2A task dispatch over SLIMRPC.
-- **`CommandToolAdapter`** — invokes an external LLM (Ollama, etc.) via subprocess stdin/stdout.
-- `run_preference_experiment_with_adapters`, `run_cascade_experiment_with_adapters`, `run_resource_experiment_with_adapters` — full coordination loops usable in examples and integration tests.
-
-## Examples
-
-```bash
-# Preference consensus over recording adapters (no infrastructure needed)
-cargo run --example preference_experiment -p agntcy-shadi-mas
-
-# Cascade supply-chain coordination
-cargo run --example cascade_experiment -p agntcy-shadi-mas
-
-# Resource extraction governance
-cargo run --example resource_experiment -p agntcy-shadi-mas
-
-# Live protocol spotcheck (needs slimctl + Ollama)
-cargo run --example mas_live_protocol_spotcheck -p agntcy-shadi-mas
-```
-
-## Integration tests
-
-`tests/integration_slim.rs` exercises live adapters against a real SLIM node
-started via `slimctl slim start`. Requires pre-generated mTLS certs
-(`tools/generate_slim_mtls_certs.sh`) and `slimctl` in PATH.
+## Tests
 
 ```bash
-cargo test -p agntcy-shadi-mas --test integration_slim -- --test-threads=1
+cargo test -p agntcy-shadi-mas --lib
 ```

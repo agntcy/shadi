@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Crate README now matches the tree and points at
+  [SHADI MAS](../../docs/content/shadi-mas.md). Dropped example binaries
+  and adapter names that are not in this crate. Distinguished
+  `shadi_mas` from `slim_mas`.
+
+### Added
+
+- `PreferenceEngine` applies the synchronous Jacobi preference step on
+  epoch-tagged `ScalarProposal` values and rejects stale or replayed
+  announcements. This is not a median vote.
+- ASSEMBLY (`AssemblySession`) and CONVERGE (`ConvergeController`,
+  `CascadeEngine`, `ResourceEngine`). See
+  [ASSEMBLY and CONVERGE](../../docs/content/assembly-converge.md).
+  ASSEMBLY may name classes beyond the implemented examples; `Unmapped`
+  does not run a solver. Paper CONVERGE engines apply the class update
+  after a full epoch and halt on STOP, plateau, or the class horizon.
+  `DevelopmentEngine` is CONVERGE for a code artifact.
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-mas-v0.1.5...agntcy-shadi-mas-v0.2.0) - 2026-09-09
 
 ### Added

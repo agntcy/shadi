@@ -57,6 +57,11 @@ enum Cmd {
         /// Official A2A binding for `--a2a-listen`: grpc, jsonrpc, or http+json.
         #[arg(long, default_value = "grpc", value_parser = shadi_a2a::A2ABinding::parse_unicast)]
         a2a_binding: shadi_a2a::A2ABinding,
+
+        /// Print the full text of every A2A request/response instead of a
+        /// truncated one-line preview.
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -165,6 +170,16 @@ enum Cmd {
         /// SLIM_MEMBER_DIDS) — shared secrets are not supported.
         #[arg(long, env = "SLIM_ENDPOINT", default_value = "127.0.0.1:47357")]
         slim_endpoint: String,
+
+        /// Coordination pattern. Each value is a CONVERGE class.
+        /// `development` (default) is propose/vote for code.
+        /// `preference`, `cascade`, and `resource` use the scalar paper driver.
+        #[arg(long, default_value = "development", value_parser = shadi_mas::PatternKind::parse_cli)]
+        pattern: shadi_mas::PatternKind,
+
+        /// Run ASSEMBLY first and infer the CONVERGE class from agent replies.
+        #[arg(long)]
+        assembly: bool,
     },
 }
 
@@ -191,6 +206,7 @@ fn main() {
             slim_endpoint,
             a2a_listen,
             a2a_binding,
+            verbose,
         } => {
             let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
@@ -204,6 +220,7 @@ fn main() {
                 a2a_listen.as_deref(),
                 a2a_binding,
                 publish_opts,
+                verbose,
             )
         }
         Cmd::List {
@@ -247,6 +264,8 @@ fn main() {
             output,
             require_human,
             slim_endpoint,
+            pattern,
+            assembly,
         } => commands::coordinate::run(
             &goal,
             &agents,
@@ -255,6 +274,8 @@ fn main() {
             output.as_deref(),
             require_human,
             &slim_endpoint,
+            pattern,
+            assembly,
         ),
     };
 
@@ -300,11 +321,40 @@ mod tests {
                 goal,
                 agents,
                 quorum,
+                pattern,
+                assembly,
                 ..
             } => {
                 assert_eq!(goal, "build a parser");
                 assert_eq!(agents, ["claude-code", "copilot"]);
                 assert_eq!(quorum, 2);
+                assert_eq!(pattern, shadi_mas::PatternKind::Development);
+                assert!(!assembly);
+            }
+            _ => panic!("expected coordinate subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_coordinate_converge_pattern_and_assembly() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "coordinate",
+            "--goal",
+            "share a renewable stock",
+            "--agents",
+            "goose,goose",
+            "--pattern",
+            "resource",
+            "--assembly",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Coordinate {
+                pattern, assembly, ..
+            } => {
+                assert_eq!(pattern, shadi_mas::PatternKind::Resource);
+                assert!(assembly);
             }
             _ => panic!("expected coordinate subcommand"),
         }
@@ -350,10 +400,12 @@ mod tests {
             Cmd::Register {
                 a2a_listen,
                 a2a_binding,
+                verbose,
                 ..
             } => {
                 assert_eq!(a2a_listen.as_deref(), Some("127.0.0.1:50051"));
                 assert_eq!(a2a_binding, shadi_a2a::A2ABinding::Grpc);
+                assert!(!verbose, "--verbose should default to false");
             }
             _ => panic!("expected register subcommand"),
         }
@@ -373,6 +425,19 @@ mod tests {
             Cmd::Register { a2a_binding, .. } => {
                 assert_eq!(a2a_binding, shadi_a2a::A2ABinding::Jsonrpc);
             }
+            _ => panic!("expected register subcommand"),
+        }
+
+        let verbose = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "copilot",
+            "--verbose",
+        ])
+        .expect("parse register verbose");
+        match verbose.command {
+            Cmd::Register { verbose, .. } => assert!(verbose),
             _ => panic!("expected register subcommand"),
         }
 

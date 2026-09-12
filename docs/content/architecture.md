@@ -40,6 +40,7 @@ flowchart TB
     Enforcement[OS sandbox enforcement]
     Memory[Encrypted local memory]
     Transport[Secure agent transport]
+    Coordination[SHADI MAS coordination]
   end
 
   subgraph Workloads[Protected workloads]
@@ -64,6 +65,8 @@ flowchart TB
   Delivery -. scoped secret access .-> Agents
   Memory -. encrypted state .-> Agents
   Transport --> Agents
+  Transport --> Coordination
+  Coordination --> Agents
   Agents --> Repos
   Agents --> Models
   Agents --> Peers
@@ -72,7 +75,7 @@ flowchart TB
 The system can be read as four presentation layers:
 
 - **Experience and control**: operators, policies, profiles, and `shadictl` define the launch contract before a process starts.
-- **Secure runtime**: identity, secret control, trusted delivery, sandboxing, transport, and encrypted memory enforce that contract during execution.
+- **Secure runtime**: identity, secret control, trusted delivery, sandboxing, transport, encrypted memory, and SHADI MAS coordination enforce that contract during execution.
 - **Protected workloads**: agents, tools, and automations run inside the approved runtime boundary.
 - **External systems**: workloads connect to GitHub, model providers, and SLIM/A2A peers only after policy and trust checks are in place.
 
@@ -128,6 +131,32 @@ The system can be read as four presentation layers:
   `invite`/`join`).
 - **Verified sessions**: Messages are only sent/received after DID/VC checks.
 
+### Coordination layer (SHADI MAS)
+
+- **Runtime**: `shadi_mas` is the epoch-disciplined coordination crate.
+  `MasRuntime<E>` applies `SemanticEvent` values to a
+  `CoordinationEngine` and records history.
+- **Group phases**: ASSEMBLY infers a class; CONVERGE applies that
+  class’s update. The protocol is not limited to numbers.
+- **Engines**: `DevelopmentEngine` (code artifact), plus the paper
+  examples `PreferenceEngine`, `CascadeEngine`, and `ResourceEngine`.
+  `Unmapped` has no solver.
+- **Not `slim_mas`**: that crate evaluates SLIM group membership
+  (`shadictl slim-mas`). SHADI MAS decides how an admitted roster
+  advances a shared problem.
+
+See [SHADI MAS](shadi-mas.md) for the event loop, adapters, and file
+map, and [ASSEMBLY and CONVERGE](assembly-converge.md) for the protocol.
+
+??? note "Code map (SHADI MAS)"
+
+    - `crates/shadi_mas/src/runtime.rs`: `CoordinationEngine`, `MasRuntime`.
+    - `crates/shadi_mas/src/types.rs`: `PatternKind`, `SemanticEvent`, outcomes.
+    - `crates/shadi_mas/src/assembly.rs`: `AssemblySession`.
+    - `crates/shadi_mas/src/engines/`: class engines and `ConvergeController`.
+    - `crates/shadi_mas/src/adapters.rs`: Messaging / Task / Tool traits.
+    - `crates/shadi_mas/src/experiments/`: recording adapters, `LiveA2ATaskAdapter`.
+
 ### Secret delivery and policy framework
 
 SHADI has a launch-time secret-delivery framework with exact executable
@@ -175,6 +204,12 @@ delivery, and the prompt-injection boundary, see
     - `crates/agent_transport_slim/src/lib.rs`: transport adapter, verifier gating, and native SLIM session bootstrap.
     - `crates/agent_transport_slim/src/bin/slim-stdio-bridge.rs`: standalone stdio bridge helper; the same bridge engine is now used directly by shadictl for in-sandbox SLIM sessions.
 
+    **Coordination layer (SHADI MAS)**
+
+    - `crates/shadi_mas/src/runtime.rs`: `CoordinationEngine`, `MasRuntime`.
+    - `crates/shadi_mas/src/types.rs`: `PatternKind`, `SemanticEvent`, outcomes.
+    - `crates/shadi_mas/src/engines/`: class engines and `ConvergeController`.
+
     **Secret delivery and policy framework**
 
     - `crates/shadictl/src/trusted_secret_delivery.rs`: secret resolution, exact-program matching, broker lifecycle, and delegated child verification.
@@ -202,4 +237,5 @@ The CLI combines profile defaults, policy file settings, and explicit flags:
 - Review the full threat model, secret-delivery rationale, and residual risks in [Security Notes](security.md).
 - Put this into practice with [Sandbox and Policies](sandbox.md) and the [CLI Reference](cli.md).
 - Integrate into an agent or app via the [API Guide](api_integration.md).
-- See the multi-agent coordination layer and general-purpose A2A agent interconnect in [AgentBridge](agentbridge.md).
+- See the coordination runtime in [SHADI MAS](shadi-mas.md) and the group protocol in [ASSEMBLY and CONVERGE](assembly-converge.md).
+- See the general-purpose A2A agent interconnect in [AgentBridge](agentbridge.md).
