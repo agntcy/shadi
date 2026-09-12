@@ -112,7 +112,7 @@ The system can be read as four presentation layers:
 - **Portable launcher model**: `shadi` supports built-in profiles
   (`strict`, `balanced`, `connected`) for portable secure launch defaults.
 - **Launch-time enforcement**: Policy is resolved before the agent process starts, so the sandbox is not a prompt-level suggestion that the agent can rewrite from inside the session.
-- **Operational hardening**: macOS launcher support now resolves relative paths before emitting Seatbelt rules and accounts for required local IPC paths such as 1Password, SLIM runtime state, and temporary trusted-secret broker endpoints.
+- **Operational hardening**: macOS launcher support resolves relative paths before emitting Seatbelt rules, emits `/private` aliases for `/tmp`, `/etc`, and `/var`, and accounts for required local IPC paths such as 1Password, SLIM runtime state, and temporary trusted-secret broker endpoints. `--deny` subtracts from the compiled floor on macOS and Linux.
 
 ### Memory layer
 
@@ -228,9 +228,11 @@ full Rust and Python surface with examples.
 The CLI combines profile defaults, policy file settings, and explicit flags:
 
 - Profile defaults are loaded first (`balanced` by default).
-- Policy file values are merged next.
-- CLI flags override or extend resulting policy.
-- The effective policy can be printed with `--print-policy`.
+- Policy file values are merged next. Policy-file paths expand a leading `~`.
+- CLI flags override or extend resulting policy. `--deny` subtracts from
+  compiled platform defaults and from allows.
+- The effective policy can be printed with `--print-policy` (includes `deny`;
+  does not list the compiled OS read floor).
 
 ## Next steps
 
