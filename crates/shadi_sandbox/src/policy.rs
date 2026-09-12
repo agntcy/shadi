@@ -22,6 +22,7 @@ impl PlatformSandboxProfile {
 pub struct SandboxPolicy {
     allow_read: Vec<PathBuf>,
     allow_write: Vec<PathBuf>,
+    deny: Vec<PathBuf>,
     net_allow: Vec<String>,
     net_block: bool,
     platform_profile: PlatformSandboxProfile,
@@ -114,6 +115,7 @@ impl SandboxPolicy {
         Self {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
+            deny: Vec::new(),
             net_allow: Vec::new(),
             net_block: false,
             platform_profile: PlatformSandboxProfile::Compatibility,
@@ -130,6 +132,27 @@ impl SandboxPolicy {
     pub fn allow_write_path(mut self, path: impl AsRef<Path>) -> Self {
         self.allow_write.push(path.as_ref().to_path_buf());
         self
+    }
+
+    /// Subtract this path from compiled platform defaults and caller allows.
+    /// Seatbelt emits the deny first (first match wins). Landlock drops the
+    /// matching allow root because it cannot carve a hole in a parent grant.
+    pub fn deny_path(mut self, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        if !self.deny.contains(&path) {
+            self.deny.push(path);
+        }
+        self
+    }
+
+    pub fn deny(&self) -> &[PathBuf] {
+        &self.deny
+    }
+
+    pub fn path_is_denied(&self, path: &Path) -> bool {
+        self.deny
+            .iter()
+            .any(|denied| path == denied || path.starts_with(denied))
     }
 
     pub fn block_network(mut self, value: bool) -> Self {

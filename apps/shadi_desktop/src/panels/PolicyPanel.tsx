@@ -51,6 +51,7 @@ interface PolicyDescription {
   platform_profile: string;
   allow_command: string[];
   block_command: string[];
+  deny?: string[];
 }
 
 interface PolicyInputs {
@@ -59,6 +60,7 @@ interface PolicyInputs {
   allow: string[];
   read: string[];
   write: string[];
+  deny?: string[];
   net_block: boolean;
   net_allow: string[];
   allow_command: string[];

@@ -1624,7 +1624,9 @@ fn repo_root() -> Result<PathBuf, String> {
 
 fn blocked_probe_path(repo_root: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
-        PathBuf::from("/private/etc/hosts")
+        // `/private/etc` is a default Seatbelt read path (symlink target of
+        // `/etc`). Use a real file that is not on that list.
+        PathBuf::from("/usr/sbin/sysctl")
     } else if cfg!(target_os = "linux") {
         PathBuf::from("/proc/version")
     } else if cfg!(target_os = "windows") {
@@ -2521,7 +2523,7 @@ mod tests {
 
         let blocked = blocked_probe_path(&root);
         #[cfg(target_os = "macos")]
-        assert_eq!(blocked, PathBuf::from("/private/etc/hosts"));
+        assert_eq!(blocked, PathBuf::from("/usr/sbin/sysctl"));
         #[cfg(target_os = "linux")]
         assert_eq!(blocked, PathBuf::from("/proc/version"));
         #[cfg(target_os = "windows")]
