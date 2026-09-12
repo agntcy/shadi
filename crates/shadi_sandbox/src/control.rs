@@ -14,7 +14,7 @@
 //! [`socket_dir`]. A caller connects, writes one JSON [`ControlMessage`] line,
 //! and reads one JSON [`ControlResponse`] line back.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::policy_patch::{
@@ -25,6 +25,35 @@ use crate::policy_patch::{
 use crate::policy_patch::PatchAxisStatus;
 #[cfg(test)]
 use std::io::Read;
+
+/// Maximum bytes accepted for one control-socket JSON line, including the newline.
+pub const CONTROL_LINE_MAX_BYTES: usize = 64 * 1024;
+
+/// Outcome of [`read_control_line`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlLine {
+    /// Peer closed the write side.
+    Eof,
+    /// A line of at most [`CONTROL_LINE_MAX_BYTES`] was read into the buffer.
+    Line,
+    /// The line exceeded [`CONTROL_LINE_MAX_BYTES`]. Remaining bytes on the
+    /// stream are unsynchronized; the caller should close the connection.
+    TooLong,
+}
+
+/// Read one newline-terminated control line, rejecting anything larger than
+/// [`CONTROL_LINE_MAX_BYTES`].
+pub fn read_control_line<R: BufRead>(reader: &mut R, buf: &mut String) -> io::Result<ControlLine> {
+    buf.clear();
+    let n = io::Read::take(&mut *reader, CONTROL_LINE_MAX_BYTES as u64 + 1).read_line(buf)?;
+    if n == 0 {
+        return Ok(ControlLine::Eof);
+    }
+    if n > CONTROL_LINE_MAX_BYTES {
+        return Ok(ControlLine::TooLong);
+    }
+    Ok(ControlLine::Line)
+}
 
 /// Directory holding control sockets.
 ///
@@ -220,9 +249,17 @@ fn send_message(socket_path: &Path, msg: &ControlMessage) -> Result<ControlRespo
 
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|e| format!("failed to read response: {}", e))?;
+    match read_control_line(&mut reader, &mut line)
+        .map_err(|e| format!("failed to read response: {}", e))?
+    {
+        ControlLine::Line => {}
+        ControlLine::Eof => return Err("empty response".to_string()),
+        ControlLine::TooLong => {
+            return Err(format!(
+                "control line exceeds {CONTROL_LINE_MAX_BYTES} bytes"
+            ));
+        }
+    }
 
     serde_json::from_str(&line).map_err(|e| format!("invalid response: {}", e))
 }
@@ -435,5 +472,28 @@ mod tests {
         assert!(send_terminate(missing).is_err());
         assert!(send_patch(missing, &PolicyPatch::default()).is_err());
         assert!(!is_reachable(missing));
+    }
+
+    #[test]
+    fn read_control_line_accepts_a_short_line() {
+        let mut reader = std::io::Cursor::new(b"{\"type\":\"query_policy\"}\n");
+        let mut buf = String::new();
+        assert_eq!(
+            read_control_line(&mut reader, &mut buf).expect("read"),
+            ControlLine::Line
+        );
+        assert!(buf.starts_with("{\"type\":\"query_policy\"}"));
+    }
+
+    #[test]
+    fn read_control_line_rejects_an_oversize_line() {
+        let mut payload = vec![b'a'; CONTROL_LINE_MAX_BYTES + 2];
+        payload.push(b'\n');
+        let mut reader = std::io::Cursor::new(payload);
+        let mut buf = String::new();
+        assert_eq!(
+            read_control_line(&mut reader, &mut buf).expect("read"),
+            ControlLine::TooLong
+        );
     }
 }
