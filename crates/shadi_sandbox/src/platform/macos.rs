@@ -8,6 +8,9 @@ use std::process::Command;
 
 use crate::{PlatformSandboxProfile, SandboxError, SandboxPolicy, SandboxedChild};
 
+// Compiled read floor for process start. `/etc` is included so TLS and
+// resolver files work; `seatbelt_spellings` also emits `/private/etc`.
+// A caller subtracts with `--deny /etc`. `/tmp` is not on this list.
 const DEFAULT_READ_PATHS: &[&str] = &[
     "/System",
     "/usr/lib",
@@ -18,6 +21,14 @@ const DEFAULT_READ_PATHS: &[&str] = &[
     "/Library",
     "/etc",
     "/opt/homebrew",
+];
+
+/// macOS keeps the historical names as symlinks into `/private`. Seatbelt
+/// matches the kernel-resolved path, so both spellings must be emitted.
+const MACOS_PRIVATE_ALIASES: &[(&str, &str)] = &[
+    ("/tmp", "/private/tmp"),
+    ("/etc", "/private/etc"),
+    ("/var", "/private/var"),
 ];
 
 /// Essential Mach services needed by any sandboxed process on macOS.
@@ -116,11 +127,31 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
         ));
     }
 
+    // Seatbelt is first-match. Emit caller denies before any allow so
+    // `--deny /etc` can subtract a compiled default, and `--deny /etc/hosts`
+    // can carve one file out of the `/etc` read default.
+    for path in policy.deny() {
+        for spelling in seatbelt_spellings(path) {
+            let Some(s) = spelling.to_str() else {
+                return Err(SandboxError::InvalidConfig);
+            };
+            let s = escape_profile_string(s)?;
+            rules.push(format!(
+                "(deny file-read* file-write* file-map-executable (subpath \"{s}\"))"
+            ));
+        }
+    }
+
     for path in DEFAULT_READ_PATHS {
-        rules.push(format!(
-            "(allow file-read* file-map-executable (subpath \"{}\"))",
-            path
-        ));
+        for spelling in seatbelt_spellings(std::path::Path::new(path)) {
+            let Some(s) = spelling.to_str() else {
+                return Err(SandboxError::InvalidConfig);
+            };
+            let s = escape_profile_string(s)?;
+            rules.push(format!(
+                "(allow file-read* file-map-executable (subpath \"{s}\"))"
+            ));
+        }
     }
 
     if compatibility_profile {
@@ -169,6 +200,11 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     // random number generation, and terminal I/O all depend on this.
     rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
 
+    // /tmp is not a compiled default. A caller that needs the shared
+    // scratch dir opts in with `--allow /tmp`; seatbelt_spellings emits
+    // both `/tmp` and `/private/tmp` so canonicalize cannot drop the
+    // literal that `lstat("/tmp")` still uses.
+
     // Allow the per-user TMPDIR unconditionally.  On macOS this is a path
     // under /var/folders/… and is required by virtually every runtime
     // (Node.js, Python, Rust stdlib) for temp file creation, sqlite WAL
@@ -205,44 +241,44 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     }
 
     for path in policy.allow_read() {
-        let abs = resolve_path(path);
-        let Some(s) = abs.to_str() else {
-            return Err(SandboxError::InvalidConfig);
-        };
-        let s = escape_profile_string(s)?;
-        rules.push(format!(
-            "(allow file-read* file-map-executable (subpath \"{}\"))",
-            s
-        ));
-        // Emit metadata-only (stat/lstat) access for every ancestor of this
-        // read path.  Without this, runtimes that call realpathSync or
-        // equivalent (Node.js, Python, Go) fail with EPERM when trying to
-        // stat parent directories such as /Users that are not themselves in
-        // the read list.  file-read-metadata does not grant access to file
-        // contents or directory listings, only stat/lstat/getxattr on the
-        // literal entry.
-        let mut ancestor = abs.parent();
-        while let Some(p) = ancestor {
-            if p == std::path::Path::new("/") {
-                break; // literal "/" is already covered unconditionally above
+        for abs in seatbelt_spellings(path) {
+            let Some(s) = abs.to_str() else {
+                return Err(SandboxError::InvalidConfig);
+            };
+            let s = escape_profile_string(s)?;
+            rules.push(format!(
+                "(allow file-read* file-map-executable (subpath \"{s}\"))"
+            ));
+            // Emit metadata-only (stat/lstat) access for every ancestor of this
+            // read path.  Without this, runtimes that call realpathSync or
+            // equivalent (Node.js, Python, Go) fail with EPERM when trying to
+            // stat parent directories such as /Users that are not themselves in
+            // the read list.  file-read-metadata does not grant access to file
+            // contents or directory listings, only stat/lstat/getxattr on the
+            // literal entry.
+            let mut ancestor = abs.parent();
+            while let Some(p) = ancestor {
+                if p == std::path::Path::new("/") {
+                    break; // literal "/" is already covered unconditionally above
+                }
+                let Some(ps) = p.to_str() else { break; };
+                let ps = escape_profile_string(ps)?;
+                rules.push(format!("(allow file-read-metadata (literal \"{ps}\"))"));
+                ancestor = p.parent();
             }
-            let Some(ps) = p.to_str() else { break; };
-            let ps = escape_profile_string(ps)?;
-            rules.push(format!("(allow file-read-metadata (literal \"{ps}\"))"));
-            ancestor = p.parent();
         }
     }
 
     for path in policy.allow_write() {
-        let abs = resolve_path(path);
-        let Some(s) = abs.to_str() else {
-            return Err(SandboxError::InvalidConfig);
-        };
-        let s = escape_profile_string(s)?;
-        rules.push(format!(
-            "(allow file-write* file-map-executable (subpath \"{}\"))",
-            s
-        ));
+        for abs in seatbelt_spellings(path) {
+            let Some(s) = abs.to_str() else {
+                return Err(SandboxError::InvalidConfig);
+            };
+            let s = escape_profile_string(s)?;
+            rules.push(format!(
+                "(allow file-write* file-map-executable (subpath \"{s}\"))"
+            ));
+        }
     }
 
     if let Some(proxy_port) = policy.net_proxy_port() {
@@ -321,6 +357,38 @@ fn normalize_path(path: std::path::PathBuf) -> std::path::PathBuf {
                 out.pop();
             }
             c => out.push(c),
+        }
+    }
+    out
+}
+
+fn swap_prefix(path: &std::path::Path, from: &str, to: &str) -> Option<std::path::PathBuf> {
+    let raw = path.to_str()?;
+    if raw == from {
+        return Some(std::path::PathBuf::from(to));
+    }
+    raw.strip_prefix(from)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .map(|rest| std::path::PathBuf::from(format!("{to}{rest}")))
+}
+
+/// Lexical path plus the `/private` symlink alias, so `/tmp` and
+/// `/private/tmp` (and the same pair for `/etc` and `/var`) both match.
+fn seatbelt_spellings(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let lexical = resolve_path(path);
+    let mut out = Vec::new();
+    let mut push = |candidate: std::path::PathBuf| {
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    };
+    push(lexical.clone());
+    for (link, target) in MACOS_PRIVATE_ALIASES {
+        if let Some(mapped) = swap_prefix(&lexical, link, target) {
+            push(mapped);
+        }
+        if let Some(mapped) = swap_prefix(&lexical, target, link) {
+            push(mapped);
         }
     }
     out
@@ -463,6 +531,47 @@ mod tests {
         assert!(profile.contains("/usr/bin"));
         assert!(profile.contains("/bin"));
         assert!(profile.contains("(allow file-read-metadata (literal \"/Users\"))"));
+        assert!(
+            profile.contains("(allow file-read* file-map-executable (subpath \"/etc\"))"),
+            "compiled /etc default"
+        );
+        assert!(
+            profile.contains("(allow file-read* file-map-executable (subpath \"/private/etc\"))"),
+            "/etc must also emit the /private alias"
+        );
+        assert!(
+            !profile.contains("(allow file-read* file-write* (subpath \"/tmp\"))"),
+            "/tmp is opt-in, not a compiled write default"
+        );
+    }
+
+    #[test]
+    fn allow_tmp_emits_symlink_and_target() {
+        let policy = SandboxPolicy::new()
+            .allow_read_path("/tmp")
+            .allow_write_path("/tmp");
+        let profile = build_profile(&policy).unwrap();
+        assert!(profile.contains("(allow file-read* file-map-executable (subpath \"/tmp\"))"));
+        assert!(profile.contains("(allow file-read* file-map-executable (subpath \"/private/tmp\"))"));
+        assert!(profile.contains("(allow file-write* file-map-executable (subpath \"/tmp\"))"));
+        assert!(profile.contains("(allow file-write* file-map-executable (subpath \"/private/tmp\"))"));
+    }
+
+    #[test]
+    fn deny_etc_is_emitted_before_the_compiled_allow() {
+        let policy = SandboxPolicy::new().deny_path("/etc");
+        let profile = build_profile(&policy).unwrap();
+        let deny_etc = profile
+            .find("(deny file-read* file-write* file-map-executable (subpath \"/etc\"))")
+            .expect("deny /etc");
+        let deny_private = profile
+            .find("(deny file-read* file-write* file-map-executable (subpath \"/private/etc\"))")
+            .expect("deny /private/etc");
+        let allow_etc = profile
+            .find("(allow file-read* file-map-executable (subpath \"/etc\"))")
+            .expect("allow /etc still listed after deny");
+        assert!(deny_etc < allow_etc);
+        assert!(deny_private < allow_etc);
     }
 
     #[test]

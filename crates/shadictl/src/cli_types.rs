@@ -19,6 +19,10 @@ pub(crate) struct Cli {
     #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
     pub(crate) write: Vec<PathBuf>,
 
+    /// Subtract a path from compiled platform defaults and from allows.
+    #[arg(long = "deny", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) deny: Vec<PathBuf>,
+
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
 
@@ -560,6 +564,9 @@ pub(crate) struct ConfigShowArgs {
     #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
     pub(crate) write: Vec<PathBuf>,
 
+    #[arg(long = "deny", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) deny: Vec<PathBuf>,
+
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
 
@@ -587,6 +594,9 @@ pub(crate) struct PolicyExplainArgs {
 
     #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
     pub(crate) write: Vec<PathBuf>,
+
+    #[arg(long = "deny", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) deny: Vec<PathBuf>,
 
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
@@ -622,6 +632,9 @@ pub(crate) struct PolicyDiffArgs {
 
     #[arg(long = "write", value_name = "PATH", action = ArgAction::Append)]
     pub(crate) write: Vec<PathBuf>,
+
+    #[arg(long = "deny", value_name = "PATH", action = ArgAction::Append)]
+    pub(crate) deny: Vec<PathBuf>,
 
     #[arg(long = "net-block", action = ArgAction::SetTrue)]
     pub(crate) net_block: bool,
@@ -1038,6 +1051,8 @@ pub(crate) struct PolicyFile {
     pub(crate) read: Vec<String>,
     #[serde(default)]
     pub(crate) write: Vec<String>,
+    #[serde(default)]
+    pub(crate) deny: Vec<String>,
     #[serde(default)]
     pub(crate) net_block: Option<bool>,
     #[serde(default)]

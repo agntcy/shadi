@@ -6,7 +6,7 @@
 # It repeatedly attempts actions that exercise different policy axes:
 # - blocked command execution (`rm`)
 # - blocked network egress (TCP connect via `nc`)
-# - blocked file reads outside the allowlist (`/etc/hosts` or `/private/etc/hosts`)
+# - blocked file reads outside the allowlist (`/usr/sbin/sysctl` or `/etc/hosts`)
 #
 # Usage:
 #   cargo run -p agntcy-shadi-cli -- \
@@ -27,7 +27,7 @@ NETWORK_PROBE_URL=${DEMO_NETWORK_URL:-http://example.com/}
 TCP_PROBE_HOST=${DEMO_TCP_HOST:-1.1.1.1}
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    PROBE_FILE="/private/etc/hosts"
+    PROBE_FILE="/usr/sbin/sysctl"
 else
     PROBE_FILE="/etc/hosts"
 fi
