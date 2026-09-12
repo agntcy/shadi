@@ -222,15 +222,35 @@ impl PathMode {
     }
 }
 
+/// Expand a leading `~` to `$HOME`. Policy files and profile defaults are
+/// plain JSON/string data with no shell to do this for them, unlike
+/// command-line paths (which the shell already expands before argv ever
+/// reaches us).
+fn expand_home(path: &str) -> PathBuf {
+    expand_home_with(path, std::env::var("HOME").ok().as_deref())
+}
+
+fn expand_home_with(path: &str, home: Option<&str>) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => match home {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(path),
+        },
+        None if path == "~" => home.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(path)),
+        None => PathBuf::from(path),
+    }
+}
+
 fn apply_string_paths(
     mut policy: SandboxPolicy,
     paths: &[String],
     mode: PathMode,
 ) -> Result<SandboxPolicy, String> {
     for path in paths.iter() {
-        let path = canonicalize_path(path)
+        let expanded = expand_home(path);
+        let canonical = canonicalize_path(&expanded)
             .map_err(|err| format!("invalid {} path {}: {}", mode.label(), path, err))?;
-        policy = apply_path(policy, &path, &mode);
+        policy = apply_path(policy, &canonical, &mode);
     }
     Ok(policy)
 }
@@ -239,7 +259,7 @@ fn apply_string_paths(
 /// cross-platform preset resolves on every OS.
 fn apply_preset_paths(mut policy: SandboxPolicy, paths: &[String], mode: PathMode) -> SandboxPolicy {
     for path in paths.iter() {
-        if let Ok(canonical) = canonicalize_path(path) {
+        if let Ok(canonical) = canonicalize_path(expand_home(path)) {
             policy = apply_path(policy, &canonical, &mode);
         }
     }
@@ -270,6 +290,52 @@ fn apply_path(policy: SandboxPolicy, path: &PathBuf, mode: &PathMode) -> Sandbox
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn expand_home_replaces_leading_tilde() {
+        assert_eq!(
+            expand_home_with("~/.claude", Some("/Users/mo")),
+            PathBuf::from("/Users/mo/.claude")
+        );
+        assert_eq!(expand_home_with("~", Some("/Users/mo")), PathBuf::from("/Users/mo"));
+    }
+
+    #[test]
+    fn expand_home_leaves_other_paths_and_missing_home_untouched() {
+        assert_eq!(
+            expand_home_with("/already/absolute", Some("/Users/mo")),
+            PathBuf::from("/already/absolute")
+        );
+        assert_eq!(expand_home_with("~/.claude", None), PathBuf::from("~/.claude"));
+    }
+
+    #[test]
+    fn preset_paths_with_a_leading_tilde_resolve_under_home() {
+        let _guard = HOME_LOCK.lock().expect("home lock");
+        let home = tempfile::tempdir().expect("tempdir");
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir(&claude_dir).expect("mkdir");
+
+        let original = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let file_policy = PolicyFileValues {
+            allow: vec!["~/.claude".to_string()],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&PolicyOverrides::default(), &file_policy).expect("resolve");
+        if let Some(value) = original {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        let canonical = canonicalize_path(&claude_dir).expect("canonical");
+        assert!(resolved.policy.allow_read().contains(&canonical));
+        assert!(resolved.policy.allow_write().contains(&canonical));
+    }
 
     #[test]
     fn overrides_layer_over_the_profile() {

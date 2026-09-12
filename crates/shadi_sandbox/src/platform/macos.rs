@@ -8,6 +8,14 @@ use std::process::Command;
 
 use crate::{PlatformSandboxProfile, SandboxError, SandboxPolicy, SandboxedChild};
 
+// `/etc` and `/var` are symlinks to `/private/etc` and `/private/var` on
+// macOS; `resolve_path()` deliberately never resolves symlinks (only `.`/
+// `..` lexical normalization), and Seatbelt's `subpath` matches the
+// kernel-resolved real path, not the symlink literal. A rule for `/etc`
+// alone never matches actual access to `/etc/hosts` — confirmed via a
+// logged `deny(1) file-read-data /private/etc/hosts`. Both the symlink
+// and its target must be listed; the code already does this correctly for
+// `/var/folders` and `/var/select` elsewhere in this file.
 const DEFAULT_READ_PATHS: &[&str] = &[
     "/System",
     "/usr/lib",
@@ -17,6 +25,7 @@ const DEFAULT_READ_PATHS: &[&str] = &[
     "/bin",
     "/Library",
     "/etc",
+    "/private/etc",
     "/opt/homebrew",
 ];
 
@@ -168,6 +177,15 @@ fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     // process may need — shell redirects (2>/dev/null), curl output (-o /dev/null),
     // random number generation, and terminal I/O all depend on this.
     rules.push("(allow file-read* file-write* (subpath \"/dev\"))".to_string());
+
+    // Allow /tmp unconditionally, same tier as /dev — many tools keep
+    // scratch/session state directly under /tmp/<name>, not under $TMPDIR.
+    // Both the symlink and its /private/tmp target need their own rule
+    // (same reason /etc needs /private/etc), so this can't be a caller
+    // `--allow /tmp`: canonicalize_path() would resolve away the literal
+    // before it reaches here.
+    rules.push("(allow file-read* file-write* (subpath \"/tmp\"))".to_string());
+    rules.push("(allow file-read* file-write* (subpath \"/private/tmp\"))".to_string());
 
     // Allow the per-user TMPDIR unconditionally.  On macOS this is a path
     // under /var/folders/… and is required by virtually every runtime
