@@ -10,6 +10,13 @@ mod platform;
 
 pub use control::{read_control_line, ControlLine, CONTROL_LINE_MAX_BYTES};
 pub use net_proxy::{NetAllowlist, NetProxy};
+
+/// Render the Seatbelt profile text for `policy` without calling `sandbox_init`.
+/// Used by the `seatbelt-profile` fuzz target.
+#[cfg(target_os = "macos")]
+pub fn seatbelt_profile_text(policy: &SandboxPolicy) -> Result<String, SandboxError> {
+    platform::macos::build_profile(policy)
+}
 pub use policy::{PlatformSandboxProfile, ProfileDefaults, SandboxPolicy, SandboxProfile};
 pub use resolve::{
     canonicalize_path, default_blocked_commands, describe_policy, is_command_blocked,
