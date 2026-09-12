@@ -82,8 +82,9 @@ Use these defaults as your baseline:
 
 !!! info
 
-    For the full policy model, profile merge rules, and platform-specific
-    behavior, continue to [Sandbox and Policies](sandbox.md).
+    For the full policy model, profile merge rules, compiled OS defaults,
+    `--deny`, and macOS `/private` aliases, continue to
+    [Sandbox and Policies](sandbox.md).
 
 ## Run Your First Sandboxed Command
 

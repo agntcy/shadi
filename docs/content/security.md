@@ -341,7 +341,7 @@ Controls:
     - Protecting against a fully compromised host OS or kernel-level malware.
     - Metadata privacy beyond message content when using SLIM/MLS, or network traffic metadata (timing, sizes, endpoints) in general.
     - ACL changes on Windows could be interrupted before rollback in a crash.
-    - Application-level path deny rules are weaker than OS-enforced sandbox restrictions; do not rely on path matching alone for high-assurance policy.
+    - Application-level path deny rules are weaker than OS-enforced sandbox restrictions; do not rely on path matching alone for high-assurance policy. `shadictl --deny` is enforced by Seatbelt (first match) and Landlock (omit the grant). Landlock cannot carve one file out of a parent allow. Windows records deny in `--print-policy` but does not subtract AppContainer ACLs yet.
 
 !!! tip "Deployment guidance"
 
