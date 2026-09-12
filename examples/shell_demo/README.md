@@ -35,11 +35,11 @@ control socket: /tmp/shadi-ctl-12345.sock
 [demo-agent] pid=12345
 [demo-agent] http probe=http://example.com/
 [demo-agent] tcp  probe=1.1.1.1:80
-[demo-agent] probe file=/private/etc/hosts
+[demo-agent] probe file=/usr/sbin/sysctl
 [demo-agent] tick    1  14:30:00
 [demo-agent] http probe           rc=97  (no output)
 [demo-agent] tcp probe            rc=97  tcp_rc=97
-[demo-agent] file probe           rc=1   head: /private/etc/hosts: Operation not permitted
+[demo-agent] file probe           rc=1   head: /usr/sbin/sysctl: Operation not permitted
 [demo-agent] delete probe         rc=1   rm: /tmp/shadi-demo-marker: Operation not permitted
 ```
 
@@ -110,7 +110,7 @@ shadi(shadi-ctl-12345)> /policy query
 The demo agent is intentionally noisy: every tick it tries three things:
 
 - a TCP connect probe to `1.1.1.1:80` to show network enforcement
-- `head /private/etc/hosts` (macOS) or `head /etc/hosts` (Linux) to show blocked file reads
+- `head /usr/sbin/sysctl` (macOS) or `head /etc/hosts` (Linux) to show blocked file reads
 - `rm -f /tmp/shadi-demo-marker` to show blocked command execution
 
 This lets you demonstrate both immediate and restart-gated policy changes.

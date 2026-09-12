@@ -108,6 +108,7 @@ fn policy_from_config(config: &PolicyConfig) -> Result<SandboxPolicy, String> {
         allow: config.allow.iter().map(PathBuf::from).collect(),
         read: config.read.iter().map(PathBuf::from).collect(),
         write: config.write.iter().map(PathBuf::from).collect(),
+        deny: Vec::new(),
         net_block: config.net_block,
         net_allow: config.net_allow.clone(),
         allow_command: Vec::new(),

@@ -123,7 +123,8 @@ impl LandlockConfig {
             policy.platform_profile() == PlatformSandboxProfile::Compatibility;
 
         for &default in DEFAULT_READ_PATHS {
-            if Path::new(default).exists() {
+            let path = Path::new(default);
+            if !policy.path_is_denied(path) && path.exists() {
                 read_paths.push(default.into());
             }
         }
@@ -142,10 +143,14 @@ impl LandlockConfig {
         }
 
         for p in policy.allow_read() {
-            read_paths.push(p.clone());
+            if !policy.path_is_denied(p) {
+                read_paths.push(p.clone());
+            }
         }
         for p in policy.allow_write() {
-            write_paths.push(p.clone());
+            if !policy.path_is_denied(p) {
+                write_paths.push(p.clone());
+            }
         }
 
         Self {

@@ -138,6 +138,11 @@ cargo run -p agntcy-shadi-cli -- --policy ./sandbox.json -- ./your-agent
 
 CLI flags override policy file settings. Paths are canonicalized before use.
 Profile defaults are applied first, then policy file values, then CLI flags.
+`--deny PATH` (or a policy-file `deny` list) subtracts from compiled platform
+defaults and from allows. On macOS, Seatbelt emits the deny first so it wins
+over a parent grant; `/etc` also emits `/private/etc` (same for `/tmp` and
+`/var`). `/tmp` is not a compiled write default — add `--allow /tmp` or put
+it in the policy `allow` list. `--print-policy` includes the deny list.
 Process-scoped secret rules are matched against the exact resolved executable
 path for the launched command, so a shared policy file can carry secrets for
 multiple entrypoints without making them ambient to every run.
@@ -156,6 +161,7 @@ allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 | `--allow PATH` | Allow read+write under the path. |
 | `--read PATH` | Allow read-only access under the path. |
 | `--write PATH` | Allow write access under the path. |
+| `--deny PATH` | Subtract the path from compiled platform defaults and from allows. |
 | `--net-block` | Block network access. |
 | `--allow-command CMD` | Override default command blocklist. |
 | `--inject-keychain KEY=ENV` | Read a keychain secret and inject it as an env var before sandboxing. |
