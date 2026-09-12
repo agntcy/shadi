@@ -18,6 +18,12 @@ fuzzing for its own sake:
   standing between an arbitrary name and a path-traversal escape out of
   `socket_dir()` is that sanitizer.
 
+- **`policy-patch`** — applies a deserialized `ControlMessage::Patch` to
+  `apply_policy_patch` (the same path `handle_patch` uses after parse).
+  Asserts `extract_host` never leaks a `://` scheme and that filesystem
+  staging lengths match the patch. The control socket also rejects any
+  line larger than `CONTROL_LINE_MAX_BYTES` (64 KiB).
+
 ## Running
 
 ```sh
@@ -25,6 +31,7 @@ cargo install cargo-fuzz
 rustup toolchain install nightly
 cargo +nightly fuzz run control-message
 cargo +nightly fuzz run session-name
+cargo +nightly fuzz run policy-patch
 ```
 
 Both ran clean for 30 seconds (~7.3-7.8M executions each) with no crash

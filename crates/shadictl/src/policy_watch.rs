@@ -35,8 +35,9 @@ use std::os::unix::net::UnixStream;
 use uds_windows::UnixListener;
 
 use shadi_sandbox::{
-    ControlMessage, ControlResponse, NetAllowlist, PatchAxisStatus, PolicyPatch,
-    PolicyPatchResponse, SandboxPolicy,
+    apply_policy_patch, read_control_line, ControlLine, ControlMessage, ControlResponse,
+    NetAllowlist, PatchAxisStatus, PatchState, PolicyPatch, PolicyPatchResponse, SandboxPolicy,
+    CONTROL_LINE_MAX_BYTES,
 };
 
 // The caller's half of this protocol lives in the library, so `shadictl`, the
@@ -83,39 +84,6 @@ impl Drop for ControlSocketHandle {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
-}
-
-/// Strip a URL scheme and path from a net-allow entry, returning just the host.
-///
-/// Users may naturally write `http://httping.org/` but the proxy allowlist
-/// works on hostnames only.  This normalisation makes both equivalent:
-///
-/// ```
-/// // assert_eq!(extract_host("http://httping.org/ping"), "httping.org");
-/// // assert_eq!(extract_host("httping.org"),             "httping.org");
-/// // assert_eq!(extract_host("192.0.2.1"),               "192.0.2.1");  // RFC 5737 TEST-NET
-/// ```
-fn extract_host(dest: &str) -> String {
-    // Strip scheme (e.g. "http://", "https://").
-    let after_scheme = if let Some(pos) = dest.find("://") {
-        &dest[pos + 3..]
-    } else {
-        dest
-    };
-    // Strip trailing path / query / fragment — take up to the first '/'.
-    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-    // Strip port suffix (host:port) — only for non-IPv6 addresses.
-    let host = if host_port.starts_with('[') {
-        // IPv6 literal [::1]:port or [::1]
-        host_port
-            .trim_start_matches('[')
-            .split(']')
-            .next()
-            .unwrap_or(host_port)
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-    host.to_ascii_lowercase()
 }
 
 // ---------------------------------------------------------------------------
@@ -251,9 +219,16 @@ fn handle_stream(stream: impl std::io::Read + std::io::Write, live: &Arc<Mutex<L
 
     loop {
         line_buf.clear();
-        match reader.read_line(&mut line_buf) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
+        match read_control_line(&mut reader, &mut line_buf) {
+            Ok(ControlLine::Eof) => break,
+            Ok(ControlLine::Line) => {}
+            Ok(ControlLine::TooLong) => {
+                let resp = ControlResponse::Error {
+                    message: format!("control line exceeds {CONTROL_LINE_MAX_BYTES} bytes"),
+                };
+                let _ = write_response(reader.get_mut(), &resp);
+                break;
+            }
             Err(_) => break,
         }
 
@@ -386,109 +361,41 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
         }
     };
 
-    let mut commands_status = PatchAxisStatus::Unchanged;
-    let mut fs_status = PatchAxisStatus::Unchanged;
-    let mut net_status = PatchAxisStatus::Unchanged;
-    let mut pending_restart = Vec::new();
-
-    // --- Command allow/block (user-space, immediate) ---
-    let has_cmd_changes = !patch.add_allow_command.is_empty()
-        || !patch.remove_allow_command.is_empty()
-        || !patch.add_block_command.is_empty()
-        || !patch.remove_block_command.is_empty();
-
-    if has_cmd_changes {
-        for cmd in &patch.add_allow_command {
-            guard.allow.insert(cmd.clone());
-        }
-        for cmd in &patch.remove_allow_command {
-            guard.allow.remove(cmd);
-        }
-        for cmd in &patch.add_block_command {
-            guard.blocked.insert(cmd.clone());
-        }
-        for cmd in &patch.remove_block_command {
-            guard.blocked.remove(cmd);
-        }
-        commands_status = PatchAxisStatus::Applied;
-    }
-
-    // --- Filesystem paths (kernel, staged) ---
-    let has_fs_changes =
-        !patch.add_read.is_empty() || !patch.add_write.is_empty() || !patch.add_allow.is_empty();
-
-    if has_fs_changes {
-        guard.staged_read.extend(patch.add_read);
-        guard.staged_write.extend(patch.add_write);
-        guard.staged_allow.extend(patch.add_allow);
-        fs_status = PatchAxisStatus::PendingRestart;
-        pending_restart.push("filesystem".to_string());
-    }
-
-    // --- Network allow ---
-    // When a live proxy allowlist is present the change takes effect immediately
-    // (no restart needed).  Without the proxy the change is staged and requires a
-    // manual restart because the kernel sandbox cannot be updated in place.
-    let has_net_changes = !patch.add_net_allow.is_empty() || !patch.remove_net_allow.is_empty();
-
-    if has_net_changes {
-        let current = guard
+    let has_live_proxy = guard.live_net_allowlist.is_some();
+    let mut state = PatchState {
+        allow: std::mem::take(&mut guard.allow),
+        blocked: std::mem::take(&mut guard.blocked),
+        staged_read: std::mem::take(&mut guard.staged_read),
+        staged_write: std::mem::take(&mut guard.staged_write),
+        staged_allow: std::mem::take(&mut guard.staged_allow),
+        net_allow: guard
             .live_net_allowlist
             .as_ref()
             .map(|al| al.snapshot())
-            .unwrap_or_else(|| guard.policy.net_allow().to_vec());
+            .unwrap_or_else(|| guard.policy.net_allow().to_vec()),
+        has_live_proxy,
+    };
 
-        let mut next_allow = current;
-        for dest in &patch.add_net_allow {
-            let host = extract_host(dest);
-            if !next_allow.contains(&host) {
-                next_allow.push(host);
-            }
-        }
-        for dest in &patch.remove_net_allow {
-            let host = extract_host(dest);
-            next_allow.retain(|d| d != &host);
-        }
+    let result = apply_policy_patch(&mut state, &patch);
 
+    guard.allow = state.allow;
+    guard.blocked = state.blocked;
+    guard.staged_read = state.staged_read;
+    guard.staged_write = state.staged_write;
+    guard.staged_allow = state.staged_allow;
+
+    if result.network == PatchAxisStatus::Applied {
         if let Some(ref al) = guard.live_net_allowlist {
-            // Proxy is running: update the allowlist live — no restart needed.
-            al.update(next_allow.clone());
-            // Also keep the policy in sync so QueryPolicy reflects reality.
-            guard.policy = guard.policy.clone().with_network_destinations(next_allow);
-            net_status = PatchAxisStatus::Applied;
-        } else {
-            // No proxy: network patches cannot be applied live and MUST NOT
-            // trigger a child restart (that would break the running application).
-            // Reject the change so the caller knows it cannot take effect.
-            net_status = PatchAxisStatus::Rejected;
+            al.update(state.net_allow.clone());
+            guard.policy = guard.policy.clone().with_network_destinations(state.net_allow);
         }
     }
 
-    if !pending_restart.is_empty() {
+    if !result.pending_restart.is_empty() {
         guard.restart_requested.store(true, Ordering::SeqCst);
     }
 
-    let accepted = commands_status != PatchAxisStatus::Rejected
-        && fs_status != PatchAxisStatus::Rejected
-        && net_status != PatchAxisStatus::Rejected;
-
-    let message = if pending_restart.is_empty() {
-        "patch applied".to_string()
-    } else {
-        format!(
-            "patch accepted; staged axes ({}) require manual process restart",
-            pending_restart.join(", ")
-        )
-    };
-
-    ControlResponse::PatchResult(PolicyPatchResponse {
-        accepted,
-        filesystem: fs_status,
-        commands: commands_status,
-        network: net_status,
-        message,
-        pending_restart,
-    })
+    ControlResponse::PatchResult(result)
 }
 
 pub(crate) fn snapshot_live_policy(live: &Arc<Mutex<LivePolicy>>) -> Result<SandboxPolicy, String> {
@@ -539,38 +446,38 @@ mod tests {
 
     #[test]
     fn extract_host_handles_bare_hostname() {
-        assert_eq!(extract_host("httping.org"), "httping.org");
+        assert_eq!(shadi_sandbox::extract_host("httping.org"), "httping.org");
     }
 
     #[test]
     fn extract_host_strips_http_scheme() {
-        assert_eq!(extract_host("http://httping.org/"), "httping.org");
+        assert_eq!(shadi_sandbox::extract_host("http://httping.org/"), "httping.org");
     }
 
     #[test]
     fn extract_host_strips_https_scheme_and_path() {
-        assert_eq!(extract_host("https://httping.org/ping?v=1"), "httping.org");
+        assert_eq!(shadi_sandbox::extract_host("https://httping.org/ping?v=1"), "httping.org");
     }
 
     #[test]
     fn extract_host_strips_port() {
-        assert_eq!(extract_host("httping.org:80"), "httping.org");
+        assert_eq!(shadi_sandbox::extract_host("httping.org:80"), "httping.org");
     }
 
     #[test]
     fn extract_host_bare_ip() {
         // 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — reserved for documentation.
-        assert_eq!(extract_host("192.0.2.1"), "192.0.2.1");
+        assert_eq!(shadi_sandbox::extract_host("192.0.2.1"), "192.0.2.1");
     }
 
     #[test]
     fn extract_host_ip_with_scheme_and_path() {
-        assert_eq!(extract_host("http://192.0.2.1/"), "192.0.2.1");
+        assert_eq!(shadi_sandbox::extract_host("http://192.0.2.1/"), "192.0.2.1");
     }
 
     #[test]
     fn extract_host_lowercases() {
-        assert_eq!(extract_host("HTTPing.ORG"), "httping.org");
+        assert_eq!(shadi_sandbox::extract_host("HTTPing.ORG"), "httping.org");
     }
 
     fn wait_for_socket_ready_with_timeout(sock_path: &Path, timeout: std::time::Duration) {
@@ -1368,6 +1275,35 @@ mod tests {
         let mut line = String::new();
         BufReader::new(&stream).read_line(&mut line).expect("read response");
         assert!(!line.trim().is_empty(), "expected a response, got nothing");
+
+        drop(stream);
+        drop(handle);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_socket_rejects_an_oversize_line() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("oversize.sock");
+        let handle = start_control_socket(&sock_path, test_live_policy()).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let mut stream = std::os::unix::net::UnixStream::connect(&sock_path).expect("connect");
+        let mut line = vec![b'x'; CONTROL_LINE_MAX_BYTES + 8];
+        line.push(b'\n');
+        stream.write_all(&line).expect("write oversize");
+        stream.flush().expect("flush");
+
+        let mut response = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut response)
+            .expect("read error");
+        assert!(
+            response.contains("exceeds"),
+            "expected an oversize error, got {response:?}"
+        );
 
         drop(stream);
         drop(handle);

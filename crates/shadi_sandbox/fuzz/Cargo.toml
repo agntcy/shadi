@@ -28,4 +28,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "policy-patch"
+path = "fuzz_targets/policy-patch.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
