@@ -24,6 +24,10 @@ fuzzing for its own sake:
   staging lengths match the patch. The control socket also rejects any
   line larger than `CONTROL_LINE_MAX_BYTES` (64 KiB).
 
+- **`seatbelt-profile`** — builds a Seatbelt profile from fuzzed paths
+  (macOS only) and asserts the generated S-expression has no NUL and
+  escapes quotes. `sandbox_init` is not called.
+
 ## Running
 
 ```sh
@@ -32,6 +36,7 @@ rustup toolchain install nightly
 cargo +nightly fuzz run control-message
 cargo +nightly fuzz run session-name
 cargo +nightly fuzz run policy-patch
+cargo +nightly fuzz run seatbelt-profile
 ```
 
 Both ran clean for 30 seconds (~7.3-7.8M executions each) with no crash

@@ -82,7 +82,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     Ok(SandboxedChild::from_std(child))
 }
 
-fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
+pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     let mut rules = Vec::new();
     let compatibility_profile = policy.platform_profile() == PlatformSandboxProfile::Compatibility;
 
