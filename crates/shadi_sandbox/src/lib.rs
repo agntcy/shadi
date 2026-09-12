@@ -9,7 +9,10 @@ pub mod resolve;
 mod platform;
 
 pub use control::{read_control_line, ControlLine, CONTROL_LINE_MAX_BYTES};
-pub use net_proxy::{NetAllowlist, NetProxy};
+pub use net_proxy::{
+    parse_socks5_connect, parse_socks5_greeting, parse_socks5_request, NetAllowlist, NetProxy,
+    Socks5Connect, Socks5ParseError,
+};
 
 /// Render the Seatbelt profile text for `policy` without calling `sandbox_init`.
 /// Used by the `seatbelt-profile` fuzz target.

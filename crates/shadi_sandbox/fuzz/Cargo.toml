@@ -42,4 +42,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "socks5-frame"
+path = "fuzz_targets/socks5-frame.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
