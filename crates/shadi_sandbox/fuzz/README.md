@@ -1,6 +1,6 @@
 # Fuzz targets
 
-Two targets, each mirroring a real boundary in `shadi_sandbox` rather than
+Each target mirrors a real boundary in `shadi_sandbox` rather than
 fuzzing for its own sake:
 
 - **`control-message`** — parses arbitrary bytes as JSON into a
@@ -28,6 +28,11 @@ fuzzing for its own sake:
   (macOS only) and asserts the generated S-expression has no NUL and
   escapes quotes. `sandbox_init` is not called.
 
+- **`socks5-frame`** — parses SOCKS5 greeting + CONNECT (`parse_socks5_connect`)
+  and checks `NetAllowlist::is_allowed`. Empty allowlist stays deny-all.
+  Domain allocations stay within the RFC 1928 255-byte prefix.
+  `is_ip_allowed` is not called (it does real DNS).
+
 ## Running
 
 ```sh
@@ -37,7 +42,9 @@ cargo +nightly fuzz run control-message
 cargo +nightly fuzz run session-name
 cargo +nightly fuzz run policy-patch
 cargo +nightly fuzz run seatbelt-profile
+cargo +nightly fuzz run socks5-frame
 ```
 
-Both ran clean for 30 seconds (~7.3-7.8M executions each) with no crash
-before this was committed.
+The original `control-message` and `session-name` targets ran clean for
+30 seconds (~7.3-7.8M executions each) with no crash before they were
+committed.
