@@ -8,6 +8,8 @@
 //! allow/block lists) can be applied instantly. Filesystem and network patches
 //! are staged and reported as `PendingRestart` in the response.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 /// An incremental patch to the effective sandbox policy.
@@ -134,6 +136,129 @@ pub enum ControlResponse {
     Error { message: String },
 }
 
+/// Mutable axes a [`PolicyPatch`] can change. The control-socket listener
+/// maps live session state onto this so the apply path can be fuzzed
+/// without a Unix socket or a `Mutex`.
+#[derive(Debug, Clone, Default)]
+pub struct PatchState {
+    pub allow: HashSet<String>,
+    pub blocked: HashSet<String>,
+    pub staged_read: Vec<String>,
+    pub staged_write: Vec<String>,
+    pub staged_allow: Vec<String>,
+    pub net_allow: Vec<String>,
+    /// When false, network changes are rejected (kernel sandbox cannot
+    /// update in place and a restart would kill the workload).
+    pub has_live_proxy: bool,
+}
+
+/// Strip a URL scheme and path from a net-allow entry, returning just the host.
+///
+/// Users may write `http://httping.org/` but the proxy allowlist matches
+/// hostnames only.
+pub fn extract_host(dest: &str) -> String {
+    let after_scheme = if let Some(pos) = dest.find("://") {
+        &dest[pos + 3..]
+    } else {
+        dest
+    };
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = if host_port.starts_with('[') {
+        host_port
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or(host_port)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Apply a patch to [`PatchState`]. Command changes take effect immediately;
+/// filesystem paths are staged; network changes apply only when a live
+/// proxy allowlist is present.
+pub fn apply_policy_patch(state: &mut PatchState, patch: &PolicyPatch) -> PolicyPatchResponse {
+    let mut commands_status = PatchAxisStatus::Unchanged;
+    let mut fs_status = PatchAxisStatus::Unchanged;
+    let mut net_status = PatchAxisStatus::Unchanged;
+    let mut pending_restart = Vec::new();
+
+    let has_cmd_changes = !patch.add_allow_command.is_empty()
+        || !patch.remove_allow_command.is_empty()
+        || !patch.add_block_command.is_empty()
+        || !patch.remove_block_command.is_empty();
+
+    if has_cmd_changes {
+        for cmd in &patch.add_allow_command {
+            state.allow.insert(cmd.clone());
+        }
+        for cmd in &patch.remove_allow_command {
+            state.allow.remove(cmd);
+        }
+        for cmd in &patch.add_block_command {
+            state.blocked.insert(cmd.clone());
+        }
+        for cmd in &patch.remove_block_command {
+            state.blocked.remove(cmd);
+        }
+        commands_status = PatchAxisStatus::Applied;
+    }
+
+    let has_fs_changes =
+        !patch.add_read.is_empty() || !patch.add_write.is_empty() || !patch.add_allow.is_empty();
+
+    if has_fs_changes {
+        state.staged_read.extend(patch.add_read.iter().cloned());
+        state.staged_write.extend(patch.add_write.iter().cloned());
+        state.staged_allow.extend(patch.add_allow.iter().cloned());
+        fs_status = PatchAxisStatus::PendingRestart;
+        pending_restart.push("filesystem".to_string());
+    }
+
+    let has_net_changes = !patch.add_net_allow.is_empty() || !patch.remove_net_allow.is_empty();
+
+    if has_net_changes {
+        if state.has_live_proxy {
+            for dest in &patch.add_net_allow {
+                let host = extract_host(dest);
+                if !state.net_allow.contains(&host) {
+                    state.net_allow.push(host);
+                }
+            }
+            for dest in &patch.remove_net_allow {
+                let host = extract_host(dest);
+                state.net_allow.retain(|d| d != &host);
+            }
+            net_status = PatchAxisStatus::Applied;
+        } else {
+            net_status = PatchAxisStatus::Rejected;
+        }
+    }
+
+    let accepted = commands_status != PatchAxisStatus::Rejected
+        && fs_status != PatchAxisStatus::Rejected
+        && net_status != PatchAxisStatus::Rejected;
+
+    let message = if pending_restart.is_empty() {
+        "patch applied".to_string()
+    } else {
+        format!(
+            "patch accepted; staged axes ({}) require manual process restart",
+            pending_restart.join(", ")
+        )
+    };
+
+    PolicyPatchResponse {
+        accepted,
+        filesystem: fs_status,
+        commands: commands_status,
+        network: net_status,
+        message,
+        pending_restart,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +357,49 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ControlMessage = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(back, ControlMessage::QueryResources));
+    }
+
+    #[test]
+    fn extract_host_strips_scheme_port_and_path() {
+        assert_eq!(extract_host("httping.org"), "httping.org");
+        assert_eq!(extract_host("http://httping.org/"), "httping.org");
+        assert_eq!(extract_host("https://httping.org/ping?v=1"), "httping.org");
+        assert_eq!(extract_host("httping.org:80"), "httping.org");
+        assert_eq!(extract_host("192.0.2.1"), "192.0.2.1");
+        assert_eq!(extract_host("HTTPing.ORG"), "httping.org");
+        assert_eq!(extract_host("[::1]:443"), "::1");
+    }
+
+    #[test]
+    fn apply_policy_patch_stages_fs_and_rejects_net_without_proxy() {
+        let mut state = PatchState::default();
+        let patch = PolicyPatch {
+            add_allow_command: vec!["npm".to_string()],
+            add_read: vec!["/opt/tool".to_string()],
+            add_net_allow: vec!["https://example.com/".to_string()],
+            ..Default::default()
+        };
+        let result = apply_policy_patch(&mut state, &patch);
+        assert!(state.allow.contains("npm"));
+        assert_eq!(state.staged_read, vec!["/opt/tool".to_string()]);
+        assert!(result.pending_restart.contains(&"filesystem".to_string()));
+        assert_eq!(result.network, PatchAxisStatus::Rejected);
+        assert!(state.net_allow.is_empty());
+    }
+
+    #[test]
+    fn apply_policy_patch_normalizes_net_allow_with_proxy() {
+        let mut state = PatchState {
+            has_live_proxy: true,
+            ..Default::default()
+        };
+        let patch = PolicyPatch {
+            add_net_allow: vec!["https://Example.com:443/path".to_string()],
+            ..Default::default()
+        };
+        let result = apply_policy_patch(&mut state, &patch);
+        assert_eq!(result.network, PatchAxisStatus::Applied);
+        assert_eq!(state.net_allow, vec!["example.com".to_string()]);
     }
 
     #[test]
