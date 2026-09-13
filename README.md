@@ -6,6 +6,7 @@
 [![CI](https://github.com/agntcy/shadi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/ci.yml)
 [![Crates](https://github.com/agntcy/shadi/actions/workflows/release-rust.yml/badge.svg?branch=main)](https://github.com/agntcy/shadi/actions/workflows/release-rust.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/agntcy/shadi/badge)](https://scorecard.dev/viewer/?uri=github.com/agntcy/shadi)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14437/badge)](https://www.bestpractices.dev/projects/14437)
 
 **SHADI** (Secure Host for Agentic AI Dynamic Instantiation) hardens *this*
 machine. **AgentBridge** connects agents that may live on this host or on
