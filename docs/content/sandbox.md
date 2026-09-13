@@ -63,8 +63,8 @@ This launch path matters because the agent does not get to reinterpret the
 policy from inside the session:
 
 - Profile defaults establish the baseline (`strict`, `balanced`, or `connected`).
-- Policy JSON adds exact executable rules and file/network allowances.
-- CLI flags override or extend the result.
+- Policy JSON adds exact executable rules, file/network allowances, and optional `deny` paths.
+- CLI flags override or extend the result. `--deny` subtracts from compiled platform defaults and from allows.
 - Secret rules are resolved before spawn so SHADI knows whether a secret is being disclosed, directly trusted-delivered, or delegated to a child.
 - Runtime policy is expanded only as needed, for example to allow a temporary broker endpoint or local Unix socket transport.
 
@@ -78,7 +78,7 @@ Use this matrix as a baseline when selecting a profile:
 | Typical development agent (reads toolchain/system paths) | `balanced` | Keeps network off while allowing common runtime reads. |
 | API-integrated agent (GitHub/LLM calls) | `connected` | Enables network while keeping filesystem policy centralized. |
 
-Then tighten with explicit path flags (`--allow`, `--read`, `--write`) and only open command exceptions with `--allow-command` when strictly required.
+Then tighten with explicit path flags (`--allow`, `--read`, `--write`, `--deny`) and only open command exceptions with `--allow-command` when strictly required.
 
 Print the resolved profile policy:
 
@@ -87,7 +87,10 @@ cargo run -p agntcy-shadi-cli -- --profile balanced --print-policy
 ```
 
 The printed policy now includes `platform_profile`, which is `minimal` on
-macOS and Linux for the built-in launcher profiles.
+macOS and Linux for the built-in launcher profiles, and a `deny` list when
+`--deny` or a policy-file `deny` array is set. It does not list the compiled
+OS read floor; those paths stay readable unless denied. See
+[Compiled defaults, aliases, and deny](#compiled-defaults-aliases-and-deny).
 
 ### JSON Policy
 
@@ -98,6 +101,7 @@ You can pass a JSON policy file to avoid long CLI arguments:
   "allow": ["."],
   "read": ["/opt/homebrew"],
   "write": ["./output"],
+  "deny": ["/etc"],
   "net_block": true,
   "net_allow": ["api.github.com", "127.0.0.1"],
   "allow_command": ["rm"],
@@ -136,8 +140,10 @@ Run it with:
 cargo run -p agntcy-shadi-cli -- --policy ./sandbox.json -- ./your-agent
 ```
 
-CLI flags override policy file settings. Paths are canonicalized before use.
-Profile defaults are applied first, then policy file values, then CLI flags.
+CLI flags override policy file settings. Allow and read/write paths are
+canonicalized before use. Policy-file paths expand a leading `~` to `$HOME`
+(the shell already expands `~` on CLI flags). Profile defaults are applied
+first, then policy file values, then CLI flags.
 Process-scoped secret rules are matched against the exact resolved executable
 path for the launched command, so a shared policy file can carry secrets for
 multiple entrypoints without making them ambient to every run.
@@ -156,6 +162,7 @@ allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 | `--allow PATH` | Allow read+write under the path. |
 | `--read PATH` | Allow read-only access under the path. |
 | `--write PATH` | Allow write access under the path. |
+| `--deny PATH` | Subtract the path from compiled platform defaults and from allows. |
 | `--net-block` | Block network access. |
 | `--allow-command CMD` | Override default command blocklist. |
 | `--inject-keychain KEY=ENV` | Read a keychain secret and inject it as an env var before sandboxing. |
@@ -169,6 +176,60 @@ allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 !!! note
 
     `net_allow` is honored by the Python sandbox runner. It injects a `sitecustomize.py` hook that blocks connections outside the allowlist (best-effort; not OS-enforced).
+
+## Compiled defaults, aliases, and deny
+
+`--allow`, `--read`, and `--write` only add paths. Each OS backend also
+compiles a small read floor so a process can start (dynamic linker, TLS
+trust store, resolver files). That floor is not listed in `--print-policy`.
+`--deny PATH` and a policy-file `deny` array subtract from the floor and
+from caller allows.
+
+### Compiled read floor
+
+| Platform | Readable unless `--deny` matches |
+| --- | --- |
+| macOS | `/System`, `/usr/lib`, `/usr/bin`, `/usr/share`, `/usr/libexec`, `/bin`, `/Library`, `/etc`, `/opt/homebrew` |
+| Linux | `/usr`, `/lib`, `/lib64`, `/etc`, `/proc/self`, `/dev/null`, `/dev/urandom`, `/dev/zero` |
+
+`/tmp` is not a compiled write default. A workload that needs scratch space
+must pass `--allow /tmp` or list `"/tmp"` under `allow`. The Claude Code
+preset (`policies/presets/claude.json`) already includes `/tmp` and
+`/private/tmp`.
+
+### macOS `/private` aliases
+
+Seatbelt `subpath` matches the kernel-resolved path. `/etc`, `/tmp`, and
+`/var` are symlinks into `/private`. For every allow or deny that hits those
+prefixes, the backend emits both spellings:
+
+| Historical name | Kernel path |
+| --- | --- |
+| `/tmp` | `/private/tmp` |
+| `/etc` | `/private/etc` |
+| `/var` | `/private/var` |
+
+`--allow /tmp` therefore covers both `lstat("/tmp")` and `/private/tmp`.
+`--deny /etc` subtracts `/etc` and `/private/etc`.
+
+### How `--deny` is enforced
+
+```bash
+cargo run -p agntcy-shadi-cli -- --deny /etc --print-policy
+```
+
+- **macOS (Seatbelt)**: deny rules are emitted before allows (first match
+  wins). `--deny /etc` turns off the compiled `/etc` read. `--deny /etc/hosts`
+  can carve one file out of the `/etc` default.
+- **Linux (Landlock)**: a denied path is omitted from the grant set.
+  `--deny /etc` drops the compiled `/etc` root. Landlock cannot punch a hole
+  in a parent grant, so `--deny /etc/hosts` does not hide `/etc/hosts` while
+  `/etc` remains allowed.
+- **Windows (AppContainer)**: deny is recorded and shown by `--print-policy`.
+  It is not subtracted from AppContainer ACLs yet.
+
+`config show`, `policy explain`, and `policy diff` accept the same `--deny`
+flag as launch.
 
 ## Git-backed snapshots
 
@@ -392,12 +453,12 @@ Unix-domain sockets can still be selectively allowed.
 ## Notes
 
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
-  to execute processes are allowed for read access.
+  to execute processes are allowed for read access; subtract them with `--deny`.
 - On macOS, the built-in launcher profiles use the minimal Seatbelt platform
   profile by default; broader read allowances should be granted explicitly.
 - Command blocking is enforced before launch in the CLI.
 - Git snapshots are metadata capture only. They do not commit, stage, or rewrite Git history.
-- On macOS, policy paths are resolved to absolute paths before Seatbelt rules are emitted; relative subpaths are not reliable enforcement inputs.
+- On macOS, policy paths are resolved to absolute paths before Seatbelt rules are emitted; relative subpaths are not reliable enforcement inputs. Historical names under `/tmp`, `/etc`, and `/var` also emit their `/private` aliases.
 
 !!! warning "Demo launchers may pre-read secrets outside the sandbox"
 

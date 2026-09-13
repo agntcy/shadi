@@ -26,6 +26,7 @@ cargo run -p agntcy-shadi-cli -- [FLAGS] -- [COMMAND]
 - `--allow PATH`: Allow read+write under PATH (can be repeated).
 - `--read PATH`: Allow read-only access under PATH (can be repeated).
 - `--write PATH`: Allow write access under PATH (can be repeated).
+- `--deny PATH`: Subtract PATH from compiled platform defaults and from allows (can be repeated). See [Sandbox and Policies → Compiled defaults, aliases, and deny](sandbox.md#compiled-defaults-aliases-and-deny).
 - `--net-block`: Block network access.
 - `--net-allow HOST[:PORT]`: Allow network access to a specific host (repeatable).
 - `--allow-command CMD`: Allow a command that is blocked by default (repeatable).
@@ -199,7 +200,9 @@ cargo run -p agntcy-shadi-cli -- --policy ./sandbox.json --print-policy
 On macOS, the built-in `balanced` and `connected` profiles no longer imply a
 root read allowlist. Their resolved policy uses the minimal platform profile by
 default, and `--print-policy` / `config show` / `policy explain` now surface
-that as `platform_profile: "minimal"`.
+that as `platform_profile: "minimal"`. Those commands also accept `--deny` and
+print the resolved `deny` list. They do not list the compiled OS read floor
+(`/etc` on macOS and Linux stays readable unless denied).
 
 Policy files can scope secrets to exact launched executables instead of
 treating them as ambient runtime configuration, via three rule types:

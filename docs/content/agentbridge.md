@@ -409,10 +409,10 @@ Controls:
   enough to confine whatever CLI tool the adapter spawns to run a task.
   agentbridge has no sandboxing code of its own; it leans entirely on the same
   enforcement `shadictl` already provides. The `--read` grant needs the SLIM
-  mTLS client certificate directory so the listener itself can still connect;
-  on macOS, resolve it to its real path first (`/tmp` is a symlink to
-  `/private/tmp`, and Seatbelt's rules don't match a path reached through the
-  symlink if generated for the canonicalized form).
+  mTLS client certificate directory so the listener itself can still connect.
+  On macOS, `--allow /tmp` and `--read /tmp` emit both `/tmp` and
+  `/private/tmp` (Seatbelt matches the kernel-resolved path). Resolving a
+  cert directory with `pwd -P` remains valid.
 - The listener prints a warning on start-up naming the tool that will execute
   incoming tasks.
 - Only expose the listener to trusted SLIM peers (`SLIM_MEMBER_DIDS` decides

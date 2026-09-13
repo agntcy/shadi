@@ -1360,6 +1360,7 @@ mod tests {
             allow: Vec::new(),
             read: Vec::new(),
             write: Vec::new(),
+            deny: Vec::new(),
             net_block: false,
             net_allow: Vec::new(),
             allow_command: Vec::new(),
