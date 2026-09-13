@@ -3,8 +3,9 @@ name: Publish Project Coverage to Codecov
 on:
   push:
     branches: [main]
+  # Every PR, whatever it targets: a PR stacked on another branch still needs
+  # its coverage status, and a required check that never posts blocks forever.
   pull_request:
-    branches: [main]
 
 # Least privilege by default; jobs widen it where they need to.
 permissions:
