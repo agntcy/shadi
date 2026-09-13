@@ -346,76 +346,136 @@ fn accept_loop(
 //     REP 0x02 = not allowed by ruleset
 //     REP 0x04 = host unreachable
 
+/// A parsed SOCKS5 CONNECT request. Address allocations are bounded by the
+/// RFC 1928 length prefix (at most 255 bytes for a domain).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Socks5Connect {
+    pub host: String,
+    pub port: u16,
+    pub is_resolved_ip: bool,
+}
+
+/// Why [`parse_socks5_greeting`] or [`parse_socks5_request`] rejected a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Socks5ParseError {
+    Truncated,
+    BadVersion,
+    NoAcceptableAuth,
+    CommandNotSupported,
+    BadAddressType,
+    InvalidDomain,
+}
+
+/// Parse the SOCKS5 greeting (`VER NMETHODS METHODS…`) and accept no-auth.
+pub fn parse_socks5_greeting<R: Read>(stream: &mut R) -> Result<(), Socks5ParseError> {
+    let mut buf = [0u8; 2];
+    stream
+        .read_exact(&mut buf)
+        .map_err(|_| Socks5ParseError::Truncated)?;
+    if buf[0] != 5 {
+        return Err(Socks5ParseError::BadVersion);
+    }
+    let nmethods = buf[1] as usize;
+    let mut methods = vec![0u8; nmethods];
+    stream
+        .read_exact(&mut methods)
+        .map_err(|_| Socks5ParseError::Truncated)?;
+    if !methods.contains(&0x00) {
+        return Err(Socks5ParseError::NoAcceptableAuth);
+    }
+    Ok(())
+}
+
+/// Parse a SOCKS5 CONNECT request (`VER CMD RSV ATYP DST.ADDR DST.PORT`).
+pub fn parse_socks5_request<R: Read>(stream: &mut R) -> Result<Socks5Connect, Socks5ParseError> {
+    let mut header = [0u8; 4];
+    stream
+        .read_exact(&mut header)
+        .map_err(|_| Socks5ParseError::Truncated)?;
+    if header[0] != 5 || header[1] != 1 {
+        return Err(Socks5ParseError::CommandNotSupported);
+    }
+
+    let atyp = header[3];
+    let (host, is_resolved_ip) = match atyp {
+        0x01 => {
+            let mut addr = [0u8; 4];
+            stream
+                .read_exact(&mut addr)
+                .map_err(|_| Socks5ParseError::Truncated)?;
+            (std::net::Ipv4Addr::from(addr).to_string(), true)
+        }
+        0x03 => {
+            let mut len_byte = [0u8; 1];
+            stream
+                .read_exact(&mut len_byte)
+                .map_err(|_| Socks5ParseError::Truncated)?;
+            let mut name = vec![0u8; len_byte[0] as usize];
+            stream
+                .read_exact(&mut name)
+                .map_err(|_| Socks5ParseError::Truncated)?;
+            let s = String::from_utf8(name).map_err(|_| Socks5ParseError::InvalidDomain)?;
+            (s, false)
+        }
+        0x04 => {
+            let mut addr = [0u8; 16];
+            stream
+                .read_exact(&mut addr)
+                .map_err(|_| Socks5ParseError::Truncated)?;
+            (std::net::Ipv6Addr::from(addr).to_string(), true)
+        }
+        _ => return Err(Socks5ParseError::BadAddressType),
+    };
+
+    let mut port_bytes = [0u8; 2];
+    stream
+        .read_exact(&mut port_bytes)
+        .map_err(|_| Socks5ParseError::Truncated)?;
+    let port = u16::from_be_bytes(port_bytes);
+    Ok(Socks5Connect {
+        host,
+        port,
+        is_resolved_ip,
+    })
+}
+
+/// Parse a pipelined greeting plus CONNECT request from one buffer.
+/// The live proxy still replies to the greeting before reading the request;
+/// this helper exists for the `socks5-frame` fuzz target.
+pub fn parse_socks5_connect<R: Read>(stream: &mut R) -> Result<Socks5Connect, Socks5ParseError> {
+    parse_socks5_greeting(stream)?;
+    parse_socks5_request(stream)
+}
+
 fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
     stream.set_write_timeout(Some(std::time::Duration::from_secs(30))).ok();
 
-    // --- Auth negotiation ---
-    // Read: VER NMETHODS METHOD...
-    let mut buf = [0u8; 2];
-    if stream.read_exact(&mut buf).is_err() || buf[0] != 5 {
-        return;
-    }
-    let nmethods = buf[1] as usize;
-    let mut methods = vec![0u8; nmethods];
-    if stream.read_exact(&mut methods).is_err() {
-        return;
-    }
-    // Accept only no-auth (0x00).  Reject everything else.
-    if !methods.contains(&0x00) {
-        let _ = stream.write_all(&[5, 0xFF]); // no acceptable method
-        return;
-    }
-    if stream.write_all(&[5, 0x00]).is_err() || stream.flush().is_err() {
-        return;
-    }
-
-    // --- Request ---
-    let mut header = [0u8; 4]; // VER CMD RSV ATYP
-    if stream.read_exact(&mut header).is_err() {
-        return;
-    }
-    if header[0] != 5 || header[1] != 1 /* CONNECT */ {
-        // CMD_NOT_SUPPORTED
-        let _ = stream.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]);
-        return;
-    }
-
-    let atyp = header[3];
-    // `host` is the address to connect to; `is_resolved_ip` is true when the
-    // client already resolved DNS and sent a raw IP (ATYP=0x01/0x04).  In that
-    // case we use `is_ip_allowed` which falls back to resolving allowlist
-    // hostnames so that hostname-based entries still work.
-    let (host, is_resolved_ip): (String, bool) = match atyp {
-        0x01 => {
-            // IPv4
-            let mut addr = [0u8; 4];
-            if stream.read_exact(&mut addr).is_err() { return; }
-            (std::net::Ipv4Addr::from(addr).to_string(), true)
-        }
-        0x03 => {
-            // Domain name: 1-byte length prefix
-            let mut len_byte = [0u8; 1];
-            if stream.read_exact(&mut len_byte).is_err() { return; }
-            let mut name = vec![0u8; len_byte[0] as usize];
-            if stream.read_exact(&mut name).is_err() { return; }
-            match String::from_utf8(name) {
-                Ok(s) => (s, false),
-                Err(_) => return,
+    match parse_socks5_greeting(&mut stream) {
+        Ok(()) => {
+            if stream.write_all(&[5, 0x00]).is_err() || stream.flush().is_err() {
+                return;
             }
         }
-        0x04 => {
-            // IPv6
-            let mut addr = [0u8; 16];
-            if stream.read_exact(&mut addr).is_err() { return; }
-            (std::net::Ipv6Addr::from(addr).to_string(), true)
+        Err(Socks5ParseError::NoAcceptableAuth) => {
+            let _ = stream.write_all(&[5, 0xFF]);
+            return;
         }
-        _ => return,
+        Err(_) => return,
+    }
+
+    let request = match parse_socks5_request(&mut stream) {
+        Ok(request) => request,
+        Err(Socks5ParseError::CommandNotSupported) => {
+            let _ = stream.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]);
+            return;
+        }
+        Err(_) => return,
     };
 
-    let mut port_bytes = [0u8; 2];
-    if stream.read_exact(&mut port_bytes).is_err() { return; }
-    let port = u16::from_be_bytes(port_bytes);
+    let host = request.host;
+    let port = request.port;
+    let is_resolved_ip = request.is_resolved_ip;
 
     // --- Policy check ---
     let (allowed, atyp_label) = {
@@ -544,6 +604,77 @@ mod tests {
     #[test]
     fn is_host_allowed_empty_list_blocks_all() {
         assert!(!is_host_allowed("api.openai.com", &[]));
+        assert!(!NetAllowlist::new(vec![]).is_allowed("api.openai.com"));
+    }
+
+    fn socks5_ipv4_frame(ip: [u8; 4], port: u16) -> Vec<u8> {
+        let mut frame = vec![5, 1, 0, 5, 1, 0, 1];
+        frame.extend_from_slice(&ip);
+        frame.extend_from_slice(&port.to_be_bytes());
+        frame
+    }
+
+    fn socks5_domain_frame(host: &str, port: u16) -> Vec<u8> {
+        let name = host.as_bytes();
+        let mut frame = vec![5, 1, 0, 5, 1, 0, 3, name.len() as u8];
+        frame.extend_from_slice(name);
+        frame.extend_from_slice(&port.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn parse_socks5_connect_reads_ipv4_and_domain() {
+        let mut ipv4 = std::io::Cursor::new(socks5_ipv4_frame([127, 0, 0, 1], 443));
+        let parsed = parse_socks5_connect(&mut ipv4).expect("ipv4");
+        assert_eq!(
+            parsed,
+            Socks5Connect {
+                host: "127.0.0.1".into(),
+                port: 443,
+                is_resolved_ip: true,
+            }
+        );
+
+        let mut domain = std::io::Cursor::new(socks5_domain_frame("api.openai.com", 80));
+        let parsed = parse_socks5_connect(&mut domain).expect("domain");
+        assert_eq!(
+            parsed,
+            Socks5Connect {
+                host: "api.openai.com".into(),
+                port: 80,
+                is_resolved_ip: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_socks5_connect_rejects_truncated_and_invalid_frames() {
+        assert_eq!(
+            parse_socks5_connect(&mut std::io::Cursor::new([5u8, 1])),
+            Err(Socks5ParseError::Truncated)
+        );
+        assert_eq!(
+            parse_socks5_connect(&mut std::io::Cursor::new([4u8, 1, 0])),
+            Err(Socks5ParseError::BadVersion)
+        );
+        assert_eq!(
+            parse_socks5_connect(&mut std::io::Cursor::new([5u8, 1, 0x02])),
+            Err(Socks5ParseError::NoAcceptableAuth)
+        );
+        assert_eq!(
+            parse_socks5_connect(&mut std::io::Cursor::new([5u8, 1, 0, 5, 2, 0, 1])),
+            Err(Socks5ParseError::CommandNotSupported)
+        );
+        assert_eq!(
+            parse_socks5_connect(&mut std::io::Cursor::new([5u8, 1, 0, 5, 1, 0, 0x05])),
+            Err(Socks5ParseError::BadAddressType)
+        );
+        assert_eq!(
+            parse_socks5_connect(&mut std::io::Cursor::new([
+                5, 1, 0, 5, 1, 0, 3, 2, 0xff, 0xfe, 0, 80
+            ])),
+            Err(Socks5ParseError::InvalidDomain)
+        );
     }
 
     #[test]
