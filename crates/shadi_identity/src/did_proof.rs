@@ -15,6 +15,12 @@ use ed25519_dalek::Signature;
 const MAGIC: &[u8] = b"SHADI-DID-PROOF/1";
 const DOMAIN: &[u8] = b"SHADI-DID-PROOF/1";
 
+/// Maximum inner payload accepted by [`wrap_signed_message`] / [`unwrap_signed_message`].
+pub const DID_PROOF_PAYLOAD_MAX_BYTES: usize = 1024 * 1024;
+
+/// Maximum DID or signature header line in a DID-proof envelope.
+pub const DID_PROOF_HEADER_MAX_BYTES: usize = 1024;
+
 /// Payload plus the `did:key` that signed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedPayload {
@@ -32,6 +38,11 @@ pub fn wrap_signed_message(
     identity: &AgentIdentity,
     payload: &[u8],
 ) -> Result<Vec<u8>, IdentityError> {
+    if payload.len() > DID_PROOF_PAYLOAD_MAX_BYTES {
+        return Err(IdentityError::Proof(format!(
+            "DID-proof payload exceeds {DID_PROOF_PAYLOAD_MAX_BYTES} bytes"
+        )));
+    }
     let did = identity.did();
     let sig = identity.sign_bytes(&canonical(&did, payload));
     let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
@@ -134,6 +145,12 @@ fn split_envelope(bytes: &[u8]) -> Result<(String, String, &[u8]), IdentityError
     if magic != MAGIC {
         return Err(IdentityError::Proof("bad DID-proof magic".to_string()));
     }
+    if headers[1].len() > DID_PROOF_HEADER_MAX_BYTES || headers[2].len() > DID_PROOF_HEADER_MAX_BYTES
+    {
+        return Err(IdentityError::Proof(
+            "DID-proof header exceeds size limit".to_string(),
+        ));
+    }
     let did = std::str::from_utf8(headers[1])
         .map_err(|_| IdentityError::Proof("DID is not UTF-8".to_string()))?
         .to_string();
@@ -145,7 +162,13 @@ fn split_envelope(bytes: &[u8]) -> Result<(String, String, &[u8]), IdentityError
             "DID-proof envelope missing DID or signature".to_string(),
         ));
     }
-    Ok((did, sig, &bytes[start..]))
+    let payload = &bytes[start..];
+    if payload.len() > DID_PROOF_PAYLOAD_MAX_BYTES {
+        return Err(IdentityError::Proof(format!(
+            "DID-proof payload exceeds {DID_PROOF_PAYLOAD_MAX_BYTES} bytes"
+        )));
+    }
+    Ok((did, sig, payload))
 }
 
 #[cfg(test)]
@@ -226,6 +249,12 @@ mod tests {
         assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"", b"x")).is_err());
         assert!(unwrap_signed_message(&raw_envelope(b"did:key:\xff", b"c2ln", b"x")).is_err());
         assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"sig\xff", b"x")).is_err());
+        let huge_did = vec![b'a'; DID_PROOF_HEADER_MAX_BYTES + 1];
+        assert!(unwrap_signed_message(&raw_envelope(&huge_did, b"c2ln", b"x")).is_err());
+        let huge_payload = vec![b'x'; DID_PROOF_PAYLOAD_MAX_BYTES + 1];
+        assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"c2ln", &huge_payload)).is_err());
+        let id = AgentIdentity::generate().unwrap();
+        assert!(wrap_signed_message(&id, &huge_payload).is_err());
     }
 
     #[test]
