@@ -294,4 +294,49 @@ mod tests {
             other => panic!("expected Proof, got {other}"),
         }
     }
+
+    #[test]
+    fn wrap_rejects_a_payload_over_the_size_limit() {
+        let id = AgentIdentity::generate().unwrap();
+        let oversized = vec![b'x'; DID_PROOF_PAYLOAD_MAX_BYTES + 1];
+        let err = wrap_signed_message(&id, &oversized).unwrap_err();
+        match err {
+            IdentityError::Proof(msg) => assert!(msg.contains("payload exceeds"), "{msg}"),
+            other => panic!("expected Proof, got {other}"),
+        }
+        // The limit itself still wraps, so the guard is off-by-one safe.
+        wrap_signed_message(&id, &vec![b'x'; DID_PROOF_PAYLOAD_MAX_BYTES]).unwrap();
+    }
+
+    #[test]
+    fn unwrap_rejects_a_header_over_the_size_limit() {
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(MAGIC);
+        envelope.push(b'\n');
+        envelope.extend_from_slice(&vec![b'd'; DID_PROOF_HEADER_MAX_BYTES + 1]);
+        envelope.push(b'\n');
+        envelope.extend_from_slice(b"sig");
+        envelope.push(b'\n');
+        envelope.extend_from_slice(b"body");
+
+        let err = unwrap_signed_message(&envelope).unwrap_err();
+        match err {
+            IdentityError::Proof(msg) => assert!(msg.contains("header exceeds"), "{msg}"),
+            other => panic!("expected Proof, got {other}"),
+        }
+    }
+
+    #[test]
+    fn unwrap_rejects_a_payload_over_the_size_limit() {
+        let id = AgentIdentity::generate().unwrap();
+        let mut envelope = wrap_signed_message(&id, b"body").unwrap();
+        // Grow the inner payload past the cap without touching the headers.
+        envelope.extend_from_slice(&vec![b'x'; DID_PROOF_PAYLOAD_MAX_BYTES]);
+
+        let err = unwrap_signed_message(&envelope).unwrap_err();
+        match err {
+            IdentityError::Proof(msg) => assert!(msg.contains("payload exceeds"), "{msg}"),
+            other => panic!("expected Proof, got {other}"),
+        }
+    }
 }
