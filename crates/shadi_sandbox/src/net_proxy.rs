@@ -622,6 +622,36 @@ mod tests {
         frame
     }
 
+    fn socks5_ipv6_frame(ip: [u8; 16], port: u16) -> Vec<u8> {
+        let mut frame = vec![5, 1, 0, 5, 1, 0, 4];
+        frame.extend_from_slice(&ip);
+        frame.extend_from_slice(&port.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn parse_socks5_connect_reads_ipv6() {
+        let mut loopback = [0u8; 16];
+        loopback[15] = 1;
+        let mut frame = std::io::Cursor::new(socks5_ipv6_frame(loopback, 8443));
+        let parsed = parse_socks5_connect(&mut frame).expect("ipv6");
+        assert_eq!(
+            parsed,
+            Socks5Connect {
+                host: "::1".into(),
+                port: 8443,
+                is_resolved_ip: true,
+            }
+        );
+
+        // A frame that stops inside the 16-byte address is truncated, not a
+        // short address padded with zeroes.
+        assert_eq!(
+            parse_socks5_connect(&mut std::io::Cursor::new([5u8, 1, 0, 5, 1, 0, 4, 0, 0])),
+            Err(Socks5ParseError::Truncated)
+        );
+    }
+
     #[test]
     fn parse_socks5_connect_reads_ipv4_and_domain() {
         let mut ipv4 = std::io::Cursor::new(socks5_ipv4_frame([127, 0, 0, 1], 443));
