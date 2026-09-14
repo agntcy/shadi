@@ -16,8 +16,49 @@ permissions:
   contents: read
 
 jobs:
+  # Required checks cannot use a workflow-level `paths:` filter: a workflow that
+  # never triggers leaves its checks pending forever. Gating the job instead
+  # keeps the check reporting while skipping the expensive half.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      workspace: ${{ steps.filter.outputs.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Detect changes that affect the Rust workspace
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          # Anything that is not a pull request always builds.
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "workspace=true" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null)
+          # An empty or failed diff means we cannot tell: build rather than skip.
+          if [ -z "$changed" ]; then
+            echo "workspace=true" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "Changed files:"; printf '%s\n' "$changed" | sed 's/^/  /'
+          # apps/shadi_desktop is its own workspace and is excluded from every
+          # build here, so a desktop-only change cannot affect these jobs.
+          if printf '%s\n' "$changed" | grep -qvE '(^docs/|\.md$|^LICENSE$|^CODEOWNERS$|^\.gitignore$|^apps/shadi_desktop/|^\.github/ISSUE_TEMPLATE/)'; then
+            echo "workspace=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "workspace=false" >>"$GITHUB_OUTPUT"
+          fi
+
   build-shadictl-release-artifacts:
     runs-on: ${{ matrix.runner }}
+    needs: changes
+    if: needs.changes.outputs.workspace == 'true'
     permissions:
       contents: read
     strategy:
