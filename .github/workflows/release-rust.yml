@@ -54,7 +54,7 @@ jobs:
 
       - name: Run release-plz publish
         id: release-plz
-        uses: release-plz/action@aec534bbd8631793b9b3b8f1ee6cd886c322e17f # v0.5.133
+        uses: release-plz/action@8e61445f0b34e7c6d985255f2f1f05a36eb350dc # v0.5.137
         with:
           command: release
           manifest_path: ./Cargo.toml
@@ -476,7 +476,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Run release-plz PR
-        uses: release-plz/action@aec534bbd8631793b9b3b8f1ee6cd886c322e17f # v0.5.133
+        uses: release-plz/action@8e61445f0b34e7c6d985255f2f1f05a36eb350dc # v0.5.137
         with:
           command: release-pr
           manifest_path: ./Cargo.toml
