@@ -25,7 +25,7 @@ pub mod ssh;
 pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
 pub use did_proof::{
     looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
-    VerifiedPayload,
+    VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
