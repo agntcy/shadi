@@ -7,13 +7,59 @@ on:
   # its coverage status, and a required check that never posts blocks forever.
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only supersede PR runs; a push to main must always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Least privilege by default; jobs widen it where they need to.
 permissions:
   contents: read
 
 jobs:
+  # Required checks cannot use a workflow-level `paths:` filter: a workflow that
+  # never triggers leaves its checks pending forever. Gating the job instead
+  # keeps the check reporting while skipping the expensive half.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      workspace: ${{ steps.filter.outputs.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Detect changes that affect the Rust workspace
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          # Anything that is not a pull request always builds.
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "workspace=true" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null)
+          # An empty or failed diff means we cannot tell: build rather than skip.
+          if [ -z "$changed" ]; then
+            echo "workspace=true" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "Changed files:"; printf '%s\n' "$changed" | sed 's/^/  /'
+          # apps/shadi_desktop is its own workspace and is excluded from every
+          # build here, so a desktop-only change cannot affect these jobs.
+          if printf '%s\n' "$changed" | grep -qvE '(^docs/|\.md$|^LICENSE$|^CODEOWNERS$|^\.gitignore$|^apps/shadi_desktop/|^\.github/ISSUE_TEMPLATE/)'; then
+            echo "workspace=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "workspace=false" >>"$GITHUB_OUTPUT"
+          fi
+
   coverage:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.workspace == 'true'
     permissions:
       contents: read
     env:
@@ -39,6 +85,10 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
+          # Only main writes the cache. PRs still restore from it; letting each
+          # PR save its own ~1GB copy pushed the repo past the 10GB ceiling and
+          # evicted the very caches the next PR needed.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
