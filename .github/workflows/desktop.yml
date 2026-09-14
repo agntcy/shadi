@@ -55,7 +55,7 @@ jobs:
           # action-setup looks for packageManager in the repo-root package.json,
           # not the job's working-directory default — apps/shadi_desktop's is
           # what's authoritative, so pin it explicitly instead.
-          version: 11.26.0
+          version: 11.27.0
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
