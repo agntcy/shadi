@@ -12,6 +12,11 @@ on:
       - "apps/shadi_desktop/**"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only supersede PR runs; a push to main must always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Least privilege by default; jobs widen it where they need to.
 permissions:
   contents: read
@@ -36,6 +41,9 @@ jobs:
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # Only main writes the cache; see ci.yml.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
         with:
           workspaces: apps/shadi_desktop/src-tauri
 
