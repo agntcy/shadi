@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only supersede PR runs; a push to main must always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Least privilege by default; jobs widen it where they need to.
 permissions:
   contents: read
@@ -38,6 +43,10 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
+          # Only main writes the cache. PRs still restore from it; letting each
+          # PR save its own ~1GB copy pushed the repo past the 10GB ceiling and
+          # evicted the very caches the next PR needed.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
