@@ -40,7 +40,7 @@ pub struct SqlCipherMemoryStore {
     store: SqlCipherStore,
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct MemoryEntry {
     #[pyo3(get)]
