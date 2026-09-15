@@ -68,6 +68,12 @@ jobs:
       - name: Fuzz ${{ matrix.target }}
         working-directory: crates/${{ matrix.crate }}/fuzz
         env:
+          # rust-toolchain.toml pins a stable channel, and it wins over the
+          # toolchain the setup step installed — cargo-fuzz needs -Z, so
+          # without this the build fails on "only accepted on the nightly
+          # compiler". Set for the whole step so cargo-fuzz's own child cargo
+          # inherits it.
+          RUSTUP_TOOLCHAIN: nightly
           # A run that needs more than this is leaking, and an OOM-killed job
           # reports as an infrastructure failure rather than a finding.
           RSS_LIMIT_MB: 2048
