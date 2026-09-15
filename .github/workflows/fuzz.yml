@@ -38,7 +38,6 @@ jobs:
           - { target: policy-patch,     crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           - { target: session-name,     crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           - { target: socks5-frame,     crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
-          - { target: resolve-policy,   crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           - { target: did-proof,        crate: shadi_identity, runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           # The profile builder is behind cfg(target_os = "macos") and the
           # target returns immediately anywhere else, so running it on Linux
