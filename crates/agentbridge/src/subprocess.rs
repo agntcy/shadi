@@ -12,15 +12,20 @@
 //! one-line `kill_in_flight` override instead of duplicating PID-tracking
 //! per adapter.
 
+use std::collections::HashSet;
 use std::io;
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
-/// Tracks the PID of a subprocess for as long as it's running, so it can be
-/// killed on demand from anywhere holding a reference to this struct.
+/// Tracks the PIDs of subprocesses for as long as they are running, so they
+/// can be killed on demand from anywhere holding a reference to this struct.
+///
+/// A set rather than one slot: the adapter is shared across concurrent A2A
+/// tasks, so a second child would otherwise displace the first, and whichever
+/// finished first would clear the slot for the one still running.
 #[derive(Default)]
 pub struct TrackedSubprocess {
-    active_pid: Mutex<Option<u32>>,
+    active_pids: Mutex<HashSet<u32>>,
 }
 
 impl TrackedSubprocess {
@@ -33,28 +38,29 @@ impl TrackedSubprocess {
     /// but with the child's PID reachable via `kill()` while it's running.
     pub fn output(&self, cmd: &mut Command) -> io::Result<Output> {
         let child = cmd.spawn()?;
+        let pid = child.id();
 
-        if let Ok(mut active) = self.active_pid.lock() {
-            *active = Some(child.id());
+        if let Ok(mut active) = self.active_pids.lock() {
+            active.insert(pid);
         }
 
         let result = child.wait_with_output();
 
-        if let Ok(mut active) = self.active_pid.lock() {
-            *active = None;
+        if let Ok(mut active) = self.active_pids.lock() {
+            active.remove(&pid);
         }
 
         result
     }
 
-    /// Best-effort: terminate whatever child is currently tracked, if any. A
-    /// no-op if nothing is running right now.
+    /// Best-effort: terminate every child currently tracked. A no-op if
+    /// nothing is running right now.
     pub fn kill(&self) {
-        let pid = match self.active_pid.lock() {
-            Ok(active) => *active,
-            Err(_) => None,
+        let pids: Vec<u32> = match self.active_pids.lock() {
+            Ok(active) => active.iter().copied().collect(),
+            Err(_) => Vec::new(),
         };
-        if let Some(pid) = pid {
+        for pid in pids {
             terminate(pid);
         }
     }
@@ -130,7 +136,7 @@ mod tests {
         let mut cmd = exits_now();
         let output = tracked.output(&mut cmd).expect("spawn should succeed");
         assert!(output.status.success());
-        assert!(tracked.active_pid.lock().unwrap().is_none());
+        assert!(tracked.active_pids.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -138,7 +144,7 @@ mod tests {
         let tracked = TrackedSubprocess::new();
         let mut cmd = Command::new("agentbridge-no-such-binary");
         assert!(tracked.output(&mut cmd).is_err());
-        assert!(tracked.active_pid.lock().unwrap().is_none());
+        assert!(tracked.active_pids.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -152,13 +158,70 @@ mod tests {
         let tracked = TrackedSubprocess::new();
         let mut child = stays_alive().spawn().expect("spawn long-running child");
         let pid = child.id();
-        *tracked
-            .active_pid
+        tracked
+            .active_pids
             .lock()
-            .expect("fresh tracker is not poisoned") = Some(pid);
+            .expect("fresh tracker is not poisoned")
+            .insert(pid);
         tracked.kill();
         let status = child.wait().expect("wait after kill");
         assert!(!status.success());
+    }
+
+    #[test]
+    fn kill_terminates_every_concurrent_child() {
+        // The adapter is shared across concurrent A2A tasks. With one pid slot
+        // the second child displaced the first, so shutdown reached only one of
+        // them and the other outlived the listener.
+        let tracked = TrackedSubprocess::new();
+        let mut first = stays_alive().spawn().expect("spawn first child");
+        let mut second = stays_alive().spawn().expect("spawn second child");
+        {
+            let mut active = tracked
+                .active_pids
+                .lock()
+                .expect("fresh tracker is not poisoned");
+            active.insert(first.id());
+            active.insert(second.id());
+        }
+
+        tracked.kill();
+
+        assert!(
+            !first.wait().expect("wait on first").success(),
+            "first child survived shutdown"
+        );
+        assert!(
+            !second.wait().expect("wait on second").success(),
+            "second child survived shutdown"
+        );
+    }
+
+    #[test]
+    fn a_running_child_is_still_tracked_while_another_finishes() {
+        // Clearing the slot on completion used to drop the pid of whichever
+        // child was still running.
+        let tracked = Arc::new(TrackedSubprocess::new());
+        let mut long_lived = stays_alive().spawn().expect("spawn long-running child");
+        tracked
+            .active_pids
+            .lock()
+            .expect("fresh tracker is not poisoned")
+            .insert(long_lived.id());
+
+        let mut quick = exits_now();
+        tracked.output(&mut quick).expect("short command runs");
+
+        assert!(
+            tracked
+                .active_pids
+                .lock()
+                .expect("not poisoned")
+                .contains(&long_lived.id()),
+            "a finished child cleared the pid of one still running"
+        );
+        tracked.kill();
+        let _ = long_lived.wait();
     }
 
     #[test]
@@ -166,12 +229,12 @@ mod tests {
         let tracked = Arc::new(TrackedSubprocess::new());
         let poisoner = Arc::clone(&tracked);
         let _ = std::thread::spawn(move || {
-            let _held = poisoner.active_pid.lock().unwrap();
+            let _held = poisoner.active_pids.lock().unwrap();
             panic!("poison the tracker's lock");
         })
         .join();
         assert!(
-            tracked.active_pid.lock().is_err(),
+            tracked.active_pids.lock().is_err(),
             "lock should be poisoned"
         );
 
