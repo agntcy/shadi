@@ -41,5 +41,13 @@ jobs:
       # Vulnerabilities fail the job. Unmaintained, unsound and yanked crates
       # are reported but do not, because the ones we carry come in through
       # Tauri's GTK3 bindings and have no upstream replacement to move to.
+      #
+      # `cargo audit` leaves its detail in the log, so a red check says only
+      # "Audit fail" until someone opens the run. The report step turns each
+      # advisory into an inline annotation and a job summary, including
+      # whether a fixed release exists, and owns the exit status.
       - name: Audit the workspace lockfile
-        run: cargo audit --color always
+        run: cargo audit --json > "$RUNNER_TEMP/audit.json" || true
+
+      - name: Report advisories
+        run: python3 scripts/audit_report.py "$RUNNER_TEMP/audit.json"
