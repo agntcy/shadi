@@ -58,6 +58,20 @@ def main() -> int:
         emit(f"::error title={ident} ({name} {version})::{title} — fixed in {fixed}")
         rows.append(f"| [{ident}](https://rustsec.org/advisories/{ident}) | {name} | {version} | {fixed} |")
 
+    ignored = (report.get("settings") or {}).get("ignore") or []
+    if ignored:
+        rows.append("")
+        rows.append("### Suppressed advisories")
+        rows.append("")
+        rows.append(
+            "These are excluded by `.cargo/audit.toml` and did not fail the job. "
+            "Each one has a justification and an exit condition there."
+        )
+        rows.append("")
+        for ident in ignored:
+            rows.append(f"- [{ident}](https://rustsec.org/advisories/{ident})")
+        emit(f"::notice::{len(ignored)} advisories suppressed by .cargo/audit.toml: {', '.join(ignored)}")
+
     warn_total = sum(len(v) for v in warnings.values())
     if warn_total:
         rows.append("")
