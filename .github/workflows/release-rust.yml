@@ -103,6 +103,8 @@ jobs:
       # Needed for cosign's keyless signing: it exchanges this for a
       # short-lived certificate tying the signature to this workflow run.
       id-token: write
+      # actions/attest-build-provenance records how the archive was built.
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -193,6 +195,27 @@ jobs:
           cosign sign-blob --yes --bundle "$bundle" "$archive"
           echo "bundle_path=$bundle" >> "$GITHUB_OUTPUT"
 
+      # The signature says who built the archive; the attestation says how.
+      # Scorecard scores the two separately, and only provenance answers
+      # "was this built from this repository's source, by this workflow".
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.archive_path }}
+
+      # The action names the bundle after the run, not the artifact; consumers
+      # and Scorecard both expect it beside the archive it attests.
+      - name: Name the provenance bundle for the release
+        id: provenance_asset
+        shell: bash
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          ARCHIVE: ${{ steps.package.outputs.archive_path }}
+        run: |
+          cp "$BUNDLE" "${ARCHIVE}.intoto.jsonl"
+          echo "path=${ARCHIVE}.intoto.jsonl" >> "$GITHUB_OUTPUT"
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -202,6 +225,7 @@ jobs:
             "${{ steps.package.outputs.archive_path }}" \
             "${{ steps.package.outputs.checksum_path }}" \
             "${{ steps.sign.outputs.bundle_path }}" \
+            "${{ steps.provenance_asset.outputs.path }}" \
             --repo "${{ github.repository }}" \
             --clobber
 
@@ -292,6 +316,8 @@ jobs:
       # Needed for cosign's keyless signing: it exchanges this for a
       # short-lived certificate tying the signature to this workflow run.
       id-token: write
+      # actions/attest-build-provenance records how the archive was built.
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -382,6 +408,27 @@ jobs:
           cosign sign-blob --yes --bundle "$bundle" "$archive"
           echo "bundle_path=$bundle" >> "$GITHUB_OUTPUT"
 
+      # The signature says who built the archive; the attestation says how.
+      # Scorecard scores the two separately, and only provenance answers
+      # "was this built from this repository's source, by this workflow".
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.archive_path }}
+
+      # The action names the bundle after the run, not the artifact; consumers
+      # and Scorecard both expect it beside the archive it attests.
+      - name: Name the provenance bundle for the release
+        id: provenance_asset
+        shell: bash
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          ARCHIVE: ${{ steps.package.outputs.archive_path }}
+        run: |
+          cp "$BUNDLE" "${ARCHIVE}.intoto.jsonl"
+          echo "path=${ARCHIVE}.intoto.jsonl" >> "$GITHUB_OUTPUT"
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -391,6 +438,7 @@ jobs:
             "${{ steps.package.outputs.archive_path }}" \
             "${{ steps.package.outputs.checksum_path }}" \
             "${{ steps.sign.outputs.bundle_path }}" \
+            "${{ steps.provenance_asset.outputs.path }}" \
             --repo "${{ github.repository }}" \
             --clobber
 
