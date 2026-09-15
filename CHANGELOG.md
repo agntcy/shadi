@@ -7,6 +7,12 @@ workspace-wide view of each release.
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.10...agntcy-shadi-cli-v0.1.11) - 2026-09-15
+
+### Fixed
+
+- *(agentbridge)* stop claude --add-dir from swallowing the prompt ([#275](https://github.com/agntcy/shadi/pull/275))
+
 ## [0.1.10](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.9...agntcy-shadi-cli-v0.1.10) - 2026-09-15
 
 ### Other

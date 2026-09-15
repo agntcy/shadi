@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-agentbridge"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agntcy-shadi-a2a",
  "agntcy-shadi-mas",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-agentbridge-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "a2a-grpc",
  "a2a-lf",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
