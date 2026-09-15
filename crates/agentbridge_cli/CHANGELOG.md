@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.1.7...agntcy-agentbridge-cli-v0.1.8) - 2026-09-15
+
+### Other
+
+- updated the following local packages: agntcy-agentbridge
+
 ## [0.1.7](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.1.6...agntcy-agentbridge-cli-v0.1.7) - 2026-09-15
 
 ### Added

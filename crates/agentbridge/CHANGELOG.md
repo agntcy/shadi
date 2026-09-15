@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.2.1...agntcy-agentbridge-v0.2.2) - 2026-09-15
+
+### Fixed
+
+- *(agentbridge)* stop claude --add-dir from swallowing the prompt ([#275](https://github.com/agntcy/shadi/pull/275))
+
 ## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.2.0...agntcy-agentbridge-v0.2.1) - 2026-09-15
 
 ### Added
