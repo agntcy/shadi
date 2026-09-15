@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OpenFlags};
 use thiserror::Error;
@@ -14,6 +15,8 @@ pub enum MemoryError {
     Database(#[from] rusqlite::Error),
     #[error("time formatting error: {0}")]
     Time(#[from] time::error::Format),
+    #[error("database connection lock poisoned")]
+    Lock,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -26,9 +29,14 @@ pub struct MemoryEntry {
 }
 
 pub struct SqlCipherStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
+// SqlCipherStore serializes all access to the underlying `rusqlite::Connection`
+// behind a `Mutex`. `Connection` is `Send` but not `Sync` (it caches prepared
+// statements internally via a `RefCell`), so callers that need to share a
+// store across threads — e.g. the PyO3 bindings, where `#[pyclass]` types must
+// be `Sync` — rely on this wrapper rather than synchronizing at the call site.
 impl SqlCipherStore {
     pub fn open(path: &Path, key: &str) -> Result<Self, MemoryError> {
         let conn = Connection::open_with_flags(
@@ -54,17 +62,20 @@ impl SqlCipherStore {
                 ON memory_entries(created_at);
             ",
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn put(&self, scope: &str, entry_key: &str, payload: &str) -> Result<i64, MemoryError> {
         let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-        self.conn.execute(
+        let conn = self.conn.lock().map_err(|_| MemoryError::Lock)?;
+        conn.execute(
             "INSERT INTO memory_entries (scope, entry_key, payload, created_at)
              VALUES (?1, ?2, ?3, ?4)",
             params![scope, entry_key, payload, created_at],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn get_latest(
@@ -72,7 +83,8 @@ impl SqlCipherStore {
         scope: &str,
         entry_key: &str,
     ) -> Result<Option<MemoryEntry>, MemoryError> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().map_err(|_| MemoryError::Lock)?;
+        let mut stmt = conn.prepare(
             "SELECT id, scope, entry_key, payload, created_at
              FROM memory_entries
              WHERE scope = ?1 AND entry_key = ?2
@@ -101,9 +113,10 @@ impl SqlCipherStore {
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
         let pattern = format!("%{}%", query);
         let mut entries = Vec::new();
+        let conn = self.conn.lock().map_err(|_| MemoryError::Lock)?;
 
         if let Some(scope) = scope {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT id, scope, entry_key, payload, created_at
                  FROM memory_entries
                  WHERE scope = ?1 AND (entry_key LIKE ?2 OR payload LIKE ?2)
@@ -125,7 +138,7 @@ impl SqlCipherStore {
             return Ok(entries);
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT id, scope, entry_key, payload, created_at
              FROM memory_entries
              WHERE entry_key LIKE ?1 OR payload LIKE ?1
@@ -149,8 +162,9 @@ impl SqlCipherStore {
 
     pub fn list(&self, scope: Option<&str>, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
         let mut entries = Vec::new();
+        let conn = self.conn.lock().map_err(|_| MemoryError::Lock)?;
         if let Some(scope) = scope {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT id, scope, entry_key, payload, created_at
                  FROM memory_entries
                  WHERE scope = ?1
@@ -172,7 +186,7 @@ impl SqlCipherStore {
             return Ok(entries);
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT id, scope, entry_key, payload, created_at
              FROM memory_entries
              ORDER BY created_at DESC
@@ -194,7 +208,8 @@ impl SqlCipherStore {
     }
 
     pub fn delete(&self, scope: &str, entry_key: &str) -> Result<usize, MemoryError> {
-        let affected = self.conn.execute(
+        let conn = self.conn.lock().map_err(|_| MemoryError::Lock)?;
+        let affected = conn.execute(
             "DELETE FROM memory_entries WHERE scope = ?1 AND entry_key = ?2",
             params![scope, entry_key],
         )?;
