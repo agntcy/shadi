@@ -25,6 +25,25 @@ release = false
 [[package]]
 name = "agntcy-shadi-cli"
 git_release_enable = true
+# The root CHANGELOG is the workspace-wide view, so release-plz owns it rather
+# than anyone maintaining it by hand — the hand-written one had drifted twelve
+# days and two releases behind. Paths are relative to the root Cargo.toml, so
+# shadictl no longer keeps a crate-local changelog.
+changelog_path = "CHANGELOG.md"
+changelog_include = [
+  "agntcy-agentbridge",
+  "agntcy-agentbridge-cli",
+  "agntcy-shadi-a2a",
+  "agntcy-shadi-agent-secrets",
+  "agntcy-shadi-agent-transport-slim",
+  "agntcy-shadi-identity",
+  "agntcy-shadi-mas",
+  "agntcy-shadi-memory",
+  "agntcy-shadi-py",
+  "agntcy-shadi-sandbox",
+  "agntcy-shadi-slim-mas",
+  "agntcy-shadi-telemetry",
+]
 
 [[package]]
 name = "agntcy-agentbridge-cli"
