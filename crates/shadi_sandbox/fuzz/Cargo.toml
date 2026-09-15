@@ -43,6 +43,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "resolve-policy"
+path = "fuzz_targets/resolve-policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "socks5-frame"
 path = "fuzz_targets/socks5-frame.rs"
 test = false
