@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # The merge queue tests the tree that will actually land, so these
+  # checks must report on merge_group too or the queue waits forever.
+  merge_group:
   push:
     branches:
       - main
