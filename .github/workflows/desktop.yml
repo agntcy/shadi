@@ -42,10 +42,9 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          workspaces: apps/shadi_desktop/src-tauri
           # Only main writes the cache; see ci.yml.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-        with:
-          workspaces: apps/shadi_desktop/src-tauri
 
       - name: Install Tauri Linux dependencies
         run: |
