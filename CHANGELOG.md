@@ -7,6 +7,12 @@ workspace-wide view of each release.
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.9...agntcy-shadi-cli-v0.1.10) - 2026-09-15
+
+### Other
+
+- generate the root CHANGELOG with release-plz ([#272](https://github.com/agntcy/shadi/pull/272))
+
 ## 2026-09-03
 
 ### Added
