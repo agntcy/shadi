@@ -214,8 +214,9 @@ fn demo_coordination() {
     println!("\n===================================================");
     println!(" SCENARIO 2: 4-Agent Autonomous Coordination");
     println!(" Mirrors: agentbridge coordinate \\");
+    println!("   --goal \"implement a JSON parser in Rust\" \\");
     println!("   --agents claude-code,copilot,codex,cursor-agent \\");
-    println!("   --quorum 4 \"implement a JSON parser in Rust\"");
+    println!("   --quorum 4");
     println!("===================================================\n");
 
     // 4 agents, quorum = 4 (all must propose), max 5 rounds.
@@ -421,9 +422,9 @@ fn main() {
             println!();
             println!(" To run with real agents:");
             println!("   agentbridge coordinate \\");
+            println!("     --goal \"implement a JSON parser in Rust\" \\");
             println!("     --agents claude-code,copilot,codex,cursor-agent \\");
-            println!("     --quorum 4 \\");
-            println!("     \"implement a JSON parser in Rust\"");
+            println!("     --quorum 4");
             println!("----------------------------------------------------------");
         }
     }

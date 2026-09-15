@@ -685,7 +685,30 @@ mod tests {
                 "sys",
                 "--session-id",
                 "sid-1",
+                "--",
                 "hello",
+            ]
+        );
+    }
+
+    /// `--add-dir` is variadic, so a bare prompt right after it is swallowed as
+    /// another directory and `claude --print` exits with "Input must be provided".
+    /// That happens whenever both `{system}` and `{session}` render empty, which
+    /// is the first short prompt of every run. The `--` keeps them apart.
+    #[test]
+    fn claude_argv_separates_prompt_from_add_dir() {
+        let p = load_bundled("claude-code");
+        let argv = render_argv(&p, "/var/workspace", "short goal", None, None, true);
+        assert_eq!(
+            argv,
+            vec![
+                "--print",
+                "--output-format",
+                "json",
+                "--add-dir",
+                "/var/workspace",
+                "--",
+                "short goal",
             ]
         );
     }
