@@ -45,6 +45,16 @@ clean:
   cargo clean
 
 [group('core')]
+[doc('Drop build artifacts untouched for DAYS (default 30), including the fuzz workspaces.')]
+sweep days='30':
+  cargo sweep --recursive --time {{days}} .
+
+[group('core')]
+[doc('Drop build artifacts left behind by toolchains that are no longer installed.')]
+sweep-stale:
+  cargo sweep --recursive --installed .
+
+[group('core')]
 [doc('Generate LCOV coverage output for the workspace.')]
 coverage:
   {{ if os() == "windows" {
