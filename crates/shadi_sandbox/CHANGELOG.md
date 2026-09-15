@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.1.4...agntcy-shadi-sandbox-v0.2.0) - 2026-09-15
+
+### Added
+
+- *(sandbox)* make platform defaults deniable ([#242](https://github.com/agntcy/shadi/pull/242))
+
+### Other
+
+- *(sandbox)* fuzz Seatbelt profile generation ([#252](https://github.com/agntcy/shadi/pull/252))
+- *(sandbox)* fuzz policy-patch apply and cap control lines ([#251](https://github.com/agntcy/shadi/pull/251))
+
 ## [0.1.4](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.1.3...agntcy-shadi-sandbox-v0.1.4) - 2026-09-09
 
 ### Added
