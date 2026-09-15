@@ -83,7 +83,7 @@ impl ShadiStore {
         }
     }
 
-    fn set_verifier(&self, verifier: PyObject) -> PyResult<()> {
+    fn set_verifier(&self, verifier: Py<PyAny>) -> PyResult<()> {
         let mut guard = self
             .didvc_verifier
             .lock()
