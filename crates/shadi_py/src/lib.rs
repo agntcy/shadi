@@ -103,7 +103,10 @@ impl ShadiStore {
                 .didvc_verifier
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
-            guard.clone().ok_or_else(|| PyRuntimeError::new_err("verifier not configured"))?
+            guard
+                .as_ref()
+                .map(|v| v.clone_ref(py))
+                .ok_or_else(|| PyRuntimeError::new_err("verifier not configured"))?
         };
 
         let (agent_id, session_id, claims) = {
@@ -115,7 +118,7 @@ impl ShadiStore {
             )
         };
 
-        let payload = PyBytes::new_bound(py, presentation);
+        let payload = PyBytes::new(py, presentation);
         let result = verifier.call1(py, (agent_id, session_id, payload, claims))?;
         let is_valid = result.is_truthy(py)?;
 
@@ -151,7 +154,7 @@ impl ShadiStore {
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
         let secret = access.get_for_session(&ctx, key).map_err(map_secret_error)?;
         let bytes = secret.expose(|data| data.to_vec());
-        Ok(PyBytes::new_bound(py, &bytes))
+        Ok(PyBytes::new(py, &bytes))
     }
 
     fn delete(&self, session: &PySessionContext, key: &str) -> PyResult<()> {
@@ -455,15 +458,15 @@ mod tests {
         ensure_python();
         Python::with_gil(|py| {
             let store = ShadiStore::new();
-            let module = PyModule::from_code_bound(
+            let module = PyModule::from_code(
                 py,
-                "def verify(agent_id, session_id, presentation, claims):\n    return True\n",
-                "verifier.py",
-                "verifier",
+                c"def verify(agent_id, session_id, presentation, claims):\n    return True\n",
+                c"verifier.py",
+                c"verifier",
             )
             .unwrap();
             let verifier = module.getattr("verify").unwrap();
-            store.set_verifier(verifier.into_py(py)).unwrap();
+            store.set_verifier(verifier.unbind()).unwrap();
 
             let mut base_session = PySessionContext::new("agent".to_string(), "session".to_string());
             base_session.add_claim("did:example:agent".to_string());
