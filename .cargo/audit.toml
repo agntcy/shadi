@@ -10,4 +10,13 @@ ignore = [
 	# performs no RSA decryption, so the vulnerable path is never entered. Drop
 	# this entry once rsa ships a constant-time release.
 	"RUSTSEC-2023-0071",
+	# rustls TLS 1.3 handshake confusion across encryption levels. Unlike the
+	# entry above, this path IS reachable — SHADI does TLS 1.3 on every SLIM
+	# and gRPC connection. It is ignored only because no fixed version is
+	# installable: rustls >=0.23.45 needs aws-lc-rs ^1.18, and
+	# mls-rs-crypto-awslc pins aws-lc-rs exactly (=1.16.3 at its latest 0.25.0)
+	# via agntcy-slim-auth, so the resolver rejects every combination.
+	# Tracked upstream at https://github.com/agntcy/slim/issues/2057; drop this
+	# the moment that pin allows 1.18 and `cargo update -p rustls` succeeds.
+	"RUSTSEC-2026-0285",
 ]
