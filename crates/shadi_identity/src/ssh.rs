@@ -105,6 +105,21 @@ pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, I
     )))
 }
 
+/// Every `ssh-ed25519` key in an `authorized_keys`-style listing.
+///
+/// [`first_ed25519_in_authorized_keys`] picks one, which is right when
+/// *deriving* a DID from an account and wrong when *verifying* one: an account
+/// publishing three keys would fail to resolve for two of them. Unparseable
+/// lines are skipped rather than fatal — one bad entry must not hide the rest.
+pub fn all_ed25519_in_authorized_keys(listing: &str) -> Vec<VerifyingKey> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(SSH_ED25519))
+        .filter_map(|line| verifying_key_from_openssh_public_key(line).ok())
+        .collect()
+}
+
 /// A fresh Ed25519 key as `(private OpenSSH PEM, public line)`.
 ///
 /// For onboarding a machine that has no key yet. An empty passphrase writes the

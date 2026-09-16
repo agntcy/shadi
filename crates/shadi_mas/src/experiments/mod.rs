@@ -103,6 +103,34 @@ pub struct LiveTaskDispatchRecord {
     pub elapsed_ms: f64,
 }
 
+/// The sender's principal *hint*, from `SHADI_PRINCIPAL_HINT`.
+///
+/// A hint, never a claim: the recipient uses it only to pick whose
+/// attestation to look up, then checks that the answer really owns the DID the
+/// envelope proved. Forging it therefore buys nothing, and tampering with it
+/// in flight can only cause a denial. Read from the environment like the rest
+/// of the identity contract (`SHADI_SLIM_AUTH`, `SLIM_HUMAN_SEED`) rather than
+/// threaded through every adapter config, since it is one fact per process:
+/// who enrolled here.
+///
+/// Form: `github:alice`, or `oidc:https://sso.example/realm#alice@corp.com`.
+fn principal_hint_from_env() -> Option<String> {
+    std::env::var("SHADI_PRINCIPAL_HINT")
+        .ok()
+        .filter(|hint| !hint.is_empty())
+}
+
+fn insert_principal_hint(mut message: Message, hint: &str) -> Message {
+    message
+        .metadata
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(
+            shadi_identity::A2A_PRINCIPAL_HINT_METADATA_KEY.to_string(),
+            serde_json::Value::String(hint.to_string()),
+        );
+    message
+}
+
 pub struct LiveA2ATaskAdapter {
     config: LiveA2ATaskAdapterConfig,
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
@@ -144,7 +172,18 @@ impl LiveA2ATaskAdapter {
                     .lock()
                     .map_err(|_| "live A2A task body lock poisoned".to_string())?
                     .clone();
-                let signed = shadi_identity::sign_message_from_env(&self.config.agent_id, current.as_bytes())
+                // Seal, then sign. Order is the whole point: the freshness
+                // fields must be inside the payload the envelope signature
+                // covers, or they are strippable in flight.
+                let payload = match self.config.peer_did.as_deref() {
+                    Some(peer_did) => shadi_identity::Sealed::seal(peer_did, &current)
+                        .map_err(|err| err.to_string())?,
+                    // No recipient DID known, so there is no `aud` to bind to.
+                    // Sends unsealed, which a receiver accepts only while its
+                    // policy leaves `require_freshness` off.
+                    None => current.clone().into_bytes(),
+                };
+                let signed = shadi_identity::sign_message_from_env(&self.config.agent_id, &payload)
                     .map_err(|err| err.to_string())?;
                 let signed_text = String::from_utf8(signed)
                     .map_err(|err| format!("DID proof envelope is not UTF-8: {err}"))?;
@@ -217,6 +256,9 @@ impl LiveA2ATaskAdapter {
             let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
             if let Some(peer_did) = self.config.peer_did.as_deref() {
                 message = insert_dest_did(message, peer_did);
+            }
+            if let Some(hint) = principal_hint_from_env() {
+                message = insert_principal_hint(message, &hint);
             }
             let request = SendMessageRequest {
                 message,

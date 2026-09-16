@@ -38,9 +38,20 @@ enum Cmd {
         #[arg(long, default_value = "prod.gateway.ads.outshift.io:443")]
         dir_server: String,
 
-        /// GitHub token for DIR authentication (or set DIRECTORY_CLIENT_GITHUB_TOKEN).
-        #[arg(long)]
+        /// GitHub token for DIR authentication and for authenticated GitHub
+        /// anchor lookups (60 req/hr unauthenticated, 5,000 with a token).
+        #[arg(long, env = "DIRECTORY_CLIENT_GITHUB_TOKEN")]
         gh_token: Option<String>,
+
+        /// Admission policy: trusted issuers, deny-lists, pinned attestations.
+        /// Without it, admission is envelope-proof only — today's behaviour.
+        #[arg(long, value_name = "PATH")]
+        oidc_policy_file: Option<std::path::PathBuf>,
+
+        /// Trust anchors to consult, in order. Only used with
+        /// --oidc-policy-file.
+        #[arg(long, value_delimiter = ',', default_value = "local")]
+        trust_anchor: Vec<commands::register::AnchorKind>,
 
         /// Start a SLIM A2A listener so remote callers can reach this adapter.
         /// Authenticates via DID/keys (SHADI_SLIM_AUTH=did, SLIM_HUMAN_SEED,
@@ -203,6 +214,8 @@ fn main() {
             dir_publish,
             dir_server,
             gh_token,
+            oidc_policy_file,
+            trust_anchor,
             slim_endpoint,
             a2a_listen,
             a2a_binding,
@@ -212,6 +225,14 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
+            let admission_opts =
+                oidc_policy_file
+                    .as_deref()
+                    .map(|policy_file| commands::register::AdmissionOptions {
+                        policy_file,
+                        anchors: &trust_anchor,
+                        gh_token: gh_token.as_deref(),
+                    });
             commands::register::run(
                 &tool,
                 command.as_deref(),
@@ -220,6 +241,7 @@ fn main() {
                 a2a_listen.as_deref(),
                 a2a_binding,
                 publish_opts,
+                admission_opts,
                 verbose,
             )
         }
@@ -357,6 +379,58 @@ mod tests {
                 assert!(assembly);
             }
             _ => panic!("expected coordinate subcommand"),
+        }
+    }
+
+    /// Absent `--oidc-policy-file` must stay the default, or this lands as a
+    /// flag day rather than an incremental rollout.
+    #[test]
+    fn parses_admission_flags_and_defaults_to_no_policy() {
+        let bare = Cli::try_parse_from(["agentbridge", "register", "--tool", "copilot"])
+            .expect("parse bare register");
+        match bare.command {
+            Cmd::Register {
+                oidc_policy_file,
+                trust_anchor,
+                ..
+            } => {
+                assert_eq!(oidc_policy_file, None, "policy must be opt-in");
+                assert_eq!(trust_anchor, [commands::register::AnchorKind::Local]);
+            }
+            _ => panic!("expected register subcommand"),
+        }
+
+        let gated = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "copilot",
+            "--oidc-policy-file",
+            "/etc/shadi/policy.json",
+            "--trust-anchor",
+            "github,local",
+        ])
+        .expect("parse gated register");
+        match gated.command {
+            Cmd::Register {
+                oidc_policy_file,
+                trust_anchor,
+                ..
+            } => {
+                assert_eq!(
+                    oidc_policy_file.as_deref(),
+                    Some(std::path::Path::new("/etc/shadi/policy.json"))
+                );
+                assert_eq!(
+                    trust_anchor,
+                    [
+                        commands::register::AnchorKind::Github,
+                        commands::register::AnchorKind::Local
+                    ],
+                    "anchors keep the order given"
+                );
+            }
+            _ => panic!("expected register subcommand"),
         }
     }
 

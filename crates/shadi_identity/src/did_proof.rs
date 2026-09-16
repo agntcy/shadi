@@ -84,9 +84,7 @@ pub fn unwrap_signed_message(envelope: &[u8]) -> Result<VerifiedPayload, Identit
     let sig = Signature::from_bytes(&sig_arr);
     vk.verify_strict(&canonical(&did, payload), &sig)
         .map_err(|_| {
-            IdentityError::Proof(
-                "forged DID: signature does not match the claimed did:key".to_string(),
-            )
+            IdentityError::ForgedDid("signature does not match the claimed did:key".to_string())
         })?;
     Ok(VerifiedPayload {
         did,
@@ -204,10 +202,11 @@ mod tests {
             out
         };
         let err = unwrap_signed_message(&forged).unwrap_err();
-        match err {
-            IdentityError::Proof(msg) => assert!(msg.contains("forged DID"), "{msg}"),
-            other => panic!("expected Proof, got {other}"),
-        }
+        // A distinct variant, not a `Proof` message: admission branches on it.
+        assert!(
+            matches!(err, IdentityError::ForgedDid(_)),
+            "expected ForgedDid, got {err}"
+        );
         let _ = parts.0;
     }
 

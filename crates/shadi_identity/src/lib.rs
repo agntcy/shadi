@@ -17,16 +17,25 @@ use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use pkcs8::LineEnding;
 
+pub mod admission;
 pub mod auth;
 pub mod config;
 pub mod did_proof;
+pub mod freshness;
+pub mod github;
+pub mod oidc;
 pub mod ssh;
+pub mod trust_anchor;
 
+pub use admission::{Admission, AdmissionPolicy, Admitter, TrustedIssuer};
 pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
 pub use did_proof::{
     looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
+pub use freshness::{ReplayCache, Sealed, A2A_PRINCIPAL_HINT_METADATA_KEY};
+pub use oidc::{OidcClaims, OidcVerifier};
+pub use trust_anchor::{Attestation, GithubAnchor, LocalAnchor, TrustAnchor};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
@@ -38,6 +47,12 @@ pub enum IdentityError {
     InvalidDid(String),
     Config(String),
     Proof(String),
+    /// The envelope signature does not match the DID it claims. Its own variant
+    /// rather than a `Proof` whose message says so, because admission has to
+    /// tell a forgery from a merely absent proof, and matching on the error
+    /// string made a reword a silent downgrade to "unauthenticated".
+    ForgedDid(String),
+    Oidc(String),
 }
 
 impl fmt::Display for IdentityError {
@@ -48,6 +63,8 @@ impl fmt::Display for IdentityError {
             IdentityError::InvalidDid(e) => write!(f, "invalid did:key: {e}"),
             IdentityError::Config(e) => write!(f, "auth configuration error: {e}"),
             IdentityError::Proof(e) => write!(f, "DID proof error: {e}"),
+            IdentityError::ForgedDid(e) => write!(f, "forged DID: {e}"),
+            IdentityError::Oidc(e) => write!(f, "OIDC error: {e}"),
         }
     }
 }

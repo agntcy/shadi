@@ -6,7 +6,8 @@ mod stdio_bridge;
 
 use agent_secrets::{AgentVerifier, SecretError, SecretResult, SecretStore, SessionContext};
 use shadi_identity::{
-    looks_like_did_proof, unwrap_signed_message, wrap_signed_message, AgentIdentity,
+    looks_like_did_proof, unwrap_signed_message, wrap_signed_message, Admission, Admitter,
+    AgentIdentity,
 };
 
 pub use native::{NativeSlimBootstrap, NativeSlimSession};
@@ -27,6 +28,9 @@ pub struct SecureAgentChannel<'a> {
     /// When set, send wraps the payload in a DID-proof envelope and recv
     /// requires a valid envelope. This is the agentbridge SLIM path.
     signer: Option<&'a AgentIdentity>,
+    /// When set, an inbound peer must also be attested and policy-permitted,
+    /// not merely in possession of a key. The same gate the A2A path applies.
+    admitter: Option<&'a Admitter>,
 }
 
 impl<'a> SecureAgentChannel<'a> {
@@ -40,6 +44,7 @@ impl<'a> SecureAgentChannel<'a> {
             verifier,
             store,
             signer: None,
+            admitter: None,
         }
     }
 
@@ -50,13 +55,24 @@ impl<'a> SecureAgentChannel<'a> {
         self
     }
 
+    /// Also require that an authority vouches for an inbound peer's DID.
+    ///
+    /// SLIM carries no A2A metadata, so there is no principal hint on this
+    /// path: anchors that need one abstain. A SLIM-first deployment therefore
+    /// wants an anchor that resolves a DID without a hint, such as
+    /// `LocalAnchor`, rather than `GithubAnchor`.
+    pub fn with_admitter(mut self, admitter: &'a Admitter) -> Self {
+        self.admitter = Some(admitter);
+        self
+    }
+
     pub fn send(&self, ctx: &SessionContext, message: &[u8]) -> SecretResult<()> {
         let outgoing = if let Some(identity) = self.signer {
             wrap_signed_message(identity, message).map_err(|_| SecretError::NotAuthorized)?
         } else {
             message.to_vec()
         };
-        self.authorize_bytes(ctx, &outgoing)?;
+        self.authorize_bytes(ctx, &outgoing, Direction::Outbound)?;
         let _ = self.store;
         self.session.send(&outgoing)
     }
@@ -64,7 +80,7 @@ impl<'a> SecureAgentChannel<'a> {
     pub fn recv(&self, ctx: &SessionContext) -> SecretResult<Vec<u8>> {
         let raw = self.session.recv()?;
         if self.signer.is_some() || looks_like_did_proof(&raw) {
-            let proven = self.authorize_bytes(ctx, &raw)?;
+            let proven = self.authorize_bytes(ctx, &raw, Direction::Inbound)?;
             return Ok(proven.unwrap_or(raw));
         }
         self.verifier.verify(ctx)?;
@@ -78,6 +94,7 @@ impl<'a> SecureAgentChannel<'a> {
         &self,
         ctx: &SessionContext,
         bytes: &[u8],
+        direction: Direction,
     ) -> SecretResult<Option<Vec<u8>>> {
         if looks_like_did_proof(bytes) {
             let verified = unwrap_signed_message(bytes).map_err(|_| SecretError::NotAuthorized)?;
@@ -85,6 +102,23 @@ impl<'a> SecureAgentChannel<'a> {
                 if expected != verified.did {
                     // Mesh member presenting another agent's DID.
                     return Err(SecretError::NotAuthorized);
+                }
+            }
+            // The same policy gate the A2A path applies in
+            // `admit_incoming_message`, so a peer rejected there is not
+            // accepted here. Inbound only: `send` runs this on its own
+            // outgoing bytes, and a sender must not have to be admitted by
+            // its own policy to speak.
+            if let (Direction::Inbound, Some(admitter)) = (direction, self.admitter) {
+                match admitter.admit(&verified.did, None) {
+                    Admission::Admitted { .. } => {}
+                    // `SecretError`'s variants carry no payload, so the reason
+                    // dies at this boundary — log it or the operator sees a
+                    // bare "not authorized".
+                    denied => {
+                        tracing::warn!(did = %verified.did, "SLIM peer not admitted: {denied:?}");
+                        return Err(SecretError::NotAuthorized);
+                    }
                 }
             }
             let proven = ctx.clone().with_proven_did(&verified.did);
@@ -97,6 +131,14 @@ impl<'a> SecureAgentChannel<'a> {
         self.verifier.verify(ctx)?;
         Ok(None)
     }
+}
+
+/// Which way the bytes are travelling. Only an inbound peer is subject to
+/// admission policy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Inbound,
+    Outbound,
 }
 
 #[cfg(test)]

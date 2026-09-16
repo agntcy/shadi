@@ -42,6 +42,90 @@ pub struct DirPublishOptions<'a> {
     pub gh_token: Option<&'a str>,
 }
 
+/// An authority a listener will ask "who owns this DID?".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AnchorKind {
+    /// The `local_attestations` pinned in the policy file. Always available.
+    Local,
+    /// The DID must be among the Ed25519 keys the hinted GitHub user
+    /// publishes. Needs an `a2a-principal-hint`, so it cannot answer on the
+    /// SLIM path, which carries no A2A metadata.
+    Github,
+}
+
+/// How a listener decides who may send it tasks.
+pub struct AdmissionOptions<'a> {
+    pub policy_file: &'a std::path::Path,
+    /// Consulted in order; the first to answer wins.
+    pub anchors: &'a [AnchorKind],
+    pub gh_token: Option<&'a str>,
+}
+
+/// Set once, before any listener starts, then read by every request handler.
+///
+/// One process serves one policy for its whole life, so this is set-once
+/// rather than threaded through four layers of listener plumbing that would
+/// only forward it.
+static ADMISSION: std::sync::OnceLock<AdmissionGate> = std::sync::OnceLock::new();
+
+struct AdmissionGate {
+    admitter: Option<Arc<shadi_identity::Admitter>>,
+    replay: Arc<shadi_identity::ReplayCache>,
+}
+
+/// Bounds the seen-`jti` set. Eviction at the 300 s freshness window keeps it
+/// far below this in practice; the cap is what a flood runs into.
+const REPLAY_CACHE_CAPACITY: usize = 16_384;
+
+fn install_admission(opts: Option<AdmissionOptions>) -> anyhow::Result<()> {
+    let Some(opts) = opts else {
+        return Ok(());
+    };
+    let policy = shadi_identity::AdmissionPolicy::load(opts.policy_file)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if opts.anchors.is_empty() {
+        anyhow::bail!("--oidc-policy-file needs at least one --trust-anchor");
+    }
+    let anchors = opts
+        .anchors
+        .iter()
+        .map(|kind| -> Box<dyn shadi_identity::TrustAnchor> {
+            match kind {
+                AnchorKind::Local => Box::new(shadi_identity::LocalAnchor::new(
+                    "local-policy-file",
+                    policy.local_attestations.clone(),
+                )),
+                AnchorKind::Github => Box::new(shadi_identity::GithubAnchor::new(
+                    opts.gh_token.map(str::to_string),
+                )),
+            }
+        })
+        .collect();
+    let gate = AdmissionGate {
+        replay: Arc::new(shadi_identity::ReplayCache::new(
+            REPLAY_CACHE_CAPACITY,
+            policy.require_freshness,
+        )),
+        admitter: Some(Arc::new(shadi_identity::Admitter::new(anchors, policy))),
+    };
+    if ADMISSION.set(gate).is_err() {
+        anyhow::bail!("admission policy was already installed");
+    }
+    Ok(())
+}
+
+/// Without `--oidc-policy-file` this is the permissive default: no admitter,
+/// and unsealed payloads accepted, i.e. exactly today's behaviour.
+fn admission_gate() -> &'static AdmissionGate {
+    ADMISSION.get_or_init(|| AdmissionGate {
+        admitter: None,
+        replay: Arc::new(shadi_identity::ReplayCache::new(
+            REPLAY_CACHE_CAPACITY,
+            false,
+        )),
+    })
+}
+
 /// Start a registered adapter server for a named tool.
 ///
 /// When `slim_endpoint` is provided the adapter is also exposed as an A2A
@@ -58,8 +142,12 @@ pub fn run(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
+    admission: Option<AdmissionOptions>,
     verbose: bool,
 ) -> anyhow::Result<()> {
+    // Before any listener exists, so no message can be served under a policy
+    // that has not loaded yet.
+    install_admission(admission)?;
     // Coding CLIs are JSON profiles (`ProfileAdapter`). Native modules stay
     // for local handoff/coordinate; register no longer constructs them.
     if tool != "generic-stdio" {
@@ -622,6 +710,9 @@ struct AgentBridgeRequestHandler {
     slim_endpoint: Option<String>,
     a2a_listen: Option<String>,
     a2a_binding: A2ABinding,
+    /// `None` keeps pre-attestation behaviour: envelope proof only.
+    admitter: Option<Arc<shadi_identity::Admitter>>,
+    replay: Arc<shadi_identity::ReplayCache>,
 }
 
 impl AgentBridgeRequestHandler {
@@ -652,6 +743,8 @@ impl AgentBridgeRequestHandler {
             slim_endpoint: slim_endpoint.map(str::to_string),
             a2a_listen: a2a_listen.map(str::to_string),
             a2a_binding,
+            admitter: admission_gate().admitter.clone(),
+            replay: Arc::clone(&admission_gate().replay),
         }
     }
 }
@@ -667,15 +760,31 @@ impl RequestHandler for AgentBridgeRequestHandler {
         if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), &req.message) {
             return Ok(rejected_forged_did(&req, &reason));
         }
-        match admit_incoming_message(req) {
-            IncomingAdmission::Proven { request, did } => {
-                tracing::info!(%did, "admitted A2A message with proven agent DID");
+        match admit_incoming_message(
+            req,
+            self.admitter.as_deref(),
+            &self.replay,
+            self.agent_did.as_deref(),
+        ) {
+            IncomingAdmission::Proven {
+                request,
+                did,
+                principal,
+            } => {
+                tracing::info!(
+                    %did,
+                    sub = principal.as_deref().map(hashed_sub).unwrap_or_else(|| "-".to_string()),
+                    "admitted A2A message"
+                );
                 self.inner.send_message(params, request).await
             }
             IncomingAdmission::AuthRequired { request, reason } => {
                 Ok(parked_auth_required(&request, &reason))
             }
-            IncomingAdmission::Forged { request, reason } => {
+            // Same A2A rejection shape as a forgery; only the reason differs.
+            // If a distinct `TaskState` is wanted later, this is the one place.
+            IncomingAdmission::Forged { request, reason }
+            | IncomingAdmission::Denied { request, reason } => {
                 Ok(rejected_forged_did(&request, &reason))
             }
         }
@@ -696,9 +805,22 @@ impl RequestHandler for AgentBridgeRequestHandler {
                 }
             })));
         }
-        match admit_incoming_message(req) {
-            IncomingAdmission::Proven { request, did } => {
-                tracing::info!(%did, "admitted A2A stream with proven agent DID");
+        match admit_incoming_message(
+            req,
+            self.admitter.as_deref(),
+            &self.replay,
+            self.agent_did.as_deref(),
+        ) {
+            IncomingAdmission::Proven {
+                request,
+                did,
+                principal,
+            } => {
+                tracing::info!(
+                    %did,
+                    sub = principal.as_deref().map(hashed_sub).unwrap_or_else(|| "-".to_string()),
+                    "admitted A2A stream"
+                );
                 self.inner.send_streaming_message(params, request).await
             }
             IncomingAdmission::AuthRequired { request, reason } => {
@@ -712,7 +834,8 @@ impl RequestHandler for AgentBridgeRequestHandler {
                     }
                 })))
             }
-            IncomingAdmission::Forged { request, reason } => {
+            IncomingAdmission::Forged { request, reason }
+            | IncomingAdmission::Denied { request, reason } => {
                 let task = rejected_forged_did(&request, &reason);
                 Ok(Box::pin(futures::stream::once(async move {
                     match task {
@@ -1154,6 +1277,8 @@ fn parse_name(name: &str) -> Result<Name, String> {
 enum IncomingAdmission {
     Proven {
         did: String,
+        /// The attested owner of `did`, when an admitter resolved one.
+        principal: Option<String>,
         request: SendMessageRequest,
     },
     AuthRequired {
@@ -1164,12 +1289,30 @@ enum IncomingAdmission {
         request: SendMessageRequest,
         reason: String,
     },
+    /// Identified, and policy says no. Distinct from `AuthRequired` because
+    /// retrying will not help.
+    Denied {
+        request: SendMessageRequest,
+        reason: String,
+    },
 }
 
-/// Application-layer gate: the payload must be signed by the claimed agent DID.
-/// Missing/unsigned proof parks the task (`AUTH_REQUIRED`). A mesh member that
-/// presents another agent's DID is rejected.
-fn admit_incoming_message(mut req: SendMessageRequest) -> IncomingAdmission {
+/// Application-layer gate: signature valid ⇒ fresh ⇒ attested ⇒ permitted.
+///
+/// `did` is only ever taken from the envelope, never from the payload or the
+/// metadata: the payload is opaque application data and the hint is
+/// unauthenticated. Missing or unsigned proof parks the task
+/// (`AUTH_REQUIRED`); a member presenting another agent's DID is rejected.
+///
+/// `admitter: None` reproduces the pre-attestation behaviour exactly — proof
+/// of possession and nothing more — which is what lets this land before any
+/// policy exists.
+fn admit_incoming_message(
+    mut req: SendMessageRequest,
+    admitter: Option<&shadi_identity::Admitter>,
+    replay: &shadi_identity::ReplayCache,
+    self_did: Option<&str>,
+) -> IncomingAdmission {
     let text = extract_text(&req.message);
     if text == "(no text parts)" || !shadi_identity::looks_like_did_proof(text.as_bytes()) {
         return IncomingAdmission::AuthRequired {
@@ -1177,26 +1320,87 @@ fn admit_incoming_message(mut req: SendMessageRequest) -> IncomingAdmission {
             reason: "DID proof required on the message".to_string(),
         };
     }
-    match shadi_identity::unwrap_signed_message(text.as_bytes()) {
-        Ok(verified) => {
-            let payload = String::from_utf8_lossy(&verified.payload).into_owned();
-            req.message.parts = vec![Part::text(payload)];
-            IncomingAdmission::Proven {
-                did: verified.did,
+
+    // An unauthenticated lookup key, used only to choose whose attestation to
+    // fetch. Never believed: a forged hint cannot make Eve into Alice, and a
+    // tampered one can only cause a denial.
+    let hint = req
+        .message
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get(shadi_identity::A2A_PRINCIPAL_HINT_METADATA_KEY))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let verified = match shadi_identity::unwrap_signed_message(text.as_bytes()) {
+        Ok(verified) => verified,
+        Err(shadi_identity::IdentityError::ForgedDid(msg)) => {
+            return IncomingAdmission::Forged {
                 request: req,
+                reason: format!("forged DID: {msg}"),
             }
         }
-        Err(shadi_identity::IdentityError::Proof(msg)) if msg.contains("forged DID") => {
-            IncomingAdmission::Forged {
+        Err(_) => {
+            return IncomingAdmission::AuthRequired {
                 request: req,
-                reason: msg,
+                reason: "DID proof required on the message".to_string(),
             }
         }
-        Err(_) => IncomingAdmission::AuthRequired {
-            request: req,
-            reason: "DID proof required on the message".to_string(),
+    };
+
+    // Freshness lives inside the signed payload, so it is covered by the
+    // signature checked above and cannot be stripped in flight.
+    let body = match shadi_identity::Sealed::open(&verified.payload, self_did, replay) {
+        Ok(body) => body,
+        Err(reason) => return IncomingAdmission::Denied { request: req, reason },
+    };
+
+    let principal = match admitter {
+        None => None,
+        Some(admitter) => match admitter.admit(&verified.did, hint.as_deref()) {
+            shadi_identity::Admission::Admitted { principal, .. } => Some(principal),
+            shadi_identity::Admission::Denied { reason, .. } => {
+                return IncomingAdmission::Denied { request: req, reason }
+            }
+            // Both park the task. They stay distinct up to here so logs and
+            // metrics can tell an unknown peer from an authority outage.
+            shadi_identity::Admission::Unattested { did } => {
+                return IncomingAdmission::AuthRequired {
+                    request: req,
+                    reason: format!("no authority attests {did}"),
+                }
+            }
+            shadi_identity::Admission::AnchorUnavailable { did, reason } => {
+                tracing::warn!(%did, %reason, "anchor unavailable; failing closed");
+                return IncomingAdmission::AuthRequired {
+                    request: req,
+                    reason: "attestation authority unavailable".to_string(),
+                }
+            }
         },
+    };
+
+    // The adapter sees the bare body: neither the envelope nor the freshness
+    // wrapper leaks into the tool's input.
+    req.message.parts = vec![Part::text(String::from_utf8_lossy(&body).into_owned())];
+    IncomingAdmission::Proven {
+        did: verified.did,
+        principal,
+        request: req,
     }
+}
+
+/// A truncated SHA-256 of a principal, for log lines.
+///
+/// `principal=alice@corp.com` is PII and leaks the org's user directory, and
+/// logs usually ship off-box. This keeps lines correlatable without that.
+fn hashed_sub(principal: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(principal.as_bytes());
+    format!(
+        "sha256:{}",
+        digest[..4].iter().map(|b| format!("{b:02x}")).collect::<String>()
+    )
 }
 
 fn task_ids_from(req: &SendMessageRequest) -> (String, String) {
@@ -1566,7 +1770,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_lists_profiles_and_generic_stdio() {
-        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None, false)
+        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None, None, false)
             .expect_err("no gemini profile");
         let msg = err.to_string();
         assert!(msg.contains("claude-code"));
@@ -1816,9 +2020,89 @@ test push ... FAILED
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// No policy configured: envelope proof only, exactly as before.
+    fn lenient() -> shadi_identity::ReplayCache {
+        shadi_identity::ReplayCache::new(64, false)
+    }
+
+    fn admit_bare(req: SendMessageRequest) -> IncomingAdmission {
+        admit_incoming_message(req, None, &lenient(), None)
+    }
+
+    /// Stands in for `GithubAnchor` without the HTTP: answers only when the
+    /// hint names the login that really owns the DID, which is the property
+    /// the hint mechanism rests on.
+    struct HintAnchor {
+        owner: String,
+        did: String,
+    }
+
+    impl shadi_identity::TrustAnchor for HintAnchor {
+        fn resolve(
+            &self,
+            did: &str,
+            hint: Option<&str>,
+        ) -> Result<Option<shadi_identity::Attestation>, shadi_identity::IdentityError> {
+            let Some(login) = hint.and_then(|h| h.strip_prefix("github:")) else {
+                return Ok(None);
+            };
+            if login != self.owner || did != self.did {
+                return Ok(None);
+            }
+            Ok(Some(shadi_identity::Attestation {
+                did: did.to_string(),
+                principal: login.to_string(),
+                authority: "github.com".to_string(),
+                email: None,
+                email_verified: false,
+                claims: serde_json::Map::new(),
+            }))
+        }
+
+        fn authority(&self) -> &str {
+            "github.com"
+        }
+    }
+
+    /// A listener trusting `github.com` for `permitted`, where `owner` really
+    /// owns `did`.
+    fn hint_admitter(owner: &str, did: &str, permitted: &[&str]) -> shadi_identity::Admitter {
+        let policy = shadi_identity::AdmissionPolicy {
+            trusted_issuers: vec![shadi_identity::TrustedIssuer {
+                issuer: "github.com".to_string(),
+                allowed_principals: permitted.iter().map(|l| l.to_string()).collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        shadi_identity::Admitter::new(
+            vec![Box::new(HintAnchor {
+                owner: owner.to_string(),
+                did: did.to_string(),
+            })],
+            policy,
+        )
+    }
+
+    fn signed_request(id: &shadi_identity::AgentIdentity, body: &str) -> SendMessageRequest {
+        let envelope = shadi_identity::wrap_signed_message(id, body.as_bytes()).unwrap();
+        sample_request(String::from_utf8(envelope).unwrap())
+    }
+
+    fn with_hint(mut req: SendMessageRequest, hint: &str) -> SendMessageRequest {
+        req.message
+            .metadata
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(
+                shadi_identity::A2A_PRINCIPAL_HINT_METADATA_KEY.to_string(),
+                serde_json::Value::String(hint.to_string()),
+            );
+        req
+    }
+
     #[test]
     fn admit_unsigned_message_parks_auth_required() {
-        match admit_incoming_message(sample_request("plain task")) {
+        match admit_bare(sample_request("plain task")) {
             IncomingAdmission::AuthRequired { reason, .. } => {
                 assert!(reason.contains("DID proof required"));
             }
@@ -1837,30 +2121,151 @@ test push ... FAILED
             text.lines().nth(2).unwrap().to_string()
         };
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
-        match admit_incoming_message(sample_request(forged)) {
+        match admit_bare(sample_request(forged)) {
             IncomingAdmission::Forged { reason, .. } => {
                 assert!(reason.contains("forged DID"), "{reason}");
             }
-            IncomingAdmission::AuthRequired { reason, .. } => {
-                panic!("forged DID must be rejected, not parked: {reason}");
-            }
-            IncomingAdmission::Proven { did, .. } => {
-                panic!("forged DID must not prove as {did}");
-            }
+            other => panic!("forged DID must be rejected as Forged, got {other:?}"),
         }
     }
 
     #[test]
     fn admit_honest_proof_unwraps_payload() {
         let id = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
-        let text = String::from_utf8(envelope).unwrap();
-        match admit_incoming_message(sample_request(text)) {
-            IncomingAdmission::Proven { did, request } => {
+        match admit_bare(signed_request(&id, "real prompt")) {
+            IncomingAdmission::Proven {
+                did,
+                principal,
+                request,
+            } => {
                 assert_eq!(did, id.did());
+                assert_eq!(principal, None, "no admitter means no principal");
                 assert_eq!(extract_text(&request.message), "real prompt");
             }
-            _ => panic!("honest proof must be admitted"),
+            other => panic!("honest proof must be admitted, got {other:?}"),
+        }
+    }
+
+    /// The attested happy path: Bob has never heard of Alice, and admits her
+    /// because GitHub vouches for the DID her envelope proves possession of.
+    #[test]
+    fn an_attested_peer_is_admitted_and_names_its_principal() {
+        let alice = shadi_identity::AgentIdentity::generate().unwrap();
+        let admitter = hint_admitter("alice", &alice.did(), &["alice"]);
+        let req = with_hint(signed_request(&alice, "review PR 412"), "github:alice");
+        match admit_incoming_message(req, Some(&admitter), &lenient(), None) {
+            IncomingAdmission::Proven {
+                principal, request, ..
+            } => {
+                assert_eq!(principal.as_deref(), Some("alice"));
+                assert_eq!(extract_text(&request.message), "review PR 412");
+            }
+            other => panic!("expected Proven, got {other:?}"),
+        }
+    }
+
+    /// Without a hint this anchor abstains, so an attestation-gated listener
+    /// parks rather than admitting on the envelope alone.
+    #[test]
+    fn a_missing_hint_parks_instead_of_admitting() {
+        let alice = shadi_identity::AgentIdentity::generate().unwrap();
+        let admitter = hint_admitter("alice", &alice.did(), &["alice"]);
+        match admit_incoming_message(
+            signed_request(&alice, "task"),
+            Some(&admitter),
+            &lenient(),
+            None,
+        ) {
+            IncomingAdmission::AuthRequired { reason, .. } => {
+                assert!(reason.contains("no authority attests"), "{reason}");
+            }
+            other => panic!("expected AuthRequired, got {other:?}"),
+        }
+    }
+
+    /// Eve signs for her own DID and hints Alice's login. The signature is
+    /// valid — for Eve — and the anchor resolves the DID, not the hint.
+    #[test]
+    fn a_hint_naming_someone_who_does_not_own_the_did_is_not_admitted() {
+        let alice = shadi_identity::AgentIdentity::generate().unwrap();
+        let eve = shadi_identity::AgentIdentity::generate().unwrap();
+        let admitter = hint_admitter("alice", &alice.did(), &["alice"]);
+        let req = with_hint(signed_request(&eve, "rm -rf /"), "github:alice");
+        match admit_incoming_message(req, Some(&admitter), &lenient(), None) {
+            IncomingAdmission::AuthRequired { reason, .. } => {
+                assert!(reason.contains("no authority attests"), "{reason}");
+            }
+            other => panic!("Eve must not become Alice, got {other:?}"),
+        }
+    }
+
+    /// Attested by a trusted authority, and still not permitted.
+    #[test]
+    fn an_attested_peer_outside_policy_is_denied_not_parked() {
+        let eve = shadi_identity::AgentIdentity::generate().unwrap();
+        let admitter = hint_admitter("eve", &eve.did(), &["alice"]);
+        let req = with_hint(signed_request(&eve, "task"), "github:eve");
+        match admit_incoming_message(req, Some(&admitter), &lenient(), None) {
+            IncomingAdmission::Denied { reason, .. } => {
+                assert!(reason.contains("not permitted"), "{reason}");
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    /// The payload is opaque application data. Claiming to be Alice in it
+    /// changes nothing, because no such field is ever consulted.
+    #[test]
+    fn a_principal_claimed_in_the_payload_is_ignored() {
+        let eve = shadi_identity::AgentIdentity::generate().unwrap();
+        let req = signed_request(&eve, r#"{"principal":"alice","task":"x"}"#);
+        match admit_bare(req) {
+            IncomingAdmission::Proven { did, principal, .. } => {
+                assert_eq!(did, eve.did(), "the DID comes from the envelope only");
+                assert_eq!(principal, None);
+            }
+            other => panic!("expected Proven as Eve, got {other:?}"),
+        }
+    }
+
+    /// Freshness rides inside the signed payload, so the whole sealed envelope
+    /// is what gets replayed — and rejected on second delivery.
+    #[test]
+    fn a_replayed_envelope_is_rejected_on_second_delivery() {
+        let alice = shadi_identity::AgentIdentity::generate().unwrap();
+        let me = "did:key:zBob";
+        let sealed = shadi_identity::Sealed::seal(me, "review PR 412").unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&alice, &sealed).unwrap();
+        let text = String::from_utf8(envelope).unwrap();
+        let replay = lenient();
+
+        match admit_incoming_message(sample_request(text.clone()), None, &replay, Some(me)) {
+            IncomingAdmission::Proven { request, .. } => {
+                assert_eq!(extract_text(&request.message), "review PR 412");
+            }
+            other => panic!("first delivery must be admitted, got {other:?}"),
+        }
+        match admit_incoming_message(sample_request(text), None, &replay, Some(me)) {
+            IncomingAdmission::Denied { reason, .. } => {
+                assert!(reason.contains("replayed"), "{reason}");
+            }
+            other => panic!("replay must be denied, got {other:?}"),
+        }
+    }
+
+    /// Captured en route to Bob, redelivered to Carol. `aud` is inside the
+    /// signature, so it cannot be rewritten.
+    #[test]
+    fn an_envelope_addressed_to_another_peer_is_rejected() {
+        let alice = shadi_identity::AgentIdentity::generate().unwrap();
+        let sealed = shadi_identity::Sealed::seal("did:key:zBob", "task").unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&alice, &sealed).unwrap();
+        let req = sample_request(String::from_utf8(envelope).unwrap());
+        match admit_incoming_message(req, None, &lenient(), Some("did:key:zCarol")) {
+            IncomingAdmission::Denied { reason, .. } => {
+                assert!(reason.contains("addressed to did:key:zBob"), "{reason}");
+            }
+            other => panic!("cross-peer replay must be denied, got {other:?}"),
         }
     }
 
