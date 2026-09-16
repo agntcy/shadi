@@ -111,6 +111,18 @@ impl NetAllowlist {
         };
         is_host_allowed(host, &guard)
     }
+
+    /// Check whether a literal `ip` is permitted by the current list.
+    ///
+    /// Unlike [`Self::is_allowed`] this also matches an allowlisted hostname
+    /// that resolves to `ip`, so it can perform DNS lookups.
+    pub fn is_ip_allowed(&self, ip: &str) -> bool {
+        let guard = match self.0.read() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        is_ip_allowed(ip, &guard)
+    }
 }
 
 fn is_host_allowed(host: &str, list: &[String]) -> bool {
@@ -303,23 +315,53 @@ impl Drop for NetProxy {
 // Accept loop
 // ---------------------------------------------------------------------------
 
+/// Concurrent connection handlers the proxy will run at once.
+///
+/// One thread per accepted connection is unbounded: anything that can reach
+/// the port — the sandboxed process, or any process of the same user — can
+/// make the proxy spawn threads and, for IP-mode clients, drive a DNS lookup
+/// per allowlist hostname on each one. Past this many the proxy sheds load by
+/// closing the connection instead of queuing it, which a SOCKS5 client sees
+/// as a failed connect.
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+
 fn accept_loop(
     listener: TcpListener,
     allowlist: NetAllowlist,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
     listener.set_nonblocking(false).ok();
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     loop {
         match listener.accept() {
             Ok((stream, _peer)) => {
                 if stop.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
+                if in_flight.load(std::sync::atomic::Ordering::SeqCst)
+                    >= MAX_CONCURRENT_CONNECTIONS
+                {
+                    warn!(
+                        "net proxy: {} connections in flight, shedding",
+                        MAX_CONCURRENT_CONNECTIONS
+                    );
+                    drop(stream);
+                    continue;
+                }
                 let al = allowlist.clone();
-                thread::Builder::new()
+                let counter = Arc::clone(&in_flight);
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let spawned = thread::Builder::new()
                     .name("shadi-proxy-conn".into())
-                    .spawn(move || handle_connection(stream, al))
-                    .ok();
+                    .spawn(move || {
+                        handle_connection(stream, al);
+                        counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    });
+                if spawned.is_err() {
+                    // The counter was raised before the spawn, so a failed
+                    // spawn has to lower it or the cap leaks downward.
+                    in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionAborted => continue,
             Err(_) => break,
@@ -795,6 +837,51 @@ mod tests {
 
     fn lock_proxy_ports() -> std::sync::MutexGuard<'static, ()> {
         PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn proxy_sheds_load_past_the_concurrency_cap() {
+        let _guard = lock_proxy_ports();
+        // Deny everything: handle_connection still reads the greeting, so each
+        // held connection occupies a handler thread without needing upstream.
+        let proxy = NetProxy::start(NetAllowlist::new(vec![])).unwrap();
+        let port = proxy.port();
+
+        // Open the cap's worth of connections and leave them mid-handshake,
+        // so every handler thread is parked on a read.
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_CONNECTIONS {
+            match std::net::TcpStream::connect(format!("127.0.0.1:{port}")) {
+                Ok(s) => held.push(s),
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            held.len(),
+            MAX_CONCURRENT_CONNECTIONS,
+            "the proxy refused a connection below its own cap"
+        );
+
+        // Give the accept loop time to spawn a handler for each.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // One more: the proxy accepts the TCP connection (the listener backlog
+        // does that) and then closes it without a SOCKS5 reply. A client sees
+        // EOF rather than a greeting response.
+        let mut extra = std::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .expect("listener still accepts");
+        extra.write_all(&[5, 1, 0]).ok();
+        extra
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        let mut reply = [0u8; 2];
+        let read = extra.read(&mut reply);
+        assert!(
+            matches!(read, Ok(0)) || read.is_err(),
+            "a shed connection answered the greeting: {read:?}"
+        );
+
+        drop(held);
     }
 
     #[test]
