@@ -38,16 +38,25 @@ fuzz_target!(|data: &[u8]| {
                     !profile.as_bytes().contains(&0),
                     "Seatbelt profile contained a NUL"
                 );
-                for path in policy.allow_read() {
-                    let Some(raw) = path.to_str() else {
-                        continue;
-                    };
-                    if raw.contains('"') {
-                        assert!(
-                            profile.contains("\\\""),
-                            "path {raw:?} contained a quote that was not escaped"
-                        );
+                // A quote in a path must not terminate the string it sits in.
+                // Looking for an escape in the whole profile does not test
+                // that: `/a/""/..` normalises to `/a`, so its quotes never
+                // reach a rule and the profile is correct without containing
+                // one. What must hold is that each rule closes what it opens.
+                for line in profile.lines() {
+                    let mut escaped = false;
+                    let mut unescaped = 0usize;
+                    for ch in line.chars() {
+                        match ch {
+                            '\\' if !escaped => escaped = true,
+                            '"' if !escaped => unescaped += 1,
+                            _ => escaped = false,
+                        }
                     }
+                    assert!(
+                        unescaped % 2 == 0,
+                        "rule line has an unbalanced quote: {line:?}"
+                    );
                 }
             }
             Err(SandboxError::InvalidConfig) => {}
