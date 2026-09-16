@@ -47,5 +47,58 @@ fuzz_target!(|data: &[u8]| {
             "empty allowlist accepted {host}"
         );
         let _ = allowlist.is_allowed(host);
+
+        // Matching is documented as case-insensitive, so the same host in a
+        // different case cannot produce a different verdict. Both the host and
+        // the patterns are folded, so flipping either side must agree.
+        let flipped: String = host
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        assert_eq!(
+            allowlist.is_allowed(host),
+            allowlist.is_allowed(&flipped),
+            "case changed the verdict for {host:?} vs {flipped:?}"
+        );
+    }
+
+    // is_ip_allowed resolves any allowlisted hostname to compare against the
+    // incoming IP, so the patterns here are restricted to the shapes it never
+    // resolves — literal IPs, `*`, and `*.` wildcards — to keep the target off
+    // the network. The resolving branch needs a stubbed resolver and is not
+    // covered here.
+    let ip_safe: Vec<String> = patterns
+        .iter()
+        .filter(|p| {
+            let t = p.trim();
+            t == "*" || t.starts_with("*.") || t.parse::<std::net::IpAddr>().is_ok()
+        })
+        .cloned()
+        .collect();
+    let ip_list = NetAllowlist::new(ip_safe.clone());
+    let wide_open = ip_safe.iter().any(|p| p.trim() == "*");
+
+    for candidate in ["127.0.0.1", "::1", "10.0.0.1", "not-an-ip"] {
+        assert!(
+            !empty.is_ip_allowed(candidate),
+            "empty allowlist accepted ip {candidate}"
+        );
+        let verdict = ip_list.is_ip_allowed(candidate);
+        if wide_open {
+            // `*` short-circuits before the IP is parsed, so even a
+            // non-address is allowed by it.
+            assert!(verdict, "`*` did not allow {candidate}");
+        } else if candidate == "not-an-ip" && !ip_safe.iter().any(|p| p.trim() == candidate) {
+            assert!(
+                !verdict,
+                "an unparseable address was allowed without a matching pattern"
+            );
+        }
     }
 });
