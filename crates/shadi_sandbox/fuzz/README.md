@@ -45,6 +45,24 @@ cargo +nightly fuzz run seatbelt-profile
 cargo +nightly fuzz run socks5-frame
 ```
 
+Pass the checked-in seeds so a run starts from legal input rather than noise,
+and bound it the way CI does:
+
+```sh
+mkdir -p corpus/socks5-frame
+cargo +nightly fuzz run socks5-frame corpus/socks5-frame seeds/socks5-frame \
+  -- -max_total_time=60 -rss_limit_mb=2048 -print_final_stats=1
+```
+
+`seeds/` is committed and read-only to the fuzzer; `corpus/` is the growing
+working set and is gitignored.
+
+`fuzz.yml` runs every target on each pull request touching this crate, 60
+seconds apiece, and five minutes apiece on the nightly schedule. A crashing
+input is uploaded as a build artifact. `seatbelt-profile` runs on macOS there:
+the profile builder is behind `cfg(target_os = "macos")` and the target returns
+immediately anywhere else.
+
 The original `control-message` and `session-name` targets ran clean for
 30 seconds (~7.3-7.8M executions each) with no crash before they were
 committed.
