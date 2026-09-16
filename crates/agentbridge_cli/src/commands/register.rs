@@ -1957,6 +1957,12 @@ test push ... FAILED
         );
     }
 
+    /// `A2A_TLS_CERT` / `A2A_TLS_KEY` are process-global and
+    /// `a2a_server_tls_paths` reads them inside the call under test, so these
+    /// tests have to hold this across both the mutation and the call. Guarding
+    /// only the mutation still lets a sibling's value reach the reader.
+    static TLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn grpc_server_tls_loopback_is_plaintext() {
         let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
@@ -1967,6 +1973,7 @@ test push ... FAILED
 
     #[test]
     fn grpc_server_tls_non_loopback_requires_cert_files() {
+        let _guard = TLS_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev_cert = std::env::var_os("A2A_TLS_CERT");
         let prev_key = std::env::var_os("A2A_TLS_KEY");
         let prev_tmp = std::env::var_os("SHADI_TMP_DIR");
@@ -2004,6 +2011,7 @@ test push ... FAILED
 
     #[test]
     fn grpc_server_tls_rejects_empty_pem() {
+        let _guard = TLS_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev_cert = std::env::var_os("A2A_TLS_CERT");
         let prev_key = std::env::var_os("A2A_TLS_KEY");
         let tmp = std::env::temp_dir().join(format!(
