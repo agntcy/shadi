@@ -1,0 +1,104 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "crates/shadi_sandbox/**"
+      - "crates/shadi_identity/**"
+      - ".github/workflows/fuzz.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/shadi_sandbox/**"
+      - "crates/shadi_identity/**"
+      - ".github/workflows/fuzz.yml"
+  # The pull-request run is a smoke test. Finding anything deeper needs time,
+  # so the nightly run gets five minutes per target instead of one.
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege; nothing here writes.
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: control-message,  crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
+          - { target: policy-patch,     crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
+          - { target: session-name,     crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
+          - { target: socks5-frame,     crate: shadi_sandbox,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
+          - { target: did-proof,        crate: shadi_identity, runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
+          # The profile builder is behind cfg(target_os = "macos") and the
+          # target returns immediately anywhere else, so running it on Linux
+          # would report coverage that never executed a line.
+          - { target: seatbelt-profile, crate: shadi_sandbox,  runner: macos-latest,  triple: aarch64-apple-darwin }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Rust nightly
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: nightly
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: crates/${{ matrix.crate }}/fuzz
+          # Only main writes the cache; see ci.yml.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: crates/${{ matrix.crate }}/fuzz
+        env:
+          # rust-toolchain.toml pins a stable channel, and it wins over the
+          # toolchain the setup step installed — cargo-fuzz needs -Z, so
+          # without this the build fails on "only accepted on the nightly
+          # compiler". Set for the whole step so cargo-fuzz's own child cargo
+          # inherits it.
+          RUSTUP_TOOLCHAIN: nightly
+          # A run that needs more than this is leaking, and an OOM-killed job
+          # reports as an infrastructure failure rather than a finding.
+          RSS_LIMIT_MB: 2048
+          MAX_TOTAL_TIME: ${{ github.event_name == 'schedule' && '300' || '60' }}
+        run: |
+          set -euo pipefail
+          mkdir -p corpus/${{ matrix.target }}
+          # --target is explicit: install-action ships the musl prebuilt of
+          # cargo-fuzz, which otherwise defaults --target to musl, and ASan
+          # cannot link against a statically linked libc.
+          cargo fuzz run \
+            --target ${{ matrix.triple }} \
+            ${{ matrix.target }} \
+            corpus/${{ matrix.target }} \
+            seeds/${{ matrix.target }} \
+            -- \
+            -max_total_time="$MAX_TOTAL_TIME" \
+            -rss_limit_mb="$RSS_LIMIT_MB" \
+            -print_final_stats=1
+
+      # The crashing input is the finding; without it the log says only that
+      # something failed.
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts/
+          if-no-files-found: ignore
