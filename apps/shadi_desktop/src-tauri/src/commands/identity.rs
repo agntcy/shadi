@@ -659,13 +659,25 @@ pub(crate) mod test_support {
     use std::sync::{Mutex, OnceLock};
 
     static PAYLOAD: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    /// Serialises the set-and-read pair. The payload mutex alone is not
+    /// enough: it protects each access, and the race is between them.
+    static SERIALISE: Mutex<()> = Mutex::new(());
 
     fn slot() -> &'static Mutex<Option<String>> {
         PAYLOAD.get_or_init(|| Mutex::new(None))
     }
 
-    pub(crate) fn set(payload: Option<String>) {
-        *slot().lock().expect("payload lock") = payload;
+    /// Publish `payload` and run `body` against it, with no other test able to
+    /// change it in between.
+    ///
+    /// Scoped rather than a bare guard so a test cannot read the payload
+    /// outside the lock by forgetting to take one. The payload mutex is
+    /// released before `body` runs, because `body` reads through
+    /// `published_keys`, which takes it again.
+    pub(crate) fn with_payload<T>(payload: Option<String>, body: impl FnOnce() -> T) -> T {
+        let _serialise = SERIALISE.lock().unwrap_or_else(|e| e.into_inner());
+        *slot().lock().unwrap_or_else(|e| e.into_inner()) = payload;
+        body()
     }
 
     pub(crate) fn published_keys() -> Result<String, String> {
@@ -703,8 +715,10 @@ mod tests {
     /// else's handle is not fixed by the operator running ssh-keygen.
     #[test]
     fn an_rsa_only_account_reports_what_it_published() {
-        test_support::set(Some("ssh-rsa AAAAB3NzaC1yc2EAAAA laptop\n".to_string()));
-        let err = fetch_github_human_did("msardara").expect_err("rsa cannot be used");
+        let err = test_support::with_payload(
+            Some("ssh-rsa AAAAB3NzaC1yc2EAAAA laptop\n".to_string()),
+            || fetch_github_human_did("msardara").expect_err("rsa cannot be used"),
+        );
         assert!(err.contains("@msardara"), "must name the account: {err}");
         assert!(err.contains("found: ssh-rsa"), "must name the algorithm: {err}");
         // The bare error must not presume whose key it is; callers add that.
@@ -791,17 +805,20 @@ mod tests {
     #[test]
     fn github_handle_resolves_to_the_published_ed25519_did() {
         let (line, expected) = ed25519_line();
-        test_support::set(Some(format!(
-            "ssh-rsa AAAAB3NzaC1yc2EAAAA other\n{line}\n"
-        )));
-        assert_eq!(fetch_github_human_did("octocat").unwrap(), expected);
+        let did = test_support::with_payload(
+            Some(format!("ssh-rsa AAAAB3NzaC1yc2EAAAA other\n{line}\n")),
+            || fetch_github_human_did("octocat").unwrap(),
+        );
+        assert_eq!(did, expected);
     }
 
     /// A key that parses but is the wrong type must not silently pass.
     #[test]
     fn an_empty_listing_is_rejected() {
-        test_support::set(Some(String::new()));
-        assert!(fetch_github_human_did("ghost").is_err());
+        let result = test_support::with_payload(Some(String::new()), || {
+            fetch_github_human_did("ghost")
+        });
+        assert!(result.is_err());
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
