@@ -247,6 +247,7 @@ fn best_effort_did(agent_id: &str) -> Option<String> {
 
 struct AgentBridgeExecutor {
     adapter: Arc<dyn CliAdapter>,
+    agent_did: Option<String>,
     slim_endpoint: Option<String>,
     verbose: bool,
 }
@@ -479,11 +480,32 @@ impl AgentExecutor for AgentBridgeExecutor {
         &self,
         ctx: a2a_server::ExecutorContext,
     ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-        let raw = ctx
-            .message
-            .as_ref()
-            .map(extract_text)
-            .unwrap_or_else(|| "(no prompt)".to_string());
+        // Admission happens here rather than in send_message so the task the
+        // client is told about is one the task store knows: the handler has
+        // already created it by the time the executor runs, so a parked task
+        // can be fetched, cancelled and resumed like any other.
+        let task_id = ctx.task_id.clone();
+        let context_id = ctx.context_id.clone();
+        if let Some(message) = ctx.message.as_ref() {
+            if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
+                return terminal_task(task_id, context_id, TaskState::Rejected, reason);
+            }
+        }
+        let raw = match ctx.message.as_ref().map(admit_message) {
+            Some(MessageAdmission::Proven { did, payload }) => {
+                tracing::info!(%did, "admitted A2A message with proven agent DID");
+                payload
+            }
+            Some(MessageAdmission::AuthRequired { reason }) => {
+                // Non-terminal: the client re-proves and sends again with this
+                // task id, and the stored task carries on from here.
+                return terminal_task(task_id, context_id, TaskState::AuthRequired, reason);
+            }
+            Some(MessageAdmission::Forged { reason }) => {
+                return terminal_task(task_id, context_id, TaskState::Rejected, reason);
+            }
+            None => "(no prompt)".to_string(),
+        };
 
         // Extract the body from the task envelope rendered by render_task_message().
         let prompt = raw
@@ -618,7 +640,6 @@ struct AgentBridgeRequestHandler {
     inner: DefaultRequestHandler,
     ready: Arc<Notify>,
     agent_id: String,
-    agent_did: Option<String>,
     slim_endpoint: Option<String>,
     a2a_listen: Option<String>,
     a2a_binding: A2ABinding,
@@ -639,6 +660,9 @@ impl AgentBridgeRequestHandler {
             inner: DefaultRequestHandler::new(
                 AgentBridgeExecutor {
                     adapter,
+                    agent_did: agent_did
+                        .filter(|did| !did.is_empty())
+                        .map(str::to_string),
                     slim_endpoint: slim_endpoint.map(str::to_string),
                     verbose,
                 },
@@ -646,9 +670,6 @@ impl AgentBridgeRequestHandler {
             ),
             ready,
             agent_id: agent_id.to_string(),
-            agent_did: agent_did
-                .filter(|did| !did.is_empty())
-                .map(str::to_string),
             slim_endpoint: slim_endpoint.map(str::to_string),
             a2a_listen: a2a_listen.map(str::to_string),
             a2a_binding,
@@ -664,21 +685,10 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
         self.ready.notify_waiters();
-        if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), &req.message) {
-            return Ok(rejected_forged_did(&req, &reason));
-        }
-        match admit_incoming_message(req) {
-            IncomingAdmission::Proven { request, did } => {
-                tracing::info!(%did, "admitted A2A message with proven agent DID");
-                self.inner.send_message(params, request).await
-            }
-            IncomingAdmission::AuthRequired { request, reason } => {
-                Ok(parked_auth_required(&request, &reason))
-            }
-            IncomingAdmission::Forged { request, reason } => {
-                Ok(rejected_forged_did(&request, &reason))
-            }
-        }
+        // Admission is the executor's job now: the handler creates the task
+        // before calling it, so a message that fails the DID gate still leaves
+        // a task the client can fetch and resume.
+        self.inner.send_message(params, req).await
     }
 
     async fn send_streaming_message(
@@ -687,43 +697,9 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.ready.notify_waiters();
-        if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), &req.message) {
-            let task = rejected_forged_did(&req, &reason);
-            return Ok(Box::pin(futures::stream::once(async move {
-                match task {
-                    SendMessageResponse::Task(task) => Ok(StreamResponse::Task(task)),
-                    SendMessageResponse::Message(message) => Ok(StreamResponse::Message(message)),
-                }
-            })));
-        }
-        match admit_incoming_message(req) {
-            IncomingAdmission::Proven { request, did } => {
-                tracing::info!(%did, "admitted A2A stream with proven agent DID");
-                self.inner.send_streaming_message(params, request).await
-            }
-            IncomingAdmission::AuthRequired { request, reason } => {
-                let task = parked_auth_required(&request, &reason);
-                Ok(Box::pin(futures::stream::once(async move {
-                    match task {
-                        SendMessageResponse::Task(task) => Ok(StreamResponse::Task(task)),
-                        SendMessageResponse::Message(message) => {
-                            Ok(StreamResponse::Message(message))
-                        }
-                    }
-                })))
-            }
-            IncomingAdmission::Forged { request, reason } => {
-                let task = rejected_forged_did(&request, &reason);
-                Ok(Box::pin(futures::stream::once(async move {
-                    match task {
-                        SendMessageResponse::Task(task) => Ok(StreamResponse::Task(task)),
-                        SendMessageResponse::Message(message) => {
-                            Ok(StreamResponse::Message(message))
-                        }
-                    }
-                })))
-            }
-        }
+        // See send_message: the executor gates the message, so the task exists
+        // in the store either way.
+        self.inner.send_streaming_message(params, req).await
     }
 
     async fn get_task(
@@ -1150,101 +1126,67 @@ fn parse_name(name: &str) -> Result<Name, String> {
         .map_err(|e| format!("invalid SLIM name '{name}': {e} (expected org/namespace/agent)"))
 }
 
-#[derive(Debug)]
-enum IncomingAdmission {
-    Proven {
-        did: String,
-        request: SendMessageRequest,
-    },
-    AuthRequired {
-        request: SendMessageRequest,
-        reason: String,
-    },
-    Forged {
-        request: SendMessageRequest,
-        reason: String,
-    },
+/// A single-task stream in `state`, carrying `reason` as the agent's message.
+///
+/// Emitted as `StreamResponse::Task`, which the handler persists, so the task
+/// the client is told about exists in the store — `AuthRequired` is
+/// non-terminal in the protocol and has to be fetchable to be resumed.
+fn terminal_task(
+    task_id: String,
+    context_id: String,
+    state: TaskState,
+    reason: String,
+) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+    let task = Task {
+        id: task_id,
+        context_id,
+        status: TaskStatus {
+            state,
+            message: Some(Message::new(
+                Role::Agent,
+                vec![Part::text(reason)],
+            )),
+            timestamp: None,
+        },
+        artifacts: None,
+        history: None,
+        metadata: None,
+    };
+    Box::pin(futures::stream::once(async move {
+        Ok(StreamResponse::Task(task))
+    }))
+}
+
+/// Admission decided from the message alone, so the executor can reach it.
+enum MessageAdmission {
+    Proven { did: String, payload: String },
+    AuthRequired { reason: String },
+    Forged { reason: String },
 }
 
 /// Application-layer gate: the payload must be signed by the claimed agent DID.
-/// Missing/unsigned proof parks the task (`AUTH_REQUIRED`). A mesh member that
-/// presents another agent's DID is rejected.
-fn admit_incoming_message(mut req: SendMessageRequest) -> IncomingAdmission {
-    let text = extract_text(&req.message);
+///
+/// A mesh member that presents another agent's DID fails here — the public key
+/// comes from the claimed `did:key`, not from the caller.
+fn admit_message(message: &Message) -> MessageAdmission {
+    let text = extract_text(message);
     if text == "(no text parts)" || !shadi_identity::looks_like_did_proof(text.as_bytes()) {
-        return IncomingAdmission::AuthRequired {
-            request: req,
+        return MessageAdmission::AuthRequired {
             reason: "DID proof required on the message".to_string(),
         };
     }
     match shadi_identity::unwrap_signed_message(text.as_bytes()) {
-        Ok(verified) => {
-            let payload = String::from_utf8_lossy(&verified.payload).into_owned();
-            req.message.parts = vec![Part::text(payload)];
-            IncomingAdmission::Proven {
-                did: verified.did,
-                request: req,
-            }
-        }
+        Ok(verified) => MessageAdmission::Proven {
+            did: verified.did,
+            payload: String::from_utf8_lossy(&verified.payload).into_owned(),
+        },
         Err(shadi_identity::IdentityError::Proof(msg)) if msg.contains("forged DID") => {
-            IncomingAdmission::Forged {
-                request: req,
-                reason: msg,
-            }
+            MessageAdmission::Forged { reason: msg }
         }
-        Err(_) => IncomingAdmission::AuthRequired {
-            request: req,
+        Err(_) => MessageAdmission::AuthRequired {
             reason: "DID proof required on the message".to_string(),
         },
     }
-}
-
-fn task_ids_from(req: &SendMessageRequest) -> (String, String) {
-    let task_id = req.message.task_id.clone().unwrap_or_else(new_task_id);
-    let context_id = req
-        .message
-        .context_id
-        .clone()
-        .unwrap_or_else(new_context_id);
-    (task_id, context_id)
-}
-
-fn parked_auth_required(req: &SendMessageRequest, reason: &str) -> SendMessageResponse {
-    let (task_id, context_id) = task_ids_from(req);
-    SendMessageResponse::Task(Task {
-        id: task_id,
-        context_id,
-        status: TaskStatus {
-            state: TaskState::AuthRequired,
-            message: Some(Message::new(
-                Role::Agent,
-                vec![Part::text(reason.to_string())],
-            )),
-            timestamp: None,
-        },
-        artifacts: None,
-        history: None,
-        metadata: None,
-    })
-}
-
-fn rejected_forged_did(req: &SendMessageRequest, reason: &str) -> SendMessageResponse {
-    let (task_id, context_id) = task_ids_from(req);
-    SendMessageResponse::Task(Task {
-        id: task_id,
-        context_id,
-        status: TaskStatus {
-            state: TaskState::Rejected,
-            message: Some(Message::new(
-                Role::Agent,
-                vec![Part::text(reason.to_string())],
-            )),
-            timestamp: None,
-        },
-        artifacts: None,
-        history: None,
-        metadata: None,
-    })
 }
 
 /// The URL is not the name. If the caller addressed a DID, only that agent
@@ -1836,12 +1778,115 @@ test push ... FAILED
 
     #[test]
     fn admit_unsigned_message_parks_auth_required() {
-        match admit_incoming_message(sample_request("plain task")) {
-            IncomingAdmission::AuthRequired { reason, .. } => {
-                assert!(reason.contains("DID proof required"));
+        match admit_message(&sample_request("plain task").message) {
+            MessageAdmission::AuthRequired { reason } => {
+                assert!(reason.contains("DID proof required"), "{reason}");
             }
-            other => panic!("expected AUTH_REQUIRED, got {other:?}"),
+            MessageAdmission::Proven { did, .. } => panic!("unsigned text proved as {did}"),
+            MessageAdmission::Forged { reason } => panic!("expected parked, got forged: {reason}"),
         }
+    }
+
+    /// Minimal adapter: the parked and rejected paths never reach it.
+    struct SilentAdapter(shadi_mas::AgentId);
+
+    impl CliAdapter for SilentAdapter {
+        fn agent_id(&self) -> &shadi_mas::AgentId {
+            &self.0
+        }
+        fn snapshot_context(&self) -> Result<agentbridge::ContextPacket, agentbridge::CliAdapterError> {
+            Err(agentbridge::CliAdapterError::Subprocess("not used".into()))
+        }
+        fn inject_context(&self, _: &agentbridge::ContextPacket) -> Result<(), agentbridge::CliAdapterError> {
+            Ok(())
+        }
+        fn execute_prompt(&self, _: &str) -> Result<String, agentbridge::CliAdapterError> {
+            panic!("a gated message must not reach the harness")
+        }
+    }
+
+    fn silent_handler() -> AgentBridgeRequestHandler {
+        AgentBridgeRequestHandler::new(
+            Arc::new(SilentAdapter(shadi_mas::AgentId("claude-code".to_string()))),
+            "claude-code",
+            None,
+            None,
+            Some("127.0.0.1:4311"),
+            A2ABinding::Jsonrpc,
+            Arc::new(Notify::new()),
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_message_parks_a_task_the_client_can_fetch() {
+        let handler = silent_handler();
+        let params = A2AServiceParams::default();
+
+        let response = handler
+            .send_message(&params, sample_request("plain task"))
+            .await
+            .expect("the gate parks rather than erroring");
+
+        let task = match response {
+            SendMessageResponse::Task(task) => task,
+            SendMessageResponse::Message(m) => panic!("expected a task, got {m:?}"),
+        };
+        assert_eq!(task.status.state, TaskState::AuthRequired);
+
+        // The point of the issue: a parked task has to exist in the store, or
+        // the client is told about a task it cannot fetch or resume.
+        let fetched = handler
+            .get_task(
+                &params,
+                GetTaskRequest {
+                    id: task.id.clone(),
+                    history_length: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("a parked task must be fetchable");
+        assert_eq!(fetched.id, task.id);
+        assert_eq!(fetched.status.state, TaskState::AuthRequired);
+        assert_eq!(fetched.context_id, task.context_id);
+    }
+
+    #[tokio::test]
+    async fn a_forged_did_is_rejected_as_a_stored_task() {
+        let honest = shadi_identity::AgentIdentity::generate().unwrap();
+        let impostor = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let sig_line = {
+            let text = String::from_utf8(envelope).unwrap();
+            text.lines().nth(2).unwrap().to_string()
+        };
+        let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
+
+        let handler = silent_handler();
+        let params = A2AServiceParams::default();
+        let response = handler
+            .send_message(&params, sample_request(forged))
+            .await
+            .expect("rejection is a task state, not a transport error");
+        let task = match response {
+            SendMessageResponse::Task(task) => task,
+            SendMessageResponse::Message(m) => panic!("expected a task, got {m:?}"),
+        };
+        assert_eq!(task.status.state, TaskState::Rejected);
+
+        let fetched = handler
+            .get_task(
+                &params,
+                GetTaskRequest {
+                    id: task.id.clone(),
+                    history_length: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("a rejected task must be fetchable");
+        assert_eq!(fetched.status.state, TaskState::Rejected);
     }
 
     #[tokio::test]
@@ -1893,14 +1938,14 @@ test push ... FAILED
             text.lines().nth(2).unwrap().to_string()
         };
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
-        match admit_incoming_message(sample_request(forged)) {
-            IncomingAdmission::Forged { reason, .. } => {
+        match admit_message(&sample_request(forged).message) {
+            MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("forged DID"), "{reason}");
             }
-            IncomingAdmission::AuthRequired { reason, .. } => {
+            MessageAdmission::AuthRequired { reason } => {
                 panic!("forged DID must be rejected, not parked: {reason}");
             }
-            IncomingAdmission::Proven { did, .. } => {
+            MessageAdmission::Proven { did, .. } => {
                 panic!("forged DID must not prove as {did}");
             }
         }
@@ -1911,10 +1956,10 @@ test push ... FAILED
         let id = shadi_identity::AgentIdentity::generate().unwrap();
         let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
         let text = String::from_utf8(envelope).unwrap();
-        match admit_incoming_message(sample_request(text)) {
-            IncomingAdmission::Proven { did, request } => {
+        match admit_message(&sample_request(text).message) {
+            MessageAdmission::Proven { did, payload } => {
                 assert_eq!(did, id.did());
-                assert_eq!(extract_text(&request.message), "real prompt");
+                assert_eq!(payload, "real prompt");
             }
             _ => panic!("honest proof must be admitted"),
         }
