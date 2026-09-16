@@ -572,6 +572,13 @@ fn return_dummy() -> TcpStream {
 
 #[cfg(test)]
 mod tests {
+
+    static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_proxy_ports() -> std::sync::MutexGuard<'static, ()> {
+        PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     use super::*;
 
     #[test]
@@ -745,6 +752,7 @@ mod tests {
 
     #[test]
     fn proxy_blocks_host_not_in_allowlist() {
+        let _guard = lock_proxy_ports();
         let al = NetAllowlist::new(vec![]);  // block everything
         let proxy = NetProxy::start(al).unwrap();
 
@@ -782,6 +790,10 @@ mod tests {
             }
         });
 
+        // Binds an ephemeral port like the restart test, so it has to take
+        // the same lock: this is the sibling that can be handed the port
+        // restart just released (agntcy/shadi#204).
+        let _guard = lock_proxy_ports();
         let al = NetAllowlist::new(vec!["127.0.0.1".into()]);
         let proxy = NetProxy::start(al).unwrap();
 
@@ -789,12 +801,6 @@ mod tests {
         let mut buf = [0u8; 5];
         tunnel.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"hello");
-    }
-
-    static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn lock_proxy_ports() -> std::sync::MutexGuard<'static, ()> {
-        PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
