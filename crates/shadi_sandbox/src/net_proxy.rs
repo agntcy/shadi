@@ -325,6 +325,22 @@ impl Drop for NetProxy {
 /// as a failed connect.
 pub const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
+/// Raises the in-flight connection count for as long as it is held.
+struct ConnectionPermit(Arc<std::sync::atomic::AtomicUsize>);
+
+impl ConnectionPermit {
+    fn acquire(counter: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn accept_loop(
     listener: TcpListener,
     allowlist: NetAllowlist,
@@ -349,19 +365,19 @@ fn accept_loop(
                     continue;
                 }
                 let al = allowlist.clone();
-                let counter = Arc::clone(&in_flight);
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let spawned = thread::Builder::new()
+                // Held by the handler, so the count falls however the handler
+                // ends — including a spawn that never runs it, which drops the
+                // closure and the permit with it. A hand-rolled decrement
+                // needs a branch per exit and leaks the cap downward if one
+                // is missed.
+                let permit = ConnectionPermit::acquire(&in_flight);
+                thread::Builder::new()
                     .name("shadi-proxy-conn".into())
                     .spawn(move || {
+                        let _permit = permit;
                         handle_connection(stream, al);
-                        counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    });
-                if spawned.is_err() {
-                    // The counter was raised before the spawn, so a failed
-                    // spawn has to lower it or the cap leaks downward.
-                    in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                }
+                    })
+                    .ok();
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionAborted => continue,
             Err(_) => break,
@@ -865,6 +881,30 @@ mod tests {
     }
 
     #[test]
+    fn is_ip_allowed_denies_when_the_lock_is_poisoned() {
+        // A poisoned allowlist must fail closed, like is_allowed does: a
+        // panic while the list was held cannot become permission to connect.
+        let list = NetAllowlist::new(vec!["127.0.0.1".into()]);
+        assert!(list.is_ip_allowed("127.0.0.1"), "sanity before poisoning");
+
+        let poisoner = list.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.0.write().unwrap();
+            panic!("poison the allowlist lock");
+        })
+        .join();
+
+        assert!(
+            list.0.read().is_err(),
+            "the lock should be poisoned for this test to mean anything"
+        );
+        assert!(
+            !list.is_ip_allowed("127.0.0.1"),
+            "a poisoned allowlist allowed a connection"
+        );
+    }
+
+    #[test]
     fn is_ip_allowed_accepts_ipv6_literals() {
         let list = NetAllowlist::new(vec!["::1".into()]);
         assert!(list.is_ip_allowed("::1"));
@@ -882,17 +922,11 @@ mod tests {
         // Open the cap's worth of connections and leave them mid-handshake,
         // so every handler thread is parked on a read.
         let mut held = Vec::new();
-        for _ in 0..MAX_CONCURRENT_CONNECTIONS {
-            match std::net::TcpStream::connect(format!("127.0.0.1:{port}")) {
-                Ok(s) => held.push(s),
-                Err(_) => break,
-            }
+        for i in 0..MAX_CONCURRENT_CONNECTIONS {
+            let conn = std::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                .unwrap_or_else(|e| panic!("proxy refused connection {i} below its own cap: {e}"));
+            held.push(conn);
         }
-        assert_eq!(
-            held.len(),
-            MAX_CONCURRENT_CONNECTIONS,
-            "the proxy refused a connection below its own cap"
-        );
 
         // Give the accept loop time to spawn a handler for each.
         std::thread::sleep(std::time::Duration::from_millis(200));
