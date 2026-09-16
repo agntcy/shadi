@@ -33,6 +33,13 @@ fuzzing for its own sake:
   Domain allocations stay within the RFC 1928 255-byte prefix.
   `is_ip_allowed` is not called (it does real DNS).
 
+- **`resolve-policy`** — layers `PolicyFileValues` over `PolicyOverrides` and
+  calls `resolve_policy` / `describe_policy`. File-policy paths are lenient and
+  must never fail; override paths name what the run asked for, so a missing one
+  must be an error. Paths come from a fixture directory, not from the fuzzed
+  bytes: canonicalisation reads the real filesystem and arbitrary absolute
+  paths would make a finding depend on the host.
+
 ## Running
 
 ```sh
@@ -43,6 +50,7 @@ cargo +nightly fuzz run session-name
 cargo +nightly fuzz run policy-patch
 cargo +nightly fuzz run seatbelt-profile
 cargo +nightly fuzz run socks5-frame
+cargo +nightly fuzz run resolve-policy
 ```
 
 Pass the checked-in seeds so a run starts from legal input rather than noise,
