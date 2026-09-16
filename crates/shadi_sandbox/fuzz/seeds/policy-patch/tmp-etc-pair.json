@@ -1,0 +1,1 @@
+{"type":"patch","add_allow":["/tmp/a"],"add_read":["/etc/passwd"]}
