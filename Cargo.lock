@@ -229,6 +229,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-tls",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
