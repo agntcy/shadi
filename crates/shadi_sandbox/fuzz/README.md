@@ -40,6 +40,12 @@ fuzzing for its own sake:
   bytes: canonicalisation reads the real filesystem and arbitrary absolute
   paths would make a finding depend on the host.
 
+- **`session-socket`** — `resolve_session_socket` takes either a session name
+  or an explicit socket path. A path-like value is used verbatim, which is the
+  caller naming a socket; anything else is a name and must land directly in
+  `socket_dir()` under a sanitised filename. The target asserts the name branch
+  cannot add a path component or carry an unsanitised character.
+
 ## Running
 
 ```sh
@@ -51,6 +57,7 @@ cargo +nightly fuzz run policy-patch
 cargo +nightly fuzz run seatbelt-profile
 cargo +nightly fuzz run socks5-frame
 cargo +nightly fuzz run resolve-policy
+cargo +nightly fuzz run session-socket
 ```
 
 Pass the checked-in seeds so a run starts from legal input rather than noise,
