@@ -426,7 +426,7 @@ fn run_sandboxed(
     let status = child
         .wait()
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-    span.record("exit.code", &status.code().unwrap_or(-1));
+    span.record("exit.code", status.code().unwrap_or(-1));
     Ok(status.code().unwrap_or(1))
 }
 
@@ -439,9 +439,7 @@ mod tests {
     static PY_INIT: Once = Once::new();
 
     fn ensure_python() {
-        PY_INIT.call_once(|| {
-            pyo3::prepare_freethreaded_python();
-        });
+        PY_INIT.call_once(Python::initialize);
     }
 
     fn unique_key(prefix: &str) -> String {
@@ -456,7 +454,7 @@ mod tests {
     #[test]
     fn verify_session_sets_verified_flag() {
         ensure_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let store = ShadiStore::new();
             let module = PyModule::from_code(
                 py,
@@ -483,7 +481,7 @@ mod tests {
     #[test]
     fn verify_session_requires_verifier() {
         ensure_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let store = ShadiStore::new();
             let session = Py::new(py, PySessionContext::new("agent".to_string(), "session".to_string())).unwrap();
             let session_bound = session.bind(py);
@@ -499,7 +497,7 @@ mod tests {
     #[test]
     fn put_get_delete_roundtrip_requires_verified() {
         ensure_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let store = ShadiStore::new();
             let mut session = PySessionContext::new("agent".to_string(), "session".to_string());
             session.add_claim("role:tourist".to_string());
@@ -522,7 +520,7 @@ mod tests {
     #[test]
     fn list_keys_requires_verified() {
         ensure_python();
-        Python::with_gil(|_py| {
+        Python::attach(|_py| {
             let store = ShadiStore::new();
             let mut session = PySessionContext::new("agent".to_string(), "session".to_string());
             session.add_claim("role:secops".to_string());
