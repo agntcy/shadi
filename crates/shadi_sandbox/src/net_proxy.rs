@@ -840,6 +840,38 @@ mod tests {
     }
 
     #[test]
+    fn is_ip_allowed_matches_literals_and_denies_by_default() {
+        // Only literal IPs and `*` here: a hostname pattern would send
+        // is_ip_allowed to the resolver, and a unit test must not do DNS.
+        let empty = NetAllowlist::new(vec![]);
+        assert!(!empty.is_ip_allowed("127.0.0.1"), "empty list is deny-all");
+        assert!(!empty.is_ip_allowed("not-an-ip"));
+
+        let literal = NetAllowlist::new(vec!["127.0.0.1".into(), "10.0.0.7".into()]);
+        assert!(literal.is_ip_allowed("127.0.0.1"));
+        assert!(literal.is_ip_allowed("10.0.0.7"));
+        assert!(!literal.is_ip_allowed("10.0.0.8"));
+
+        // `*` short-circuits before the address is parsed, so it allows even
+        // a value that is not an address.
+        let open = NetAllowlist::new(vec!["*".into()]);
+        assert!(open.is_ip_allowed("127.0.0.1"));
+        assert!(open.is_ip_allowed("not-an-ip"));
+
+        // A `*.` pattern cannot be resolved to a fixed address, so it never
+        // matches an IP on its own.
+        let wildcard = NetAllowlist::new(vec!["*.example.com".into()]);
+        assert!(!wildcard.is_ip_allowed("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_ip_allowed_accepts_ipv6_literals() {
+        let list = NetAllowlist::new(vec!["::1".into()]);
+        assert!(list.is_ip_allowed("::1"));
+        assert!(!list.is_ip_allowed("::2"));
+    }
+
+    #[test]
     fn proxy_sheds_load_past_the_concurrency_cap() {
         let _guard = lock_proxy_ports();
         // Deny everything: handle_connection still reads the greeting, so each
