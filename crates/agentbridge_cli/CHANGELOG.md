@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.1.7...agntcy-agentbridge-cli-v0.1.8) - 2026-09-17
+
+### Added
+
+- *(agentbridge)* serve the agent card at the well-known path ([#287](https://github.com/agntcy/shadi/pull/287))
+
+### Fixed
+
+- *(agentbridge)* park and reject as real tasks the client can fetch ([#293](https://github.com/agntcy/shadi/pull/293))
+
+### Other
+
+- *(agentbridge)* serialise the TLS tests against each other ([#288](https://github.com/agntcy/shadi/pull/288))
+
 ## [0.1.7](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.1.6...agntcy-agentbridge-cli-v0.1.7) - 2026-09-15
 
 ### Added

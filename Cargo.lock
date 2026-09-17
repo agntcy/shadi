@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-agentbridge"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agntcy-shadi-a2a",
  "agntcy-shadi-mas",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-agentbridge-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "a2a-grpc",
  "a2a-lf",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-memory"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "rusqlite",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-py"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-memory",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-sandbox"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hex",
  "hmac 0.13.0",
