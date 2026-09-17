@@ -480,10 +480,6 @@ impl AgentExecutor for AgentBridgeExecutor {
         &self,
         ctx: a2a_server::ExecutorContext,
     ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-        // Admission happens here rather than in send_message so the task the
-        // client is told about is one the task store knows: the handler has
-        // already created it by the time the executor runs, so a parked task
-        // can be fetched, cancelled and resumed like any other.
         let task_id = ctx.task_id.clone();
         let context_id = ctx.context_id.clone();
         if let Some(message) = ctx.message.as_ref() {
@@ -497,8 +493,6 @@ impl AgentExecutor for AgentBridgeExecutor {
                 payload
             }
             Some(MessageAdmission::AuthRequired { reason }) => {
-                // Non-terminal: the client re-proves and sends again with this
-                // task id, and the stored task carries on from here.
                 return terminal_task(task_id, context_id, TaskState::AuthRequired, reason);
             }
             Some(MessageAdmission::Forged { reason }) => {
@@ -685,9 +679,6 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
         self.ready.notify_waiters();
-        // Admission is the executor's job now: the handler creates the task
-        // before calling it, so a message that fails the DID gate still leaves
-        // a task the client can fetch and resume.
         self.inner.send_message(params, req).await
     }
 
@@ -697,8 +688,6 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.ready.notify_waiters();
-        // See send_message: the executor gates the message, so the task exists
-        // in the store either way.
         self.inner.send_streaming_message(params, req).await
     }
 
@@ -1834,8 +1823,6 @@ test push ... FAILED
         };
         assert_eq!(task.status.state, TaskState::AuthRequired);
 
-        // The point of the issue: a parked task has to exist in the store, or
-        // the client is told about a task it cannot fetch or resume.
         let fetched = handler
             .get_task(
                 &params,
