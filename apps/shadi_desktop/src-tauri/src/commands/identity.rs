@@ -14,9 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::bootstrap::{
-    self, AgentEntry, IdentityConfig, TrustedHuman, DEFAULT_ENDPOINT,
-};
+use super::bootstrap::{self, AgentEntry, IdentityConfig, TrustedHuman, DEFAULT_ENDPOINT};
 use super::not_implemented;
 
 const PANEL_ISSUE: u32 = 117;
@@ -205,10 +203,7 @@ pub struct BootstrapStatus {
 }
 
 fn ssh_dir() -> Option<PathBuf> {
-    ssh_dir_from(
-        std::env::var_os("HOME"),
-        std::env::var_os("USERPROFILE"),
-    )
+    ssh_dir_from(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
 }
 
 /// Windows sets `USERPROFILE`, not `HOME`, so reading only `HOME` there made
@@ -252,7 +247,10 @@ pub async fn identity_generate_ssh_key(
 
 /// Refuses to touch an existing key: overwriting one would orphan every
 /// identity already derived from it.
-fn generate_into(dir: &std::path::Path, request: GenerateKeyRequest) -> Result<SshKeyCandidate, String> {
+fn generate_into(
+    dir: &std::path::Path,
+    request: GenerateKeyRequest,
+) -> Result<SshKeyCandidate, String> {
     let private_path = dir.join("id_ed25519");
     let public_path = dir.join("id_ed25519.pub");
     if private_path.exists() || public_path.exists() {
@@ -343,7 +341,10 @@ pub async fn identity_discover_ssh_keys() -> Result<Vec<SshKeyCandidate>, String
             let Ok(line) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            if !line.trim_start().starts_with(shadi_identity::ssh::SSH_ED25519) {
+            if !line
+                .trim_start()
+                .starts_with(shadi_identity::ssh::SSH_ED25519)
+            {
                 continue;
             }
             let private = path.with_extension("");
@@ -359,10 +360,7 @@ pub async fn identity_discover_ssh_keys() -> Result<Vec<SshKeyCandidate>, String
 
             found.push(SshKeyCandidate {
                 path: private.to_string_lossy().into_owned(),
-                comment: line
-                    .split_whitespace()
-                    .nth(2)
-                    .map(|c| c.to_string()),
+                comment: line.split_whitespace().nth(2).map(|c| c.to_string()),
                 encrypted,
                 human_did,
             });
@@ -444,7 +442,10 @@ pub async fn identity_bootstrap(
             .iter()
             .map(|name| {
                 shadi_identity::AgentIdentity::derive(&seed, name)
-                    .map(|id| AgentEntry { agent_id: name.clone(), did: id.did() })
+                    .map(|id| AgentEntry {
+                        agent_id: name.clone(),
+                        did: id.did(),
+                    })
                     .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -520,13 +521,22 @@ pub async fn identity_trust_github_handle(
 
         let mut config = bootstrap::load_config(&paths.config)?
             .ok_or_else(|| "run onboarding before trusting other accounts".to_string())?;
-        let entry = TrustedHuman { github_handle: handle.clone(), human_did };
-        match config.trusted.iter_mut().find(|t| t.github_handle == handle) {
+        let entry = TrustedHuman {
+            github_handle: handle.clone(),
+            human_did,
+        };
+        match config
+            .trusted
+            .iter_mut()
+            .find(|t| t.github_handle == handle)
+        {
             // Re-trusting refreshes the DID, so a rotated key is picked up.
             Some(existing) => *existing = entry,
             None => config.trusted.push(entry),
         }
-        config.trusted.sort_by(|a, b| a.github_handle.cmp(&b.github_handle));
+        config
+            .trusted
+            .sort_by(|a, b| a.github_handle.cmp(&b.github_handle));
         bootstrap::save_config(&paths.config, &config)?;
         Ok(config.trusted)
     })
@@ -596,7 +606,10 @@ fn status_from(
         agents: config
             .agents
             .iter()
-            .map(|a| AgentIdentity { agent_name: a.agent_id.clone(), did: a.did.clone() })
+            .map(|a| AgentIdentity {
+                agent_name: a.agent_id.clone(),
+                did: a.did.clone(),
+            })
             .collect(),
         local_agent: Some(config.local_agent.clone()),
         endpoint: config.endpoint.clone(),
@@ -706,9 +719,15 @@ mod tests {
         test_support::set(Some("ssh-rsa AAAAB3NzaC1yc2EAAAA laptop\n".to_string()));
         let err = fetch_github_human_did("msardara").expect_err("rsa cannot be used");
         assert!(err.contains("@msardara"), "must name the account: {err}");
-        assert!(err.contains("found: ssh-rsa"), "must name the algorithm: {err}");
+        assert!(
+            err.contains("found: ssh-rsa"),
+            "must name the algorithm: {err}"
+        );
         // The bare error must not presume whose key it is; callers add that.
-        assert!(!err.contains("Ask @"), "remedy belongs to the caller: {err}");
+        assert!(
+            !err.contains("Ask @"),
+            "remedy belongs to the caller: {err}"
+        );
     }
 
     /// The tags the frontend sends, spelled exactly as it spells them.
@@ -728,7 +747,11 @@ mod tests {
         )
         .expect("one_password");
         match op {
-            KeySource::OnePassword { item, vault, account } => {
+            KeySource::OnePassword {
+                item,
+                vault,
+                account,
+            } => {
                 assert_eq!(item, "My Key");
                 assert_eq!(vault.as_deref(), Some("Private"));
                 assert_eq!(account.as_deref(), Some("UUID"));
@@ -791,9 +814,7 @@ mod tests {
     #[test]
     fn github_handle_resolves_to_the_published_ed25519_did() {
         let (line, expected) = ed25519_line();
-        test_support::set(Some(format!(
-            "ssh-rsa AAAAB3NzaC1yc2EAAAA other\n{line}\n"
-        )));
+        test_support::set(Some(format!("ssh-rsa AAAAB3NzaC1yc2EAAAA other\n{line}\n")));
         assert_eq!(fetch_github_human_did("octocat").unwrap(), expected);
     }
 
@@ -805,8 +826,7 @@ mod tests {
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("shadi-keygen-{}-{tag}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("shadi-keygen-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -825,20 +845,36 @@ mod tests {
 
         let private = std::fs::read(dir.join("id_ed25519")).expect("private half");
         let public = std::fs::read_to_string(dir.join("id_ed25519.pub")).expect("public half");
-        assert!(public.starts_with(shadi_identity::ssh::SSH_ED25519), "{public}");
-        assert!(public.ends_with('\n'), "public key must be newline terminated");
+        assert!(
+            public.starts_with(shadi_identity::ssh::SSH_ED25519),
+            "{public}"
+        );
+        assert!(
+            public.ends_with('\n'),
+            "public key must be newline terminated"
+        );
         assert!(!created.encrypted);
 
         // The DID handed to the UI has to be the one the key actually derives.
         let vk = shadi_identity::ssh::verifying_key_from_openssh_private_key(&private, None)
             .expect("read back");
-        assert_eq!(created.human_did.as_deref(), Some(shadi_identity::encode_did_key(&vk).as_str()));
+        assert_eq!(
+            created.human_did.as_deref(),
+            Some(shadi_identity::encode_did_key(&vk).as_str())
+        );
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.join("id_ed25519")).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "private key must not be group or world readable");
+            let mode = std::fs::metadata(dir.join("id_ed25519"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "private key must not be group or world readable"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -851,7 +887,11 @@ mod tests {
 
         let err = generate_into(&dir, request(None)).expect_err("must refuse");
         assert!(err.contains("already exists"), "{err}");
-        assert_eq!(before, std::fs::read(dir.join("id_ed25519")).unwrap(), "key was rewritten");
+        assert_eq!(
+            before,
+            std::fs::read(dir.join("id_ed25519")).unwrap(),
+            "key was rewritten"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -863,7 +903,9 @@ mod tests {
 
         let private = std::fs::read(dir.join("id_ed25519")).unwrap();
         assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, None).is_err());
-        assert!(shadi_identity::ssh::seed_from_openssh_private_key(&private, Some("hunter2")).is_ok());
+        assert!(
+            shadi_identity::ssh::seed_from_openssh_private_key(&private, Some("hunter2")).is_ok()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -912,9 +954,9 @@ fn run_op(account: Option<&str>, args: &[&str]) -> Result<String, String> {
     if let Some(account) = account.filter(|a| !a.is_empty()) {
         command.args(["--account", account]);
     }
-    let output = command
-        .output()
-        .map_err(|e| format!("failed to run `op`: {e}. Install the 1Password CLI to use this source"))?;
+    let output = command.output().map_err(|e| {
+        format!("failed to run `op`: {e}. Install the 1Password CLI to use this source")
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // Not being signed in is the common case and has a specific remedy.
@@ -956,7 +998,14 @@ pub async fn identity_list_1password_ssh_keys(
         let account = account.as_deref();
         let json = run_op(
             account,
-            &["item", "list", "--categories", "SSH Key", "--format", "json"],
+            &[
+                "item",
+                "list",
+                "--categories",
+                "SSH Key",
+                "--format",
+                "json",
+            ],
         )?;
         let items: serde_json::Value =
             serde_json::from_str(&json).map_err(|e| format!("unexpected `op` output: {e}"))?;
@@ -975,7 +1024,11 @@ pub async fn identity_list_1password_ssh_keys(
                     .map(|s| s.to_string());
                 // Read only the public field for the DID preview.
                 let human_did = op_public_key_did(account, &title, vault.as_deref());
-                Some(OnePasswordSshKey { item: title, vault, human_did })
+                Some(OnePasswordSshKey {
+                    item: title,
+                    vault,
+                    human_did,
+                })
             })
             .collect())
     })
@@ -1006,8 +1059,19 @@ fn read_key_material(source: &KeySource) -> Result<Vec<u8>, String> {
         KeySource::File { path } => {
             std::fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))
         }
-        KeySource::OnePassword { item, vault, account } => {
-            let mut args = vec!["item", "get", item.as_str(), "--fields", "private key", "--reveal"];
+        KeySource::OnePassword {
+            item,
+            vault,
+            account,
+        } => {
+            let mut args = vec![
+                "item",
+                "get",
+                item.as_str(),
+                "--fields",
+                "private key",
+                "--reveal",
+            ];
             if let Some(vault) = vault {
                 args.push("--vault");
                 args.push(vault);

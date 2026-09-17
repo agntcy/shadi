@@ -12,7 +12,10 @@ pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
+pub fn spawn_sandboxed(
+    command: &mut Command,
+    policy: &SandboxPolicy,
+) -> Result<SandboxedChild, SandboxError> {
     #[cfg(target_os = "linux")]
     {
         linux::spawn_sandboxed(command, policy)

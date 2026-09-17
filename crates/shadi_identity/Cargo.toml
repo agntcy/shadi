@@ -15,9 +15,11 @@ pkcs8 = { version = "0.11", features = ["pem"] }
 getrandom = "0.4"
 bs58 = "0.5"
 base64 = "0.23"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hkdf = "0.13"
 sha2 = "0.11"
+tracing = "0.1"
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
 # OpenSSH key parsing for the SSH-rooted identity source (agntcy/shadi#140).
 # `encryption` brings bcrypt-pbkdf so passphrase-protected keys work.

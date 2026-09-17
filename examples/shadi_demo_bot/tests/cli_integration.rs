@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
 #[cfg(unix)]
 use std::process::Stdio;
+use std::process::{Command, Output};
 #[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
@@ -77,7 +77,10 @@ fn assert_feature_bot_runtime_expectations(output: &Output, expect_slim: bool) {
             stderr
         );
         assert!(stdout.contains("[FAIL] sandbox blocked read"), "{stdout}");
-        assert!(stdout.contains("[FAIL] sandbox blocked network"), "{stdout}");
+        assert!(
+            stdout.contains("[FAIL] sandbox blocked network"),
+            "{stdout}"
+        );
         assert!(
             stderr.contains("error: one or more SHADI feature checks failed"),
             "stdout:\n{stdout}\n\nstderr:\n{stderr}"
@@ -203,7 +206,9 @@ fn shell_ticker_handles_sigterm() {
         .expect("send SIGTERM to shell ticker");
     assert!(status.success(), "failed to send SIGTERM");
 
-    let output = child.wait_with_output().expect("wait for shell ticker output");
+    let output = child
+        .wait_with_output()
+        .expect("wait for shell ticker output");
     assert_success(&output);
 
     let stdout = stdout_text(&output);

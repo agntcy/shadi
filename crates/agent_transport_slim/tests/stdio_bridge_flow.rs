@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_transport_slim::{BridgeArgs, NativeSlimBootstrap, start_bridge_with_io};
+use agent_transport_slim::{start_bridge_with_io, BridgeArgs, NativeSlimBootstrap};
 use slim_bindings::{CaSource, Service, TlsSource};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -217,15 +217,24 @@ fn given_generated_assets_when_bridge_runs_then_it_reports_and_forwards_messages
     let (ready_tx, ready_rx) = mpsc::channel();
     let endpoint_for_participant = endpoint.clone();
     let participant_handle = thread::spawn(move || -> Result<(u32, Vec<u8>), String> {
-        let participant_service =
-            Service::new(format!("stdio-bridge-test-participant-{}", std::process::id()));
-        let participant_name = slim_bindings::Name::from_string("agntcy/shadi/secops-a".to_string())
-            .map_err(format_slim_error)?;
+        let participant_service = Service::new(format!(
+            "stdio-bridge-test-participant-{}",
+            std::process::id()
+        ));
+        let participant_name =
+            slim_bindings::Name::from_string("agntcy/shadi/secops-a".to_string())
+                .map_err(format_slim_error)?;
         let connection_id = participant_service
-            .connect(build_client_config(&endpoint_for_participant, &participant_tls))
+            .connect(build_client_config(
+                &endpoint_for_participant,
+                &participant_tls,
+            ))
             .map_err(format_slim_error)?;
         let participant_app = participant_service
-            .create_app_with_secret(Arc::new(participant_name.clone()), TEST_SHARED_SECRET.to_string())
+            .create_app_with_secret(
+                Arc::new(participant_name.clone()),
+                TEST_SHARED_SECRET.to_string(),
+            )
             .map_err(format_slim_error)?;
 
         participant_app
@@ -299,10 +308,7 @@ fn given_generated_assets_when_bridge_runs_then_it_reports_and_forwards_messages
     assert_eq!(report.published, 1);
     assert_eq!(report.received, 1);
     assert_eq!(participant_payload, b"hello".to_vec());
-    assert_eq!(
-        output.lock().expect("output bytes").as_slice(),
-        b"reply\n"
-    );
+    assert_eq!(output.lock().expect("output bytes").as_slice(), b"reply\n");
 
     node_service
         .stop_server(endpoint.clone())

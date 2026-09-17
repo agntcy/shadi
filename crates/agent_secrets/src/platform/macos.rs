@@ -14,9 +14,9 @@ use std::fmt;
 #[cfg(any(test, feature = "coverage"))]
 use std::sync::{Mutex, OnceLock};
 
-use crate::{SecretError, SecretResult, SecretStore};
 use crate::memory::SecretBytes;
 use crate::policy::SecretPolicy;
+use crate::{SecretError, SecretResult, SecretStore};
 
 pub struct MacosKeychainStore {
     service: String,
@@ -63,24 +63,20 @@ fn keychain_fixture() -> &'static KeychainFixture {
 
 #[cfg(any(test, feature = "coverage"))]
 fn set_generic_password(service: &str, account: &str, secret: &[u8]) -> Result<(), KeychainError> {
-    let mut guard = keychain_fixture()
-        .lock()
-        .map_err(|_| KeychainError {
-            code: -1,
-            message: "fixture lock poisoned",
-        })?;
+    let mut guard = keychain_fixture().lock().map_err(|_| KeychainError {
+        code: -1,
+        message: "fixture lock poisoned",
+    })?;
     guard.insert((service.to_string(), account.to_string()), secret.to_vec());
     Ok(())
 }
 
 #[cfg(any(test, feature = "coverage"))]
 fn get_generic_password(service: &str, account: &str) -> Result<Vec<u8>, KeychainError> {
-    let guard = keychain_fixture()
-        .lock()
-        .map_err(|_| KeychainError {
-            code: -1,
-            message: "fixture lock poisoned",
-        })?;
+    let guard = keychain_fixture().lock().map_err(|_| KeychainError {
+        code: -1,
+        message: "fixture lock poisoned",
+    })?;
     guard
         .get(&(service.to_string(), account.to_string()))
         .cloned()
@@ -89,12 +85,10 @@ fn get_generic_password(service: &str, account: &str) -> Result<Vec<u8>, Keychai
 
 #[cfg(any(test, feature = "coverage"))]
 fn delete_generic_password(service: &str, account: &str) -> Result<(), KeychainError> {
-    let mut guard = keychain_fixture()
-        .lock()
-        .map_err(|_| KeychainError {
-            code: -1,
-            message: "fixture lock poisoned",
-        })?;
+    let mut guard = keychain_fixture().lock().map_err(|_| KeychainError {
+        code: -1,
+        message: "fixture lock poisoned",
+    })?;
     if guard
         .remove(&(service.to_string(), account.to_string()))
         .is_some()
@@ -200,9 +194,7 @@ impl SecretStore for MacosKeychainStore {
     fn delete(&self, key: &str) -> SecretResult<()> {
         match delete_generic_password(&self.service, key) {
             Ok(()) => {}
-            Err(err) if err.code() == errSecItemNotFound => {
-                return Err(SecretError::InvalidInput)
-            }
+            Err(err) if err.code() == errSecItemNotFound => return Err(SecretError::InvalidInput),
             Err(err) => {
                 eprintln!("keychain delete failed: {}", err);
                 return Err(SecretError::StorageFailure);
@@ -213,7 +205,10 @@ impl SecretStore for MacosKeychainStore {
 
     fn list_keys(&self) -> SecretResult<Vec<String>> {
         let keys = self.load_registry()?;
-        Ok(keys.into_iter().filter(|key| key != REGISTRY_ACCOUNT).collect())
+        Ok(keys
+            .into_iter()
+            .filter(|key| key != REGISTRY_ACCOUNT)
+            .collect())
     }
 }
 
@@ -257,8 +252,12 @@ mod tests {
         let key_one = unique_key("shadi-key-a");
         let key_two = unique_key("shadi-key-b");
 
-        store.put(&key_one, b"value-a", SecretPolicy::default()).unwrap();
-        store.put(&key_two, b"value-b", SecretPolicy::default()).unwrap();
+        store
+            .put(&key_one, b"value-a", SecretPolicy::default())
+            .unwrap();
+        store
+            .put(&key_two, b"value-b", SecretPolicy::default())
+            .unwrap();
 
         let keys = store.list_keys().unwrap();
         assert!(keys.iter().any(|item| item == &key_one));

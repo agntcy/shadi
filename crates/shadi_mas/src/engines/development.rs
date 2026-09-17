@@ -124,8 +124,7 @@ impl DevelopmentEngine {
     }
 
     fn accept_proposal(&mut self, participant: AgentId, artifact: Vec<u8>) -> EventOutcome {
-        if !self.config.participants.is_empty()
-            && !self.config.participants.contains(&participant)
+        if !self.config.participants.is_empty() && !self.config.participants.contains(&participant)
         {
             self.counters.rejected += 1;
             return EventOutcome::Rejected(RejectReason::UnknownParticipant);
@@ -208,9 +207,7 @@ impl CoordinationEngine for DevelopmentEngine {
             SemanticPayload::ExternalBytes(bytes) => {
                 let participant = match &event.metadata.source {
                     crate::types::EventSource::Peer(id) => id.clone(),
-                    crate::types::EventSource::Local => {
-                        AgentId("local".to_string())
-                    }
+                    crate::types::EventSource::Local => AgentId("local".to_string()),
                     _ => {
                         self.counters.rejected += 1;
                         return EventOutcome::Rejected(RejectReason::UnknownParticipant);
@@ -229,7 +226,9 @@ impl CoordinationEngine for DevelopmentEngine {
                 };
                 self.accept_vote(voter, AgentId(tool_name))
             }
-            SemanticPayload::ToolResult { accepted: false, .. } => {
+            SemanticPayload::ToolResult {
+                accepted: false, ..
+            } => {
                 self.counters.applied += 1;
                 EventOutcome::Applied
             }
@@ -297,8 +296,14 @@ mod tests {
     fn finalizes_when_quorum_proposals_received() {
         let mut rt = engine();
 
-        assert_eq!(rt.apply(proposal("p1", 0, "claude", b"fn foo() {}")), EventOutcome::Applied);
-        assert_eq!(rt.apply(proposal("p2", 0, "copilot", b"fn foo() -> i32 { 0 }")), EventOutcome::Applied);
+        assert_eq!(
+            rt.apply(proposal("p1", 0, "claude", b"fn foo() {}")),
+            EventOutcome::Applied
+        );
+        assert_eq!(
+            rt.apply(proposal("p2", 0, "copilot", b"fn foo() -> i32 { 0 }")),
+            EventOutcome::Applied
+        );
 
         let outcome = rt.apply(proposal("p3", 0, "codex", b"fn foo() -> i32 { 42 }"));
         assert!(matches!(outcome, EventOutcome::Finalized(_)));
@@ -335,7 +340,10 @@ mod tests {
         let mut rt = engine();
         let ev = proposal("p1", 0, "claude", b"fn x() {}");
         assert_eq!(rt.apply(ev.clone()), EventOutcome::Applied);
-        assert_eq!(rt.apply(ev), EventOutcome::Rejected(RejectReason::DuplicateEvent));
+        assert_eq!(
+            rt.apply(ev),
+            EventOutcome::Rejected(RejectReason::DuplicateEvent)
+        );
     }
 
     #[test]
@@ -344,7 +352,10 @@ mod tests {
         let ev = proposal("future", 1, "claude", b"fn x() {}");
         assert_eq!(
             rt.apply(ev),
-            EventOutcome::Deferred { expected: Epoch(0), received: Epoch(1) }
+            EventOutcome::Deferred {
+                expected: Epoch(0),
+                received: Epoch(1)
+            }
         );
     }
 
@@ -361,7 +372,10 @@ mod tests {
             },
             payload: SemanticPayload::ExternalBytes(b"code".to_vec()),
         };
-        assert_eq!(rt.apply(ev), EventOutcome::Rejected(RejectReason::IncompatiblePattern));
+        assert_eq!(
+            rt.apply(ev),
+            EventOutcome::Rejected(RejectReason::IncompatiblePattern)
+        );
     }
 
     #[test]
@@ -399,7 +413,10 @@ mod tests {
             },
             payload: SemanticPayload::ExternalBytes(b"malicious".to_vec()),
         };
-        assert_eq!(rt.apply(ev), EventOutcome::Rejected(RejectReason::UnknownParticipant));
+        assert_eq!(
+            rt.apply(ev),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
     }
 
     #[test]
@@ -418,7 +435,10 @@ mod tests {
             payload: SemanticPayload::ExternalBytes(b"local code".to_vec()),
         };
         assert!(matches!(rt.apply(ev), EventOutcome::Finalized(_)));
-        assert_eq!(rt.engine().selected_artifact(Epoch(0)), Some(b"local code".as_slice()));
+        assert_eq!(
+            rt.engine().selected_artifact(Epoch(0)),
+            Some(b"local code".as_slice())
+        );
     }
 
     #[test]
@@ -435,7 +455,10 @@ mod tests {
             },
             payload: SemanticPayload::ExternalBytes(b"code".to_vec()),
         };
-        assert_eq!(rt.apply(ev), EventOutcome::Rejected(RejectReason::UnknownParticipant));
+        assert_eq!(
+            rt.apply(ev),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
     }
 
     #[test]
@@ -460,7 +483,10 @@ mod tests {
         let mut rt = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
         let outcome = rt.apply(proposal("p1", 0, "claude", b"fn forced() {}"));
         assert!(matches!(outcome, EventOutcome::Finalized(_)));
-        assert_eq!(rt.engine().selected_artifact(Epoch(0)), Some(b"fn forced() {}".as_slice()));
+        assert_eq!(
+            rt.engine().selected_artifact(Epoch(0)),
+            Some(b"fn forced() {}".as_slice())
+        );
     }
 
     #[test]
@@ -572,7 +598,11 @@ mod tests {
                 },
                 payload,
             };
-            assert_eq!(rt.apply(ev), EventOutcome::Applied, "failed for event {event_id}");
+            assert_eq!(
+                rt.apply(ev),
+                EventOutcome::Applied,
+                "failed for event {event_id}"
+            );
         }
     }
 }

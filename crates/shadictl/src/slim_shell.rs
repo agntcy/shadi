@@ -148,9 +148,10 @@ impl SlimShellState {
         let participant_name = Arc::new(parse_name(participant)?);
         let connection_id = self.ensure_connection()?;
         let app = self.ensure_app()?;
-        let session = self.active_session.clone().ok_or_else(|| {
-            "no active SLIM session; create or join a channel first".to_string()
-        })?;
+        let session = self
+            .active_session
+            .clone()
+            .ok_or_else(|| "no active SLIM session; create or join a channel first".to_string())?;
 
         app.set_route(participant_name.clone(), connection_id)
             .map_err(format_slim_error)?;
@@ -184,9 +185,7 @@ impl SlimShellState {
         // reaches the other members.
         app.set_route(Arc::new(parse_name(channel)?), connection_id)
             .map_err(format_slim_error)?;
-        let session = app
-            .listen_for_session(timeout)
-            .map_err(format_slim_error)?;
+        let session = app.listen_for_session(timeout).map_err(format_slim_error)?;
         let actual = session.destination().map_err(format_slim_error)?;
         let actual_name = actual.to_string();
 
@@ -385,7 +384,9 @@ pub(crate) fn run_foreground_node() -> Result<(), String> {
     let endpoint = resolve_endpoint();
     let server_config = build_server_config()?;
     let service = Service::new(node_service_name());
-    service.run_server(server_config).map_err(format_slim_error)?;
+    service
+        .run_server(server_config)
+        .map_err(format_slim_error)?;
     eprintln!("started SLIM node on {}", endpoint);
 
     wait_for_shutdown_signal()?;
@@ -661,10 +662,7 @@ fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(P
         ));
     }
 
-    candidates.push((
-        base_dir.join("client.crt"),
-        base_dir.join("client.key"),
-    ));
+    candidates.push((base_dir.join("client.crt"), base_dir.join("client.key")));
     candidates
 }
 
@@ -828,13 +826,19 @@ mod tests {
             "agntcy/shadi/avatar",
             Some(("did:key:zMOD".to_string(), None)),
         );
-        assert!(did.contains("as moderator agntcy/shadi/avatar (did:key:zMOD)"), "{did}");
+        assert!(
+            did.contains("as moderator agntcy/shadi/avatar (did:key:zMOD)"),
+            "{did}"
+        );
         assert!(!did.contains("human"), "{did}");
         // DID + human DID.
         let both = format_create_channel_message(
             "agntcy/shadi/room",
             "agntcy/shadi/avatar",
-            Some(("did:key:zMOD".to_string(), Some("did:key:zHUMAN".to_string()))),
+            Some((
+                "did:key:zMOD".to_string(),
+                Some("did:key:zHUMAN".to_string()),
+            )),
         );
         assert!(both.contains("(did:key:zMOD)"), "{both}");
         assert!(both.contains("human did:key:zHUMAN"), "{both}");
@@ -849,7 +853,10 @@ mod tests {
         let did = format_invite_message(
             "agntcy/shadi/secops-a",
             "agntcy/shadi/room",
-            Some(("did:key:zMOD".to_string(), Some("did:key:zHUMAN".to_string()))),
+            Some((
+                "did:key:zMOD".to_string(),
+                Some("did:key:zHUMAN".to_string()),
+            )),
         );
         assert_eq!(
             did,
@@ -1014,8 +1021,8 @@ mod tests {
 
     #[test]
     fn given_empty_custom_local_name_when_resolving_then_it_is_rejected() {
-        let err = resolve_local_name_value(Some("  "), Some("avatar"))
-            .expect_err("empty local name");
+        let err =
+            resolve_local_name_value(Some("  "), Some("avatar")).expect_err("empty local name");
 
         assert!(err.contains("cannot be empty"));
     }
@@ -1123,7 +1130,10 @@ mod tests {
         let mut state = SlimShellState::new();
         state.shared_secret = Some("cached-secret".to_string());
 
-        assert_eq!(state.shared_secret().expect("shared secret"), "cached-secret");
+        assert_eq!(
+            state.shared_secret().expect("shared secret"),
+            "cached-secret"
+        );
     }
 
     #[test]
@@ -1238,7 +1248,12 @@ mod tests {
         let _guard = lock_env();
         let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shared-secret");
 
-        assert_eq!(SlimShellState::new().shared_secret().expect("shared secret"), "shared-secret");
+        assert_eq!(
+            SlimShellState::new()
+                .shared_secret()
+                .expect("shared secret"),
+            "shared-secret"
+        );
     }
 
     #[test]
@@ -1289,7 +1304,8 @@ mod tests {
         let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
         let _agent_id = ScopedEnvVar::unset("SHADI_AGENT_ID");
 
-        let tls = resolve_client_tls_material_for_agent(Some("avatar")).expect("agent tls material");
+        let tls =
+            resolve_client_tls_material_for_agent(Some("avatar")).expect("agent tls material");
 
         assert_eq!(tls.cert, cert);
         assert_eq!(tls.key, key);
@@ -1337,8 +1353,7 @@ mod tests {
         let moderator_tls = test_client_tls_material(&tls_dir, "avatar");
         let participant_name =
             Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
-        let channel_name =
-            Arc::new(parse_name("agntcy/shadi/secops-room").expect("channel name"));
+        let channel_name = Arc::new(parse_name("agntcy/shadi/secops-room").expect("channel name"));
 
         let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
         let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", &endpoint);
@@ -1361,7 +1376,8 @@ mod tests {
         let moderator_handle = thread::spawn(move || -> Result<(u32, String), String> {
             let moderator_service =
                 Service::new(format!("shadictl-test-moderator-{}", std::process::id()));
-            let moderator_name = Arc::new(parse_name("agntcy/shadi/avatar").expect("moderator name"));
+            let moderator_name =
+                Arc::new(parse_name("agntcy/shadi/avatar").expect("moderator name"));
             let connection_id = moderator_service
                 .connect(build_client_config_for_endpoint(
                     &endpoint_for_moderator,
@@ -1450,8 +1466,7 @@ mod tests {
         let endpoint = reserve_test_endpoint();
         let participant_name =
             Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
-        let channel_name =
-            Arc::new(parse_name("agntcy/shadi/secops-room").expect("channel name"));
+        let channel_name = Arc::new(parse_name("agntcy/shadi/secops-room").expect("channel name"));
 
         let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
         let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", &endpoint);

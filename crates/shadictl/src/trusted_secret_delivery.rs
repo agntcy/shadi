@@ -1,12 +1,12 @@
 use super::*;
 
 use agent_secrets::memory::SecretBytes;
-use std::collections::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
-use std::io::{Read, Write};
+use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
 use std::ffi::OsString;
+#[cfg(unix)]
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(all(test, unix))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,7 +82,9 @@ struct UnixTrustedSecretBroker {
 #[cfg(unix)]
 #[derive(Debug)]
 enum UnixTrustedSecretBrokerKind {
-    Direct { expected_program: PathBuf },
+    Direct {
+        expected_program: PathBuf,
+    },
     Delegated {
         allowed_children: Vec<DelegatedChildConstraint>,
         worker: Option<thread::JoinHandle<Result<(), String>>>,
@@ -153,7 +155,8 @@ impl PendingTrustedSecretDelivery {
             command.env(TRUSTED_SECRET_PROTOCOL_ENV, TRUSTED_SECRET_PROTOCOL_VALUE);
 
             for mapping in mappings.iter() {
-                let (key, name) = parse_key_name(mapping, "trusted-secret must be in KEY=NAME format")?;
+                let (key, name) =
+                    parse_key_name(mapping, "trusted-secret must be in KEY=NAME format")?;
                 if !seen_names.insert(name.to_string()) {
                     return Err(format!(
                         "trusted secret '{}' is configured more than once",
@@ -275,7 +278,8 @@ impl PendingTrustedSecretDelivery {
             command.env(TRUSTED_SECRET_PROTOCOL_ENV, TRUSTED_SECRET_PROTOCOL_VALUE);
 
             for mapping in mappings {
-                let (key, name) = parse_key_name(mapping, "trusted-secret must be in KEY=NAME format")?;
+                let (key, name) =
+                    parse_key_name(mapping, "trusted-secret must be in KEY=NAME format")?;
                 if !seen_names.insert(name.to_string()) {
                     return Err(format!(
                         "trusted secret '{}' is configured more than once",
@@ -374,15 +378,17 @@ impl PendingTrustedSecretDelivery {
                 }
 
                 let delegated_allowed_children = match &broker.kind {
-                    UnixTrustedSecretBrokerKind::Delegated { allowed_children, .. } => {
-                        Some(allowed_children.clone())
-                    }
+                    UnixTrustedSecretBrokerKind::Delegated {
+                        allowed_children, ..
+                    } => Some(allowed_children.clone()),
                     UnixTrustedSecretBrokerKind::Direct { .. } => None,
                 };
 
                 if let Some(allowed_children) = delegated_allowed_children {
-                    let thread = start_delegated_secret_delivery(broker, child_pid, allowed_children)?;
-                    if let UnixTrustedSecretBrokerKind::Delegated { worker, .. } = &mut broker.kind {
+                    let thread =
+                        start_delegated_secret_delivery(broker, child_pid, allowed_children)?;
+                    if let UnixTrustedSecretBrokerKind::Delegated { worker, .. } = &mut broker.kind
+                    {
                         *worker = Some(thread);
                     }
                 }
@@ -401,7 +407,9 @@ impl PendingTrustedSecretDelivery {
                     if let Some(handle) = worker.take() {
                         match handle.join() {
                             Ok(result) => result?,
-                            Err(_) => return Err("trusted secret delivery worker panicked".to_string()),
+                            Err(_) => {
+                                return Err("trusted secret delivery worker panicked".to_string())
+                            }
                         }
                     }
                 }
@@ -590,14 +598,16 @@ pub(crate) fn resolve_launch_secret_config(
             child_sha256.push(expected);
         }
 
-        resolved.process_secret_policy.push(ResolvedProcessSecretPolicyRule {
-            secret: rule.secret.clone(),
-            actions: rule.actions.clone(),
-            children,
-            child_sha256,
-            name: rule.name.clone(),
-            fd_env: rule.fd_env.clone(),
-        });
+        resolved
+            .process_secret_policy
+            .push(ResolvedProcessSecretPolicyRule {
+                secret: rule.secret.clone(),
+                actions: rule.actions.clone(),
+                children,
+                child_sha256,
+                name: rule.name.clone(),
+                fd_env: rule.fd_env.clone(),
+            });
     }
 
     Ok(resolved)
@@ -645,8 +655,8 @@ fn parse_sha256_hex(value: &str) -> Result<[u8; 32], String> {
     let mut output = [0_u8; 32];
     for (index, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
         let hex = std::str::from_utf8(chunk).map_err(|err| err.to_string())?;
-        output[index] = u8::from_str_radix(hex, 16)
-            .map_err(|_| format!("invalid hex byte '{}'", hex))?;
+        output[index] =
+            u8::from_str_radix(hex, 16).map_err(|_| format!("invalid hex byte '{}'", hex))?;
     }
     Ok(output)
 }
@@ -673,9 +683,13 @@ fn compute_file_sha256(path: &Path) -> Result<[u8; 32], String> {
 fn parse_exec_mappings(values: &[String]) -> Result<HashMap<String, PathBuf>, String> {
     let mut mappings = HashMap::new();
     for value in values {
-        let (name, program) = parse_key_name(value, "trusted-secret-exec must be in NAME=PROGRAM format")?;
-        let path = canonicalize_executable(Path::new(program), &std::env::current_dir().map_err(|err| err.to_string())?)
-            .map_err(|err| format!("invalid trusted executable {}: {}", program, err))?;
+        let (name, program) =
+            parse_key_name(value, "trusted-secret-exec must be in NAME=PROGRAM format")?;
+        let path = canonicalize_executable(
+            Path::new(program),
+            &std::env::current_dir().map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| format!("invalid trusted executable {}: {}", program, err))?;
         if mappings.insert(name.to_string(), path).is_some() {
             return Err(format!(
                 "trusted-secret-exec has duplicate mapping for '{}'",
@@ -738,8 +752,10 @@ fn is_relay_executable_name(name: &str) -> bool {
         .and_then(|value| value.to_str())
         .unwrap_or(&normalized);
 
-    matches!(stem, "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "env" | "osascript")
-        || stem.starts_with("python")
+    matches!(
+        stem,
+        "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "env" | "osascript"
+    ) || stem.starts_with("python")
         || stem.starts_with("node")
         || stem.starts_with("ruby")
         || stem.starts_with("perl")
@@ -762,8 +778,13 @@ fn executable_candidates(base: &Path, program: &Path) -> Vec<PathBuf> {
             return candidates;
         }
 
-        let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
-        for extension in pathext.to_string_lossy().split(';').filter(|value| !value.is_empty()) {
+        let pathext =
+            std::env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
+        for extension in pathext
+            .to_string_lossy()
+            .split(';')
+            .filter(|value| !value.is_empty())
+        {
             let trimmed = extension.trim();
             let ext = if trimmed.starts_with('.') {
                 trimmed.to_lowercase()
@@ -834,8 +855,12 @@ fn read_secret_nonce(stream: &mut UnixStream) -> Result<String, String> {
         .set_read_timeout(Some(TRUSTED_SECRET_NONCE_READ_TIMEOUT))
         .map_err(|err| err.to_string())?;
     let mut buffer = [0_u8; TRUSTED_SECRET_NONCE_LEN];
-    stream.read_exact(&mut buffer).map_err(|err| err.to_string())?;
-    stream.set_read_timeout(None).map_err(|err| err.to_string())?;
+    stream
+        .read_exact(&mut buffer)
+        .map_err(|err| err.to_string())?;
+    stream
+        .set_read_timeout(None)
+        .map_err(|err| err.to_string())?;
     String::from_utf8(buffer.to_vec()).map_err(|err| err.to_string())
 }
 
@@ -895,10 +920,12 @@ fn deliver_secret_to_process(
         .payload
         .take()
         .ok_or_else(|| format!("trusted secret '{}' payload is unavailable", broker.name))?;
-    let listener = broker
-        .listener
-        .take()
-        .ok_or_else(|| format!("trusted secret '{}' broker listener is unavailable", broker.name))?;
+    let listener = broker.listener.take().ok_or_else(|| {
+        format!(
+            "trusted secret '{}' broker listener is unavailable",
+            broker.name
+        )
+    })?;
     let deadline = Instant::now() + TRUSTED_SECRET_DELIVERY_TIMEOUT;
     while Instant::now() < deadline {
         match listener.accept() {
@@ -988,10 +1015,12 @@ fn start_delegated_secret_delivery(
     parent_pid: u32,
     allowed_children: Vec<DelegatedChildConstraint>,
 ) -> Result<thread::JoinHandle<Result<(), String>>, String> {
-    let listener = broker
-        .listener
-        .take()
-        .ok_or_else(|| format!("trusted secret '{}' broker listener is unavailable", broker.name))?;
+    let listener = broker.listener.take().ok_or_else(|| {
+        format!(
+            "trusted secret '{}' broker listener is unavailable",
+            broker.name
+        )
+    })?;
     let name = broker.name.clone();
     let nonce = broker.nonce.clone();
     let payload = broker
@@ -1129,7 +1158,10 @@ fn start_delegated_secret_delivery(
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1186,13 +1218,7 @@ fn get_process_executable(pid: u32) -> std::io::Result<PathBuf> {
     }
 
     let mut buffer = vec![0_u8; PROC_PIDPATHINFO_MAXSIZE];
-    let rc = unsafe {
-        proc_pidpath(
-            pid as i32,
-            buffer.as_mut_ptr().cast(),
-            buffer.len() as u32,
-        )
-    };
+    let rc = unsafe { proc_pidpath(pid as i32, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
     if rc <= 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -1236,8 +1262,8 @@ fn get_process_executable(pid: u32) -> std::io::Result<PathBuf> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn get_process_parent_pid(pid: u32) -> Result<u32, String> {
-    let status = std::fs::read_to_string(format!("/proc/{}/status", pid))
-        .map_err(|err| err.to_string())?;
+    let status =
+        std::fs::read_to_string(format!("/proc/{}/status", pid)).map_err(|err| err.to_string())?;
     let parent_line = status
         .lines()
         .find(|line| line.starts_with("PPid:"))
@@ -1260,7 +1286,14 @@ fn prepare_secret_handle(payload: SecretBytes) -> Result<HANDLE, String> {
     };
     let mut read_handle: HANDLE = std::ptr::null_mut();
     let mut write_handle: HANDLE = std::ptr::null_mut();
-    let ok = unsafe { CreatePipe(&mut read_handle, &mut write_handle, &mut security_attributes, 0) };
+    let ok = unsafe {
+        CreatePipe(
+            &mut read_handle,
+            &mut write_handle,
+            &mut security_attributes,
+            0,
+        )
+    };
     if ok == 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
@@ -1403,11 +1436,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn resolve_config_error(
-        command: &Command,
-        program: &Path,
-        policy: &PolicyFile,
-    ) -> String {
+    fn resolve_config_error(command: &Command, program: &Path, policy: &PolicyFile) -> String {
         let cli = build_test_cli(program);
         resolve_launch_secret_config(command, &cli, policy).unwrap_err()
     }
@@ -1487,25 +1516,44 @@ mod tests {
 
         let cli = build_test_cli(&helper);
 
-        let resolved = resolve_launch_secret_config(&command, &cli, &policy).expect("resolve config");
+        let resolved =
+            resolve_launch_secret_config(&command, &cli, &policy).expect("resolve config");
         let helper_canonical = std::fs::canonicalize(&helper).expect("canonical helper");
-        assert_eq!(resolved.inject_keychain, vec!["secops/token=TOKEN".to_string()]);
-        assert_eq!(resolved.trusted_secret, vec!["secops/token=token".to_string()]);
-        assert_eq!(resolved.trusted_secret_fd_env, vec!["token=TOKEN_FD".to_string()]);
+        assert_eq!(
+            resolved.inject_keychain,
+            vec!["secops/token=TOKEN".to_string()]
+        );
+        assert_eq!(
+            resolved.trusted_secret,
+            vec!["secops/token=token".to_string()]
+        );
+        assert_eq!(
+            resolved.trusted_secret_fd_env,
+            vec!["token=TOKEN_FD".to_string()]
+        );
         assert_eq!(
             resolved.trusted_secret_exec,
             vec![format!("token={}", helper_canonical.display())]
         );
         assert_eq!(resolved.process_secret_policy.len(), 1);
-        assert_eq!(resolved.process_secret_policy[0].secret, "secops/github_token");
+        assert_eq!(
+            resolved.process_secret_policy[0].secret,
+            "secops/github_token"
+        );
         assert_eq!(
             resolved.process_secret_policy[0].actions,
             vec![SecretAction::DelegateToChild]
         );
         assert_eq!(resolved.process_secret_policy[0].children, vec![child]);
         assert_eq!(resolved.process_secret_policy[0].child_sha256.len(), 1);
-        assert_eq!(resolved.process_secret_policy[0].name.as_deref(), Some("github-token"));
-        assert_eq!(resolved.process_secret_policy[0].fd_env.as_deref(), Some("TOKEN_FD"));
+        assert_eq!(
+            resolved.process_secret_policy[0].name.as_deref(),
+            Some("github-token")
+        );
+        assert_eq!(
+            resolved.process_secret_policy[0].fd_env.as_deref(),
+            Some("TOKEN_FD")
+        );
     }
 
     #[cfg(unix)]
@@ -1673,7 +1721,10 @@ mod tests {
 
         let cli = build_test_cli(&helper);
         let resolved = resolve_launch_secret_config(&command, &cli, &policy).expect("resolve");
-        assert_eq!(resolved.trusted_secret, vec!["secops/token=token".to_string()]);
+        assert_eq!(
+            resolved.trusted_secret,
+            vec!["secops/token=token".to_string()]
+        );
     }
 
     #[cfg(unix)]
@@ -1709,10 +1760,7 @@ mod tests {
 
         let mut command = Command::new(&parent);
         crate::scrub_test_secret_backend_env(&mut command);
-        command
-            .arg("spawn-child")
-            .arg(&child)
-            .arg(&output_path);
+        command.arg("spawn-child").arg(&child).arg(&output_path);
         command.current_dir(temp.path());
 
         let delegated_rule = ResolvedProcessSecretPolicyRule {
@@ -1724,15 +1772,10 @@ mod tests {
             fd_env: Some("TOKEN_FD".to_string()),
         };
 
-        let mut pending = PendingTrustedSecretDelivery::new(
-            &mut command,
-            &[],
-            &[],
-            &[],
-            &[delegated_rule],
-        )
-        .expect("prepare")
-        .expect("delivery");
+        let mut pending =
+            PendingTrustedSecretDelivery::new(&mut command, &[], &[], &[], &[delegated_rule])
+                .expect("prepare")
+                .expect("delivery");
 
         let envs = command.get_envs().collect::<Vec<_>>();
         assert!(!envs.iter().any(|(key, value)| {
@@ -1750,7 +1793,10 @@ mod tests {
             .wait_for_background_delivery()
             .expect("wait delegated delivery");
         pending.close_parent_fds();
-        assert_eq!(std::fs::read(&output_path).expect("read delegated output"), b"trusted-value");
+        assert_eq!(
+            std::fs::read(&output_path).expect("read delegated output"),
+            b"trusted-value"
+        );
     }
 
     #[cfg(unix)]
@@ -1782,15 +1828,10 @@ mod tests {
             fd_env: Some("TOKEN_FD".to_string()),
         };
 
-        let mut pending = PendingTrustedSecretDelivery::new(
-            &mut command,
-            &[],
-            &[],
-            &[],
-            &[delegated_rule],
-        )
-        .expect("prepare")
-        .expect("delivery");
+        let mut pending =
+            PendingTrustedSecretDelivery::new(&mut command, &[], &[], &[], &[delegated_rule])
+                .expect("prepare")
+                .expect("delivery");
 
         let token_endpoint = command
             .get_envs()
@@ -1835,13 +1876,18 @@ mod tests {
         assert!(!outsider.status.success());
         assert_unix_secret_probe_rejected(&outsider_status);
 
-        let output = parent_process.wait_with_output().expect("wait parent helper");
+        let output = parent_process
+            .wait_with_output()
+            .expect("wait parent helper");
         assert!(output.status.success());
         pending
             .wait_for_background_delivery()
             .expect("wait delegated delivery");
         pending.close_parent_fds();
-        assert_eq!(std::fs::read(&authorized_output).expect("read delegated output"), b"trusted-value");
+        assert_eq!(
+            std::fs::read(&authorized_output).expect("read delegated output"),
+            b"trusted-value"
+        );
     }
 
     #[cfg(unix)]
@@ -1872,21 +1918,18 @@ mod tests {
             fd_env: Some("TOKEN_FD".to_string()),
         };
 
-        let mut pending = PendingTrustedSecretDelivery::new(
-            &mut command,
-            &[],
-            &[],
-            &[],
-            &[delegated_rule],
-        )
-        .expect("prepare")
-        .expect("delivery");
+        let mut pending =
+            PendingTrustedSecretDelivery::new(&mut command, &[], &[], &[], &[delegated_rule])
+                .expect("prepare")
+                .expect("delivery");
 
         let parent_process = command.spawn().expect("spawn parent helper");
         pending
             .deliver_after_spawn(parent_process.id())
             .expect("start delegated delivery");
-        let output = parent_process.wait_with_output().expect("wait parent helper");
+        let output = parent_process
+            .wait_with_output()
+            .expect("wait parent helper");
         assert!(!output.status.success());
         let err = pending
             .wait_for_background_delivery()
@@ -1923,26 +1966,26 @@ mod tests {
             fd_env: Some("TOKEN_FD".to_string()),
         };
 
-        let mut pending = PendingTrustedSecretDelivery::new(
-            &mut command,
-            &[],
-            &[],
-            &[],
-            &[delegated_rule],
-        )
-        .expect("prepare")
-        .expect("delivery");
+        let mut pending =
+            PendingTrustedSecretDelivery::new(&mut command, &[], &[], &[], &[delegated_rule])
+                .expect("prepare")
+                .expect("delivery");
 
         let parent_process = command.spawn().expect("spawn parent helper");
         pending
             .deliver_after_spawn(parent_process.id())
             .expect("start delegated delivery");
-        let output = parent_process.wait_with_output().expect("wait parent helper");
+        let output = parent_process
+            .wait_with_output()
+            .expect("wait parent helper");
         assert!(!output.status.success());
         let err = pending
             .wait_for_background_delivery()
             .expect_err("delegated delivery should fail when the nonce is missing");
-        assert!(err.contains("trusted secret 'token'"), "unexpected error: {err}");
+        assert!(
+            err.contains("trusted secret 'token'"),
+            "unexpected error: {err}"
+        );
         pending.close_parent_fds();
         assert!(std::fs::read(&output_path).is_err());
     }
@@ -1993,11 +2036,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parse_exec_mappings_rejects_duplicates() {
-        let err = parse_exec_mappings(&[
-            "token=/bin/sh".to_string(),
-            "token=/bin/bash".to_string(),
-        ])
-        .unwrap_err();
+        let err =
+            parse_exec_mappings(&["token=/bin/sh".to_string(), "token=/bin/bash".to_string()])
+                .unwrap_err();
         assert!(err.contains("duplicate mapping"));
         assert!(err.contains("token"));
     }
@@ -2135,7 +2176,10 @@ mod tests {
         pending.close_parent_fds();
         let output = status.wait_with_output().expect("wait output");
         assert!(output.status.success());
-        assert_eq!(std::fs::read(&output_path).expect("read output"), b"trusted-value");
+        assert_eq!(
+            std::fs::read(&output_path).expect("read output"),
+            b"trusted-value"
+        );
     }
 
     #[cfg(unix)]
@@ -2145,7 +2189,8 @@ mod tests {
         test_store_put(&key, b"trusted-value");
         let temp = tempfile::tempdir().expect("tempdir");
         let helper = compile_trusted_secret_test_helper(temp.path());
-        let checker = compile_trusted_secret_test_helper_named(temp.path(), "trusted-secret-checker");
+        let checker =
+            compile_trusted_secret_test_helper_named(temp.path(), "trusted-secret-checker");
         let secret_output = temp.path().join("secret.txt");
         let status_output = temp.path().join("status.txt");
 
@@ -2174,7 +2219,13 @@ mod tests {
         pending.close_parent_fds();
         let output = status.wait_with_output().expect("wait output");
         assert!(output.status.success());
-        assert_eq!(std::fs::read(&secret_output).expect("read secret output"), b"trusted-value");
-        assert_eq!(std::fs::read(&status_output).expect("read status output"), b"closed");
+        assert_eq!(
+            std::fs::read(&secret_output).expect("read secret output"),
+            b"trusted-value"
+        );
+        assert_eq!(
+            std::fs::read(&status_output).expect("read status output"),
+            b"closed"
+        );
     }
 }

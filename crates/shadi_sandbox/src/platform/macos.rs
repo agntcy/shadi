@@ -63,14 +63,16 @@ const ESSENTIAL_MACH_SERVICES: &[&str] = &[
 ];
 
 #[cfg(not(any(test, feature = "coverage")))]
-pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
+pub fn spawn_sandboxed(
+    command: &mut Command,
+    policy: &SandboxPolicy,
+) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
     let profile_cstr = CString::new(profile).map_err(|_| SandboxError::InvalidConfig)?;
 
     unsafe {
         command.pre_exec(move || {
-            apply_profile(&profile_cstr)
-                .map_err(std::io::Error::other)?;
+            apply_profile(&profile_cstr).map_err(std::io::Error::other)?;
             // Create a new process group so the parent can kill the entire
             // tree with killpg(), mirroring the Windows Job-object pattern.
             if libc::setsid() == -1 {
@@ -80,16 +82,23 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
         });
     }
 
-    let child = command.spawn().map_err(|err| SandboxError::SpawnFailed(err.to_string()))?;
+    let child = command
+        .spawn()
+        .map_err(|err| SandboxError::SpawnFailed(err.to_string()))?;
     Ok(SandboxedChild::from_std(child))
 }
 
 #[cfg(any(test, feature = "coverage"))]
-pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
+pub fn spawn_sandboxed(
+    command: &mut Command,
+    policy: &SandboxPolicy,
+) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
     let profile_cstr = CString::new(profile).map_err(|_| SandboxError::InvalidConfig)?;
     apply_profile(profile_cstr.as_c_str())?;
-    let child = command.spawn().map_err(|err| SandboxError::SpawnFailed(err.to_string()))?;
+    let child = command
+        .spawn()
+        .map_err(|err| SandboxError::SpawnFailed(err.to_string()))?;
     Ok(SandboxedChild::from_std(child))
 }
 
@@ -111,10 +120,7 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
         // Essential system services needed for basic process execution,
         // DNS resolution, security framework, and logging.
         for svc in ESSENTIAL_MACH_SERVICES {
-            rules.push(format!(
-                "(allow mach-lookup (global-name \"{}\"))",
-                svc
-            ));
+            rules.push(format!("(allow mach-lookup (global-name \"{}\"))", svc));
         }
     }
 
@@ -158,8 +164,12 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
         rules.push("(allow file-read* file-write* (subpath \"/private/var\"))".to_string());
 
         rules.push("(allow file-read* file-write* (subpath \"/Library/Keychains\"))".to_string());
-        rules.push("(allow file-read* file-write* (subpath \"/private/var/db/Keychains\"))".to_string());
-        rules.push("(allow file-read* file-write* (subpath \"/private/var/db/SystemKey\"))".to_string());
+        rules.push(
+            "(allow file-read* file-write* (subpath \"/private/var/db/Keychains\"))".to_string(),
+        );
+        rules.push(
+            "(allow file-read* file-write* (subpath \"/private/var/db/SystemKey\"))".to_string(),
+        );
         if let Ok(home) = std::env::var("HOME") {
             let home = escape_profile_string(&home)?;
             rules.push(format!(
@@ -261,7 +271,9 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
                 if p == std::path::Path::new("/") {
                     break; // literal "/" is already covered unconditionally above
                 }
-                let Some(ps) = p.to_str() else { break; };
+                let Some(ps) = p.to_str() else {
+                    break;
+                };
                 let ps = escape_profile_string(ps)?;
                 rules.push(format!("(allow file-read-metadata (literal \"{ps}\"))"));
                 ancestor = p.parent();
@@ -423,7 +435,11 @@ fn apply_profile(_profile: &CStr) -> Result<(), SandboxError> {
 #[cfg(not(any(test, feature = "coverage")))]
 #[link(name = "sandbox")]
 extern "C" {
-    fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
+    fn sandbox_init(
+        profile: *const libc::c_char,
+        flags: u64,
+        errorbuf: *mut *mut libc::c_char,
+    ) -> libc::c_int;
     fn sandbox_free_error(errorbuf: *mut libc::c_char);
 }
 
@@ -488,7 +504,9 @@ mod tests {
         assert!(profile.contains("(allow network-inbound)"));
         assert!(!profile.contains("(allow network*)"));
         assert!(
-            profile.lines().any(|line| line.trim() == "(allow mach-lookup)"),
+            profile
+                .lines()
+                .any(|line| line.trim() == "(allow mach-lookup)"),
             "net_allow should lift mach-lookup so Node CLIs can start"
         );
         assert!(profile.contains("(allow signal)"));
@@ -552,9 +570,13 @@ mod tests {
             .allow_write_path("/tmp");
         let profile = build_profile(&policy).unwrap();
         assert!(profile.contains("(allow file-read* file-map-executable (subpath \"/tmp\"))"));
-        assert!(profile.contains("(allow file-read* file-map-executable (subpath \"/private/tmp\"))"));
+        assert!(
+            profile.contains("(allow file-read* file-map-executable (subpath \"/private/tmp\"))")
+        );
         assert!(profile.contains("(allow file-write* file-map-executable (subpath \"/tmp\"))"));
-        assert!(profile.contains("(allow file-write* file-map-executable (subpath \"/private/tmp\"))"));
+        assert!(
+            profile.contains("(allow file-write* file-map-executable (subpath \"/private/tmp\"))")
+        );
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use agentbridge::local_registry::{LocalAdapterRecord, LocalAdapterRegistry};
-use agentbridge::member_source::{CandidateMember, DirLookupOptions, MemberSource, SkillSearchSource};
+use agentbridge::member_source::{
+    CandidateMember, DirLookupOptions, MemberSource, SkillSearchSource,
+};
 use shadi_a2a::A2ALocator;
 
 /// List registered agentbridge adapters.

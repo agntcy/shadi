@@ -67,15 +67,9 @@ pub(crate) fn secrets_rules(policy_path: Option<&str>) {
 
     if has_inject {
         println!("Keychain injection (env var disclosure):");
-        println!(
-            "  {:<30} {:<25} {}",
-            "PROGRAM", "KEY", "ENV"
-        );
+        println!("  {:<30} {:<25} {}", "PROGRAM", "KEY", "ENV");
         for rule in &policy.process_inject_keychain {
-            println!(
-                "  {:<30} {:<25} {}",
-                rule.program, rule.key, rule.env
-            );
+            println!("  {:<30} {:<25} {}", rule.program, rule.key, rule.env);
         }
         println!();
     }
@@ -89,10 +83,7 @@ pub(crate) fn secrets_rules(policy_path: Option<&str>) {
         for rule in &policy.process_trusted_secret {
             println!(
                 "  {:<30} {:<20} {:<15} {}",
-                rule.program,
-                rule.key,
-                rule.name,
-                rule.fd_env,
+                rule.program, rule.key, rule.name, rule.fd_env,
             );
             if let Some(ref sha) = rule.exec_sha256 {
                 println!("    exec_sha256: {}", sha);
@@ -103,10 +94,7 @@ pub(crate) fn secrets_rules(policy_path: Option<&str>) {
 
     if has_policy {
         println!("Process secret policy (declarative rules):");
-        println!(
-            "  {:<30} {:<20} {}",
-            "PROGRAM", "SECRET", "ACTIONS"
-        );
+        println!("  {:<30} {:<20} {}", "PROGRAM", "SECRET", "ACTIONS");
         for rule in &policy.process_secret_policy {
             let actions = rule
                 .actions
@@ -114,15 +102,9 @@ pub(crate) fn secrets_rules(policy_path: Option<&str>) {
                 .map(format_action)
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!(
-                "  {:<30} {:<20} {}",
-                rule.program, rule.secret, actions
-            );
+            println!("  {:<30} {:<20} {}", rule.program, rule.secret, actions);
             if !rule.children.is_empty() {
-                println!(
-                    "    children: {}",
-                    rule.children.join(", ")
-                );
+                println!("    children: {}", rule.children.join(", "));
             }
             if !rule.child_sha256.is_empty() {
                 for sha in &rule.child_sha256 {
@@ -181,7 +163,10 @@ mod tests {
     fn format_action_formats_all_variants() {
         assert_eq!(format_action(&SecretAction::Disclose), "disclose");
         assert_eq!(format_action(&SecretAction::Use), "use");
-        assert_eq!(format_action(&SecretAction::DelegateToChild), "delegate-to-child");
+        assert_eq!(
+            format_action(&SecretAction::DelegateToChild),
+            "delegate-to-child"
+        );
     }
 
     #[test]

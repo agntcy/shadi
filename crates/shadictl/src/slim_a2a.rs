@@ -14,7 +14,7 @@ use a2a_server::{
 use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretResult, SessionContext};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use shadi_a2a::{A2AChannelBuilder, A2AGroupChannelBuilder, SLIM_SRC_METADATA_KEY, SlimRpcHandler};
+use shadi_a2a::{A2AChannelBuilder, A2AGroupChannelBuilder, SlimRpcHandler, SLIM_SRC_METADATA_KEY};
 use slim_bindings::{Name, Service};
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
@@ -307,13 +307,13 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
                 .map_err(|err| format!("failed to write {}: {}", ready_file.display(), err))?;
         }
 
-        println!("[shadictl a2a-peer] ready as {} on {}", peer_label, endpoint_label);
+        println!(
+            "[shadictl a2a-peer] ready as {} on {}",
+            peer_label, endpoint_label
+        );
 
-        let request_result = tokio::time::timeout(
-            Duration::from_secs(wait_seconds),
-            request_seen.notified(),
-        )
-        .await;
+        let request_result =
+            tokio::time::timeout(Duration::from_secs(wait_seconds), request_seen.notified()).await;
 
         if request_result.is_ok() {
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -325,12 +325,8 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
             .map_err(|err| format!("failed to join A2A SLIMRPC server task: {}", err))?;
         server_status?;
 
-        request_result.map_err(|_| {
-            format!(
-                "timed out waiting for A2A request after {}s",
-                wait_seconds
-            )
-        })?;
+        request_result
+            .map_err(|_| format!("timed out waiting for A2A request after {}s", wait_seconds))?;
 
         Ok::<(), String>(())
     });
@@ -359,9 +355,7 @@ pub(crate) fn run_a2a_collaborate(args: SlimA2ACollaborateArgs) -> Result<(), St
     Ok(())
 }
 
-pub(crate) fn parse_shell_a2a_echo_peer_args(
-    args: &[&str],
-) -> Result<SlimA2AEchoPeerArgs, String> {
+pub(crate) fn parse_shell_a2a_echo_peer_args(args: &[&str]) -> Result<SlimA2AEchoPeerArgs, String> {
     let mut parsed = SlimA2AEchoPeerArgs {
         endpoint: None,
         agent_id: "secops-a".to_string(),
@@ -374,10 +368,12 @@ pub(crate) fn parse_shell_a2a_echo_peer_args(
     while index < args.len() {
         match args[index] {
             "--endpoint" => {
-                parsed.endpoint = Some(next_value(args, &mut index, SHELL_A2A_ECHO_PEER_USAGE)?.to_string());
+                parsed.endpoint =
+                    Some(next_value(args, &mut index, SHELL_A2A_ECHO_PEER_USAGE)?.to_string());
             }
             "--agent-id" => {
-                parsed.agent_id = next_value(args, &mut index, SHELL_A2A_ECHO_PEER_USAGE)?.to_string();
+                parsed.agent_id =
+                    next_value(args, &mut index, SHELL_A2A_ECHO_PEER_USAGE)?.to_string();
             }
             "--listen-timeout" | "--listen-timeout-seconds" => {
                 let value = next_value(args, &mut index, SHELL_A2A_ECHO_PEER_USAGE)?;
@@ -419,16 +415,19 @@ pub(crate) fn parse_shell_a2a_send_args(args: &[&str]) -> Result<SlimA2ASendArgs
     while index < args.len() {
         match args[index] {
             "--endpoint" => {
-                parsed.endpoint = Some(next_value(args, &mut index, SHELL_A2A_SEND_USAGE)?.to_string());
+                parsed.endpoint =
+                    Some(next_value(args, &mut index, SHELL_A2A_SEND_USAGE)?.to_string());
             }
             "--agent-id" => {
                 parsed.agent_id = next_value(args, &mut index, SHELL_A2A_SEND_USAGE)?.to_string();
             }
             "--peer-agent-id" => {
-                parsed.peer_agent_id = next_value(args, &mut index, SHELL_A2A_SEND_USAGE)?.to_string();
+                parsed.peer_agent_id =
+                    next_value(args, &mut index, SHELL_A2A_SEND_USAGE)?.to_string();
             }
             "--destination" => {
-                parsed.destination = Some(next_value(args, &mut index, SHELL_A2A_SEND_USAGE)?.to_string());
+                parsed.destination =
+                    Some(next_value(args, &mut index, SHELL_A2A_SEND_USAGE)?.to_string());
             }
             "--message" => {
                 let (message, next_index) = collect_message_value(args, index + 1)?;
@@ -583,10 +582,7 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
 
     Ok(format!(
         "sent {:?} to {} via {} and received {}",
-        args.message,
-        destination,
-        local_name,
-        response_detail
+        args.message, destination, local_name, response_detail
     ))
 }
 
@@ -657,10 +653,11 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
             received_for_handler.lock().unwrap().push(text);
         });
 
-        let channel = A2AGroupChannelBuilder::new(app.clone(), peer_names.clone(), verifier, session)
-            .connection_id(connection_id)
-            .build()
-            .map_err(|err| format!("failed to build group channel: {err}"))?;
+        let channel =
+            A2AGroupChannelBuilder::new(app.clone(), peer_names.clone(), verifier, session)
+                .connection_id(connection_id)
+                .build()
+                .map_err(|err| format!("failed to build group channel: {err}"))?;
 
         (server, channel)
     };
@@ -986,21 +983,23 @@ mod tests {
                 Role::Agent,
                 vec![Part::text("direct reply")],
             ))),
-            Ok(StreamResponse::ArtifactUpdate(a2a::event::TaskArtifactUpdateEvent {
-                task_id: "task-1".to_string(),
-                context_id: "context-1".to_string(),
-                artifact: Artifact {
-                    artifact_id: "artifact-1".to_string(),
-                    name: None,
-                    description: None,
-                    parts: vec![Part::text("artifact body")],
+            Ok(StreamResponse::ArtifactUpdate(
+                a2a::event::TaskArtifactUpdateEvent {
+                    task_id: "task-1".to_string(),
+                    context_id: "context-1".to_string(),
+                    artifact: Artifact {
+                        artifact_id: "artifact-1".to_string(),
+                        name: None,
+                        description: None,
+                        parts: vec![Part::text("artifact body")],
+                        metadata: None,
+                        extensions: None,
+                    },
+                    append: Some(true),
+                    last_chunk: Some(false),
                     metadata: None,
-                    extensions: None,
                 },
-                append: Some(true),
-                last_chunk: Some(false),
-                metadata: None,
-            })),
+            )),
             Err(A2AError::internal("stream failed")),
         ];
 
@@ -1241,7 +1240,10 @@ mod tests {
             .get_extended_agent_card(&params, GetExtendedAgentCardRequest { tenant: None })
             .await
             .expect("extended agent card");
-        assert_eq!(card.supported_interfaces[0].url, "slimrpc://agntcy/shadi/secops-a");
+        assert_eq!(
+            card.supported_interfaces[0].url,
+            "slimrpc://agntcy/shadi/secops-a"
+        );
     }
 
     #[test]
@@ -1253,7 +1255,9 @@ mod tests {
 
         let mut verified = SessionContext::new("avatar", "session-2");
         verified.verified = true;
-        verifier.verify(&verified).expect("verified session should pass");
+        verifier
+            .verify(&verified)
+            .expect("verified session should pass");
     }
 
     #[test]

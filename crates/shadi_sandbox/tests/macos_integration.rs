@@ -18,7 +18,11 @@ mod macos_integration {
         std::env::current_dir()
             .expect("current dir")
             .join(".tmp")
-            .join(format!("macos-sandbox-test-{}-{}", std::process::id(), suffix))
+            .join(format!(
+                "macos-sandbox-test-{}-{}",
+                std::process::id(),
+                suffix
+            ))
     }
 
     fn compile_read_stdout_helper(dir: &Path) -> PathBuf {
@@ -86,8 +90,8 @@ mod macos_integration {
         minimal_command.stdout(Stdio::from(minimal_stdout));
         minimal_command.stderr(Stdio::null());
 
-        let mut minimal_child = spawn_sandboxed(&mut minimal_command, &minimal_policy)
-            .expect("spawn minimal helper");
+        let mut minimal_child =
+            spawn_sandboxed(&mut minimal_command, &minimal_policy).expect("spawn minimal helper");
         let minimal_status = minimal_child.wait().expect("wait for minimal helper");
 
         if let Some(home) = original_home {
@@ -96,11 +100,22 @@ mod macos_integration {
             std::env::remove_var("HOME");
         }
 
-        assert!(baseline_status.success(), "baseline helper should read the file outside the sandbox");
-        assert_eq!(fs::read(&baseline_output).expect("read baseline output"), b"top-secret");
+        assert!(
+            baseline_status.success(),
+            "baseline helper should read the file outside the sandbox"
+        );
+        assert_eq!(
+            fs::read(&baseline_output).expect("read baseline output"),
+            b"top-secret"
+        );
 
-        assert!(!minimal_status.success(), "minimal profile should block the user Library read");
-        assert!(fs::read(&minimal_output).expect("read minimal output").is_empty());
+        assert!(
+            !minimal_status.success(),
+            "minimal profile should block the user Library read"
+        );
+        assert!(fs::read(&minimal_output)
+            .expect("read minimal output")
+            .is_empty());
 
         let _ = fs::remove_dir_all(&root);
     }

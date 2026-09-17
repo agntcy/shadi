@@ -29,7 +29,10 @@ pub(crate) fn run_memory_command(cli: MemoryCli) -> ExitCode {
     }
 }
 
-pub(crate) fn handle_memory_command(cli: &MemoryCli, store: &SqlCipherStore) -> Result<String, String> {
+pub(crate) fn handle_memory_command(
+    cli: &MemoryCli,
+    store: &SqlCipherStore,
+) -> Result<String, String> {
     let span = info_span!(
         "shadi.memory.command",
         memory.command = field::Empty,

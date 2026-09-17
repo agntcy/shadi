@@ -172,7 +172,10 @@ fn authorize_control_peer(stream: &UnixStream) -> Result<(), String> {
     }
     let current_uid = unsafe { libc::geteuid() };
     if uid != current_uid {
-        return Err(format!("peer uid {} does not match current uid {}", uid, current_uid));
+        return Err(format!(
+            "peer uid {} does not match current uid {}",
+            uid, current_uid
+        ));
     }
     Ok(())
 }
@@ -342,7 +345,8 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
         "shadi.policy.patch",
         patch.add_commands = patch.add_allow_command.len() as i64,
         patch.block_commands = patch.add_block_command.len() as i64,
-        patch.fs_paths = (patch.add_read.len() + patch.add_write.len() + patch.add_allow.len()) as i64,
+        patch.fs_paths =
+            (patch.add_read.len() + patch.add_write.len() + patch.add_allow.len()) as i64,
         patch.net_entries = patch.add_net_allow.len() as i64,
     );
     let _guard = span.enter();
@@ -387,7 +391,10 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
     if result.network == PatchAxisStatus::Applied {
         if let Some(ref al) = guard.live_net_allowlist {
             al.update(state.net_allow.clone());
-            guard.policy = guard.policy.clone().with_network_destinations(state.net_allow);
+            guard.policy = guard
+                .policy
+                .clone()
+                .with_network_destinations(state.net_allow);
         }
     }
 
@@ -399,16 +406,12 @@ fn handle_patch(live: &Arc<Mutex<LivePolicy>>, patch: PolicyPatch) -> ControlRes
 }
 
 pub(crate) fn snapshot_live_policy(live: &Arc<Mutex<LivePolicy>>) -> Result<SandboxPolicy, String> {
-    let guard = live
-        .lock()
-        .map_err(|_| "internal lock error".to_string())?;
+    let guard = live.lock().map_err(|_| "internal lock error".to_string())?;
     Ok(guard.policy.clone())
 }
 
 pub(crate) fn apply_staged_policy_updates(live: &Arc<Mutex<LivePolicy>>) -> Result<bool, String> {
-    let mut guard = live
-        .lock()
-        .map_err(|_| "internal lock error".to_string())?;
+    let mut guard = live.lock().map_err(|_| "internal lock error".to_string())?;
 
     let has_staged = !guard.staged_read.is_empty()
         || !guard.staged_write.is_empty()
@@ -451,12 +454,18 @@ mod tests {
 
     #[test]
     fn extract_host_strips_http_scheme() {
-        assert_eq!(shadi_sandbox::extract_host("http://httping.org/"), "httping.org");
+        assert_eq!(
+            shadi_sandbox::extract_host("http://httping.org/"),
+            "httping.org"
+        );
     }
 
     #[test]
     fn extract_host_strips_https_scheme_and_path() {
-        assert_eq!(shadi_sandbox::extract_host("https://httping.org/ping?v=1"), "httping.org");
+        assert_eq!(
+            shadi_sandbox::extract_host("https://httping.org/ping?v=1"),
+            "httping.org"
+        );
     }
 
     #[test]
@@ -472,7 +481,10 @@ mod tests {
 
     #[test]
     fn extract_host_ip_with_scheme_and_path() {
-        assert_eq!(shadi_sandbox::extract_host("http://192.0.2.1/"), "192.0.2.1");
+        assert_eq!(
+            shadi_sandbox::extract_host("http://192.0.2.1/"),
+            "192.0.2.1"
+        );
     }
 
     #[test]
@@ -488,7 +500,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        panic!("control socket did not become ready: {}", sock_path.display());
+        panic!(
+            "control socket did not become ready: {}",
+            sock_path.display()
+        );
     }
 
     fn wait_for_socket_removed_with_timeout(sock_path: &Path, timeout: std::time::Duration) {
@@ -596,7 +611,7 @@ mod tests {
     fn handle_patch_rejects_network_changes_without_proxy() {
         let live = test_live_policy(); // live_net_allowlist: None
         let patch = PolicyPatch {
-            add_net_allow: vec!["allowed.example.com".to_string()],  // RFC 2606
+            add_net_allow: vec!["allowed.example.com".to_string()], // RFC 2606
             ..Default::default()
         };
 
@@ -907,9 +922,16 @@ mod tests {
         assert!(changed);
 
         let guard = live.lock().unwrap();
-        assert!(guard.staged_read.is_empty(), "staged_read should be drained");
         assert!(
-            guard.policy.allow_read().iter().any(|p| p.to_str() == Some("/opt/new-read")),
+            guard.staged_read.is_empty(),
+            "staged_read should be drained"
+        );
+        assert!(
+            guard
+                .policy
+                .allow_read()
+                .iter()
+                .any(|p| p.to_str() == Some("/opt/new-read")),
             "read path should be in effective policy"
         );
     }
@@ -927,7 +949,11 @@ mod tests {
         let guard = live.lock().unwrap();
         assert!(guard.staged_write.is_empty());
         assert!(
-            guard.policy.allow_write().iter().any(|p| p.to_str() == Some("/tmp/new-write")),
+            guard
+                .policy
+                .allow_write()
+                .iter()
+                .any(|p| p.to_str() == Some("/tmp/new-write")),
             "write path should be in effective policy"
         );
     }
@@ -944,8 +970,16 @@ mod tests {
 
         let guard = live.lock().unwrap();
         assert!(guard.staged_allow.is_empty());
-        assert!(guard.policy.allow_read().iter().any(|p| p.to_str() == Some("/opt/shared")));
-        assert!(guard.policy.allow_write().iter().any(|p| p.to_str() == Some("/opt/shared")));
+        assert!(guard
+            .policy
+            .allow_read()
+            .iter()
+            .any(|p| p.to_str() == Some("/opt/shared")));
+        assert!(guard
+            .policy
+            .allow_write()
+            .iter()
+            .any(|p| p.to_str() == Some("/opt/shared")));
     }
 
     #[test]
@@ -954,7 +988,10 @@ mod tests {
         // modified.  Only filesystem staged changes are written to the policy.
         let live = test_live_policy();
         let patch = PolicyPatch {
-            add_net_allow: vec!["allowed.example.com".to_string(), "192.0.2.1:80".to_string()],  // RFC 2606 / RFC 5737
+            add_net_allow: vec![
+                "allowed.example.com".to_string(),
+                "192.0.2.1:80".to_string(),
+            ], // RFC 2606 / RFC 5737
             ..Default::default()
         };
         handle_patch(&live, patch);
@@ -1088,7 +1125,11 @@ mod tests {
         let resp = handle_patch(&live, patch);
         match resp {
             ControlResponse::PatchResult(r) => {
-                assert!(r.message.contains("manual process restart"), "message should mention restart: {}", r.message);
+                assert!(
+                    r.message.contains("manual process restart"),
+                    "message should mention restart: {}",
+                    r.message
+                );
                 assert!(r.message.contains("filesystem"));
             }
             _ => panic!("expected PatchResult"),
@@ -1158,7 +1199,7 @@ mod tests {
         }));
 
         let patch = PolicyPatch {
-            add_net_allow: vec!["allowed.example.com".to_string(), "192.0.2.1".to_string()],  // RFC 2606 / RFC 5737
+            add_net_allow: vec!["allowed.example.com".to_string(), "192.0.2.1".to_string()], // RFC 2606 / RFC 5737
             ..Default::default()
         };
         let resp = handle_patch(&live, patch);
@@ -1172,7 +1213,10 @@ mod tests {
         }
 
         // Both the proxy allowlist and the mirrored policy are updated.
-        assert_eq!(al.snapshot(), &["allowed.example.com".to_string(), "192.0.2.1".to_string()]);
+        assert_eq!(
+            al.snapshot(),
+            &["allowed.example.com".to_string(), "192.0.2.1".to_string()]
+        );
         let guard = live.lock().unwrap();
         assert_eq!(
             guard.policy.net_allow(),
@@ -1273,7 +1317,9 @@ mod tests {
         stream.flush().expect("flush");
 
         let mut line = String::new();
-        BufReader::new(&stream).read_line(&mut line).expect("read response");
+        BufReader::new(&stream)
+            .read_line(&mut line)
+            .expect("read response");
         assert!(!line.trim().is_empty(), "expected a response, got nothing");
 
         drop(stream);
@@ -1537,4 +1583,3 @@ mod tests {
         assert_eq!(path, std::path::PathBuf::from("/tmp/shadi-ctl-12345.sock"));
     }
 }
-

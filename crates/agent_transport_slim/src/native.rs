@@ -9,8 +9,7 @@ use std::time::Duration;
 use agent_secrets::{SecretError, SecretResult};
 use slim_bindings::{
     App, CaSource, ClientConfig, MlsSettings, Name, Service, Session, SessionConfig, SessionType,
-    SlimError,
-    TlsClientConfig, TlsSource,
+    SlimError, TlsClientConfig, TlsSource,
 };
 
 use crate::SlimSession;
@@ -23,7 +22,9 @@ const DEFAULT_SHARED_SECRET_KEY: &str = "secops/slim_shared_secret";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeSlimBootstrap {
-    PointToPoint { destination: String },
+    PointToPoint {
+        destination: String,
+    },
     GroupJoin {
         channel: String,
         timeout: Option<Duration>,
@@ -55,7 +56,11 @@ impl NativeSlimSession {
         let local_name = resolve_local_name()?;
         let local_name_ref = Arc::new(parse_name(&local_name)?);
         // DID derivation uses the app (last) component of the local name.
-        let agent_id = local_name.rsplit('/').next().unwrap_or(&local_name).to_string();
+        let agent_id = local_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&local_name)
+            .to_string();
         let client_config = build_client_config()?;
         let service = Service::new(client_service_name());
 
@@ -87,10 +92,7 @@ impl NativeSlimSession {
                         .set_route(destination_name.clone(), connected_id)
                         .map_err(format_slim_error)?;
                     let created_session = created_app
-                        .create_session_and_wait(
-                            point_to_point_session_config(),
-                            destination_name,
-                        )
+                        .create_session_and_wait(point_to_point_session_config(), destination_name)
                         .map_err(format_slim_error)?;
                     let actual_target = created_session
                         .destination()
@@ -187,7 +189,9 @@ impl NativeSlimSession {
     }
 
     pub fn receive_bytes_raw(&self, timeout: Option<Duration>) -> Result<Vec<u8>, SlimError> {
-        self.session.get_message(timeout).map(|message| message.payload)
+        self.session
+            .get_message(timeout)
+            .map(|message| message.payload)
     }
 }
 
@@ -646,8 +650,8 @@ mod tests {
 
     #[test]
     fn given_empty_custom_local_name_when_resolving_then_it_is_rejected() {
-        let err = resolve_local_name_value(Some("   "), Some("avatar"))
-            .expect_err("empty local name");
+        let err =
+            resolve_local_name_value(Some("   "), Some("avatar")).expect_err("empty local name");
 
         assert!(err.contains("cannot be empty"));
     }
@@ -734,7 +738,10 @@ mod tests {
         let _guard = lock_env();
         let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shared-secret");
 
-        assert_eq!(resolve_shared_secret().expect("shared secret"), "shared-secret");
+        assert_eq!(
+            resolve_shared_secret().expect("shared secret"),
+            "shared-secret"
+        );
     }
 
     #[test]
@@ -841,16 +848,21 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn given_generated_assets_when_point_to_point_session_exchanges_messages_then_native_session_works() {
+    fn given_generated_assets_when_point_to_point_session_exchanges_messages_then_native_session_works(
+    ) {
         let _guard = lock_env();
         let dir = TestDir::new("native-point-to-point");
         let tls_dir = generate_test_tls_dir(dir.path());
         let endpoint = reserve_test_endpoint();
         let participant_tls = test_client_tls_material(&tls_dir, "secops-a");
         let server_tls = test_server_tls_material(&tls_dir);
-        let participant_name = Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
+        let participant_name =
+            Arc::new(parse_name("agntcy/shadi/secops-a").expect("participant name"));
 
-        let node_service = Service::new(format!("agent-transport-native-node-{}", std::process::id()));
+        let node_service = Service::new(format!(
+            "agent-transport-native-node-{}",
+            std::process::id()
+        ));
         node_service
             .run_server(build_test_server_config(&endpoint, &server_tls))
             .expect("start local SLIM node");
@@ -860,8 +872,10 @@ mod tests {
         let endpoint_for_participant = endpoint.clone();
         let participant_name_for_thread = participant_name.clone();
         let participant_handle = std::thread::spawn(move || -> Result<(u32, Vec<u8>), String> {
-            let participant_service =
-                Service::new(format!("agent-transport-native-participant-{}", std::process::id()));
+            let participant_service = Service::new(format!(
+                "agent-transport-native-participant-{}",
+                std::process::id()
+            ));
             let connection_id = participant_service
                 .connect(build_client_config_for_endpoint(
                     &endpoint_for_participant,
@@ -949,7 +963,10 @@ mod tests {
         let endpoint = reserve_test_endpoint();
         let server_tls = test_server_tls_material(&tls_dir);
 
-        let node_service = Service::new(format!("agent-transport-native-node-timeout-{}", std::process::id()));
+        let node_service = Service::new(format!(
+            "agent-transport-native-node-timeout-{}",
+            std::process::id()
+        ));
         node_service
             .run_server(build_test_server_config(&endpoint, &server_tls))
             .expect("start local SLIM node");

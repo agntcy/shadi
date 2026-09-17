@@ -65,7 +65,10 @@ fn response_to_message(response: SendMessageResponse) -> Message {
         SendMessageResponse::Task(task) => task.status.message.unwrap_or_else(|| {
             Message::new(
                 Role::Agent,
-                vec![Part::text(format!("task {} {:?}", task.id, task.status.state))],
+                vec![Part::text(format!(
+                    "task {} {:?}",
+                    task.id, task.status.state
+                ))],
             )
         }),
     }
@@ -376,9 +379,12 @@ impl A2AGroupChannelBuilder {
             .iter()
             .map(|name| Arc::new(name.as_slim_name()))
             .collect();
-        let transport =
-            SlimRpcTransport::new_group_with_connection(self.app.inner(), members, self.connection_id)
-                .map_err(|error| a2a_slimrpc::errors::rpc_error_to_a2a_error(&error))?;
+        let transport = SlimRpcTransport::new_group_with_connection(
+            self.app.inner(),
+            members,
+            self.connection_id,
+        )
+        .map_err(|error| a2a_slimrpc::errors::rpc_error_to_a2a_error(&error))?;
         Ok(A2AGroupChannel {
             binding: GroupBinding::Slim(transport),
             verifier: self.verifier,
@@ -794,10 +800,7 @@ mod tests {
         assert_eq!(delete_push_err.message, "stub");
 
         let card_err = channel
-            .get_extended_agent_card(
-                &params,
-                &GetExtendedAgentCardRequest { tenant: None },
-            )
+            .get_extended_agent_card(&params, &GetExtendedAgentCardRequest { tenant: None })
             .await
             .unwrap_err();
         assert_eq!(card_err.message, "stub");
@@ -833,11 +836,7 @@ mod tests {
             Ok(_) => panic!("https gRPC must be rejected until a2a-rs#162"),
             Err(err) => err,
         };
-        assert!(
-            https.message.contains("a2a-rs#162"),
-            "{}",
-            https.message
-        );
+        assert!(https.message.contains("a2a-rs#162"), "{}", https.message);
     }
 
     #[test]
@@ -923,11 +922,10 @@ mod tests {
                         .join(" ")
                 })
                 .unwrap_or_default();
-            let reply = Message::new(
-                Role::Agent,
-                vec![Part::text(format!("echo:{text}"))],
-            );
-            Box::pin(futures::stream::once(async move { Ok(StreamResponse::Message(reply)) }))
+            let reply = Message::new(Role::Agent, vec![Part::text(format!("echo:{text}"))]);
+            Box::pin(futures::stream::once(async move {
+                Ok(StreamResponse::Message(reply))
+            }))
         }
 
         fn cancel(
@@ -946,7 +944,9 @@ mod tests {
                 history: None,
                 metadata: None,
             };
-            Box::pin(futures::stream::once(async move { Ok(StreamResponse::Task(task)) }))
+            Box::pin(futures::stream::once(async move {
+                Ok(StreamResponse::Task(task))
+            }))
         }
     }
 
@@ -1050,9 +1050,7 @@ mod tests {
         server.abort();
     }
 
-    async fn serve_loopback_http(
-        binding: A2ABinding,
-    ) -> (A2ALocator, tokio::task::JoinHandle<()>) {
+    async fn serve_loopback_http(binding: A2ABinding) -> (A2ALocator, tokio::task::JoinHandle<()>) {
         let handler = Arc::new(a2a_server::DefaultRequestHandler::new(
             EchoExecutor,
             a2a_server::InMemoryTaskStore::new(),
@@ -1069,10 +1067,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, router).await.expect("serve HTTP");
         });
-        (
-            A2ALocator::new(binding, format!("http://{addr}")),
-            handle,
-        )
+        (A2ALocator::new(binding, format!("http://{addr}")), handle)
     }
 
     async fn assert_loopback_echo(locator: A2ALocator) {

@@ -117,7 +117,11 @@ pub fn session_name_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
         .and_then(|s| s.strip_prefix("shadi-ctl-"))
-        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("session"))
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("session")
+        })
         .to_string()
 }
 
@@ -126,7 +130,13 @@ pub fn session_name_from_path(path: &Path) -> String {
 pub fn sanitize_session_name(name: &str) -> String {
     let slug: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let slug = slug.trim_matches('-');
     slug.chars().take(48).collect()
@@ -185,10 +195,7 @@ pub fn prune_unreachable(sockets: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Send a patch to a running control endpoint and return the response.
-pub fn send_patch(
-    socket_path: &Path,
-    patch: &PolicyPatch,
-) -> Result<PolicyPatchResponse, String> {
+pub fn send_patch(socket_path: &Path, patch: &PolicyPatch) -> Result<PolicyPatchResponse, String> {
     match send_message(socket_path, &ControlMessage::Patch(patch.clone()))? {
         ControlResponse::PatchResult(r) => Ok(r),
         ControlResponse::Error { message } => Err(message),
@@ -300,7 +307,10 @@ mod tests {
 
     #[test]
     fn session_name_falls_back_for_unrelated_paths() {
-        assert_eq!(session_name_from_path(Path::new("/tmp/other.sock")), "other");
+        assert_eq!(
+            session_name_from_path(Path::new("/tmp/other.sock")),
+            "other"
+        );
         assert_eq!(session_name_from_path(Path::new("/")), "session");
     }
 
@@ -366,7 +376,9 @@ mod tests {
 
         std::thread::spawn(move || {
             for reply in replies {
-                let Ok((mut stream, _)) = listener.accept() else { return };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
                 // Read to EOF before replying. The client writes its request,
                 // shuts down its write half, and only then reads; answering
                 // the moment the first line arrives can close this end before
@@ -386,8 +398,12 @@ mod tests {
     #[test]
     fn each_client_call_returns_its_own_response_variant() {
         let (_dir, sock) = stub_server(vec![
-            ControlResponse::Policy { policy: serde_json::json!({"net_block": true}) },
-            ControlResponse::Ack { message: "terminating".to_string() },
+            ControlResponse::Policy {
+                policy: serde_json::json!({"net_block": true}),
+            },
+            ControlResponse::Ack {
+                message: "terminating".to_string(),
+            },
             ControlResponse::PatchResult(PolicyPatchResponse {
                 accepted: true,
                 filesystem: PatchAxisStatus::Unchanged,
@@ -422,30 +438,43 @@ mod tests {
             policy: serde_json::json!({}),
         }]);
 
-        assert_eq!(send_terminate(&sock).unwrap_err(), "unexpected response type");
+        assert_eq!(
+            send_terminate(&sock).unwrap_err(),
+            "unexpected response type"
+        );
     }
 
     #[test]
     fn every_client_call_surfaces_a_server_error() {
         // One Error reply per call, so each function's Error arm is exercised
         // rather than only the one that happens to be tested elsewhere.
-        let err = || ControlResponse::Error { message: "denied".to_string() };
+        let err = || ControlResponse::Error {
+            message: "denied".to_string(),
+        };
         let (_dir, sock) = stub_server(vec![err(), err(), err(), err()]);
 
         assert_eq!(query_policy(&sock).unwrap_err(), "denied");
         assert_eq!(query_resources(&sock).unwrap_err(), "denied");
         assert_eq!(send_terminate(&sock).unwrap_err(), "denied");
-        assert_eq!(send_patch(&sock, &PolicyPatch::default()).unwrap_err(), "denied");
+        assert_eq!(
+            send_patch(&sock, &PolicyPatch::default()).unwrap_err(),
+            "denied"
+        );
     }
 
     #[test]
     fn every_client_call_rejects_the_wrong_response_variant() {
         // An Ack answers all four; only send_terminate should accept it.
-        let ack = || ControlResponse::Ack { message: "ok".to_string() };
+        let ack = || ControlResponse::Ack {
+            message: "ok".to_string(),
+        };
         let (_dir, sock) = stub_server(vec![ack(), ack(), ack()]);
 
         assert_eq!(query_policy(&sock).unwrap_err(), "unexpected response type");
-        assert_eq!(query_resources(&sock).unwrap_err(), "unexpected response type");
+        assert_eq!(
+            query_resources(&sock).unwrap_err(),
+            "unexpected response type"
+        );
         assert_eq!(
             send_patch(&sock, &PolicyPatch::default()).unwrap_err(),
             "unexpected response type"
@@ -455,8 +484,12 @@ mod tests {
     #[test]
     fn a_reachable_socket_survives_pruning() {
         let (_dir, sock) = stub_server(vec![
-            ControlResponse::Policy { policy: serde_json::json!({}) },
-            ControlResponse::Policy { policy: serde_json::json!({}) },
+            ControlResponse::Policy {
+                policy: serde_json::json!({}),
+            },
+            ControlResponse::Policy {
+                policy: serde_json::json!({}),
+            },
         ]);
 
         assert!(is_reachable(&sock));

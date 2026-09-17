@@ -30,8 +30,8 @@ use shadi_a2a::{A2AChannelBuilder, SlimRpcHandler};
 use shadi_memory::SqlCipherStore;
 use shadi_sandbox::{spawn_sandboxed, SandboxError, SandboxPolicy};
 use slim_bindings::{
-    CaSource, ClientConfig, Name, ServerConfig, Service, TlsClientConfig,
-    TlsServerConfig, TlsSource,
+    CaSource, ClientConfig, Name, ServerConfig, Service, TlsClientConfig, TlsServerConfig,
+    TlsSource,
 };
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
@@ -274,7 +274,10 @@ struct DemoA2AExecutor {
 
 #[async_trait]
 impl AgentExecutor for DemoA2AExecutor {
-    fn execute(&self, ctx: a2a_server::ExecutorContext) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+    fn execute(
+        &self,
+        ctx: a2a_server::ExecutorContext,
+    ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
         let input = ctx
             .message
             .as_ref()
@@ -318,7 +321,10 @@ impl AgentExecutor for DemoA2AExecutor {
         ]))
     }
 
-    fn cancel(&self, ctx: a2a_server::ExecutorContext) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+    fn cancel(
+        &self,
+        ctx: a2a_server::ExecutorContext,
+    ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
         Box::pin(futures::stream::once(async move {
             Ok(StreamResponse::Task(Task {
                 id: ctx.task_id,
@@ -1244,16 +1250,16 @@ fn run_a2a_exchange(
     wait_for_file(&ready_file, Duration::from_secs(10))?;
 
     let detail = run_a2a_send_once(&A2ASendArgs {
-                shadi_tmp_dir: Some(tmp_dir.to_path_buf()),
-                endpoint: slim_endpoint.to_string(),
-                agent_id: bot_agent_id.to_string(),
-                peer_agent_id: peer_agent_id.to_string(),
-                destination: Some(destination.to_string()),
-                shared_secret: shared_secret.to_string(),
-                message: message.to_string(),
-                stream,
-                timeout_seconds,
-            })?;
+        shadi_tmp_dir: Some(tmp_dir.to_path_buf()),
+        endpoint: slim_endpoint.to_string(),
+        agent_id: bot_agent_id.to_string(),
+        peer_agent_id: peer_agent_id.to_string(),
+        destination: Some(destination.to_string()),
+        shared_secret: shared_secret.to_string(),
+        message: message.to_string(),
+        stream,
+        timeout_seconds,
+    })?;
 
     let output = wait_for_child_output(peer, Duration::from_secs(timeout_seconds + 5))?;
     if !output.status.success() {
@@ -1352,10 +1358,12 @@ fn run_slim_echo_peer(args: SlimEchoPeerArgs) -> Result<(), String> {
         .connect(build_client_config(&args.endpoint, &client_tls))
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
-    let auth = match shadi_identity::did_auth_from_env(peer_name.rsplit('/').next().unwrap_or(&peer_name)) {
-        Some(result) => result.map_err(|e| e.to_string())?,
-        None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
-    };
+    let auth =
+        match shadi_identity::did_auth_from_env(peer_name.rsplit('/').next().unwrap_or(&peer_name))
+        {
+            Some(result) => result.map_err(|e| e.to_string())?,
+            None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
+        };
     let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
@@ -1416,10 +1424,12 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
         .connect(build_client_config(&args.endpoint, &client_tls))
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
-    let auth = match shadi_identity::did_auth_from_env(peer_name.rsplit('/').next().unwrap_or(&peer_name)) {
-        Some(result) => result.map_err(|e| e.to_string())?,
-        None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
-    };
+    let auth =
+        match shadi_identity::did_auth_from_env(peer_name.rsplit('/').next().unwrap_or(&peer_name))
+        {
+            Some(result) => result.map_err(|e| e.to_string())?,
+            None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
+        };
     let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
         .map_err(format_slim_error)?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
@@ -1468,11 +1478,8 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
 
         println!("[a2a-peer] ready as {} on {}", peer_label, endpoint);
 
-        let request_result = tokio::time::timeout(
-            Duration::from_secs(wait_seconds),
-            request_seen.notified(),
-        )
-        .await;
+        let request_result =
+            tokio::time::timeout(Duration::from_secs(wait_seconds), request_seen.notified()).await;
 
         if request_result.is_ok() {
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1484,12 +1491,8 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
             .map_err(|err| format!("failed to join A2A SLIMRPC server task: {}", err))?;
         server_status?;
 
-        request_result.map_err(|_| {
-            format!(
-                "timed out waiting for A2A request after {}s",
-                wait_seconds
-            )
-        })?;
+        request_result
+            .map_err(|_| format!("timed out waiting for A2A request after {}s", wait_seconds))?;
 
         Ok::<(), String>(())
     });
@@ -1529,7 +1532,9 @@ fn run_a2a_send_once(args: &A2ASendArgs) -> Result<String, String> {
         .map_err(format_slim_error)?;
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let remote_name_ref = Arc::new(parse_name(&destination)?);
-    let auth = match shadi_identity::did_auth_from_env(local_name.rsplit('/').next().unwrap_or(&local_name)) {
+    let auth = match shadi_identity::did_auth_from_env(
+        local_name.rsplit('/').next().unwrap_or(&local_name),
+    ) {
         Some(result) => result.map_err(|e| e.to_string())?,
         None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
     };
@@ -1585,10 +1590,7 @@ fn run_a2a_send_once(args: &A2ASendArgs) -> Result<String, String> {
 
     Ok(format!(
         "sent {:?} to {} via {} and received {}",
-        args.message,
-        destination,
-        local_name,
-        response_detail
+        args.message, destination, local_name, response_detail
     ))
 }
 
@@ -1928,10 +1930,9 @@ fn describe_a2a_stream(events: &[Result<StreamResponse, A2AError>]) -> String {
     let mut descriptions = Vec::new();
     for event in events {
         match event {
-            Ok(StreamResponse::StatusUpdate(update)) => descriptions.push(format!(
-                "status {:?}",
-                update.status.state
-            )),
+            Ok(StreamResponse::StatusUpdate(update)) => {
+                descriptions.push(format!("status {:?}", update.status.state))
+            }
             Ok(StreamResponse::Task(task)) => descriptions.push(format!(
                 "task {} ({})",
                 task.id,
@@ -2747,10 +2748,7 @@ mod tests {
         let empty_message = Message::new(Role::User, vec![]);
         assert_eq!(readable_message_text(&empty_message), "(no text parts)");
 
-        let card = demo_a2a_agent_card(
-            "agntcy/shadi/secops-a",
-            "slimrpc://agntcy/shadi/secops-a",
-        );
+        let card = demo_a2a_agent_card("agntcy/shadi/secops-a", "slimrpc://agntcy/shadi/secops-a");
         assert_eq!(card.name, "SHADI Demo A2A Peer (agntcy/shadi/secops-a)");
         assert_eq!(card.supported_interfaces.len(), 1);
         assert_eq!(
@@ -2932,7 +2930,10 @@ mod tests {
                 .get_extended_agent_card(&params, GetExtendedAgentCardRequest { tenant: None })
                 .await
                 .expect("extended agent card");
-            assert_eq!(card.supported_interfaces[0].url, "slimrpc://agntcy/shadi/secops-a");
+            assert_eq!(
+                card.supported_interfaces[0].url,
+                "slimrpc://agntcy/shadi/secops-a"
+            );
         });
     }
 

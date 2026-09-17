@@ -193,7 +193,8 @@ fn run_policy_explain(args: PolicyExplainArgs) -> ExitCode {
 
     // If a socket is provided (or auto-detectable), merge the live patched
     // state so the user sees network policy changes applied via `policy patch`.
-    let live_state = args.socket
+    let live_state = args
+        .socket
         .as_ref()
         .and_then(|sock| query_policy(sock).ok());
 
@@ -294,25 +295,30 @@ fn run_policy_diff(args: PolicyDiffArgs) -> ExitCode {
         }
     };
 
-    let (against_label, baseline_profile, baseline_policy_path) =
-        if let Some(profile) = args.against.strip_prefix("profile:") {
-            let profile = match parse_against_profile(profile) {
-                Some(profile) => profile,
-                None => {
-                    eprintln!("invalid profile target for --against: {}", args.against);
-                    return ExitCode::from(2);
-                }
-            };
-            (args.against.clone(), Some(profile), None)
-        } else if let Some(path) = args.against.strip_prefix("file:") {
-            (args.against.clone(), args.profile, Some(PathBuf::from(path)))
-        } else {
-            eprintln!(
+    let (against_label, baseline_profile, baseline_policy_path) = if let Some(profile) =
+        args.against.strip_prefix("profile:")
+    {
+        let profile = match parse_against_profile(profile) {
+            Some(profile) => profile,
+            None => {
+                eprintln!("invalid profile target for --against: {}", args.against);
+                return ExitCode::from(2);
+            }
+        };
+        (args.against.clone(), Some(profile), None)
+    } else if let Some(path) = args.against.strip_prefix("file:") {
+        (
+            args.against.clone(),
+            args.profile,
+            Some(PathBuf::from(path)),
+        )
+    } else {
+        eprintln!(
                 "invalid --against value: {} (expected profile:<strict|balanced|connected> or file:<path>)",
                 args.against
             );
-            return ExitCode::from(2);
-        };
+        return ExitCode::from(2);
+    };
 
     let baseline_file_policy = match load_policy_file_or_default(baseline_policy_path.as_ref()) {
         Ok(policy) => policy,
@@ -820,8 +826,8 @@ mod tests {
 
     fn test_live_policy() -> std::sync::Arc<std::sync::Mutex<LivePolicy>> {
         use shadi_sandbox::SandboxPolicy;
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU32};
+        use std::sync::Arc;
         std::sync::Arc::new(std::sync::Mutex::new(LivePolicy {
             policy: SandboxPolicy::new().block_network(true),
             blocked: HashSet::new(),
@@ -898,11 +904,7 @@ mod tests {
         wait_for_control_socket_ready(&sock);
 
         let patch_path = dir.path().join("patch.json");
-        std::fs::write(
-            &patch_path,
-            r#"{"add_allow_command":["node"]}"#,
-        )
-        .expect("write patch");
+        std::fs::write(&patch_path, r#"{"add_allow_command":["node"]}"#).expect("write patch");
 
         let code = run_policy_patch_command(PolicyPatchArgs {
             socket: sock.clone(),

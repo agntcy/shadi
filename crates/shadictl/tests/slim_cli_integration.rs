@@ -58,9 +58,7 @@ fn given_missing_server_material_when_start_node_runs_then_error_is_reported() {
         .expect("run shadictl slim start-node");
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("SLIM server certificate not found")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("SLIM server certificate not found"));
 }
 
 #[test]
@@ -86,7 +84,10 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
             "40",
         ])
         .env("SHADI_TMP_DIR", dir.path())
-        .env("SLIM_SHARED_SECRET", "my_shared_secret_for_testing_purposes_only")
+        .env(
+            "SLIM_SHARED_SECRET",
+            "my_shared_secret_for_testing_purposes_only",
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -111,7 +112,10 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
             "15",
         ])
         .env("SHADI_TMP_DIR", dir.path())
-        .env("SLIM_SHARED_SECRET", "my_shared_secret_for_testing_purposes_only")
+        .env(
+            "SLIM_SHARED_SECRET",
+            "my_shared_secret_for_testing_purposes_only",
+        )
         .output()
         .expect("run shadictl slim a2a-send");
 
@@ -123,13 +127,34 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_streaming_round
     let (peer_status, peer_stdout, peer_stderr) =
         wait_for_child_output(&mut peer, CHILD_EXIT_TIMEOUT);
 
-    assert_eq!(sender.status.code(), Some(0), "sender stderr={} stdout={}", String::from_utf8_lossy(&sender.stderr), String::from_utf8_lossy(&sender.stdout));
+    assert_eq!(
+        sender.status.code(),
+        Some(0),
+        "sender stderr={} stdout={}",
+        String::from_utf8_lossy(&sender.stderr),
+        String::from_utf8_lossy(&sender.stdout)
+    );
     let sender_stdout = String::from_utf8_lossy(&sender.stdout);
-    assert!(sender_stdout.contains("stream [status Working, task "), "sender stdout={sender_stdout}");
-    assert!(sender_stdout.contains("echo:agntcy/shadi/secops-a:hello from integration test"), "sender stdout={sender_stdout}");
+    assert!(
+        sender_stdout.contains("stream [status Working, task "),
+        "sender stdout={sender_stdout}"
+    );
+    assert!(
+        sender_stdout.contains("echo:agntcy/shadi/secops-a:hello from integration test"),
+        "sender stdout={sender_stdout}"
+    );
 
-    assert_eq!(peer_status.code(), Some(0), "peer stderr={} stdout={}", peer_stderr, peer_stdout);
-    assert!(peer_stdout.contains("[shadictl a2a-peer] ready as agntcy/shadi/secops-a"), "peer stdout={peer_stdout}");
+    assert_eq!(
+        peer_status.code(),
+        Some(0),
+        "peer stderr={} stdout={}",
+        peer_stderr,
+        peer_stdout
+    );
+    assert!(
+        peer_stdout.contains("[shadictl a2a-peer] ready as agntcy/shadi/secops-a"),
+        "peer stdout={peer_stdout}"
+    );
 }
 
 // End-to-end DID-auth round trip: two agents derived from one human seed form a
@@ -257,7 +282,10 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_task_round_trip
             "40",
         ])
         .env("SHADI_TMP_DIR", dir.path())
-        .env("SLIM_SHARED_SECRET", "my_shared_secret_for_testing_purposes_only")
+        .env(
+            "SLIM_SHARED_SECRET",
+            "my_shared_secret_for_testing_purposes_only",
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -285,7 +313,10 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_task_round_trip
             "15",
         ])
         .env("SHADI_TMP_DIR", dir.path())
-        .env("SLIM_SHARED_SECRET", "my_shared_secret_for_testing_purposes_only")
+        .env(
+            "SLIM_SHARED_SECRET",
+            "my_shared_secret_for_testing_purposes_only",
+        )
         .output()
         .expect("run shadictl slim a2a-send");
 
@@ -297,13 +328,34 @@ fn given_generated_mtls_assets_when_a2a_peer_and_sender_run_then_task_round_trip
     let (peer_status, peer_stdout, peer_stderr) =
         wait_for_child_output(&mut peer, CHILD_EXIT_TIMEOUT);
 
-    assert_eq!(sender.status.code(), Some(0), "sender stderr={} stdout={}", String::from_utf8_lossy(&sender.stderr), String::from_utf8_lossy(&sender.stdout));
+    assert_eq!(
+        sender.status.code(),
+        Some(0),
+        "sender stderr={} stdout={}",
+        String::from_utf8_lossy(&sender.stderr),
+        String::from_utf8_lossy(&sender.stdout)
+    );
     let sender_stdout = String::from_utf8_lossy(&sender.stdout);
-    assert!(sender_stdout.contains("received task "), "sender stdout={sender_stdout}");
-    assert!(sender_stdout.contains("echo:agntcy/shadi/secops-a:hello from task integration test"), "sender stdout={sender_stdout}");
+    assert!(
+        sender_stdout.contains("received task "),
+        "sender stdout={sender_stdout}"
+    );
+    assert!(
+        sender_stdout.contains("echo:agntcy/shadi/secops-a:hello from task integration test"),
+        "sender stdout={sender_stdout}"
+    );
 
-    assert_eq!(peer_status.code(), Some(0), "peer stderr={} stdout={}", peer_stderr, peer_stdout);
-    assert!(peer_stdout.contains("[shadictl a2a-peer] ready as agntcy/shadi/secops-a"), "peer stdout={peer_stdout}");
+    assert_eq!(
+        peer_status.code(),
+        Some(0),
+        "peer stderr={} stdout={}",
+        peer_stderr,
+        peer_stdout
+    );
+    assert!(
+        peer_stdout.contains("[shadictl a2a-peer] ready as agntcy/shadi/secops-a"),
+        "peer stdout={peer_stdout}"
+    );
 }
 
 fn reserve_endpoint() -> String {
@@ -314,8 +366,8 @@ fn reserve_endpoint() -> String {
 }
 
 fn generate_mtls_assets(target_dir: &Path) {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/generate_slim_mtls_certs.sh");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/generate_slim_mtls_certs.sh");
     let output = bash_command()
         .arg(script)
         .arg(target_dir)
@@ -351,7 +403,10 @@ fn git_bash_path() -> Option<PathBuf> {
         let Some(base_dir) = std::env::var_os(env_name) else {
             continue;
         };
-        let candidate = PathBuf::from(base_dir).join("Git").join("bin").join("bash.exe");
+        let candidate = PathBuf::from(base_dir)
+            .join("Git")
+            .join("bin")
+            .join("bash.exe");
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -410,7 +465,10 @@ fn wait_for_ready_file(path: &Path, timeout: Duration, child: &mut Child) {
     );
 }
 
-fn wait_for_child_output(child: &mut Child, timeout: Duration) -> (std::process::ExitStatus, String, String) {
+fn wait_for_child_output(
+    child: &mut Child,
+    timeout: Duration,
+) -> (std::process::ExitStatus, String, String) {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().expect("poll child status") {

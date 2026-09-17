@@ -1,8 +1,8 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{SecretError, SecretResult};
 use crate::session::SessionContext;
+use crate::{SecretError, SecretResult};
 
 pub trait AgentVerifier: Send + Sync {
     fn verify(&self, session: &SessionContext) -> SecretResult<()>;

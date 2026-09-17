@@ -161,7 +161,10 @@ mod tests {
         match (p, v) {
             (
                 IdentityProviderConfig::SharedSecret { id, data },
-                IdentityVerifierConfig::SharedSecret { id: vid, data: vdata },
+                IdentityVerifierConfig::SharedSecret {
+                    id: vid,
+                    data: vdata,
+                },
             ) => {
                 assert_eq!(id, name.to_string());
                 assert_eq!(vid, name.to_string());

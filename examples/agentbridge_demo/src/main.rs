@@ -12,7 +12,7 @@
 
 use agentbridge::{
     adapter::{CliAdapter, CliAdapterError, CliToolAdapter},
-    context::{ArtifactPayload, ConversationMessage, ContextPacket, FileSnapshot},
+    context::{ArtifactPayload, ContextPacket, ConversationMessage, FileSnapshot},
     mas::{
         AgentId, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch, EventId,
         EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
@@ -231,8 +231,8 @@ fn demo_coordination() {
             AgentId::from("codex"),
             AgentId::from("cursor-agent"),
         ],
-        4,  // quorum: all four proposals required
-        5,  // max_rounds: safety cutoff
+        4, // quorum: all four proposals required
+        5, // max_rounds: safety cutoff
     );
     let mut runtime = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
 
@@ -364,7 +364,10 @@ fn demo_tool_adapter_bridge() {
         epoch: Epoch(0),
     };
 
-    println!("[2] Dispatching tool call: {:?}", std::str::from_utf8(&call.arguments).unwrap());
+    println!(
+        "[2] Dispatching tool call: {:?}",
+        std::str::from_utf8(&call.arguments).unwrap()
+    );
     let result = tool_adapter.call(call).expect("tool call");
     println!("[3] Tool result: {} bytes", result.payload.len());
 
@@ -406,9 +409,9 @@ fn main() {
     println!("+==========================================================+");
 
     match scenario.as_deref() {
-        Some("handoff")      => demo_handoff(),
+        Some("handoff") => demo_handoff(),
         Some("coordination") => demo_coordination(),
-        Some("bridge")       => demo_tool_adapter_bridge(),
+        Some("bridge") => demo_tool_adapter_bridge(),
         Some(other) => {
             eprintln!("Unknown scenario: {other}. Valid: handoff, coordination, bridge");
             std::process::exit(1);

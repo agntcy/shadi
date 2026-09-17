@@ -299,8 +299,14 @@ mod tests {
         assert_eq!(A2ABinding::parse("GRPC").unwrap(), A2ABinding::Grpc);
         assert_eq!(A2ABinding::parse("jsonrpc").unwrap(), A2ABinding::Jsonrpc);
         assert_eq!(A2ABinding::parse("JSONRPC").unwrap(), A2ABinding::Jsonrpc);
-        assert_eq!(A2ABinding::parse("http+json").unwrap(), A2ABinding::HttpJson);
-        assert_eq!(A2ABinding::parse("HTTP+JSON").unwrap(), A2ABinding::HttpJson);
+        assert_eq!(
+            A2ABinding::parse("http+json").unwrap(),
+            A2ABinding::HttpJson
+        );
+        assert_eq!(
+            A2ABinding::parse("HTTP+JSON").unwrap(),
+            A2ABinding::HttpJson
+        );
         assert_eq!(A2ABinding::parse("rest").unwrap(), A2ABinding::HttpJson);
         assert_eq!(A2ABinding::parse("slimrpc").unwrap(), A2ABinding::Slim);
         assert_eq!(A2ABinding::parse("SLIMRPC").unwrap(), A2ABinding::Slim);
@@ -335,29 +341,23 @@ mod tests {
     fn bare_http_defaults_to_grpc_unless_hinted() {
         let grpc = A2ALocator::parse("http://127.0.0.1:50051").unwrap();
         assert_eq!(grpc.binding, A2ABinding::Grpc);
-        let jsonrpc = A2ALocator::parse_with_hint(
-            "http://127.0.0.1:8080",
-            Some(A2ABinding::Jsonrpc),
-        )
-        .unwrap();
+        let jsonrpc =
+            A2ALocator::parse_with_hint("http://127.0.0.1:8080", Some(A2ABinding::Jsonrpc))
+                .unwrap();
         assert_eq!(jsonrpc.binding, A2ABinding::Jsonrpc);
         assert_eq!(jsonrpc.url, "http://127.0.0.1:8080");
-        let https = A2ALocator::parse_with_hint(
-            "https://example.test:443",
-            Some(A2ABinding::HttpJson),
-        )
-        .unwrap();
+        let https =
+            A2ALocator::parse_with_hint("https://example.test:443", Some(A2ABinding::HttpJson))
+                .unwrap();
         assert_eq!(https.binding, A2ABinding::HttpJson);
         assert_eq!(https.url, "https://example.test:443");
-        assert_eq!(
-            https.display_uri(),
-            "HTTP+JSON https://example.test:443"
-        );
+        assert_eq!(https.display_uri(), "HTTP+JSON https://example.test:443");
     }
 
     #[test]
     fn slim_locator_is_the_local_node() {
-        let by_hint = A2ALocator::parse_with_hint("127.0.0.1:47357", Some(A2ABinding::Slim)).unwrap();
+        let by_hint =
+            A2ALocator::parse_with_hint("127.0.0.1:47357", Some(A2ABinding::Slim)).unwrap();
         assert_eq!(by_hint, A2ALocator::slim("127.0.0.1:47357"));
         assert_eq!(by_hint.display_uri(), "slim://127.0.0.1:47357");
     }

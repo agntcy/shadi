@@ -74,11 +74,7 @@ impl<'a> SecureAgentChannel<'a> {
 
     /// Verify a DID-proof envelope (or reject unsigned bytes on a proven
     /// channel). Returns the inner payload when an envelope was present.
-    fn authorize_bytes(
-        &self,
-        ctx: &SessionContext,
-        bytes: &[u8],
-    ) -> SecretResult<Option<Vec<u8>>> {
+    fn authorize_bytes(&self, ctx: &SessionContext, bytes: &[u8]) -> SecretResult<Option<Vec<u8>>> {
         if looks_like_did_proof(bytes) {
             let verified = unwrap_signed_message(bytes).map_err(|_| SecretError::NotAuthorized)?;
             if let Some(expected) = ctx.did.as_deref() {
@@ -102,9 +98,9 @@ impl<'a> SecureAgentChannel<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_secrets::{SecretError, SecretStore};
-    use agent_secrets::policy::SecretPolicy;
     use agent_secrets::memory::SecretBytes;
+    use agent_secrets::policy::SecretPolicy;
+    use agent_secrets::{SecretError, SecretStore};
     use std::sync::Mutex;
 
     struct AllowVerifier;

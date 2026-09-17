@@ -124,10 +124,7 @@ fn mock_accept_loop(listener: &UnixListener, state: &Arc<Mutex<MockState>>, sock
     }
 }
 
-fn mock_handle_stream(
-    stream: std::os::unix::net::UnixStream,
-    state: &Arc<Mutex<MockState>>,
-) {
+fn mock_handle_stream(stream: std::os::unix::net::UnixStream, state: &Arc<Mutex<MockState>>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
@@ -158,16 +155,16 @@ fn mock_handle_stream(
             ControlMessage::QueryPolicy => mock_query(state),
             ControlMessage::Patch(patch) => mock_patch(state, patch),
             ControlMessage::Terminate => mock_terminate(state),
-            ControlMessage::QueryResources => ControlResponse::Resources(
-                shadi_sandbox::ProcessResources {
+            ControlMessage::QueryResources => {
+                ControlResponse::Resources(shadi_sandbox::ProcessResources {
                     pid: std::process::id(),
                     rss_bytes: Some(1024 * 1024),
                     virtual_bytes: Some(128 * 1024 * 1024),
                     cpu_user_ms: Some(100),
                     cpu_system_ms: Some(50),
                     thread_count: Some(2),
-                },
-            ),
+                })
+            }
         };
 
         if write_mock_response(reader.get_mut(), &resp).is_err() {
@@ -176,10 +173,7 @@ fn mock_handle_stream(
     }
 }
 
-fn write_mock_response(
-    writer: &mut impl Write,
-    resp: &ControlResponse,
-) -> std::io::Result<()> {
+fn write_mock_response(writer: &mut impl Write, resp: &ControlResponse) -> std::io::Result<()> {
     let json = serde_json::to_string(resp)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     writer.write_all(json.as_bytes())?;
@@ -189,8 +183,8 @@ fn write_mock_response(
 
 fn probe_mock_socket(sock_path: &Path) -> std::io::Result<()> {
     let mut stream = std::os::unix::net::UnixStream::connect(sock_path)?;
-    let message = serde_json::to_string(&ControlMessage::QueryPolicy)
-        .map_err(std::io::Error::other)?;
+    let message =
+        serde_json::to_string(&ControlMessage::QueryPolicy).map_err(std::io::Error::other)?;
     stream.write_all(message.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
@@ -307,11 +301,7 @@ fn run_shell_with_args(input: &str, extra_args: &[&str]) -> ShellOutput {
     run_shell_with_env(input, extra_args, &[])
 }
 
-fn run_shell_with_env(
-    input: &str,
-    extra_args: &[&str],
-    env_vars: &[(&str, &str)],
-) -> ShellOutput {
+fn run_shell_with_env(input: &str, extra_args: &[&str], env_vars: &[(&str, &str)]) -> ShellOutput {
     // These tests drive the compiled shell through piped stdin while also
     // standing up per-test Unix socket servers. Running multiple shell
     // subprocesses in parallel is flaky on macOS CI, so keep the harness
@@ -345,7 +335,9 @@ fn run_shell_with_env(
         stdin.flush().unwrap();
     }
 
-    let output = child.wait_with_output().expect("failed to wait on shadictl");
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait on shadictl");
     ShellOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
@@ -383,8 +375,7 @@ impl ShellOutput {
         assert!(
             self.success,
             "expected exit code 0, got stdout:\n{}\n--- stderr ---\n{}",
-            self.stdout,
-            self.stderr
+            self.stdout, self.stderr
         );
         self
     }
@@ -588,10 +579,7 @@ fn given_attached_session_when_policy_query_then_shows_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mock = MockSandbox::start(dir.path());
 
-    let input = format!(
-        "/attach {}\n/policy query\n/exit\n",
-        mock.socket_path()
-    );
+    let input = format!("/attach {}\n/policy query\n/exit\n", mock.socket_path());
     let out = run_shell(&input);
 
     out.assert_success()
@@ -672,8 +660,12 @@ fn given_attached_session_when_kill_then_termination_is_requested() {
 
     let out = run_shell_with_args("/kill\n/exit\n", &["--socket", mock.socket_path()]);
 
-    out.assert_success().stdout_contains("termination requested");
-    assert!(mock.terminated(), "expected terminate request to reach mock sandbox");
+    out.assert_success()
+        .stdout_contains("termination requested");
+    assert!(
+        mock.terminated(),
+        "expected terminate request to reach mock sandbox"
+    );
 }
 
 #[test]

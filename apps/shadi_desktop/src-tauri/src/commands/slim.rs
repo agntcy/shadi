@@ -172,7 +172,9 @@ where
 {
     let state = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut inner = state.lock().map_err(|_| "SLIM state poisoned".to_string())?;
+        let mut inner = state
+            .lock()
+            .map_err(|_| "SLIM state poisoned".to_string())?;
         f(&mut inner)
     })
     .await
@@ -317,9 +319,10 @@ impl Inner {
     /// The live session for a room, or an error naming what to do about it —
     /// a known-but-disconnected room needs rejoining before it can be modified.
     fn live_session(&self, channel: &str) -> Result<Arc<Session>, String> {
-        self.room(channel)?.session.clone().ok_or_else(|| {
-            format!("room '{channel}' is known but not connected; rejoin it first")
-        })
+        self.room(channel)?
+            .session
+            .clone()
+            .ok_or_else(|| format!("room '{channel}' is known but not connected; rejoin it first"))
     }
 
     /// Write every known room's metadata to the store. Called after each
@@ -350,8 +353,7 @@ impl Inner {
         }
         let data = serde_json::to_string_pretty(&stored)
             .map_err(|e| format!("failed to serialize rooms: {e}"))?;
-        std::fs::write(path, data)
-            .map_err(|e| format!("failed to write {}: {e}", path.display()))
+        std::fs::write(path, data).map_err(|e| format!("failed to write {}: {e}", path.display()))
     }
 
     fn node_service_mut(&mut self) -> &mut Service {
@@ -382,12 +384,15 @@ impl Inner {
             // name alone; the status is not surfaced yet.
             .map(|participant| {
                 let name = participant.name.to_string();
-                room.admitted.get(&name).cloned().unwrap_or(SlimGroupMember {
-                    name,
-                    did: String::new(),
-                    endpoint: None,
-                    kind: "agent".to_string(),
-                })
+                room.admitted
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or(SlimGroupMember {
+                        name,
+                        did: String::new(),
+                        endpoint: None,
+                        kind: "agent".to_string(),
+                    })
             })
             .collect())
     }
@@ -430,7 +435,9 @@ pub async fn slim_node_start(state: tauri::State<'_, SlimState>) -> Result<SlimN
 }
 
 #[tauri::command]
-pub async fn slim_node_status(state: tauri::State<'_, SlimState>) -> Result<SlimNodeStatus, String> {
+pub async fn slim_node_status(
+    state: tauri::State<'_, SlimState>,
+) -> Result<SlimNodeStatus, String> {
     with_state(&state, |inner| {
         Ok(SlimNodeStatus {
             running: inner.node_started,
@@ -549,7 +556,8 @@ pub async fn slim_group_invite(
 
         for (member, _) in &resolved {
             let name = Arc::new(parse_name(&member.name)?);
-            app.set_route(name.clone(), connection_id).map_err(slim_err)?;
+            app.set_route(name.clone(), connection_id)
+                .map_err(slim_err)?;
             session.invite_and_wait(name).map_err(slim_err)?;
         }
 
@@ -578,42 +586,42 @@ pub async fn slim_group_join(
     timeout_secs: Option<u64>,
 ) -> Result<SlimGroupInfo, String> {
     with_state(&state, move |inner| {
-    let expected = parse_name(&channel)?;
-    inner.ensure_channel_subscription(&channel)?;
-    let connection_id = inner.ensure_connection()?;
-    let app = inner.ensure_app()?;
-    // Subscribing only enables receiving; a route is what lets this member
-    // broadcast back to the room.
-    app.set_route(Arc::new(parse_name(&channel)?), connection_id)
-        .map_err(slim_err)?;
+        let expected = parse_name(&channel)?;
+        inner.ensure_channel_subscription(&channel)?;
+        let connection_id = inner.ensure_connection()?;
+        let app = inner.ensure_app()?;
+        // Subscribing only enables receiving; a route is what lets this member
+        // broadcast back to the room.
+        app.set_route(Arc::new(parse_name(&channel)?), connection_id)
+            .map_err(slim_err)?;
 
-    let session = app
-        .listen_for_session(timeout_secs.map(Duration::from_secs))
-        .map_err(slim_err)?;
-    let actual = session.destination().map_err(slim_err)?.to_string();
-    if actual != expected.to_string() {
-        let _ = app.delete_session_and_wait(session);
-        return Err(format!(
-            "received session for {actual} while waiting for {expected}"
-        ));
-    }
-
-    match inner.rooms.get_mut(&actual) {
-        // Rejoin: keep the role and roster this room already carries.
-        Some(room) => room.session = Some(session),
-        None => {
-            inner.rooms.insert(
-                actual.clone(),
-                Room {
-                    session: Some(session),
-                    moderator: false,
-                    admitted: HashMap::new(),
-                },
-            );
+        let session = app
+            .listen_for_session(timeout_secs.map(Duration::from_secs))
+            .map_err(slim_err)?;
+        let actual = session.destination().map_err(slim_err)?.to_string();
+        if actual != expected.to_string() {
+            let _ = app.delete_session_and_wait(session);
+            return Err(format!(
+                "received session for {actual} while waiting for {expected}"
+            ));
         }
-    }
-    inner.persist()?;
-    inner.group_info(&actual)
+
+        match inner.rooms.get_mut(&actual) {
+            // Rejoin: keep the role and roster this room already carries.
+            Some(room) => room.session = Some(session),
+            None => {
+                inner.rooms.insert(
+                    actual.clone(),
+                    Room {
+                        session: Some(session),
+                        moderator: false,
+                        admitted: HashMap::new(),
+                    },
+                );
+            }
+        }
+        inner.persist()?;
+        inner.group_info(&actual)
     })
     .await
 }
@@ -655,21 +663,21 @@ pub async fn slim_group_remove_member(
     member_name: String,
 ) -> Result<SlimGroupInfo, String> {
     with_state(&state, move |inner| {
-    if !inner.room(&channel)?.moderator {
-        return Err(format!(
-            "only the moderator of '{channel}' can remove members"
-        ));
-    }
-    inner
-        .live_session(&channel)?
-        .remove_and_wait(Arc::new(parse_name(&member_name)?))
-        .map_err(slim_err)?;
+        if !inner.room(&channel)?.moderator {
+            return Err(format!(
+                "only the moderator of '{channel}' can remove members"
+            ));
+        }
+        inner
+            .live_session(&channel)?
+            .remove_and_wait(Arc::new(parse_name(&member_name)?))
+            .map_err(slim_err)?;
 
-    if let Some(room) = inner.rooms.get_mut(&channel) {
-        room.admitted.remove(&member_name);
-    }
-    inner.persist()?;
-    inner.group_info(&channel)
+        if let Some(room) = inner.rooms.get_mut(&channel) {
+            room.admitted.remove(&member_name);
+        }
+        inner.persist()?;
+        inner.group_info(&channel)
     })
     .await
 }
@@ -782,10 +790,7 @@ fn route_rows(list: &RouteListResponse) -> Vec<SlimRoute> {
         .collect()
 }
 
-fn controller_request(
-    endpoint: &str,
-    request: ControlMessage,
-) -> Result<ControlMessage, String> {
+fn controller_request(endpoint: &str, request: ControlMessage) -> Result<ControlMessage, String> {
     let runtime = TokioRuntimeBuilder::new_current_thread()
         .enable_all()
         .build()
@@ -855,7 +860,6 @@ fn is_member_spec(spec: &str) -> bool {
 fn spec_needs_directory(spec: &str) -> bool {
     spec.starts_with("skill:") || spec.starts_with("did:")
 }
-
 
 /// Resolve `--members`-style specs into members. Directory-discovered
 /// candidates are agents; an `explicit:` entry names a member by hand and is
@@ -1111,7 +1115,9 @@ fn resolve_local_name() -> Result<String, String> {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DEFAULT_LOCAL_APP.to_string());
-    Ok(format!("{DEFAULT_LOCAL_ORG}/{DEFAULT_LOCAL_NAMESPACE}/{app}"))
+    Ok(format!(
+        "{DEFAULT_LOCAL_ORG}/{DEFAULT_LOCAL_NAMESPACE}/{app}"
+    ))
 }
 
 fn parse_name(raw: &str) -> Result<Name, String> {
@@ -1183,10 +1189,7 @@ mod tests {
             // No live session: exactly the shape a restored room has.
             session: None,
             moderator,
-            admitted: members
-                .into_iter()
-                .map(|m| (m.name.clone(), m))
-                .collect(),
+            admitted: members.into_iter().map(|m| (m.name.clone(), m)).collect(),
         }
     }
 
@@ -1227,7 +1230,9 @@ mod tests {
         after.init_store(path.clone()).expect("init store");
         let inner = after.0.lock().unwrap_or_else(|e| e.into_inner());
 
-        let review = inner.group_info("agntcy/shadi/review").expect("review room");
+        let review = inner
+            .group_info("agntcy/shadi/review")
+            .expect("review room");
         assert_eq!(review.role, "moderator");
         assert!(!review.connected, "a restored room has no live session");
         assert_eq!(review.members.len(), 1);
@@ -1241,7 +1246,9 @@ mod tests {
         );
 
         // Role and the human/agent label are per-room, not global.
-        let standup = inner.group_info("agntcy/shadi/standup").expect("standup room");
+        let standup = inner
+            .group_info("agntcy/shadi/standup")
+            .expect("standup room");
         assert_eq!(standup.role, "participant");
         assert_eq!(standup.members[0].kind, "human");
 
@@ -1301,7 +1308,12 @@ mod tests {
         let missing = std::env::temp_dir().join("shadi-desktop-definitely-absent.json");
         let _ = std::fs::remove_file(&missing);
         assert!(state.init_store(missing).is_ok());
-        assert!(state.0.lock().unwrap_or_else(|e| e.into_inner()).rooms.is_empty());
+        assert!(state
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rooms
+            .is_empty());
     }
 
     /// Pins the invariant that makes this whole module work.
@@ -1398,7 +1410,8 @@ mod tests {
             for member in &members {
                 let name = Arc::new(parse_name(member).expect("member name"));
                 let session = inner.live_session(&channel).expect("live session");
-                app.set_route(name.clone(), connection_id).expect("set route");
+                app.set_route(name.clone(), connection_id)
+                    .expect("set route");
                 session
                     .invite_and_wait(name)
                     .unwrap_or_else(|e| panic!("invite {member} failed: {e}"));
@@ -1467,7 +1480,10 @@ mod tests {
             Path::new("/somewhere/shadi-slim-mtls/server.crt"),
         );
         assert!(err.contains("/somewhere/shadi-slim-mtls/server.crt"));
-        assert!(err.contains("SHADI_TMP_DIR"), "must name the env var: {err}");
+        assert!(
+            err.contains("SHADI_TMP_DIR"),
+            "must name the env var: {err}"
+        );
         assert!(
             err.contains("generate_slim_mtls_certs.sh"),
             "must say how to generate the material: {err}"
@@ -1518,7 +1534,9 @@ mod tests {
             .iter()
             .map(|n| bootstrap::AgentEntry {
                 agent_id: n.clone(),
-                did: shadi_identity::AgentIdentity::derive(&seed, n).unwrap().did(),
+                did: shadi_identity::AgentIdentity::derive(&seed, n)
+                    .unwrap()
+                    .did(),
             })
             .collect();
 
@@ -1555,7 +1573,11 @@ mod tests {
                 .expect("create group session");
             inner.rooms.insert(
                 channel_name.to_string(),
-                Room { session: Some(session), moderator: true, admitted: HashMap::new() },
+                Room {
+                    session: Some(session),
+                    moderator: true,
+                    admitted: HashMap::new(),
+                },
             );
             inner.persist().expect("persist");
 
@@ -1571,7 +1593,9 @@ mod tests {
 
     #[test]
     fn member_specs_are_recognised() {
-        assert!(is_member_spec("skill:agent_orchestration/agent_coordination"));
+        assert!(is_member_spec(
+            "skill:agent_orchestration/agent_coordination"
+        ));
         assert!(is_member_spec("did:key:z6Mk"));
         assert!(is_member_spec("explicit:alice=did:key:z6Mk"));
         assert!(!is_member_spec("agntcy/shadi/reviewer"));
@@ -1609,7 +1633,10 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name, "agntcy/shadi/reviewer");
         assert_eq!(resolved[0].did, "did:key:z6MkTest");
-        assert_eq!(resolved[0].slim_endpoint.as_deref(), Some("127.0.0.1:47357"));
+        assert_eq!(
+            resolved[0].slim_endpoint.as_deref(),
+            Some("127.0.0.1:47357")
+        );
 
         // Endpoint is omitted entirely when unknown, not left as a bare `@`.
         let no_endpoint = "explicit:agntcy/shadi/reviewer=did:key:z6MkTest";
@@ -1629,7 +1656,10 @@ mod tests {
 
     #[test]
     fn client_endpoint_value_adds_scheme_once() {
-        assert_eq!(client_endpoint_value("127.0.0.1:47357"), "https://127.0.0.1:47357");
+        assert_eq!(
+            client_endpoint_value("127.0.0.1:47357"),
+            "https://127.0.0.1:47357"
+        );
         assert_eq!(client_endpoint_value("https://host:1"), "https://host:1");
     }
 

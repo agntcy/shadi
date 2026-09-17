@@ -252,9 +252,7 @@ mod tests {
         store
             .put("secops", "security_report", "dependabot alert")
             .expect("put");
-        store
-            .put("secops", "notes", "weekly summary")
-            .expect("put");
+        store.put("secops", "notes", "weekly summary").expect("put");
         store
             .put("other", "notes", "dependabot triage")
             .expect("put");
@@ -270,12 +268,8 @@ mod tests {
     #[test]
     fn list_returns_latest_first() {
         let store = open_store();
-        store
-            .put("secops", "k1", "payload-1")
-            .expect("put");
-        store
-            .put("secops", "k2", "payload-2")
-            .expect("put");
+        store.put("secops", "k1", "payload-1").expect("put");
+        store.put("secops", "k2", "payload-2").expect("put");
 
         let entries = store.list(Some("secops"), 10).expect("list");
         assert_eq!(entries.len(), 2);
@@ -285,9 +279,7 @@ mod tests {
     #[test]
     fn list_without_scope_returns_entries() {
         let store = open_store();
-        store
-            .put("secops", "k1", "payload-1")
-            .expect("put");
+        store.put("secops", "k1", "payload-1").expect("put");
         let entries = store.list(None, 10).expect("list");
         assert_eq!(entries.len(), 1);
     }
@@ -295,9 +287,7 @@ mod tests {
     #[test]
     fn search_without_scope_matches_payload() {
         let store = open_store();
-        store
-            .put("secops", "k1", "dependabot")
-            .expect("put");
+        store.put("secops", "k1", "dependabot").expect("put");
         let entries = store.search(None, "dependabot", 10).expect("search");
         assert_eq!(entries.len(), 1);
     }
@@ -305,15 +295,11 @@ mod tests {
     #[test]
     fn delete_removes_entries() {
         let store = open_store();
-        store
-            .put("secops", "k1", "payload-1")
-            .expect("put");
+        store.put("secops", "k1", "payload-1").expect("put");
         let removed = store.delete("secops", "k1").expect("delete");
         assert_eq!(removed, 1);
 
-        let entry = store
-            .get_latest("secops", "k1")
-            .expect("get");
+        let entry = store.get_latest("secops", "k1").expect("get");
         assert!(entry.is_none());
     }
 

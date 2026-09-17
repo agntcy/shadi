@@ -84,9 +84,7 @@ pub fn unwrap_signed_message(envelope: &[u8]) -> Result<VerifiedPayload, Identit
     let sig = Signature::from_bytes(&sig_arr);
     vk.verify_strict(&canonical(&did, payload), &sig)
         .map_err(|_| {
-            IdentityError::Proof(
-                "forged DID: signature does not match the claimed did:key".to_string(),
-            )
+            IdentityError::ForgedDid("signature does not match the claimed did:key".to_string())
         })?;
     Ok(VerifiedPayload {
         did,
@@ -145,7 +143,8 @@ fn split_envelope(bytes: &[u8]) -> Result<(String, String, &[u8]), IdentityError
     if magic != MAGIC {
         return Err(IdentityError::Proof("bad DID-proof magic".to_string()));
     }
-    if headers[1].len() > DID_PROOF_HEADER_MAX_BYTES || headers[2].len() > DID_PROOF_HEADER_MAX_BYTES
+    if headers[1].len() > DID_PROOF_HEADER_MAX_BYTES
+        || headers[2].len() > DID_PROOF_HEADER_MAX_BYTES
     {
         return Err(IdentityError::Proof(
             "DID-proof header exceeds size limit".to_string(),
@@ -204,10 +203,11 @@ mod tests {
             out
         };
         let err = unwrap_signed_message(&forged).unwrap_err();
-        match err {
-            IdentityError::Proof(msg) => assert!(msg.contains("forged DID"), "{msg}"),
-            other => panic!("expected Proof, got {other}"),
-        }
+        // A distinct variant, not a `Proof` message: admission branches on it.
+        assert!(
+            matches!(err, IdentityError::ForgedDid(_)),
+            "expected ForgedDid, got {err}"
+        );
         let _ = parts.0;
     }
 
@@ -242,7 +242,9 @@ mod tests {
     fn unwrap_rejects_malformed_envelopes() {
         assert!(unwrap_signed_message(b"SHADI-DID-PROOF/1\nonly-one-line").is_err());
         assert!(split_envelope(b"NOPE\ndid:key:z\nsig\n").is_err());
-        assert!(unwrap_signed_message(&raw_envelope(b"did:web:example.com", b"c2ln", b"x")).is_err());
+        assert!(
+            unwrap_signed_message(&raw_envelope(b"did:web:example.com", b"c2ln", b"x")).is_err()
+        );
         assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"@@@", b"x")).is_err());
         assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"YQ", b"x")).is_err());
         assert!(unwrap_signed_message(&raw_envelope(b"", b"c2ln", b"x")).is_err());
@@ -252,7 +254,9 @@ mod tests {
         let huge_did = vec![b'a'; DID_PROOF_HEADER_MAX_BYTES + 1];
         assert!(unwrap_signed_message(&raw_envelope(&huge_did, b"c2ln", b"x")).is_err());
         let huge_payload = vec![b'x'; DID_PROOF_PAYLOAD_MAX_BYTES + 1];
-        assert!(unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"c2ln", &huge_payload)).is_err());
+        assert!(
+            unwrap_signed_message(&raw_envelope(b"did:key:zabc", b"c2ln", &huge_payload)).is_err()
+        );
         let id = AgentIdentity::generate().unwrap();
         assert!(wrap_signed_message(&id, &huge_payload).is_err());
     }
