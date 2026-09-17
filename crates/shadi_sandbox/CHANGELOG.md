@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.2.0...agntcy-shadi-sandbox-v0.2.1) - 2026-09-17
+
+### Added
+
+- *(sandbox)* bound proxy connections and finish the SOCKS5 fuzzing ([#290](https://github.com/agntcy/shadi/pull/290))
+
+### Other
+
+- *(sandbox)* fuzz resolve_session_socket ([#291](https://github.com/agntcy/shadi/pull/291))
+- *(sandbox)* hold the port lock in every test that binds one ([#289](https://github.com/agntcy/shadi/pull/289))
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.1.4...agntcy-shadi-sandbox-v0.2.0) - 2026-09-15
 
 ### Added
