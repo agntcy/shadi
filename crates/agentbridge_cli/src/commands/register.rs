@@ -1666,6 +1666,7 @@ fn run_unicast_listener(
                     A2ABinding::HttpJson => a2a_server::rest::rest_router(handler),
                     A2ABinding::Grpc | A2ABinding::Slim => unreachable!(),
                 };
+                let router = with_agent_card(router, agent_id, listen, a2a_binding);
                 tokio::select! {
                     result = serve_http_router(addr, router) => result,
                     _ = tokio::signal::ctrl_c() => {
@@ -1677,6 +1678,23 @@ fn run_unicast_listener(
             }
         }
     })
+}
+
+/// Serve the agent card at the well-known path alongside the RPC routes.
+///
+/// `get_extended_agent_card` answers the same card, but that is no help to a
+/// client which has not yet learned what binding to speak: discovery by URL
+/// goes through this path.
+fn with_agent_card(
+    router: axum::Router,
+    agent_id: &str,
+    listen: &str,
+    a2a_binding: A2ABinding,
+) -> axum::Router {
+    let card = build_agent_card(agent_id, None, Some(listen), a2a_binding);
+    router.merge(a2a_server::agent_card::agent_card_router(
+        std::sync::Arc::new(a2a_server::StaticAgentCard::new(card)),
+    ))
 }
 
 async fn serve_http_router(addr: SocketAddr, router: axum::Router) -> Result<(), String> {
@@ -2045,6 +2063,44 @@ test push ... FAILED
         }
     }
 
+    #[tokio::test]
+    async fn well_known_agent_card_matches_the_rpc_card() {
+        use tower::ServiceExt;
+
+        let listen = "127.0.0.1:4310";
+        let binding = A2ABinding::Jsonrpc;
+        let card = build_agent_card("claude-code", None, Some(listen), binding);
+
+        // Through with_agent_card, which is what the listener calls, so this
+        // fails if the mount is dropped rather than only if the library breaks.
+        let router = with_agent_card(axum::Router::new(), "claude-code", listen, binding);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(a2a_server::WELL_KNOWN_AGENT_CARD_PATH)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "well-known agent card must be served, not 404"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("card body");
+        let served: serde_json::Value = serde_json::from_slice(&body).expect("card is JSON");
+        let expected = serde_json::to_value(&card).expect("card serialises");
+        assert_eq!(
+            served, expected,
+            "the served card must be the one get_extended_agent_card answers"
+        );
+    }
+
     #[test]
     fn admit_forged_did_is_rejected() {
         let honest = shadi_identity::AgentIdentity::generate().unwrap();
@@ -2277,6 +2333,12 @@ test push ... FAILED
         );
     }
 
+    /// `A2A_TLS_CERT` / `A2A_TLS_KEY` are process-global and
+    /// `a2a_server_tls_paths` reads them inside the call under test, so these
+    /// tests have to hold this across both the mutation and the call. Guarding
+    /// only the mutation still lets a sibling's value reach the reader.
+    static TLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn grpc_server_tls_loopback_is_plaintext() {
         let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
@@ -2287,6 +2349,7 @@ test push ... FAILED
 
     #[test]
     fn grpc_server_tls_non_loopback_requires_cert_files() {
+        let _guard = TLS_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev_cert = std::env::var_os("A2A_TLS_CERT");
         let prev_key = std::env::var_os("A2A_TLS_KEY");
         let prev_tmp = std::env::var_os("SHADI_TMP_DIR");
@@ -2324,6 +2387,7 @@ test push ... FAILED
 
     #[test]
     fn grpc_server_tls_rejects_empty_pem() {
+        let _guard = TLS_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev_cert = std::env::var_os("A2A_TLS_CERT");
         let prev_key = std::env::var_os("A2A_TLS_KEY");
         let tmp = std::env::temp_dir().join(format!(

@@ -40,7 +40,7 @@ pub struct SqlCipherMemoryStore {
     store: SqlCipherStore,
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct MemoryEntry {
     #[pyo3(get)]
@@ -83,7 +83,7 @@ impl ShadiStore {
         }
     }
 
-    fn set_verifier(&self, verifier: PyObject) -> PyResult<()> {
+    fn set_verifier(&self, verifier: Py<PyAny>) -> PyResult<()> {
         let mut guard = self
             .didvc_verifier
             .lock()
@@ -104,7 +104,8 @@ impl ShadiStore {
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
             guard
-                .clone()
+                .as_ref()
+                .map(|v| v.clone_ref(py))
                 .ok_or_else(|| PyRuntimeError::new_err("verifier not configured"))?
         };
 
@@ -117,7 +118,7 @@ impl ShadiStore {
             )
         };
 
-        let payload = PyBytes::new_bound(py, presentation);
+        let payload = PyBytes::new(py, presentation);
         let result = verifier.call1(py, (agent_id, session_id, payload, claims))?;
         let is_valid = result.is_truthy(py)?;
 
@@ -161,7 +162,7 @@ impl ShadiStore {
             .get_for_session(&ctx, key)
             .map_err(map_secret_error)?;
         let bytes = secret.expose(|data| data.to_vec());
-        Ok(PyBytes::new_bound(py, &bytes))
+        Ok(PyBytes::new(py, &bytes))
     }
 
     fn delete(&self, session: &PySessionContext, key: &str) -> PyResult<()> {
@@ -440,7 +441,7 @@ fn run_sandboxed(
     let status = child
         .wait()
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-    span.record("exit.code", &status.code().unwrap_or(-1));
+    span.record("exit.code", status.code().unwrap_or(-1));
     Ok(status.code().unwrap_or(1))
 }
 
@@ -453,9 +454,7 @@ mod tests {
     static PY_INIT: Once = Once::new();
 
     fn ensure_python() {
-        PY_INIT.call_once(|| {
-            pyo3::prepare_freethreaded_python();
-        });
+        PY_INIT.call_once(Python::initialize);
     }
 
     fn unique_key(prefix: &str) -> String {
@@ -470,17 +469,17 @@ mod tests {
     #[test]
     fn verify_session_sets_verified_flag() {
         ensure_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let store = ShadiStore::new();
-            let module = PyModule::from_code_bound(
+            let module = PyModule::from_code(
                 py,
-                "def verify(agent_id, session_id, presentation, claims):\n    return True\n",
-                "verifier.py",
-                "verifier",
+                c"def verify(agent_id, session_id, presentation, claims):\n    return True\n",
+                c"verifier.py",
+                c"verifier",
             )
             .unwrap();
             let verifier = module.getattr("verify").unwrap();
-            store.set_verifier(verifier.into_py(py)).unwrap();
+            store.set_verifier(verifier.unbind()).unwrap();
 
             let mut base_session =
                 PySessionContext::new("agent".to_string(), "session".to_string());
@@ -500,7 +499,7 @@ mod tests {
     #[test]
     fn verify_session_requires_verifier() {
         ensure_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let store = ShadiStore::new();
             let session = Py::new(
                 py,
@@ -520,7 +519,7 @@ mod tests {
     #[test]
     fn put_get_delete_roundtrip_requires_verified() {
         ensure_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let store = ShadiStore::new();
             let mut session = PySessionContext::new("agent".to_string(), "session".to_string());
             session.add_claim("role:tourist".to_string());
@@ -543,7 +542,7 @@ mod tests {
     #[test]
     fn list_keys_requires_verified() {
         ensure_python();
-        Python::with_gil(|_py| {
+        Python::attach(|_py| {
             let store = ShadiStore::new();
             let mut session = PySessionContext::new("agent".to_string(), "session".to_string());
             session.add_claim("role:secops".to_string());
