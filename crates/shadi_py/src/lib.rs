@@ -257,11 +257,6 @@ impl SqlCipherMemoryStore {
 impl SandboxPolicyHandle {
     #[new]
     fn new() -> Self {
-        // SandboxPolicy::new() starts in the Compatibility profile, which
-        // grants the child ~/Library/Keychains and blanket mach-lookup.
-        // resolve_policy lowers it for shadictl; nothing lowered it here, so
-        // an agent launched from Python ran more permissively than the same
-        // agent launched from the CLI (agntcy/shadi#298).
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let policy = SandboxPolicy::new().use_minimal_platform_profile();
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -449,9 +444,6 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn python_policies_start_in_the_minimal_platform_profile() {
-        // Compatibility grants the child ~/Library/Keychains and blanket
-        // mach-lookup. A policy built from Python must start where shadictl's
-        // resolve_policy leaves off, not above it (agntcy/shadi#298).
         let handle = SandboxPolicyHandle::new();
         assert_eq!(
             handle.policy.platform_profile(),
