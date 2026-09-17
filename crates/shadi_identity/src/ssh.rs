@@ -72,8 +72,11 @@ pub fn verifying_key_from_openssh_public_key(line: &str) -> Result<VerifyingKey,
             key.algorithm()
         ))
     })?;
-    VerifyingKey::from_bytes(&public.0)
-        .map_err(|err| invalid(format!("SSH public key is not a valid Ed25519 point: {err}")))
+    VerifyingKey::from_bytes(&public.0).map_err(|err| {
+        invalid(format!(
+            "SSH public key is not a valid Ed25519 point: {err}"
+        ))
+    })
 }
 
 /// First `ssh-ed25519` key in an `authorized_keys`-style listing, e.g.
@@ -103,21 +106,6 @@ pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, I
     Err(invalid(format!(
         "no {SSH_ED25519} key published (found: {found}). SHADI's did:key is Ed25519-only"
     )))
-}
-
-/// Every `ssh-ed25519` key in an `authorized_keys`-style listing.
-///
-/// [`first_ed25519_in_authorized_keys`] picks one, which is right when
-/// *deriving* a DID from an account and wrong when *verifying* one: an account
-/// publishing three keys would fail to resolve for two of them. Unparseable
-/// lines are skipped rather than fatal — one bad entry must not hide the rest.
-pub fn all_ed25519_in_authorized_keys(listing: &str) -> Vec<VerifyingKey> {
-    listing
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with(SSH_ED25519))
-        .filter_map(|line| verifying_key_from_openssh_public_key(line).ok())
-        .collect()
 }
 
 /// A fresh Ed25519 key as `(private OpenSSH PEM, public line)`.
@@ -255,7 +243,10 @@ mod tests {
             .expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("no ssh-ed25519 key published"), "{msg}");
-        assert!(msg.contains("found: ssh-rsa"), "must name the algorithm: {msg}");
+        assert!(
+            msg.contains("found: ssh-rsa"),
+            "must name the algorithm: {msg}"
+        );
     }
 
     /// Adding a passphrase must not change the derivation root.
@@ -278,7 +269,10 @@ mod tests {
 
         let missing = seed_from_openssh_private_key(encrypted.as_bytes(), None)
             .expect_err("must not silently succeed");
-        assert!(missing.to_string().contains("passphrase is required"), "{missing}");
+        assert!(
+            missing.to_string().contains("passphrase is required"),
+            "{missing}"
+        );
 
         // An empty passphrase is treated as absent rather than tried.
         assert!(seed_from_openssh_private_key(encrypted.as_bytes(), Some("")).is_err());
@@ -297,7 +291,10 @@ mod tests {
         let from_public = verifying_key_from_openssh_public_key(&public).expect("public half");
         assert_eq!(from_private.as_bytes(), from_public.as_bytes());
         assert!(public.starts_with(SSH_ED25519), "{public}");
-        assert!(public.ends_with("shadi@host"), "comment must survive: {public}");
+        assert!(
+            public.ends_with("shadi@host"),
+            "comment must survive: {public}"
+        );
 
         let seed = seed_from_openssh_private_key(private.as_bytes(), None).expect("seed");
         assert!(crate::AgentIdentity::derive(&seed, "claude-code").is_ok());

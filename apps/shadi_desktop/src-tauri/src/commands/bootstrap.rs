@@ -289,8 +289,14 @@ mod tests {
             human_did: "did:key:zHuman".to_string(),
             github_handle: Some("octocat".to_string()),
             agents: vec![
-                AgentEntry { agent_id: "avatar".to_string(), did: "did:key:zA".to_string() },
-                AgentEntry { agent_id: "codex".to_string(), did: "did:key:zB".to_string() },
+                AgentEntry {
+                    agent_id: "avatar".to_string(),
+                    did: "did:key:zA".to_string(),
+                },
+                AgentEntry {
+                    agent_id: "codex".to_string(),
+                    did: "did:key:zB".to_string(),
+                },
             ],
             local_agent: "avatar".to_string(),
             endpoint: DEFAULT_ENDPOINT.to_string(),
@@ -302,7 +308,10 @@ mod tests {
         save_config(&path, &config).expect("save");
 
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("seed"), "the seed must never be in the config");
+        assert!(
+            !raw.contains("seed"),
+            "the seed must never be in the config"
+        );
 
         assert_eq!(load_config(&path).unwrap().as_ref(), Some(&config));
         std::fs::remove_dir_all(&dir).ok();
@@ -316,8 +325,14 @@ mod tests {
             human_did: "did:key:zHuman".to_string(),
             github_handle: None,
             agents: vec![
-                AgentEntry { agent_id: "avatar".to_string(), did: "did:key:zA".to_string() },
-                AgentEntry { agent_id: "codex".to_string(), did: "did:key:zB".to_string() },
+                AgentEntry {
+                    agent_id: "avatar".to_string(),
+                    did: "did:key:zA".to_string(),
+                },
+                AgentEntry {
+                    agent_id: "codex".to_string(),
+                    did: "did:key:zB".to_string(),
+                },
             ],
             local_agent: "avatar".to_string(),
             endpoint: DEFAULT_ENDPOINT.to_string(),

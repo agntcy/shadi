@@ -299,7 +299,17 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(args, vec!["item", "list", "--vault", "test-vault", "--account", "test-account"]);
+        assert_eq!(
+            args,
+            vec![
+                "item",
+                "list",
+                "--vault",
+                "test-vault",
+                "--account",
+                "test-account"
+            ]
+        );
     }
 
     #[test]
@@ -351,8 +361,14 @@ mod tests {
         std::env::remove_var("SHADI_OP_BINARY");
 
         assert!(matches!(store.list_keys(), Err(SecretError::NotSupported)));
-        assert!(matches!(store.get("test-key"), Err(SecretError::NotSupported)));
-        assert!(matches!(store.delete("test-key"), Err(SecretError::NotSupported)));
+        assert!(matches!(
+            store.get("test-key"),
+            Err(SecretError::NotSupported)
+        ));
+        assert!(matches!(
+            store.delete("test-key"),
+            Err(SecretError::NotSupported)
+        ));
         assert!(matches!(
             store.put("test-key", b"value", SecretPolicy::default()),
             Err(SecretError::NotSupported)
@@ -361,10 +377,8 @@ mod tests {
 
     #[test]
     fn decode_item_secret_success() {
-        let secret = decode_item_secret(
-            r#"{"fields":[{"id":"notesPlain","value":"aGVsbG8="}]}"#,
-        )
-        .expect("decode");
+        let secret = decode_item_secret(r#"{"fields":[{"id":"notesPlain","value":"aGVsbG8="}]}"#)
+            .expect("decode");
         assert_eq!(secret.expose(|bytes| bytes.to_vec()), b"hello".to_vec());
     }
 
@@ -394,7 +408,10 @@ mod tests {
 
     #[test]
     fn parse_item_titles_handles_empty_and_json() {
-        assert_eq!(parse_item_titles("   ").expect("empty"), Vec::<String>::new());
+        assert_eq!(
+            parse_item_titles("   ").expect("empty"),
+            Vec::<String>::new()
+        );
         assert_eq!(
             parse_item_titles(r#"[{"id":"1","title":"a"},{"id":"2","title":"b"}]"#)
                 .expect("titles"),

@@ -12,7 +12,10 @@ fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicBo
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     for signal in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
         if let Err(err) = signal_hook::flag::register(signal, std::sync::Arc::clone(&interrupted)) {
-            eprintln!("warning: failed to install signal handler for {}: {}", signal, err);
+            eprintln!(
+                "warning: failed to install signal handler for {}: {}",
+                signal, err
+            );
             return None;
         }
     }
@@ -99,7 +102,11 @@ fn prepare_sandbox_launch(
     String,
 > {
     let slim_bridge = resolve_internal_slim_bridge_args(cli)?;
-    let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
+    let cmd_name = cli
+        .run_command
+        .first()
+        .map(|cmd| cmd.as_str())
+        .unwrap_or("");
     let mut command = Command::new(cmd_name);
     if cli.run_command.len() > 1 {
         command.args(&cli.run_command[1..]);
@@ -166,7 +173,12 @@ fn prepare_sandbox_launch(
 
     inject_keychain_secrets(&mut command, &secret_config.inject_keychain)?;
 
-    Ok((command, pending_trusted_secrets, runtime_policy, slim_bridge))
+    Ok((
+        command,
+        pending_trusted_secrets,
+        runtime_policy,
+        slim_bridge,
+    ))
 }
 
 pub(crate) fn run_sandboxed_command(
@@ -175,7 +187,11 @@ pub(crate) fn run_sandboxed_command(
     file_policy: &PolicyFile,
     cwd: &Path,
 ) -> ExitCode {
-    let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
+    let cmd_name = cli
+        .run_command
+        .first()
+        .map(|cmd| cmd.as_str())
+        .unwrap_or("");
     let policy_source = cli
         .policy_file
         .as_ref()
@@ -310,27 +326,28 @@ pub(crate) fn run_sandboxed_command(
             None => resolved.policy.clone(),
         };
 
-        let (mut command, mut pending_trusted_secrets, runtime_policy, slim_bridge_args) = match prepare_sandbox_launch(
-            cli,
-            file_policy,
-            cwd,
-            &base_policy,
-            net_proxy_handle.as_ref(),
-        ) {
-            Ok(launch) => launch,
-            Err(err) => {
-                let exit_code = if err.starts_with("failed to inject keychain secrets")
-                    || err.starts_with("failed to resolve launch secret policy")
-                    || err.starts_with("failed to configure trusted secret delivery")
-                {
-                    2
-                } else {
-                    2
-                };
-                eprintln!("{}", err);
-                return ExitCode::from(exit_code);
-            }
-        };
+        let (mut command, mut pending_trusted_secrets, runtime_policy, slim_bridge_args) =
+            match prepare_sandbox_launch(
+                cli,
+                file_policy,
+                cwd,
+                &base_policy,
+                net_proxy_handle.as_ref(),
+            ) {
+                Ok(launch) => launch,
+                Err(err) => {
+                    let exit_code = if err.starts_with("failed to inject keychain secrets")
+                        || err.starts_with("failed to resolve launch secret policy")
+                        || err.starts_with("failed to configure trusted secret delivery")
+                    {
+                        2
+                    } else {
+                        2
+                    };
+                    eprintln!("{}", err);
+                    return ExitCode::from(exit_code);
+                }
+            };
 
         let mut child = match spawn_sandboxed(&mut command, &runtime_policy) {
             Ok(child) => child,
@@ -455,7 +472,9 @@ pub(crate) fn run_sandboxed_command(
                             net_proxy_handle = Some(new_proxy);
                         }
                         Err(err) => {
-                            eprintln!("warning: failed to restart network proxy on same port: {err}");
+                            eprintln!(
+                                "warning: failed to restart network proxy on same port: {err}"
+                            );
                         }
                     }
                 }
@@ -503,7 +522,10 @@ pub(crate) fn run_sandboxed_command(
                         let snapshot_path = finalize_git_snapshot(
                             snapshot.as_mut(),
                             None,
-                            Some(format!("failed to complete trusted secret delivery: {}", err)),
+                            Some(format!(
+                                "failed to complete trusted secret delivery: {}",
+                                err
+                            )),
                         );
                         if let Some(path) = snapshot_path {
                             span.record("snapshot.path", &path.display().to_string());
@@ -579,14 +601,12 @@ fn resolve_internal_slim_bridge_args(cli: &Cli) -> Result<Option<SlimBridgeArgs>
             }
             if cli.slim_payload_type.is_some() {
                 return Err(
-                    "--slim-payload-type requires --slim-channel or --slim-destination"
-                        .to_string(),
+                    "--slim-payload-type requires --slim-channel or --slim-destination".to_string(),
                 );
             }
             if cli.slim_allow_empty {
                 return Err(
-                    "--slim-allow-empty requires --slim-channel or --slim-destination"
-                        .to_string(),
+                    "--slim-allow-empty requires --slim-channel or --slim-destination".to_string(),
                 );
             }
             Ok(None)
@@ -702,7 +722,11 @@ impl GitSnapshotSession {
         })
     }
 
-    pub(crate) fn finish(&mut self, exit_code: Option<i32>, error: Option<String>) -> Result<PathBuf, String> {
+    pub(crate) fn finish(
+        &mut self,
+        exit_code: Option<i32>,
+        error: Option<String>,
+    ) -> Result<PathBuf, String> {
         let finished_at_ms = unix_timestamp_ms();
         self.artifact.timestamps.finished_at_ms = Some(finished_at_ms);
         self.artifact.timestamps.duration_ms =
@@ -737,7 +761,10 @@ impl GitSnapshotSession {
         std::fs::create_dir_all(&self.output_dir)
             .map_err(|err| format!("failed to create {}: {}", self.output_dir.display(), err))?;
 
-        let run_dir = self.output_dir.join("runs").join(&self.artifact.artifact_id);
+        let run_dir = self
+            .output_dir
+            .join("runs")
+            .join(&self.artifact.artifact_id);
         std::fs::create_dir_all(&run_dir)
             .map_err(|err| format!("failed to create {}: {}", run_dir.display(), err))?;
 
@@ -748,7 +775,8 @@ impl GitSnapshotSession {
         self.artifact.layout.snapshot_file = path.display().to_string();
         self.artifact.layout.latest_file = latest.display().to_string();
 
-        let payload = serde_json::to_string_pretty(&self.artifact).map_err(|err| err.to_string())?;
+        let payload =
+            serde_json::to_string_pretty(&self.artifact).map_err(|err| err.to_string())?;
         std::fs::write(&path, format!("{}\n", payload))
             .map_err(|err| format!("failed to write {}: {}", path.display(), err))?;
 
@@ -960,7 +988,11 @@ fn sanitize_snapshot_component(value: &str) -> String {
     out.trim_matches('-').chars().take(48).collect()
 }
 
-fn snapshot_policy_value(policy: &SandboxPolicy, blocked: &HashSet<String>, allow: &HashSet<String>) -> Value {
+fn snapshot_policy_value(
+    policy: &SandboxPolicy,
+    blocked: &HashSet<String>,
+    allow: &HashSet<String>,
+) -> Value {
     match format_policy(policy, blocked, allow) {
         Ok(output) => serde_json::from_str(&output).unwrap_or_else(|_| Value::String(output)),
         Err(err) => Value::String(err),
@@ -985,7 +1017,9 @@ fn capture_git_snapshot(cwd: &Path, include_untracked: bool) -> GitSnapshotRecor
         Ok(repo_roots) => {
             let repositories = repo_roots
                 .into_iter()
-                .map(|repo_root| capture_git_repository_snapshot(cwd, &repo_root, include_untracked))
+                .map(|repo_root| {
+                    capture_git_repository_snapshot(cwd, &repo_root, include_untracked)
+                })
                 .collect::<Vec<_>>();
 
             let mut record = GitSnapshotRecord {
@@ -1021,7 +1055,11 @@ fn capture_git_snapshot(cwd: &Path, include_untracked: bool) -> GitSnapshotRecor
     }
 }
 
-fn capture_git_repository_snapshot(cwd: &Path, repo_root: &Path, include_untracked: bool) -> GitTrackedRepository {
+fn capture_git_repository_snapshot(
+    cwd: &Path,
+    repo_root: &Path,
+    include_untracked: bool,
+) -> GitTrackedRepository {
     let repo_root_string = repo_root.display().to_string();
     match collect_git_repo_state(repo_root, include_untracked) {
         Ok(before) => GitTrackedRepository {
@@ -1086,7 +1124,8 @@ fn find_nested_git_repo_roots(scope_root: &Path) -> Result<Vec<PathBuf>, String>
             .map_err(|err| format!("failed to scan {}: {}", directory.display(), err))?;
 
         for entry in entries {
-            let entry = entry.map_err(|err| format!("failed to scan {}: {}", directory.display(), err))?;
+            let entry =
+                entry.map_err(|err| format!("failed to scan {}: {}", directory.display(), err))?;
             let path = entry.path();
             let file_name = entry.file_name();
             let file_type = entry
@@ -1097,7 +1136,8 @@ fn find_nested_git_repo_roots(scope_root: &Path) -> Result<Vec<PathBuf>, String>
                 if let Some(repo_dir) = path.parent() {
                     if let Some(repo_root) = detect_git_repo_root(repo_dir)? {
                         let normalized = canonicalize_or_clone(&repo_root);
-                        if normalized.starts_with(scope_root) || scope_root.starts_with(&normalized) {
+                        if normalized.starts_with(scope_root) || scope_root.starts_with(&normalized)
+                        {
                             repo_roots.push(normalized);
                         }
                     }
@@ -1143,9 +1183,15 @@ fn detect_git_repo_root(cwd: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(PathBuf::from(root)))
 }
 
-fn collect_git_repo_state(repo_root: &Path, include_untracked: bool) -> Result<GitRepoState, String> {
+fn collect_git_repo_state(
+    repo_root: &Path,
+    include_untracked: bool,
+) -> Result<GitRepoState, String> {
     let head = run_git_capture_optional(repo_root, &["rev-parse", "HEAD"])?;
-    let status = run_git_capture(repo_root, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+    let status = run_git_capture(
+        repo_root,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?;
     let status_porcelain = split_nonempty_lines(&status);
     let diff_binary = run_git_capture(repo_root, &["diff", "--binary"])?;
     let untracked_inventory = if include_untracked {
@@ -1201,7 +1247,10 @@ fn build_git_repo_state_hashes(
     }
 }
 
-fn build_git_state_comparison(before: Option<&GitRepoState>, after: Option<&GitRepoState>) -> Option<GitStateComparison> {
+fn build_git_state_comparison(
+    before: Option<&GitRepoState>,
+    after: Option<&GitRepoState>,
+) -> Option<GitStateComparison> {
     let before = before?;
     let after = after?;
 
@@ -1325,7 +1374,7 @@ fn unix_timestamp_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cli, PolicyFile, resolve_policy};
+    use crate::{resolve_policy, Cli, PolicyFile};
     #[cfg(unix)]
     use std::sync::atomic::AtomicBool;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1429,7 +1478,10 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn build_test_client_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ClientConfig {
+    fn build_test_client_config(
+        endpoint: &str,
+        tls: &TestTlsMaterial,
+    ) -> slim_bindings::ClientConfig {
         let mut config = slim_bindings::ClientConfig::default();
         config.endpoint = format!("https://{endpoint}");
         config.tls = slim_bindings::TlsClientConfig {
@@ -1449,7 +1501,10 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn build_test_server_config(endpoint: &str, tls: &TestTlsMaterial) -> slim_bindings::ServerConfig {
+    fn build_test_server_config(
+        endpoint: &str,
+        tls: &TestTlsMaterial,
+    ) -> slim_bindings::ServerConfig {
         let mut config = slim_bindings::ServerConfig::default();
         config.endpoint = endpoint.to_string();
         config.tls = slim_bindings::TlsServerConfig {
@@ -1497,11 +1552,15 @@ mod tests {
             signal_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let outcome = wait_for_child_or_interrupt(&mut child, None, Some(&terminate_requested), None)
-            .expect("wait for terminated child");
+        let outcome =
+            wait_for_child_or_interrupt(&mut child, None, Some(&terminate_requested), None)
+                .expect("wait for terminated child");
         match outcome {
             ChildWaitOutcome::Terminated(status) => assert!(!status.success()),
-            other => panic!("expected Terminated, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Terminated, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1525,7 +1584,10 @@ mod tests {
             .expect("wait for interrupted child");
         match outcome {
             ChildWaitOutcome::Terminated(status) => assert!(!status.success()),
-            other => panic!("expected Terminated, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Terminated, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1553,13 +1615,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wait_for_child_or_interrupt_returns_exited_when_child_exits_normally() {
-        let child = Command::new("/usr/bin/true")
-            .spawn()
-            .expect("spawn true");
+        let child = Command::new("/usr/bin/true").spawn().expect("spawn true");
         let mut child = SandboxedChild::from_std(child);
 
-        let outcome = wait_for_child_or_interrupt(&mut child, None, None, None)
-            .expect("wait for exit");
+        let outcome =
+            wait_for_child_or_interrupt(&mut child, None, None, None).expect("wait for exit");
         match outcome {
             ChildWaitOutcome::Exited(status) => assert!(status.success()),
             other => panic!("expected Exited, got {:?}", other),
@@ -1586,8 +1646,9 @@ mod tests {
             r.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let outcome = wait_for_child_or_interrupt(&mut child, None, Some(&terminate), Some(&restart))
-            .expect("wait");
+        let outcome =
+            wait_for_child_or_interrupt(&mut child, None, Some(&terminate), Some(&restart))
+                .expect("wait");
         assert!(matches!(outcome, ChildWaitOutcome::Terminated(_)));
     }
 
@@ -1595,8 +1656,7 @@ mod tests {
     fn prepare_sandbox_launch_returns_policy_with_base_net_allow() {
         let cli = build_cli();
         let file_policy = PolicyFile::default();
-        let base_policy = SandboxPolicy::new()
-            .allow_network_destination("1.1.1.1:80");
+        let base_policy = SandboxPolicy::new().allow_network_destination("1.1.1.1:80");
         let dir = temp_dir();
 
         let (_command, _pending, runtime_policy, _bridge) =
@@ -1623,11 +1683,26 @@ mod tests {
 
         let output = command.output().expect("run env");
         let env_output = String::from_utf8_lossy(&output.stdout);
-        assert!(env_output.contains(&format!("ALL_PROXY={expected_url}")), "ALL_PROXY should be set");
-        assert!(env_output.contains(&format!("HTTPS_PROXY={expected_url}")), "HTTPS_PROXY should be set");
-        assert!(env_output.contains(&format!("HTTP_PROXY={expected_url}")), "HTTP_PROXY should be set");
-        assert!(env_output.contains(&format!("https_proxy={expected_url}")), "https_proxy should be set");
-        assert!(env_output.contains(&format!("http_proxy={expected_url}")), "http_proxy should be set");
+        assert!(
+            env_output.contains(&format!("ALL_PROXY={expected_url}")),
+            "ALL_PROXY should be set"
+        );
+        assert!(
+            env_output.contains(&format!("HTTPS_PROXY={expected_url}")),
+            "HTTPS_PROXY should be set"
+        );
+        assert!(
+            env_output.contains(&format!("HTTP_PROXY={expected_url}")),
+            "HTTP_PROXY should be set"
+        );
+        assert!(
+            env_output.contains(&format!("https_proxy={expected_url}")),
+            "https_proxy should be set"
+        );
+        assert!(
+            env_output.contains(&format!("http_proxy={expected_url}")),
+            "http_proxy should be set"
+        );
     }
 
     #[cfg(unix)]
@@ -1687,12 +1762,30 @@ mod tests {
 
         let output = command.output().expect("run env");
         let env_output = String::from_utf8_lossy(&output.stdout);
-        assert!(env_output.contains(&format!("ALL_PROXY={expected_url}")), "ALL_PROXY must remain for SOCKS5 enforcement");
-        assert!(env_output.contains(&format!("all_proxy={expected_url}")), "all_proxy must remain");
-        assert!(!env_output.contains("HTTPS_PROXY="), "HTTPS_PROXY must be stripped");
-        assert!(!env_output.contains("HTTP_PROXY="), "HTTP_PROXY must be stripped");
-        assert!(!env_output.contains("https_proxy="), "https_proxy must be stripped");
-        assert!(!env_output.contains("http_proxy="), "http_proxy must be stripped");
+        assert!(
+            env_output.contains(&format!("ALL_PROXY={expected_url}")),
+            "ALL_PROXY must remain for SOCKS5 enforcement"
+        );
+        assert!(
+            env_output.contains(&format!("all_proxy={expected_url}")),
+            "all_proxy must remain"
+        );
+        assert!(
+            !env_output.contains("HTTPS_PROXY="),
+            "HTTPS_PROXY must be stripped"
+        );
+        assert!(
+            !env_output.contains("HTTP_PROXY="),
+            "HTTP_PROXY must be stripped"
+        );
+        assert!(
+            !env_output.contains("https_proxy="),
+            "https_proxy must be stripped"
+        );
+        assert!(
+            !env_output.contains("http_proxy="),
+            "http_proxy must be stripped"
+        );
     }
 
     #[test]
@@ -1783,8 +1876,14 @@ mod tests {
         let mut child = command.spawn().expect("spawn cat");
 
         assert!(bridge.is_some());
-        assert!(child.stdin.take().is_some(), "internal bridge requires piped stdin");
-        assert!(child.stdout.take().is_some(), "internal bridge requires piped stdout");
+        assert!(
+            child.stdin.take().is_some(),
+            "internal bridge requires piped stdin"
+        );
+        assert!(
+            child.stdout.take().is_some(),
+            "internal bridge requires piped stdout"
+        );
 
         let _ = child.kill();
         let _ = child.wait();
@@ -1806,7 +1905,10 @@ mod tests {
 
         std::env::set_var("SHADI_TMP_DIR", tmp_root.path());
         std::env::set_var("SLIM_ENDPOINT", "127.0.0.1:65535");
-        std::env::set_var("SLIM_SHARED_SECRET", "my_shared_secret_for_testing_purposes_only");
+        std::env::set_var(
+            "SLIM_SHARED_SECRET",
+            "my_shared_secret_for_testing_purposes_only",
+        );
         std::env::remove_var("SLIM_TLS_CERT");
         std::env::remove_var("SLIM_TLS_KEY");
         std::env::remove_var("SLIM_TLS_CA");
@@ -1883,15 +1985,20 @@ mod tests {
                 "sandbox-snapshot-test-participant-{}",
                 std::process::id()
             ));
-            let participant_name = slim_bindings::Name::from_string(
-                "agntcy/shadi/secops-a".to_string(),
-            )
-            .map_err(format_slim_error)?;
+            let participant_name =
+                slim_bindings::Name::from_string("agntcy/shadi/secops-a".to_string())
+                    .map_err(format_slim_error)?;
             let connection_id = participant_service
-                .connect(build_test_client_config(&endpoint_for_participant, &participant_tls))
+                .connect(build_test_client_config(
+                    &endpoint_for_participant,
+                    &participant_tls,
+                ))
                 .map_err(format_slim_error)?;
             let participant_app = participant_service
-                .create_app_with_secret(Arc::new(participant_name.clone()), TEST_SHARED_SECRET.to_string())
+                .create_app_with_secret(
+                    Arc::new(participant_name.clone()),
+                    TEST_SHARED_SECRET.to_string(),
+                )
                 .map_err(format_slim_error)?;
 
             participant_app
@@ -2000,7 +2107,10 @@ mod tests {
         let dir = temp_dir();
         run_git(dir.path(), &["init"]);
         run_git(dir.path(), &["config", "user.name", "SHADI Tests"]);
-        run_git(dir.path(), &["config", "user.email", "shadi-tests@example.com"]);
+        run_git(
+            dir.path(),
+            &["config", "user.email", "shadi-tests@example.com"],
+        );
         run_git(dir.path(), &["config", "commit.gpgsign", "false"]);
         dir
     }
@@ -2017,7 +2127,10 @@ mod tests {
         std::fs::create_dir_all(&repo_path).expect("create nested repo dir");
         run_git(&repo_path, &["init"]);
         run_git(&repo_path, &["config", "user.name", "SHADI Tests"]);
-        run_git(&repo_path, &["config", "user.email", "shadi-tests@example.com"]);
+        run_git(
+            &repo_path,
+            &["config", "user.email", "shadi-tests@example.com"],
+        );
         run_git(&repo_path, &["config", "commit.gpgsign", "false"]);
         repo_path
     }
@@ -2131,7 +2244,11 @@ mod tests {
         assert!(repository.after.is_none());
         assert!(repository.diff_summary.is_none());
         assert!(repository.comparison.is_none());
-        assert!(repository.capture_error.as_deref().unwrap_or_default().contains("git status"));
+        assert!(repository
+            .capture_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("git status"));
     }
 
     #[test]
@@ -2143,7 +2260,10 @@ mod tests {
         std::fs::create_dir_all(&unrelated).expect("create unrelated dir");
 
         assert_eq!(repo_relative_path(&cwd, dir.path()), ".");
-        assert_eq!(repo_relative_path(&cwd, &unrelated), unrelated.display().to_string());
+        assert_eq!(
+            repo_relative_path(&cwd, &unrelated),
+            unrelated.display().to_string()
+        );
     }
 
     #[test]
@@ -2156,14 +2276,17 @@ mod tests {
     #[test]
     fn detect_git_repo_root_returns_none_outside_git() {
         let dir = temp_dir();
-        assert!(detect_git_repo_root(dir.path()).expect("detect git root").is_none());
+        assert!(detect_git_repo_root(dir.path())
+            .expect("detect git root")
+            .is_none());
     }
 
     #[test]
     fn run_git_capture_reports_git_failures() {
         let repo = init_git_repo();
         let repo_path = repo.path().canonicalize().expect("canonical repo");
-        let err = run_git_capture(&repo_path, &["definitely-not-a-real-git-subcommand"]).unwrap_err();
+        let err =
+            run_git_capture(&repo_path, &["definitely-not-a-real-git-subcommand"]).unwrap_err();
         assert!(err.contains("git definitely-not-a-real-git-subcommand failed"));
     }
 
@@ -2171,8 +2294,11 @@ mod tests {
     fn run_git_capture_optional_returns_none_on_git_failures() {
         let repo = init_git_repo();
         let repo_path = repo.path().canonicalize().expect("canonical repo");
-        let output = run_git_capture_optional(&repo_path, &["show-ref", "--verify", "refs/heads/does-not-exist"])
-            .expect("optional git output");
+        let output = run_git_capture_optional(
+            &repo_path,
+            &["show-ref", "--verify", "refs/heads/does-not-exist"],
+        )
+        .expect("optional git output");
         assert!(output.is_none());
     }
 
@@ -2181,7 +2307,8 @@ mod tests {
         let before = sample_git_repo_state(None);
         let after = sample_git_repo_state(Some(vec!["scratch.txt".to_string()]));
 
-        let comparison = build_git_state_comparison(Some(&before), Some(&after)).expect("comparison");
+        let comparison =
+            build_git_state_comparison(Some(&before), Some(&after)).expect("comparison");
         assert_eq!(comparison.untracked_changed, Some(true));
     }
 
@@ -2205,7 +2332,8 @@ mod tests {
         cli.git_snapshot_dir = Some(snapshot_dir);
 
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+        let mut session =
+            GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
 
         std::fs::remove_dir_all(&nested_repo).expect("remove nested repo");
 
@@ -2220,7 +2348,10 @@ mod tests {
             .iter()
             .find(|repository| repository["relative_path"] == "nested-missing-after-start")
             .expect("nested repository entry");
-        assert!(nested["capture_error"].as_str().expect("capture error").contains("git status"));
+        assert!(nested["capture_error"]
+            .as_str()
+            .expect("capture error")
+            .contains("git status"));
     }
 
     #[test]
@@ -2238,10 +2369,14 @@ mod tests {
         cli.git_snapshot_dir = Some(snapshot_dir.clone());
 
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+        let mut session =
+            GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
 
-        let run_dir = snapshot_dir.join("runs").join(&session.artifact.artifact_id);
-        std::fs::create_dir_all(run_dir.parent().expect("runs parent")).expect("create runs parent");
+        let run_dir = snapshot_dir
+            .join("runs")
+            .join(&session.artifact.artifact_id);
+        std::fs::create_dir_all(run_dir.parent().expect("runs parent"))
+            .expect("create runs parent");
         std::fs::write(&run_dir, "occupied\n").expect("block run dir with file");
 
         let err = session.finish(Some(0), None).unwrap_err();
@@ -2263,9 +2398,12 @@ mod tests {
         cli.git_snapshot_dir = Some(snapshot_dir.clone());
 
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+        let mut session =
+            GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
 
-        let run_dir = snapshot_dir.join("runs").join(&session.artifact.artifact_id);
+        let run_dir = snapshot_dir
+            .join("runs")
+            .join(&session.artifact.artifact_id);
         std::fs::create_dir_all(&run_dir).expect("create run dir");
         std::fs::create_dir(run_dir.join("snapshot.json")).expect("block snapshot file with dir");
 
@@ -2288,7 +2426,8 @@ mod tests {
         cli.git_snapshot_dir = Some(snapshot_dir.clone());
 
         let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve policy");
-        let mut session = GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
+        let mut session =
+            GitSnapshotSession::start(&cli, &resolved, &repo_path).expect("start snapshot");
 
         std::fs::create_dir_all(&snapshot_dir).expect("create snapshot dir");
         std::fs::create_dir(snapshot_dir.join("latest.json")).expect("block latest file with dir");
@@ -2342,4 +2481,3 @@ mod tests {
         assert_eq!(exit, ExitCode::from(0));
     }
 }
-

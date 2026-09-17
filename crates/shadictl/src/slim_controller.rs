@@ -20,9 +20,9 @@ use slim_config::grpc::client::TransportChannel;
 use slim_config::tls::client::TlsClientConfig as CoreTlsClientConfig;
 use slim_config::tls::common::{CaSource, Config as CoreTlsConfig, TlsSource};
 use slim_proto::controller::proto::v1::{
-    control_message, controller_service_client::ControllerServiceClient, Connection,
-    ConnectionDirection, ConnectionListRequest, ConnectionListResponse, ConfigurationCommand,
-    ControlMessage, Route, RouteListRequest, RouteListResponse,
+    control_message, controller_service_client::ControllerServiceClient, ConfigurationCommand,
+    Connection, ConnectionDirection, ConnectionListRequest, ConnectionListResponse, ControlMessage,
+    Route, RouteListRequest, RouteListResponse,
 };
 use slim_proto::dataplane::proto::v1::{Name as ProtoName, NameId};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
@@ -91,7 +91,9 @@ fn run_controller_connect_once(args: &SlimControllerConnectArgs) -> Result<Strin
 
     let response = send_and_await(&args.endpoint, args.timeout_seconds, request)?;
     match response.payload {
-        Some(control_message::Payload::ConfigCommandAck(ack)) => Ok(format_config_command_ack(&ack)),
+        Some(control_message::Payload::ConfigCommandAck(ack)) => {
+            Ok(format_config_command_ack(&ack))
+        }
         Some(other) => Err(format!("unexpected response payload: {other:?}")),
         None => Err("controller returned an empty response".to_string()),
     }
@@ -100,7 +102,9 @@ fn run_controller_connect_once(args: &SlimControllerConnectArgs) -> Result<Strin
 fn run_controller_list_routes_once(args: &SlimControllerListArgs) -> Result<String, String> {
     let request = ControlMessage {
         message_id: uuid::Uuid::new_v4().to_string(),
-        payload: Some(control_message::Payload::RouteListRequest(RouteListRequest {})),
+        payload: Some(control_message::Payload::RouteListRequest(
+            RouteListRequest {},
+        )),
     };
     let response = send_and_await(&args.endpoint, args.timeout_seconds, request)?;
     match response.payload {
@@ -187,25 +191,27 @@ fn build_core_client_config(endpoint: &str) -> Result<CoreClientConfig, String> 
     } else {
         format!("https://{endpoint}")
     };
-    Ok(CoreClientConfig::with_endpoint(&endpoint).with_tls_setting(CoreTlsClientConfig {
-        config: CoreTlsConfig {
-            source: TlsSource::File {
-                cert: tls.cert.display().to_string(),
-                key: tls.key.display().to_string(),
+    Ok(
+        CoreClientConfig::with_endpoint(&endpoint).with_tls_setting(CoreTlsClientConfig {
+            config: CoreTlsConfig {
+                source: TlsSource::File {
+                    cert: tls.cert.display().to_string(),
+                    key: tls.key.display().to_string(),
+                },
+                ca_source: CaSource::File {
+                    path: tls.ca.display().to_string(),
+                },
+                include_system_ca_certs_pool: false,
+                tls_version: "tls1.3".to_string(),
+                reload_interval: None,
+                // slim-config 0.16 added this; upstream defaults it off and drives
+                // it from dataplane.enforce_pqc rather than the tls settings.
+                enforce_pqc: false,
             },
-            ca_source: CaSource::File {
-                path: tls.ca.display().to_string(),
-            },
-            include_system_ca_certs_pool: false,
-            tls_version: "tls1.3".to_string(),
-            reload_interval: None,
-            // slim-config 0.16 added this; upstream defaults it off and drives
-            // it from dataplane.enforce_pqc rather than the tls settings.
-            enforce_pqc: false,
-        },
-        insecure: false,
-        insecure_skip_verify: false,
-    }))
+            insecure: false,
+            insecure_skip_verify: false,
+        }),
+    )
 }
 
 fn split_pair(entry: &str, flag: &str, shape: &str) -> Result<(String, String), String> {
@@ -349,7 +355,12 @@ mod tests {
     #[test]
     fn split_pair_parses_valid_entries() {
         assert_eq!(
-            split_pair("link-1@127.0.0.1:1234", "--create-connection", "LINK_ID@ENDPOINT").unwrap(),
+            split_pair(
+                "link-1@127.0.0.1:1234",
+                "--create-connection",
+                "LINK_ID@ENDPOINT"
+            )
+            .unwrap(),
             ("link-1".to_string(), "127.0.0.1:1234".to_string())
         );
     }
@@ -366,10 +377,7 @@ mod tests {
         assert!(route("org/ns", "link-1").is_err());
         let r = route("org/ns/agent", "link-1").unwrap();
         assert_eq!(r.link_id.as_deref(), Some("link-1"));
-        assert_eq!(
-            r.direction,
-            Some(ConnectionDirection::Outgoing as i32)
-        );
+        assert_eq!(r.direction, Some(ConnectionDirection::Outgoing as i32));
         let name = r.name.unwrap();
         let str_name = name.str_name.unwrap();
         assert_eq!(str_name.str_component_0, "org");

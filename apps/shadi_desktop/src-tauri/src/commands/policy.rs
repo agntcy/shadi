@@ -181,7 +181,9 @@ fn read_policy_file(path: &str) -> Result<PolicyFileValues, String> {
     serde_json::from_str(&data).map_err(|err| format!("{path} is not a valid policy file: {err}"))
 }
 
-fn resolve(inputs: &PolicyInputs) -> Result<(ResolvedPolicy, SandboxProfile, PolicyFileValues), String> {
+fn resolve(
+    inputs: &PolicyInputs,
+) -> Result<(ResolvedPolicy, SandboxProfile, PolicyFileValues), String> {
     let profile = parse_profile(inputs.profile.as_deref())?;
     let file_values = match inputs.policy_file.as_deref() {
         Some(path) => read_policy_file(path)?,
@@ -291,8 +293,16 @@ pub async fn policy_diff(
         compare("read", &current.read, &baseline.read);
         compare("write", &current.write, &baseline.write);
         compare("net_allow", &current.net_allow, &baseline.net_allow);
-        compare("allow_command", &current.allow_command, &baseline.allow_command);
-        compare("block_command", &current.block_command, &baseline.block_command);
+        compare(
+            "allow_command",
+            &current.allow_command,
+            &baseline.allow_command,
+        );
+        compare(
+            "block_command",
+            &current.block_command,
+            &baseline.block_command,
+        );
         if current.net_block != baseline.net_block {
             changed.push(PolicyFieldDiff {
                 field: "net_block".to_string(),

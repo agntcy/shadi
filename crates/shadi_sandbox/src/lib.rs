@@ -3,10 +3,10 @@
 
 pub mod control;
 pub mod net_proxy;
+mod platform;
 pub mod policy;
 pub mod policy_patch;
 pub mod resolve;
-mod platform;
 
 pub use control::{read_control_line, ControlLine, CONTROL_LINE_MAX_BYTES};
 pub use net_proxy::{
@@ -21,16 +21,16 @@ pub fn seatbelt_profile_text(policy: &SandboxPolicy) -> Result<String, SandboxEr
     platform::macos::build_profile(policy)
 }
 pub use policy::{PlatformSandboxProfile, ProfileDefaults, SandboxPolicy, SandboxProfile};
+pub use policy_patch::{
+    apply_policy_patch, extract_host, ControlMessage, ControlResponse, PatchAxisStatus, PatchState,
+    PolicyPatch, PolicyPatchResponse, ProcessResources,
+};
 pub use resolve::{
     canonicalize_path, default_blocked_commands, describe_policy, is_command_blocked,
     resolve_policy, PolicyDescription, PolicyFileValues, PolicyOverrides, ResolvedPolicy,
 };
-pub use policy_patch::{
-    apply_policy_patch, extract_host, ControlMessage, ControlResponse, PatchAxisStatus,
-    PatchState, PolicyPatch, PolicyPatchResponse, ProcessResources,
-};
-use std::process::{Command, ExitStatus};
 use std::io;
+use std::process::{Command, ExitStatus};
 use tracing::{field, info_span};
 
 /// Set on a sandboxed child's environment by [`spawn_sandboxed`], `"1"` iff
@@ -64,7 +64,10 @@ pub fn sandbox_enforced_from_env() -> bool {
         && std::env::var(SANDBOX_NET_BLOCKED_ENV).as_deref() == Ok("1")
 }
 
-pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
+pub fn spawn_sandboxed(
+    command: &mut Command,
+    policy: &SandboxPolicy,
+) -> Result<SandboxedChild, SandboxError> {
     let program = command.get_program().to_string_lossy().to_string();
     let args = command
         .get_args()
@@ -76,7 +79,11 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let allowed_paths = policy.allow_read().len() + policy.allow_write().len();
-    let network_mode = if policy.net_blocked() { "blocked" } else { "allowed" };
+    let network_mode = if policy.net_blocked() {
+        "blocked"
+    } else {
+        "allowed"
+    };
 
     let span = info_span!(
         "shadi.sandbox.spawn",
@@ -122,7 +129,11 @@ impl SandboxedChild {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        let span = info_span!("shadi.sandbox.wait", pid = self.id(), exit.code = field::Empty);
+        let span = info_span!(
+            "shadi.sandbox.wait",
+            pid = self.id(),
+            exit.code = field::Empty
+        );
         let _guard = span.enter();
 
         let status = match &mut self.inner {
@@ -289,7 +300,9 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg(format!("echo ${SANDBOX_ACTIVE_ENV} ${SANDBOX_NET_BLOCKED_ENV}"))
+            .arg(format!(
+                "echo ${SANDBOX_ACTIVE_ENV} ${SANDBOX_NET_BLOCKED_ENV}"
+            ))
             .stdout(Stdio::piped());
         let policy = SandboxPolicy::new()
             .allow_read_path("/bin")
@@ -345,10 +358,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sandboxed_child_kill_stops_process() {
-        let child = Command::new("/bin/sleep")
-            .arg("5")
-            .spawn()
-            .expect("spawn");
+        let child = Command::new("/bin/sleep").arg("5").spawn().expect("spawn");
         let mut wrapped = SandboxedChild::from_std(child);
         wrapped.kill().expect("kill");
         let _ = wrapped.wait().expect("wait");
@@ -357,10 +367,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sandboxed_child_try_wait_reports_running_then_exit() {
-        let child = Command::new("/bin/sleep")
-            .arg("1")
-            .spawn()
-            .expect("spawn");
+        let child = Command::new("/bin/sleep").arg("1").spawn().expect("spawn");
         let mut wrapped = SandboxedChild::from_std(child);
         assert!(wrapped.try_wait().expect("try_wait").is_none());
         let _ = wrapped.wait().expect("wait");
@@ -387,7 +394,11 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     fn to_wide(value: &std::path::Path) -> Vec<u16> {
-        value.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        value
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     #[cfg(target_os = "windows")]
@@ -443,7 +454,8 @@ mod tests {
             PROCESS_QUERY_LIMITED_INFORMATION_ACCESS | SYNCHRONIZE_ACCESS,
         );
 
-        let windows_child = WindowsChild::new(process, std::ptr::null_mut(), std_child.id(), Vec::new());
+        let windows_child =
+            WindowsChild::new(process, std::ptr::null_mut(), std_child.id(), Vec::new());
         let mut wrapped = SandboxedChild::from_windows(windows_child);
 
         assert_eq!(wrapped.id(), std_child.id());
@@ -466,10 +478,13 @@ mod tests {
             .expect("spawn");
         let process = open_process_handle(
             std_child.id(),
-            PROCESS_QUERY_LIMITED_INFORMATION_ACCESS | PROCESS_TERMINATE_ACCESS | SYNCHRONIZE_ACCESS,
+            PROCESS_QUERY_LIMITED_INFORMATION_ACCESS
+                | PROCESS_TERMINATE_ACCESS
+                | SYNCHRONIZE_ACCESS,
         );
 
-        let windows_child = WindowsChild::new(process, std::ptr::null_mut(), std_child.id(), Vec::new());
+        let windows_child =
+            WindowsChild::new(process, std::ptr::null_mut(), std_child.id(), Vec::new());
         let mut wrapped = SandboxedChild::from_windows(windows_child);
 
         wrapped.kill().expect("kill");
@@ -610,8 +625,10 @@ impl WindowsChild {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
         use std::os::windows::process::ExitStatusExt;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, WaitForSingleObject, INFINITE,
+        };
 
         unsafe {
             let wait = WaitForSingleObject(self.process, INFINITE);
@@ -629,9 +646,7 @@ impl WindowsChild {
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         use std::os::windows::process::ExitStatusExt;
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, WaitForSingleObject,
-        };
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
         const WAIT_OBJECT_0: u32 = 0;
 
         unsafe {
@@ -718,12 +733,10 @@ fn ensure_journal_dir_restricted() -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT,
-        SetNamedSecurityInfoW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{
-        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION,
+        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     };
 
     let dir = windows_acl_journal_dir();
@@ -755,9 +768,8 @@ fn ensure_journal_dir_restricted() -> Result<(), String> {
         let mut dacl_present = 0;
         let mut dacl = std::ptr::null_mut();
         let mut defaulted = 0;
-        let ok = unsafe {
-            GetSecurityDescriptorDacl(sd, &mut dacl_present, &mut dacl, &mut defaulted)
-        };
+        let ok =
+            unsafe { GetSecurityDescriptorDacl(sd, &mut dacl_present, &mut dacl, &mut defaulted) };
         if ok == 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
@@ -778,7 +790,10 @@ fn ensure_journal_dir_restricted() -> Result<(), String> {
             )
         };
         if rc != 0 {
-            return Err(format!("SetNamedSecurityInfoW on journal dir failed (win32={})", rc));
+            return Err(format!(
+                "SetNamedSecurityInfoW on journal dir failed (win32={})",
+                rc
+            ));
         }
         Ok(())
     })();
@@ -816,8 +831,7 @@ fn compute_journal_hmac(key: &[u8], path: &str, dacl_sddl: &str) -> String {
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC key length is always valid");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length is always valid");
     mac.update(path.as_bytes());
     mac.update(b"\x00");
     mac.update(dacl_sddl.as_bytes());
@@ -841,7 +855,9 @@ fn validate_sddl(sddl: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn persist_windows_acl_rollback(rollback: &mut WindowsAclRollback) -> Result<(), String> {
+pub(crate) fn persist_windows_acl_rollback(
+    rollback: &mut WindowsAclRollback,
+) -> Result<(), String> {
     if rollback.journal_path.is_some() {
         return Ok(());
     }
@@ -867,12 +883,9 @@ fn restore_windows_acl_journal_entry(entry: &WindowsAclRollbackJournalEntry) -> 
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT,
-        SetNamedSecurityInfoW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
-    use windows_sys::Win32::Security::{
-        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION,
-    };
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION};
 
     let sddl: Vec<u16> = std::ffi::OsStr::new(&entry.dacl_sddl)
         .encode_wide()
@@ -1001,10 +1014,10 @@ pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
 #[cfg(target_os = "windows")]
 pub(crate) fn restore_windows_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
     use tracing::warn;
-    use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-    use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
     use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
+    use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 
     for mut rollback in rollbacks.drain(..) {
         let restored;

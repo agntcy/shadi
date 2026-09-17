@@ -240,9 +240,15 @@ mod tests {
             .block_network(true);
 
         assert!(policy.allow_read().iter().any(|p| p == Path::new(&tmp_dir)));
-        assert!(policy.allow_write().iter().any(|p| p == Path::new(&tmp_dir)));
+        assert!(policy
+            .allow_write()
+            .iter()
+            .any(|p| p == Path::new(&tmp_dir)));
         assert!(policy.net_blocked());
-        assert_eq!(policy.platform_profile(), PlatformSandboxProfile::Compatibility);
+        assert_eq!(
+            policy.platform_profile(),
+            PlatformSandboxProfile::Compatibility
+        );
     }
 
     #[test]
@@ -251,7 +257,10 @@ mod tests {
             .allow_network_destination("1.1.1.1:80")
             .allow_network_destination("api.github.com");
 
-        assert_eq!(policy.net_allow(), &["1.1.1.1:80".to_string(), "api.github.com".to_string()]);
+        assert_eq!(
+            policy.net_allow(),
+            &["1.1.1.1:80".to_string(), "api.github.com".to_string()]
+        );
     }
 
     #[test]
@@ -282,11 +291,23 @@ mod profile_tests {
 
     #[test]
     fn profile_names_round_trip_and_reject_the_rest() {
-        assert_eq!(SandboxProfile::from_name("strict"), Some(SandboxProfile::Strict));
-        assert_eq!(SandboxProfile::from_name("balanced"), Some(SandboxProfile::Balanced));
-        assert_eq!(SandboxProfile::from_name("connected"), Some(SandboxProfile::Connected));
+        assert_eq!(
+            SandboxProfile::from_name("strict"),
+            Some(SandboxProfile::Strict)
+        );
+        assert_eq!(
+            SandboxProfile::from_name("balanced"),
+            Some(SandboxProfile::Balanced)
+        );
+        assert_eq!(
+            SandboxProfile::from_name("connected"),
+            Some(SandboxProfile::Connected)
+        );
         // The CLI accepts these case-insensitively, so the library must too.
-        assert_eq!(SandboxProfile::from_name("STRICT"), Some(SandboxProfile::Strict));
+        assert_eq!(
+            SandboxProfile::from_name("STRICT"),
+            Some(SandboxProfile::Strict)
+        );
         assert_eq!(SandboxProfile::from_name("paranoid"), None);
         assert_eq!(SandboxProfile::from_name(""), None);
     }
@@ -307,13 +328,19 @@ mod profile_tests {
         ] {
             let d = profile.defaults();
             assert_eq!(d.allow, vec![".".to_string()], "{profile:?}");
-            assert!(d.write.is_empty(), "{profile:?} must not grant a blanket write");
+            assert!(
+                d.write.is_empty(),
+                "{profile:?} must not grant a blanket write"
+            );
         }
     }
 
     #[test]
     fn strict_confines_reads_where_the_others_do_not() {
-        assert_eq!(SandboxProfile::Strict.defaults().read, vec![".".to_string()]);
+        assert_eq!(
+            SandboxProfile::Strict.defaults().read,
+            vec![".".to_string()]
+        );
         // Seatbelt and Landlock give a readable root for free; elsewhere it is
         // spelled out, so the two cases differ by platform, not by profile.
         assert_eq!(

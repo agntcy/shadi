@@ -62,11 +62,7 @@ mod tests {
     };
 
     fn make_runtime() -> MasRuntime<DevelopmentEngine> {
-        let config = DevelopmentEngineConfig::new(
-            [AgentId::from("a"), AgentId::from("b")],
-            2,
-            10,
-        );
+        let config = DevelopmentEngineConfig::new([AgentId::from("a"), AgentId::from("b")], 2, 10);
         MasRuntime::new(DevelopmentEngine::new(Epoch(0), config))
     }
 

@@ -191,12 +191,16 @@ pub(crate) fn run_derive_agent_did(args: DeriveAgentDidArgs) -> Result<(), Strin
 
 pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result<(), String> {
     let seed_material = match args.source {
-        HumanIdentitySource::Gpg => {
-            read_openpgp_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
-        }
-        HumanIdentitySource::Seed => {
-            read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
-        }
+        HumanIdentitySource::Gpg => read_openpgp_input(
+            "--human-secret",
+            args.human_secret.as_deref(),
+            args.input.as_ref(),
+        )?,
+        HumanIdentitySource::Seed => read_seed_input(
+            "--human-secret",
+            args.human_secret.as_deref(),
+            args.input.as_ref(),
+        )?,
         HumanIdentitySource::Ssh => read_ssh_seed_input(
             "--human-secret",
             args.human_secret.as_deref(),
@@ -211,7 +215,9 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
             let secret = store
                 .get(key)
                 .map_err(|_| format!("keychain lookup failed for {}", key))?;
-            Some(secret_bytes_to_utf8(&secret.expose(|bytes| bytes.to_vec()))?)
+            Some(secret_bytes_to_utf8(
+                &secret.expose(|bytes| bytes.to_vec()),
+            )?)
         }
         None => None,
     };
@@ -261,12 +267,16 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
 
 pub(crate) fn run_verify_agent_identity(args: VerifyAgentIdentityArgs) -> Result<(), String> {
     let seed_material = match args.source {
-        HumanIdentitySource::Gpg => {
-            read_openpgp_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
-        }
-        HumanIdentitySource::Seed => {
-            read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
-        }
+        HumanIdentitySource::Gpg => read_openpgp_input(
+            "--human-secret",
+            args.human_secret.as_deref(),
+            args.input.as_ref(),
+        )?,
+        HumanIdentitySource::Seed => read_seed_input(
+            "--human-secret",
+            args.human_secret.as_deref(),
+            args.input.as_ref(),
+        )?,
         HumanIdentitySource::Ssh => read_ssh_seed_input(
             "--human-secret",
             args.human_secret.as_deref(),
@@ -275,7 +285,8 @@ pub(crate) fn run_verify_agent_identity(args: VerifyAgentIdentityArgs) -> Result
         )?,
     };
 
-    let (_private_key, expected_public_key) = derive_agent_keypair(&seed_material, &args.agent_name)?;
+    let (_private_key, expected_public_key) =
+        derive_agent_keypair(&seed_material, &args.agent_name)?;
     let (expected_did, _vm_id, _doc) = build_did_document(&expected_public_key)?;
 
     let prefix = args.prefix.trim_end_matches('/');
@@ -364,16 +375,28 @@ pub(crate) fn store_derived_agent_identity(
     let public_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
 
     store
-        .put(&private_key_name, private_b64.as_bytes(), SecretPolicy::default())
+        .put(
+            &private_key_name,
+            private_b64.as_bytes(),
+            SecretPolicy::default(),
+        )
         .map_err(|err| format!("failed to store secret {}: {}", private_key_name, err))?;
     store
-        .put(&public_key_name, public_b64.as_bytes(), SecretPolicy::default())
+        .put(
+            &public_key_name,
+            public_b64.as_bytes(),
+            SecretPolicy::default(),
+        )
         .map_err(|err| format!("failed to store secret {}: {}", public_key_name, err))?;
     store
         .put(&did_key_name, did.as_bytes(), SecretPolicy::default())
         .map_err(|err| format!("failed to store secret {}: {}", did_key_name, err))?;
     store
-        .put(&diddoc_key_name, diddoc_json.as_bytes(), SecretPolicy::default())
+        .put(
+            &diddoc_key_name,
+            diddoc_json.as_bytes(),
+            SecretPolicy::default(),
+        )
         .map_err(|err| format!("failed to store secret {}: {}", diddoc_key_name, err))?;
 
     if let Some(human_did) = human_did {
@@ -407,13 +430,18 @@ pub(crate) fn read_seed_input(
     Err(format!("missing {} or --in", label))
 }
 
-pub(crate) fn build_did_document(pkey: &[u8]) -> Result<(String, String, serde_json::Value), String> {
+pub(crate) fn build_did_document(
+    pkey: &[u8],
+) -> Result<(String, String, serde_json::Value), String> {
     let pubkey = if pkey.len() == 33 && pkey[0] == 0x40 {
         pkey[1..].to_vec()
     } else if pkey.len() == 32 {
         pkey.to_vec()
     } else {
-        return Err(format!("unexpected Ed25519 key material length: {}", pkey.len()));
+        return Err(format!(
+            "unexpected Ed25519 key material length: {}",
+            pkey.len()
+        ));
     };
 
     let mut multicodec = Vec::with_capacity(2 + pubkey.len());
@@ -515,7 +543,11 @@ pub(crate) fn decode_github_public_key(public_key: String) -> Result<Vec<u8>, St
         return Ok(public_key.into_bytes());
     }
 
-    let compact = public_key.lines().map(str::trim).collect::<Vec<_>>().join("");
+    let compact = public_key
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("");
     if compact.is_empty() {
         return Err("GitHub public_key is empty".to_string());
     }
@@ -535,13 +567,17 @@ fn test_github_payload_slot() -> &'static Mutex<Option<String>> {
 
 #[cfg(test)]
 pub(crate) fn set_test_github_payload(payload: Option<String>) {
-    let mut guard = test_github_payload_slot().lock().expect("github payload lock");
+    let mut guard = test_github_payload_slot()
+        .lock()
+        .expect("github payload lock");
     *guard = payload;
 }
 
 #[cfg(test)]
 fn github_api_get_gpg_keys(_user: &str) -> Result<String, String> {
-    let guard = test_github_payload_slot().lock().expect("github payload lock");
+    let guard = test_github_payload_slot()
+        .lock()
+        .expect("github payload lock");
     guard
         .clone()
         .ok_or_else(|| "test github payload not set".to_string())
@@ -554,7 +590,10 @@ fn github_get_text(url: &str, token: Option<String>) -> Result<String, String> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static("shadi-shadictl"));
     if let Some(token) = token {
-        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", token))
@@ -592,7 +631,10 @@ fn github_api_get_gpg_keys(user: &str) -> Result<String, String> {
     )
 }
 
-pub(crate) fn derive_agent_keypair(secret_key: &[u8], agent_name: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+pub(crate) fn derive_agent_keypair(
+    secret_key: &[u8],
+    agent_name: &str,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     // Canonical HKDF agent derivation lives in shadi_identity; delegate so there
     // is a single did:key derivation code path across the workspace.
     let id = shadi_identity::AgentIdentity::derive(secret_key, agent_name)
@@ -657,8 +699,9 @@ pub(crate) fn read_ssh_seed_input(
 ) -> Result<Vec<u8>, String> {
     let key_bytes = read_seed_input(label, secret_key, input)?;
     let passphrase = resolve_ssh_passphrase(passphrase_secret)?;
-    let seed = shadi_identity::ssh::seed_from_openssh_private_key(&key_bytes, passphrase.as_deref())
-        .map_err(|err| err.to_string())?;
+    let seed =
+        shadi_identity::ssh::seed_from_openssh_private_key(&key_bytes, passphrase.as_deref())
+            .map_err(|err| err.to_string())?;
     Ok(seed.to_vec())
 }
 
@@ -696,7 +739,9 @@ fn fetch_github_ssh_keys(user: &str) -> Result<String, String> {
 
 #[cfg(test)]
 fn fetch_github_ssh_keys(_user: &str) -> Result<String, String> {
-    let guard = test_github_payload_slot().lock().expect("github payload lock");
+    let guard = test_github_payload_slot()
+        .lock()
+        .expect("github payload lock");
     guard
         .clone()
         .ok_or_else(|| "test github payload not set".to_string())

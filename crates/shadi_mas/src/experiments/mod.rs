@@ -9,11 +9,11 @@ use a2a_client::A2AClient;
 use agent_secrets::{DidProofVerifier, SessionContext};
 
 pub mod auth_required;
+use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 pub use auth_required::{
     audit_auth_required, decide_auth_required, is_auth_required, run_auth_required_loop,
     AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
 };
-use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 use shadi_a2a::{insert_dest_did, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator};
 use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
@@ -78,7 +78,6 @@ impl TaskAdapter for RecordingTaskAdapter {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveA2ATaskAdapterConfig {
     pub endpoint: String,
@@ -101,34 +100,6 @@ pub struct LiveTaskDispatchRecord {
     pub task: TaskEnvelope,
     pub response: String,
     pub elapsed_ms: f64,
-}
-
-/// The sender's principal *hint*, from `SHADI_PRINCIPAL_HINT`.
-///
-/// A hint, never a claim: the recipient uses it only to pick whose
-/// attestation to look up, then checks that the answer really owns the DID the
-/// envelope proved. Forging it therefore buys nothing, and tampering with it
-/// in flight can only cause a denial. Read from the environment like the rest
-/// of the identity contract (`SHADI_SLIM_AUTH`, `SLIM_HUMAN_SEED`) rather than
-/// threaded through every adapter config, since it is one fact per process:
-/// who enrolled here.
-///
-/// Form: `github:alice`, or `oidc:https://sso.example/realm#alice@corp.com`.
-fn principal_hint_from_env() -> Option<String> {
-    std::env::var("SHADI_PRINCIPAL_HINT")
-        .ok()
-        .filter(|hint| !hint.is_empty())
-}
-
-fn insert_principal_hint(mut message: Message, hint: &str) -> Message {
-    message
-        .metadata
-        .get_or_insert_with(std::collections::HashMap::new)
-        .insert(
-            shadi_identity::A2A_PRINCIPAL_HINT_METADATA_KEY.to_string(),
-            serde_json::Value::String(hint.to_string()),
-        );
-    message
 }
 
 pub struct LiveA2ATaskAdapter {
@@ -209,10 +180,8 @@ impl LiveA2ATaskAdapter {
         signed_text: &str,
     ) -> Result<SendMessageResponse, String> {
         if let Some(a2a_url) = self.config.a2a_url.as_deref() {
-            let locator = A2ALocator::new(
-                self.config.a2a_binding.unwrap_or(A2ABinding::Grpc),
-                a2a_url,
-            );
+            let locator =
+                A2ALocator::new(self.config.a2a_binding.unwrap_or(A2ABinding::Grpc), a2a_url);
             if locator.binding.is_unicast() {
                 return self.send_signed_task_unicast(task, signed_text, &locator);
             }
@@ -256,9 +225,6 @@ impl LiveA2ATaskAdapter {
             let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
             if let Some(peer_did) = self.config.peer_did.as_deref() {
                 message = insert_dest_did(message, peer_did);
-            }
-            if let Some(hint) = principal_hint_from_env() {
-                message = insert_principal_hint(message, &hint);
             }
             let request = SendMessageRequest {
                 message,
@@ -312,7 +278,10 @@ impl LiveA2ATaskAdapter {
             ));
             let attempt_result = (|| -> Result<SendMessageResponse, String> {
                 let connection_id = service
-                    .connect(build_client_config_for_endpoint(&self.config.endpoint, &tls))
+                    .connect(build_client_config_for_endpoint(
+                        &self.config.endpoint,
+                        &tls,
+                    ))
                     .map_err(format_slim_error)?;
                 let local_name_ref = Arc::new(parse_slim_name(&local_name)?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
@@ -393,7 +362,10 @@ impl LiveA2ATaskAdapter {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            format!("failed to send A2A task {} for an unknown reason", task.task_id)
+            format!(
+                "failed to send A2A task {} for an unknown reason",
+                task.task_id
+            )
         }))
     }
 }
@@ -425,7 +397,6 @@ impl TaskAdapter for LiveA2ATaskAdapter {
         Ok(())
     }
 }
-
 
 #[derive(Clone)]
 struct TlsMaterial {
@@ -490,7 +461,9 @@ fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Client
     config
 }
 
-fn resolve_client_tls_material_for_agent(agent_id_override: Option<&str>) -> Result<TlsMaterial, String> {
+fn resolve_client_tls_material_for_agent(
+    agent_id_override: Option<&str>,
+) -> Result<TlsMaterial, String> {
     let cert_override = std::env::var_os("SLIM_TLS_CERT").map(PathBuf::from);
     let key_override = std::env::var_os("SLIM_TLS_KEY").map(PathBuf::from);
     let ca = std::env::var_os("SLIM_TLS_CA")
@@ -594,7 +567,10 @@ fn canonical_slim_name(agent_id: &str) -> String {
     if agent_id.contains('/') {
         agent_id.to_string()
     } else {
-        format!("{}/{}/{}", DEFAULT_LOCAL_ORG, DEFAULT_LOCAL_NAMESPACE, agent_id)
+        format!(
+            "{}/{}/{}",
+            DEFAULT_LOCAL_ORG, DEFAULT_LOCAL_NAMESPACE, agent_id
+        )
     }
 }
 
@@ -605,8 +581,8 @@ fn format_slim_error(err: slim_bindings::SlimError) -> String {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use agent_secrets::AgentVerifier;
     use crate::types::{Epoch, PatternKind};
+    use agent_secrets::AgentVerifier;
 
     fn sample_task() -> TaskEnvelope {
         TaskEnvelope {
@@ -625,10 +601,7 @@ mod transport_tests {
 
     #[test]
     fn canonical_slim_name_preserves_qualified_names() {
-        assert_eq!(
-            canonical_slim_name("acme/team/avatar"),
-            "acme/team/avatar"
-        );
+        assert_eq!(canonical_slim_name("acme/team/avatar"), "acme/team/avatar");
     }
 
     #[test]
@@ -672,7 +645,10 @@ mod transport_tests {
     fn readable_message_text_joins_text_parts() {
         let message = Message::new(
             Role::Agent,
-            vec![Part::text("first".to_string()), Part::text("second".to_string())],
+            vec![
+                Part::text("first".to_string()),
+                Part::text("second".to_string()),
+            ],
         );
         assert_eq!(readable_message_text(&message), "first second");
     }

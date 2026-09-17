@@ -86,9 +86,38 @@ pub struct PolicyDescription {
 /// anything that moves data off the machine.
 pub fn default_blocked_commands() -> HashSet<&'static str> {
     [
-        "rm", "rmdir", "shred", "srm", "dd", "mkfs", "fdisk", "parted", "wipefs", "chmod", "chown",
-        "chgrp", "chattr", "shutdown", "reboot", "halt", "systemctl", "apt", "brew", "pip", "yum",
-        "pacman", "mv", "cp", "truncate", "sudo", "su", "doas", "pkexec", "scp", "rsync", "sftp",
+        "rm",
+        "rmdir",
+        "shred",
+        "srm",
+        "dd",
+        "mkfs",
+        "fdisk",
+        "parted",
+        "wipefs",
+        "chmod",
+        "chown",
+        "chgrp",
+        "chattr",
+        "shutdown",
+        "reboot",
+        "halt",
+        "systemctl",
+        "apt",
+        "brew",
+        "pip",
+        "yum",
+        "pacman",
+        "mv",
+        "cp",
+        "truncate",
+        "sudo",
+        "su",
+        "doas",
+        "pkexec",
+        "scp",
+        "rsync",
+        "sftp",
         "ftp",
     ]
     .into_iter()
@@ -172,7 +201,11 @@ pub fn resolve_policy(
         .chain(policy.allow_write().iter())
         .collect::<std::collections::BTreeSet<_>>();
     span.record("policy.allowed_paths", allowed_paths.len() as i64);
-    let network_mode = if policy.net_blocked() { "blocked" } else { "allowed" };
+    let network_mode = if policy.net_blocked() {
+        "blocked"
+    } else {
+        "allowed"
+    };
     span.record("network.mode", field::display(network_mode));
 
     Ok(ResolvedPolicy {
@@ -203,9 +236,27 @@ pub fn describe_policy(
     allow_list.sort();
 
     PolicyDescription {
-        allow: display(policy.allow_read().iter().filter(|p| is_writable(p)).collect()),
-        read: display(policy.allow_read().iter().filter(|p| !is_writable(p)).collect()),
-        write: display(policy.allow_write().iter().filter(|p| !is_readable(p)).collect()),
+        allow: display(
+            policy
+                .allow_read()
+                .iter()
+                .filter(|p| is_writable(p))
+                .collect(),
+        ),
+        read: display(
+            policy
+                .allow_read()
+                .iter()
+                .filter(|p| !is_writable(p))
+                .collect(),
+        ),
+        write: display(
+            policy
+                .allow_write()
+                .iter()
+                .filter(|p| !is_readable(p))
+                .collect(),
+        ),
         net_block: policy.net_blocked(),
         net_allow: policy.net_allow().to_vec(),
         platform_profile: policy.platform_profile().as_str().to_string(),
@@ -245,7 +296,9 @@ fn expand_home_with(path: &str, home: Option<&str>) -> PathBuf {
             Some(home) => PathBuf::from(home).join(rest),
             None => PathBuf::from(path),
         },
-        None if path == "~" => home.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(path)),
+        None if path == "~" => home
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(path)),
         None => PathBuf::from(path),
     }
 }
@@ -266,7 +319,11 @@ fn apply_string_paths(
 
 /// Like [`apply_string_paths`], but skips paths that do not exist, so a
 /// cross-platform preset resolves on every OS.
-fn apply_preset_paths(mut policy: SandboxPolicy, paths: &[String], mode: PathMode) -> SandboxPolicy {
+fn apply_preset_paths(
+    mut policy: SandboxPolicy,
+    paths: &[String],
+    mode: PathMode,
+) -> SandboxPolicy {
     for path in paths.iter() {
         if let Ok(canonical) = canonicalize_path(expand_home(path)) {
             policy = apply_path(policy, &canonical, &mode);
@@ -331,7 +388,10 @@ mod tests {
             expand_home_with("~/.claude", Some("/Users/mo")),
             PathBuf::from("/Users/mo/.claude")
         );
-        assert_eq!(expand_home_with("~", Some("/Users/mo")), PathBuf::from("/Users/mo"));
+        assert_eq!(
+            expand_home_with("~", Some("/Users/mo")),
+            PathBuf::from("/Users/mo")
+        );
     }
 
     #[test]
@@ -340,7 +400,10 @@ mod tests {
             expand_home_with("/already/absolute", Some("/Users/mo")),
             PathBuf::from("/already/absolute")
         );
-        assert_eq!(expand_home_with("~/.claude", None), PathBuf::from("~/.claude"));
+        assert_eq!(
+            expand_home_with("~/.claude", None),
+            PathBuf::from("~/.claude")
+        );
     }
 
     #[test]
@@ -376,8 +439,7 @@ mod tests {
             allow: vec![dir.path().to_path_buf()],
             ..Default::default()
         };
-        let resolved =
-            resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
 
         let canonical = canonicalize_path(dir.path()).expect("canonical");
         assert!(resolved.policy.allow_read().contains(&canonical));
@@ -408,9 +470,11 @@ mod tests {
             profile: Some(SandboxProfile::Connected),
             ..Default::default()
         };
-        let resolved =
-            resolve_policy(&connected, &PolicyFileValues::default()).expect("resolve");
-        assert!(!resolved.policy.net_blocked(), "connected leaves network on");
+        let resolved = resolve_policy(&connected, &PolicyFileValues::default()).expect("resolve");
+        assert!(
+            !resolved.policy.net_blocked(),
+            "connected leaves network on"
+        );
 
         let file_policy = PolicyFileValues {
             net_block: Some(true),
@@ -433,10 +497,26 @@ mod tests {
         };
         let resolved = resolve_policy(&overrides, &file_policy).expect("resolve");
 
-        assert!(!is_command_blocked("rm", &resolved.blocked, &resolved.allow));
-        assert!(!is_command_blocked("mv", &resolved.blocked, &resolved.allow));
-        assert!(is_command_blocked("git", &resolved.blocked, &resolved.allow));
-        assert!(is_command_blocked("sudo", &resolved.blocked, &resolved.allow));
+        assert!(!is_command_blocked(
+            "rm",
+            &resolved.blocked,
+            &resolved.allow
+        ));
+        assert!(!is_command_blocked(
+            "mv",
+            &resolved.blocked,
+            &resolved.allow
+        ));
+        assert!(is_command_blocked(
+            "git",
+            &resolved.blocked,
+            &resolved.allow
+        ));
+        assert!(is_command_blocked(
+            "sudo",
+            &resolved.blocked,
+            &resolved.allow
+        ));
     }
 
     #[test]
@@ -455,8 +535,7 @@ mod tests {
             allow: vec![both.clone()],
             ..Default::default()
         };
-        let resolved =
-            resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
         let described = describe_policy(&resolved.policy, &resolved.blocked, &resolved.allow);
 
         let canonical = |path: &PathBuf| {

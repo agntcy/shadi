@@ -2,62 +2,64 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeSet, HashSet};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::io::BufRead;
 
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
+use agent_secrets::{SecretPolicy, SecretStore};
 use base64::Engine;
 use clap::{ArgAction, Parser, Subcommand};
 #[cfg(not(test))]
 use reqwest::blocking::Client;
 #[cfg(not(test))]
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use sequoia_openpgp as openpgp;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use shadi_sandbox::{spawn_sandboxed, NetAllowlist, NetProxy, SandboxPolicy};
-use agent_secrets::{SecretPolicy, SecretStore};
 use shadi_memory::{MemoryEntry, SqlCipherStore};
-use slim_mas::{is_member_allowed, load_config as load_mas_config, resolve_group, resolve_group_dids};
-use sequoia_openpgp as openpgp;
+use shadi_sandbox::{spawn_sandboxed, NetAllowlist, NetProxy, SandboxPolicy};
+use slim_mas::{
+    is_member_allowed, load_config as load_mas_config, resolve_group, resolve_group_dids,
+};
 use tracing::{field, info_span};
 
-mod memory_command;
-mod identity_command;
 mod cli_types;
 mod dir_command;
+mod identity_command;
 mod introspection_command;
+mod memory_command;
 mod policy_helpers;
 mod policy_watch;
 mod resource_info;
 mod sandbox_snapshot;
 mod secrets_command;
-mod slim_shell;
+mod shell_command;
 mod slim_a2a;
 mod slim_controller;
 mod slim_mas_command;
+mod slim_shell;
 mod snapshot_command;
 mod trace_command;
 mod trusted_secret_delivery;
-mod shell_command;
 
 use cli_types::*;
 use dir_command::*;
-use introspection_command::*;
 use identity_command::*;
+use introspection_command::*;
 use memory_command::*;
 use policy_helpers::*;
 use policy_watch::*;
 use sandbox_snapshot::*;
+use shell_command::*;
 use slim_mas_command::*;
 use trace_command::*;
 use trusted_secret_delivery::*;
-use shell_command::*;
 
 #[cfg(test)]
 static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
@@ -95,7 +97,12 @@ struct TestSecretStore;
 
 #[cfg(test)]
 impl SecretStore for TestSecretStore {
-    fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> agent_secrets::SecretResult<()> {
+    fn put(
+        &self,
+        key: &str,
+        secret: &[u8],
+        _policy: SecretPolicy,
+    ) -> agent_secrets::SecretResult<()> {
         if test_secret_store_put_failures()
             .lock()
             .map_err(|_| agent_secrets::SecretError::StorageFailure)?
@@ -188,7 +195,6 @@ pub(crate) fn scrub_test_secret_backend_env(command: &mut Command) {
         command.env_remove(key);
     }
 }
-
 
 fn main() -> ExitCode {
     shadi_telemetry::init("shadi-core");
@@ -361,7 +367,11 @@ fn run_cli(mut cli: Cli) -> ExitCode {
         }
     };
 
-    let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
+    let cmd_name = cli
+        .run_command
+        .first()
+        .map(|cmd| cmd.as_str())
+        .unwrap_or("");
     if is_command_blocked(cmd_name, &resolved.blocked, &resolved.allow) {
         eprintln!("blocked command: {}", cmd_name);
         return ExitCode::from(2);

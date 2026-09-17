@@ -20,7 +20,5 @@ pub mod trace_memory;
 /// Placeholder error for every stub command. `issue` is the panel issue that
 /// will replace this stub with a real implementation.
 pub(crate) fn not_implemented<T>(issue: u32) -> Result<T, String> {
-    Err(format!(
-        "not implemented yet — see agntcy/shadi#{issue}"
-    ))
+    Err(format!("not implemented yet — see agntcy/shadi#{issue}"))
 }

@@ -42,23 +42,9 @@ pub struct DirPublishOptions<'a> {
     pub gh_token: Option<&'a str>,
 }
 
-/// An authority a listener will ask "who owns this DID?".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum AnchorKind {
-    /// The `local_attestations` pinned in the policy file. Always available.
-    Local,
-    /// The DID must be among the Ed25519 keys the hinted GitHub user
-    /// publishes. Needs an `a2a-principal-hint`, so it cannot answer on the
-    /// SLIM path, which carries no A2A metadata.
-    Github,
-}
-
 /// How a listener decides who may send it tasks.
 pub struct AdmissionOptions<'a> {
     pub policy_file: &'a std::path::Path,
-    /// Consulted in order; the first to answer wins.
-    pub anchors: &'a [AnchorKind],
-    pub gh_token: Option<&'a str>,
 }
 
 /// Set once, before any listener starts, then read by every request handler.
@@ -83,24 +69,9 @@ fn install_admission(opts: Option<AdmissionOptions>) -> anyhow::Result<()> {
     };
     let policy = shadi_identity::AdmissionPolicy::load(opts.policy_file)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    if opts.anchors.is_empty() {
-        anyhow::bail!("--oidc-policy-file needs at least one --trust-anchor");
-    }
-    let anchors = opts
-        .anchors
-        .iter()
-        .map(|kind| -> Box<dyn shadi_identity::TrustAnchor> {
-            match kind {
-                AnchorKind::Local => Box::new(shadi_identity::LocalAnchor::new(
-                    "local-policy-file",
-                    policy.local_attestations.clone(),
-                )),
-                AnchorKind::Github => Box::new(shadi_identity::GithubAnchor::new(
-                    opts.gh_token.map(str::to_string),
-                )),
-            }
-        })
-        .collect();
+    let anchors: Vec<Box<dyn shadi_identity::TrustAnchor>> = vec![Box::new(
+        shadi_identity::LocalAnchor::new("local-policy-file", policy.local_attestations.clone()),
+    )];
     let gate = AdmissionGate {
         replay: Arc::new(shadi_identity::ReplayCache::new(
             REPLAY_CACHE_CAPACITY,
@@ -114,7 +85,7 @@ fn install_admission(opts: Option<AdmissionOptions>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Without `--oidc-policy-file` this is the permissive default: no admitter,
+/// Without `--admission-policy-file` this is the permissive default: no admitter,
 /// and unsealed payloads accepted, i.e. exactly today's behaviour.
 fn admission_gate() -> &'static AdmissionGate {
     ADMISSION.get_or_init(|| AdmissionGate {
@@ -288,7 +259,10 @@ fn start_listeners(
                     false,
                     verbose,
                 ) {
-                    eprintln!("[agentbridge] {} listener: {err}", a2a_binding.as_protocol_binding());
+                    eprintln!(
+                        "[agentbridge] {} listener: {err}",
+                        a2a_binding.as_protocol_binding()
+                    );
                 }
             });
         } else {
@@ -737,9 +711,7 @@ impl AgentBridgeRequestHandler {
             ),
             ready,
             agent_id: agent_id.to_string(),
-            agent_did: agent_did
-                .filter(|did| !did.is_empty())
-                .map(str::to_string),
+            agent_did: agent_did.filter(|did| !did.is_empty()).map(str::to_string),
             slim_endpoint: slim_endpoint.map(str::to_string),
             a2a_listen: a2a_listen.map(str::to_string),
             a2a_binding,
@@ -951,10 +923,7 @@ fn build_agent_card(
         } else {
             format!("http://{listen}")
         };
-        supported_interfaces.push(AgentInterface::new(
-            url,
-            a2a_binding.as_protocol_binding(),
-        ));
+        supported_interfaces.push(AgentInterface::new(url, a2a_binding.as_protocol_binding()));
     }
 
     AgentCard {
@@ -1098,9 +1067,7 @@ fn run_slim_listener(
                 name: agent_id.to_string(),
                 did: did.clone(),
                 slim_endpoint: endpoint.to_string(),
-                a2a_url: a2a_listen
-                    .map(advertised_a2a_url)
-                    .unwrap_or_default(),
+                a2a_url: a2a_listen.map(advertised_a2a_url).unwrap_or_default(),
                 a2a_binding,
                 pid: std::process::id(),
             },
@@ -1118,7 +1085,9 @@ fn run_slim_listener(
             shadi_identity::SlimAuth::Did { did, .. } => Some(did.as_str()),
             shadi_identity::SlimAuth::SharedSecret(_) => None,
         };
-        if let Err(e) = publish_card_to_dir(agent_id, Some(endpoint), a2a_listen, a2a_binding, did, opts) {
+        if let Err(e) =
+            publish_card_to_dir(agent_id, Some(endpoint), a2a_listen, a2a_binding, did, opts)
+        {
             eprintln!("[agentbridge] DIR publish failed: {e}");
         }
     }
@@ -1321,17 +1290,6 @@ fn admit_incoming_message(
         };
     }
 
-    // An unauthenticated lookup key, used only to choose whose attestation to
-    // fetch. Never believed: a forged hint cannot make Eve into Alice, and a
-    // tampered one can only cause a denial.
-    let hint = req
-        .message
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get(shadi_identity::A2A_PRINCIPAL_HINT_METADATA_KEY))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
     let verified = match shadi_identity::unwrap_signed_message(text.as_bytes()) {
         Ok(verified) => verified,
         Err(shadi_identity::IdentityError::ForgedDid(msg)) => {
@@ -1352,15 +1310,23 @@ fn admit_incoming_message(
     // signature checked above and cannot be stripped in flight.
     let body = match shadi_identity::Sealed::open(&verified.payload, self_did, replay) {
         Ok(body) => body,
-        Err(reason) => return IncomingAdmission::Denied { request: req, reason },
+        Err(reason) => {
+            return IncomingAdmission::Denied {
+                request: req,
+                reason,
+            }
+        }
     };
 
     let principal = match admitter {
         None => None,
-        Some(admitter) => match admitter.admit(&verified.did, hint.as_deref()) {
+        Some(admitter) => match admitter.admit(&verified.did, None) {
             shadi_identity::Admission::Admitted { principal, .. } => Some(principal),
             shadi_identity::Admission::Denied { reason, .. } => {
-                return IncomingAdmission::Denied { request: req, reason }
+                return IncomingAdmission::Denied {
+                    request: req,
+                    reason,
+                }
             }
             // Both park the task. They stay distinct up to here so logs and
             // metrics can tell an unknown peer from an authority outage.
@@ -1375,7 +1341,7 @@ fn admit_incoming_message(
                 return IncomingAdmission::AuthRequired {
                     request: req,
                     reason: "attestation authority unavailable".to_string(),
-                }
+                };
             }
         },
     };
@@ -1399,7 +1365,10 @@ fn hashed_sub(principal: &str) -> String {
     let digest = sha2::Sha256::digest(principal.as_bytes());
     format!(
         "sha256:{}",
-        digest[..4].iter().map(|b| format!("{b:02x}")).collect::<String>()
+        digest[..4]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     )
 }
 
@@ -1530,9 +1499,10 @@ fn grpc_server_tls_config(
     let Some((cert, key)) = a2a_server_tls_paths(addr)? else {
         return Ok(None);
     };
-    use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 
-    let cert_pem = fs::read(&cert).map_err(|e| format!("read A2A_TLS_CERT {}: {e}", cert.display()))?;
+    let cert_pem =
+        fs::read(&cert).map_err(|e| format!("read A2A_TLS_CERT {}: {e}", cert.display()))?;
     let key_pem = fs::read(&key).map_err(|e| format!("read A2A_TLS_KEY {}: {e}", key.display()))?;
     // rustls-pki-types ≥ 1.9 `PemObject` replaces archived rustls-pemfile
     // (RUSTSEC-2025-0134). Certs stay on disk via A2A_TLS_CERT / A2A_TLS_KEY.
@@ -1540,7 +1510,10 @@ fn grpc_server_tls_config(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("parse A2A_TLS_CERT {}: {e}", cert.display()))?;
     if certs.is_empty() {
-        return Err(format!("A2A_TLS_CERT {} has no certificates", cert.display()));
+        return Err(format!(
+            "A2A_TLS_CERT {} has no certificates",
+            cert.display()
+        ));
     }
     let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| {
         if matches!(e, rustls_pki_types::pem::Error::NoItemsFound) {
@@ -1569,9 +1542,9 @@ fn run_unicast_listener(
     verbose: bool,
 ) -> Result<(), String> {
     require_sandbox_enforced(agent_id, listen)?;
-    let addr: SocketAddr = listen.parse().map_err(|e| {
-        format!("invalid --a2a-listen '{listen}' (expected host:port): {e}")
-    })?;
+    let addr: SocketAddr = listen
+        .parse()
+        .map_err(|e| format!("invalid --a2a-listen '{listen}' (expected host:port): {e}"))?;
 
     let auth = shadi_identity::require_did_auth_from_env(agent_id)
         .map_err(|e| format!("A2A {} auth error: {e}", a2a_binding.as_protocol_binding()))?;
@@ -1613,9 +1586,14 @@ fn run_unicast_listener(
     };
 
     if let Some(opts) = dir_publish {
-        if let Err(e) =
-            publish_card_to_dir(agent_id, None, Some(listen), a2a_binding, Some(did.as_str()), opts)
-        {
+        if let Err(e) = publish_card_to_dir(
+            agent_id,
+            None,
+            Some(listen),
+            a2a_binding,
+            Some(did.as_str()),
+            opts,
+        ) {
             eprintln!("[agentbridge] DIR publish failed: {e}");
         }
     }
@@ -1645,9 +1623,7 @@ fn run_unicast_listener(
         );
         println!("[agentbridge] Press Ctrl-C to stop.");
         match a2a_binding {
-            A2ABinding::Slim => {
-                Err("SLIM uses --slim-endpoint, not --a2a-listen".to_string())
-            }
+            A2ABinding::Slim => Err("SLIM uses --slim-endpoint, not --a2a-listen".to_string()),
             A2ABinding::Grpc => {
                 let grpc_service = A2aServiceServer::new(GrpcHandler::new(handler));
                 match grpc_server_tls_config(&addr)? {
@@ -1770,8 +1746,18 @@ mod tests {
 
     #[test]
     fn unknown_tool_lists_profiles_and_generic_stdio() {
-        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None, None, false)
-            .expect_err("no gemini profile");
+        let err = run(
+            "gemini",
+            None,
+            &[],
+            None,
+            None,
+            A2ABinding::Grpc,
+            None,
+            None,
+            false,
+        )
+        .expect_err("no gemini profile");
         let msg = err.to_string();
         assert!(msg.contains("claude-code"));
         assert!(msg.contains("generic-stdio"));
@@ -1925,7 +1911,10 @@ test push ... FAILED
         assert!(wrong_destination_reason(Some("did:key:zMine"), &unlabeled).is_none());
         let unlabeled_reason =
             wrong_destination_reason(None, &message).expect("dest DID with no listener DID");
-        assert!(unlabeled_reason.contains("no agent DID"), "{unlabeled_reason}");
+        assert!(
+            unlabeled_reason.contains("no agent DID"),
+            "{unlabeled_reason}"
+        );
     }
 
     fn scratch_registry() -> (PathBuf, LocalAdapterRegistry) {
@@ -1938,12 +1927,7 @@ test push ... FAILED
         (dir.clone(), LocalAdapterRegistry::with_dir(dir))
     }
 
-    fn handoff_record(
-        name: &str,
-        did: &str,
-        slim: &str,
-        url: &str,
-    ) -> LocalAdapterRecord {
+    fn handoff_record(name: &str, did: &str, slim: &str, url: &str) -> LocalAdapterRecord {
         LocalAdapterRecord {
             name: name.to_string(),
             did: did.to_string(),
@@ -1969,14 +1953,8 @@ test push ... FAILED
             resolve_handoff_target("copilot", Some("127.0.0.1:9"), &registry).expect("lease");
         assert_eq!(target.peer_agent_id, "copilot");
         assert_eq!(target.peer_did.as_deref(), Some("did:key:zCopilot"));
-        assert_eq!(
-            target.a2a_url.as_deref(),
-            Some("http://127.0.0.1:50151")
-        );
-        assert_eq!(
-            target.slim_endpoint.as_deref(),
-            Some("127.0.0.1:47357")
-        );
+        assert_eq!(target.a2a_url.as_deref(), Some("http://127.0.0.1:50151"));
+        assert_eq!(target.slim_endpoint.as_deref(), Some("127.0.0.1:47357"));
         let by_did = resolve_handoff_target("did:key:zCopilot", None, &registry).expect("did");
         assert_eq!(by_did.a2a_url, target.a2a_url);
         drop(_lease);
@@ -1995,10 +1973,7 @@ test push ... FAILED
             ))
             .unwrap();
         let target = resolve_handoff_target("codex", None, &registry).expect("grpc-only");
-        assert_eq!(
-            target.a2a_url.as_deref(),
-            Some("http://127.0.0.1:50152")
-        );
+        assert_eq!(target.a2a_url.as_deref(), Some("http://127.0.0.1:50152"));
         assert_eq!(target.slim_endpoint, None);
         drop(_lease);
         let _ = fs::remove_dir_all(dir);
@@ -2011,10 +1986,7 @@ test push ... FAILED
             .expect("slim fallback");
         assert_eq!(target.peer_agent_id, "claude-code");
         assert_eq!(target.a2a_url, None);
-        assert_eq!(
-            target.slim_endpoint.as_deref(),
-            Some("127.0.0.1:47357")
-        );
+        assert_eq!(target.slim_endpoint.as_deref(), Some("127.0.0.1:47357"));
         let err = resolve_handoff_target("claude-code", None, &registry).unwrap_err();
         assert!(err.contains("list --local"), "{err}");
         let _ = fs::remove_dir_all(dir);
@@ -2029,57 +2001,31 @@ test push ... FAILED
         admit_incoming_message(req, None, &lenient(), None)
     }
 
-    /// Stands in for `GithubAnchor` without the HTTP: answers only when the
-    /// hint names the login that really owns the DID, which is the property
-    /// the hint mechanism rests on.
-    struct HintAnchor {
-        owner: String,
-        did: String,
-    }
-
-    impl shadi_identity::TrustAnchor for HintAnchor {
-        fn resolve(
-            &self,
-            did: &str,
-            hint: Option<&str>,
-        ) -> Result<Option<shadi_identity::Attestation>, shadi_identity::IdentityError> {
-            let Some(login) = hint.and_then(|h| h.strip_prefix("github:")) else {
-                return Ok(None);
-            };
-            if login != self.owner || did != self.did {
-                return Ok(None);
-            }
-            Ok(Some(shadi_identity::Attestation {
-                did: did.to_string(),
-                principal: login.to_string(),
-                authority: "github.com".to_string(),
-                email: None,
-                email_verified: false,
-                claims: serde_json::Map::new(),
-            }))
-        }
-
-        fn authority(&self) -> &str {
-            "github.com"
-        }
-    }
-
-    /// A listener trusting `github.com` for `permitted`, where `owner` really
-    /// owns `did`.
-    fn hint_admitter(owner: &str, did: &str, permitted: &[&str]) -> shadi_identity::Admitter {
+    /// A listener that pins `did` to `principal`, trusting `authority` for
+    /// whichever principals are `permitted`.
+    fn pinned_admitter(did: &str, principal: &str, permitted: &[&str]) -> shadi_identity::Admitter {
+        const AUTHORITY: &str = "https://sso.example";
         let policy = shadi_identity::AdmissionPolicy {
             trusted_issuers: vec![shadi_identity::TrustedIssuer {
-                issuer: "github.com".to_string(),
-                allowed_principals: permitted.iter().map(|l| l.to_string()).collect(),
+                issuer: AUTHORITY.to_string(),
+                allowed_principals: permitted.iter().map(|p| p.to_string()).collect(),
                 ..Default::default()
             }],
             ..Default::default()
         };
+        let pinned = shadi_identity::Attestation {
+            did: did.to_string(),
+            principal: principal.to_string(),
+            authority: AUTHORITY.to_string(),
+            email: None,
+            email_verified: false,
+            claims: serde_json::Map::new(),
+        };
         shadi_identity::Admitter::new(
-            vec![Box::new(HintAnchor {
-                owner: owner.to_string(),
-                did: did.to_string(),
-            })],
+            vec![Box::new(shadi_identity::LocalAnchor::new(
+                AUTHORITY,
+                vec![pinned],
+            ))],
             policy,
         )
     }
@@ -2087,17 +2033,6 @@ test push ... FAILED
     fn signed_request(id: &shadi_identity::AgentIdentity, body: &str) -> SendMessageRequest {
         let envelope = shadi_identity::wrap_signed_message(id, body.as_bytes()).unwrap();
         sample_request(String::from_utf8(envelope).unwrap())
-    }
-
-    fn with_hint(mut req: SendMessageRequest, hint: &str) -> SendMessageRequest {
-        req.message
-            .metadata
-            .get_or_insert_with(std::collections::HashMap::new)
-            .insert(
-                shadi_identity::A2A_PRINCIPAL_HINT_METADATA_KEY.to_string(),
-                serde_json::Value::String(hint.to_string()),
-            );
-        req
     }
 
     #[test]
@@ -2146,14 +2081,18 @@ test push ... FAILED
         }
     }
 
-    /// The attested happy path: Bob has never heard of Alice, and admits her
-    /// because GitHub vouches for the DID her envelope proves possession of.
+    /// Bob has never heard of Alice and admits her because an authority
+    /// vouches for the DID her envelope proves possession of.
     #[test]
     fn an_attested_peer_is_admitted_and_names_its_principal() {
         let alice = shadi_identity::AgentIdentity::generate().unwrap();
-        let admitter = hint_admitter("alice", &alice.did(), &["alice"]);
-        let req = with_hint(signed_request(&alice, "review PR 412"), "github:alice");
-        match admit_incoming_message(req, Some(&admitter), &lenient(), None) {
+        let admitter = pinned_admitter(&alice.did(), "alice", &["alice"]);
+        match admit_incoming_message(
+            signed_request(&alice, "review PR 412"),
+            Some(&admitter),
+            &lenient(),
+            None,
+        ) {
             IncomingAdmission::Proven {
                 principal, request, ..
             } => {
@@ -2164,14 +2103,15 @@ test push ... FAILED
         }
     }
 
-    /// Without a hint this anchor abstains, so an attestation-gated listener
-    /// parks rather than admitting on the envelope alone.
+    /// Eve holds a valid key nobody vouches for. A good signature is not an
+    /// identity, so she parks rather than being admitted.
     #[test]
-    fn a_missing_hint_parks_instead_of_admitting() {
+    fn an_unattested_peer_parks_instead_of_admitting() {
         let alice = shadi_identity::AgentIdentity::generate().unwrap();
-        let admitter = hint_admitter("alice", &alice.did(), &["alice"]);
+        let eve = shadi_identity::AgentIdentity::generate().unwrap();
+        let admitter = pinned_admitter(&alice.did(), "alice", &["alice"]);
         match admit_incoming_message(
-            signed_request(&alice, "task"),
+            signed_request(&eve, "rm -rf /"),
             Some(&admitter),
             &lenient(),
             None,
@@ -2179,23 +2119,7 @@ test push ... FAILED
             IncomingAdmission::AuthRequired { reason, .. } => {
                 assert!(reason.contains("no authority attests"), "{reason}");
             }
-            other => panic!("expected AuthRequired, got {other:?}"),
-        }
-    }
-
-    /// Eve signs for her own DID and hints Alice's login. The signature is
-    /// valid — for Eve — and the anchor resolves the DID, not the hint.
-    #[test]
-    fn a_hint_naming_someone_who_does_not_own_the_did_is_not_admitted() {
-        let alice = shadi_identity::AgentIdentity::generate().unwrap();
-        let eve = shadi_identity::AgentIdentity::generate().unwrap();
-        let admitter = hint_admitter("alice", &alice.did(), &["alice"]);
-        let req = with_hint(signed_request(&eve, "rm -rf /"), "github:alice");
-        match admit_incoming_message(req, Some(&admitter), &lenient(), None) {
-            IncomingAdmission::AuthRequired { reason, .. } => {
-                assert!(reason.contains("no authority attests"), "{reason}");
-            }
-            other => panic!("Eve must not become Alice, got {other:?}"),
+            other => panic!("Eve must not be admitted, got {other:?}"),
         }
     }
 
@@ -2203,9 +2127,13 @@ test push ... FAILED
     #[test]
     fn an_attested_peer_outside_policy_is_denied_not_parked() {
         let eve = shadi_identity::AgentIdentity::generate().unwrap();
-        let admitter = hint_admitter("eve", &eve.did(), &["alice"]);
-        let req = with_hint(signed_request(&eve, "task"), "github:eve");
-        match admit_incoming_message(req, Some(&admitter), &lenient(), None) {
+        let admitter = pinned_admitter(&eve.did(), "eve", &["alice"]);
+        match admit_incoming_message(
+            signed_request(&eve, "task"),
+            Some(&admitter),
+            &lenient(),
+            None,
+        ) {
             IncomingAdmission::Denied { reason, .. } => {
                 assert!(reason.contains("not permitted"), "{reason}");
             }
@@ -2319,12 +2247,7 @@ test push ... FAILED
 
     #[test]
     fn build_agent_card_sets_grpc_interface_when_listen_given() {
-        let card = build_agent_card(
-            "copilot",
-            None,
-            Some("127.0.0.1:50051"),
-            A2ABinding::Grpc,
-        );
+        let card = build_agent_card("copilot", None, Some("127.0.0.1:50051"), A2ABinding::Grpc);
         assert_eq!(card.supported_interfaces.len(), 1);
         let iface = &card.supported_interfaces[0];
         assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_GRPC);
@@ -2334,12 +2257,7 @@ test push ... FAILED
 
     #[test]
     fn build_agent_card_sets_jsonrpc_interface_when_binding_given() {
-        let card = build_agent_card(
-            "copilot",
-            None,
-            Some("127.0.0.1:8080"),
-            A2ABinding::Jsonrpc,
-        );
+        let card = build_agent_card("copilot", None, Some("127.0.0.1:8080"), A2ABinding::Jsonrpc);
         let iface = &card.supported_interfaces[0];
         assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_JSONRPC);
         assert!(iface.url.contains("127.0.0.1:8080"), "{}", iface.url);
@@ -2352,10 +2270,7 @@ test push ... FAILED
             "http://127.0.0.1:50051"
         );
         assert_eq!(advertised_a2a_url("[::1]:50051"), "http://[::1]:50051");
-        assert_eq!(
-            advertised_a2a_url("0.0.0.0:50051"),
-            "https://0.0.0.0:50051"
-        );
+        assert_eq!(advertised_a2a_url("0.0.0.0:50051"), "https://0.0.0.0:50051");
         assert_eq!(
             advertised_a2a_url("https://example.test:443"),
             "https://example.test:443"
@@ -2428,10 +2343,7 @@ test push ... FAILED
         std::env::set_var("A2A_TLS_KEY", &key);
         let addr: SocketAddr = "0.0.0.0:9443".parse().unwrap();
         let err = grpc_server_tls_config(&addr).expect_err("empty PEM is not a cert");
-        assert!(
-            err.contains("has no certificates"),
-            "{err}"
-        );
+        assert!(err.contains("has no certificates"), "{err}");
         match prev_cert {
             Some(v) => std::env::set_var("A2A_TLS_CERT", v),
             None => std::env::remove_var("A2A_TLS_CERT"),

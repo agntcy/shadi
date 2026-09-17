@@ -22,20 +22,19 @@ pub mod auth;
 pub mod config;
 pub mod did_proof;
 pub mod freshness;
-pub mod github;
-pub mod oidc;
 pub mod ssh;
 pub mod trust_anchor;
 
 pub use admission::{Admission, AdmissionPolicy, Admitter, TrustedIssuer};
-pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
+pub use auth::{
+    build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth,
+};
 pub use did_proof::{
     looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
-pub use freshness::{ReplayCache, Sealed, A2A_PRINCIPAL_HINT_METADATA_KEY};
-pub use oidc::{OidcClaims, OidcVerifier};
-pub use trust_anchor::{Attestation, GithubAnchor, LocalAnchor, TrustAnchor};
+pub use freshness::{ReplayCache, Sealed};
+pub use trust_anchor::{Attestation, LocalAnchor, TrustAnchor};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
@@ -47,12 +46,11 @@ pub enum IdentityError {
     InvalidDid(String),
     Config(String),
     Proof(String),
-    /// The envelope signature does not match the DID it claims. Its own variant
-    /// rather than a `Proof` whose message says so, because admission has to
-    /// tell a forgery from a merely absent proof, and matching on the error
-    /// string made a reword a silent downgrade to "unauthenticated".
+    /// The envelope signature does not match the DID it claims. Its own
+    /// variant because admission has to tell a forgery from a merely absent
+    /// proof, and matching on the error string made a reword a silent
+    /// downgrade to "unauthenticated".
     ForgedDid(String),
-    Oidc(String),
 }
 
 impl fmt::Display for IdentityError {
@@ -64,7 +62,6 @@ impl fmt::Display for IdentityError {
             IdentityError::Config(e) => write!(f, "auth configuration error: {e}"),
             IdentityError::Proof(e) => write!(f, "DID proof error: {e}"),
             IdentityError::ForgedDid(e) => write!(f, "forged DID: {e}"),
-            IdentityError::Oidc(e) => write!(f, "OIDC error: {e}"),
         }
     }
 }
@@ -136,9 +133,9 @@ impl AgentIdentity {
 
     /// Same as [`Self::from_signing_key_bytes`] from a slice (must be 32 bytes).
     pub fn from_signing_key_slice(bytes: &[u8]) -> Result<Self, IdentityError> {
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| IdentityError::KeyGen("Ed25519 signing key must be 32 bytes".to_string()))?;
+        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+            IdentityError::KeyGen("Ed25519 signing key must be 32 bytes".to_string())
+        })?;
         Ok(Self::from_signing_key_bytes(&arr))
     }
 
@@ -195,7 +192,10 @@ pub fn verifier_config_from_dids<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
-    Ok(config::did_verifier_config(&jwks_from_dids(dids)?, audience))
+    Ok(config::did_verifier_config(
+        &jwks_from_dids(dids)?,
+        audience,
+    ))
 }
 
 /// Encode an Ed25519 public key as a `did:key` (`did:key:z<base58btc(0xed01 || pubkey)>`).
@@ -316,7 +316,10 @@ mod tests {
     #[test]
     fn parse_did_key_rejects_valid_base58_wrong_multicodec() {
         // Valid base58 multibase, but not the Ed25519 multicodec/length.
-        let bad = format!("did:key:z{}", bs58::encode([0x12u8, 0x00, 1, 2, 3]).into_string());
+        let bad = format!(
+            "did:key:z{}",
+            bs58::encode([0x12u8, 0x00, 1, 2, 3]).into_string()
+        );
         assert!(parse_did_key(&bad).is_err());
     }
 
@@ -328,7 +331,7 @@ mod tests {
         assert!(IdentityError::Pkcs8("x".into())
             .to_string()
             .contains("PKCS#8"));
-        assert!(            IdentityError::InvalidDid("x".into())
+        assert!(IdentityError::InvalidDid("x".into())
             .to_string()
             .contains("invalid did:key"));
         assert!(IdentityError::Proof("x".into())

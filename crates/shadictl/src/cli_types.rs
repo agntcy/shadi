@@ -121,7 +121,11 @@ pub(crate) struct MemoryCli {
     #[arg(long, env = "SHADI_MEMORY_KEY")]
     pub(crate) key: Option<String>,
 
-    #[arg(long = "key-name", env = "SHADI_MEMORY_KEY_NAME", default_value = "shadi/memory/sqlcipher_key")]
+    #[arg(
+        long = "key-name",
+        env = "SHADI_MEMORY_KEY_NAME",
+        default_value = "shadi/memory/sqlcipher_key"
+    )]
     pub(crate) key_name: String,
 
     #[command(subcommand)]
@@ -177,7 +181,10 @@ pub(crate) enum Commands {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "dir", about = "Interact with the AGNTCY Agent Directory (requires dirctl)")]
+#[command(
+    name = "dir",
+    about = "Interact with the AGNTCY Agent Directory (requires dirctl)"
+)]
 pub(crate) struct DirCli {
     /// GitHub token (PAT or OAuth) for authenticating to the AGNTCY Agent Directory.
     /// For CI: pass a PAT or the GitHub Actions token.
@@ -185,7 +192,11 @@ pub(crate) struct DirCli {
     /// Using the SHADI secret store (via --token-key) is preferred over passing this flag
     /// directly, because it keeps the token out of shell history and process listings.
     /// Also read from $DIRECTORY_CLIENT_GITHUB_TOKEN (the native dirctl env var).
-    #[arg(long = "gh-token", value_name = "TOKEN", env = "DIRECTORY_CLIENT_GITHUB_TOKEN")]
+    #[arg(
+        long = "gh-token",
+        value_name = "TOKEN",
+        env = "DIRECTORY_CLIENT_GITHUB_TOKEN"
+    )]
     pub(crate) gh_token: Option<String>,
 
     /// SHADI secret store key that holds the directory auth token.
@@ -207,7 +218,10 @@ pub(crate) struct SlimCli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum SlimCommand {
-    #[command(name = "start-node", about = "Run the local native SLIM node until interrupted")]
+    #[command(
+        name = "start-node",
+        about = "Run the local native SLIM node until interrupted"
+    )]
     StartNode,
     #[command(
         name = "a2a-echo-peer",
@@ -242,11 +256,12 @@ pub(crate) enum SlimCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ControllerCommand {
-    #[command(
-        about = "Push a ConfigurationCommand (connections/routes) to a controller endpoint"
-    )]
+    #[command(about = "Push a ConfigurationCommand (connections/routes) to a controller endpoint")]
     Connect(SlimControllerConnectArgs),
-    #[command(name = "list-routes", about = "List routes known to a controller endpoint")]
+    #[command(
+        name = "list-routes",
+        about = "List routes known to a controller endpoint"
+    )]
     ListRoutes(SlimControllerListArgs),
     #[command(
         name = "list-connections",
@@ -408,12 +423,14 @@ pub(crate) enum DirCommand {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "login",
+#[command(
+    name = "login",
     about = "Authenticate with the Agent Directory via GitHub OAuth and ingest the token into the SHADI secret store",
     long_about = "Runs `dirctl auth login` (GitHub OAuth browser flow), then reads the resulting \
         access token from dirctl's local cache and writes it into the SHADI secret store at \
         --token-key (default: dir/gh_token). Subsequent `shadictl dir` commands pick it up \
-        automatically.")]
+        automatically."
+)]
 pub(crate) struct DirLoginArgs {
     /// Show the authorization URL for manual opening instead of launching a browser.
     /// Use this in SSH/headless environments.
@@ -426,13 +443,20 @@ pub(crate) struct DirLoginArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "pull", about = "Fetch an OASF record and cache it in ~/.shadi/records/")]
+#[command(
+    name = "pull",
+    about = "Fetch an OASF record and cache it in ~/.shadi/records/"
+)]
 pub(crate) struct DirPullArgs {
     /// Record reference: CID, name, name:version, or name:version@cid
     pub(crate) reference: String,
     /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
-    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
-          default_value = "prod.gateway.ads.outshift.io:443")]
+    #[arg(
+        long = "server-addr",
+        value_name = "ADDR",
+        env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+        default_value = "prod.gateway.ads.outshift.io:443"
+    )]
     pub(crate) server_addr: String,
 }
 
@@ -444,7 +468,8 @@ pub(crate) struct DirPullArgs {
         OASF record already present in the directory.  Verification is performed locally \n\
         by default (sigstore TUF root + Rekor transparency log).  Use --oidc-issuer / \n\
         --oidc-subject to pin the signing identity, or --key to verify against a specific \n\
-        public key.  Use --from-server to rely on the server's cached result instead.")]
+        public key.  Use --from-server to rely on the server's cached result instead."
+)]
 pub(crate) struct DirVerifyArgs {
     /// Record CID to verify (e.g. bafkrei...).
     /// Obtain this from `dirctl pull <ref> --output json` or from the `dirctl search` output.
@@ -482,8 +507,12 @@ pub(crate) struct DirVerifyArgs {
 
     /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS).
     /// Needed to fetch the signature manifest from the directory.
-    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
-          default_value = "prod.gateway.ads.outshift.io:443")]
+    #[arg(
+        long = "server-addr",
+        value_name = "ADDR",
+        env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+        default_value = "prod.gateway.ads.outshift.io:443"
+    )]
     pub(crate) server_addr: String,
 }
 
@@ -493,13 +522,20 @@ pub(crate) struct DirInfoArgs {
     /// Record reference: CID, name, name:version, or name:version@cid
     pub(crate) reference: String,
     /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
-    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
-          default_value = "prod.gateway.ads.outshift.io:443")]
+    #[arg(
+        long = "server-addr",
+        value_name = "ADDR",
+        env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+        default_value = "prod.gateway.ads.outshift.io:443"
+    )]
     pub(crate) server_addr: String,
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "search", about = "Search the directory for agent records by skill")]
+#[command(
+    name = "search",
+    about = "Search the directory for agent records by skill"
+)]
 pub(crate) struct DirSearchArgs {
     /// OASF skill name to search for (repeatable, e.g. natural_language_processing)
     #[arg(long = "skill", value_name = "SKILL", action = ArgAction::Append)]
@@ -508,8 +544,12 @@ pub(crate) struct DirSearchArgs {
     #[arg(long = "limit", value_name = "N", default_value = "10")]
     pub(crate) limit: usize,
     /// Directory server address (overrides $DIRECTORY_CLIENT_SERVER_ADDRESS)
-    #[arg(long = "server-addr", value_name = "ADDR", env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
-          default_value = "prod.gateway.ads.outshift.io:443")]
+    #[arg(
+        long = "server-addr",
+        value_name = "ADDR",
+        env = "DIRECTORY_CLIENT_SERVER_ADDRESS",
+        default_value = "prod.gateway.ads.outshift.io:443"
+    )]
     pub(crate) server_addr: String,
 }
 
@@ -650,7 +690,10 @@ pub(crate) struct PolicyDiffArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "patch", about = "Send an incremental policy patch to a running sandbox session")]
+#[command(
+    name = "patch",
+    about = "Send an incremental policy patch to a running sandbox session"
+)]
 pub(crate) struct PolicyPatchArgs {
     #[arg(long = "socket", value_name = "PATH")]
     pub(crate) socket: PathBuf,
@@ -694,7 +737,10 @@ pub(crate) struct PolicyPatchArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "query", about = "Query the effective policy of a running sandbox session")]
+#[command(
+    name = "query",
+    about = "Query the effective policy of a running sandbox session"
+)]
 pub(crate) struct PolicyQueryArgs {
     #[arg(long = "socket", value_name = "PATH")]
     pub(crate) socket: PathBuf,
@@ -704,7 +750,10 @@ pub(crate) struct PolicyQueryArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "shell", about = "Interactive terminal for managing SHADI sandbox sessions")]
+#[command(
+    name = "shell",
+    about = "Interactive terminal for managing SHADI sandbox sessions"
+)]
 pub(crate) struct ShellArgs {
     /// Connect to a running sandbox session by control socket path
     #[arg(long = "socket", value_name = "PATH")]
@@ -807,7 +856,10 @@ pub(crate) enum MemoryCommand {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "did-from-gpg", about = "Create did:key DID document from a GPG Ed25519 public key")]
+#[command(
+    name = "did-from-gpg",
+    about = "Create did:key DID document from a GPG Ed25519 public key"
+)]
 pub(crate) struct DidFromGpgArgs {
     #[arg(
         short = 'k',
@@ -827,7 +879,12 @@ pub(crate) struct DidFromGpgArgs {
     )]
     pub(crate) input: Option<PathBuf>,
 
-    #[arg(short = 'o', long = "out", value_name = "FILE", default_value = "did-document.json")]
+    #[arg(
+        short = 'o',
+        long = "out",
+        value_name = "FILE",
+        default_value = "did-document.json"
+    )]
     pub(crate) out_file: PathBuf,
 }
 
@@ -890,19 +947,30 @@ pub(crate) struct DidFromSshArgs {
     #[arg(long = "passphrase-secret", value_name = "SECRET")]
     pub(crate) passphrase_secret: Option<String>,
 
-    #[arg(short = 'o', long = "out", value_name = "FILE", default_value = "did-document.json")]
+    #[arg(
+        short = 'o',
+        long = "out",
+        value_name = "FILE",
+        default_value = "did-document.json"
+    )]
     pub(crate) out_file: PathBuf,
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "get-secret", about = "Read a secret from the SHADI secret store")]
+#[command(
+    name = "get-secret",
+    about = "Read a secret from the SHADI secret store"
+)]
 pub(crate) struct GetSecretArgs {
     #[arg(long = "key", value_name = "KEY")]
     pub(crate) key: String,
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "derive-agent-did", about = "Derive an agent DID from a human GPG key")]
+#[command(
+    name = "derive-agent-did",
+    about = "Derive an agent DID from a human GPG key"
+)]
 pub(crate) struct DeriveAgentDidArgs {
     #[arg(
         short = 's',
@@ -942,7 +1010,10 @@ pub(crate) enum HumanIdentitySource {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "derive-agent-identity", about = "Derive one or more local agent identities from a human identity source")]
+#[command(
+    name = "derive-agent-identity",
+    about = "Derive one or more local agent identities from a human identity source"
+)]
 pub(crate) struct DeriveAgentIdentityArgs {
     #[arg(long = "source", value_enum, default_value = "gpg")]
     pub(crate) source: HumanIdentitySource,
@@ -971,7 +1042,6 @@ pub(crate) struct DeriveAgentIdentityArgs {
     #[arg(long = "prefix", value_name = "PATH", default_value = "agent_keys")]
     pub(crate) prefix: String,
 
-
     /// Secret-store reference holding the SSH key passphrase (`--source ssh`
     /// with an encrypted key). Never a literal argument — that would be visible
     /// via `ps`. `SHADI_SSH_PASSPHRASE` is also honoured.
@@ -985,7 +1055,10 @@ pub(crate) struct DeriveAgentIdentityArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "verify-agent-identity", about = "Verify an agent identity is derived from a human identity source")]
+#[command(
+    name = "verify-agent-identity",
+    about = "Verify an agent identity is derived from a human identity source"
+)]
 pub(crate) struct VerifyAgentIdentityArgs {
     #[arg(long = "source", value_enum, default_value = "gpg")]
     pub(crate) source: HumanIdentitySource,
@@ -1034,7 +1107,10 @@ pub(crate) struct VerifyAgentIdentityArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "put-key", about = "Store an OpenPGP key in the SHADI secret store")]
+#[command(
+    name = "put-key",
+    about = "Store an OpenPGP key in the SHADI secret store"
+)]
 pub(crate) struct PutKeyArgs {
     #[arg(short = 'k', long = "key", value_name = "SECRET")]
     pub(crate) key: String,

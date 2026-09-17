@@ -31,31 +31,70 @@ use shadi_sandbox::{control, PolicyPatch};
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show available commands (alias: /h)"),
     ("/status", "Show current session status (alias: /s)"),
-    ("/attach", "Attach to a running sandbox session by name or socket path"),
+    (
+        "/attach",
+        "Attach to a running sandbox session by name or socket path",
+    ),
     ("/detach", "Detach from the current session"),
     ("/kill", "Terminate the attached sandboxed process"),
-    ("/sessions", "Discover running SHADI sandbox control sockets"),
+    (
+        "/sessions",
+        "Discover running SHADI sandbox control sockets",
+    ),
     ("/config", "Show effective runtime configuration"),
-    ("/policy query", "Query the effective policy of the attached session"),
+    (
+        "/policy query",
+        "Query the effective policy of the attached session",
+    ),
     ("/policy patch", "Patch the policy of the attached session"),
-    ("/policy explain", "Explain resolved policy and source inputs"),
-    ("/policy diff", "Diff effective policy against a baseline profile"),
+    (
+        "/policy explain",
+        "Explain resolved policy and source inputs",
+    ),
+    (
+        "/policy diff",
+        "Diff effective policy against a baseline profile",
+    ),
     ("/trace list", "List recent trace log entries"),
     ("/trace summary", "Summarize trace logs by span name"),
     ("/slim status", "Show native SLIM shell status"),
-    ("/slim start node", "Start a local native SLIM node with SHADI mTLS defaults"),
-    ("/slim a2a-echo-peer", "Serve one task-backed A2A request over SLIMRPC"),
-    ("/slim a2a-send", "Send a unary or streaming A2A request over SLIMRPC"),
-    ("/slim create", "Create a SLIM group session for a channel name"),
-    ("/slim invite", "Invite a participant into the active SLIM group session"),
-    ("/slim invite-from", "Re-resolve a member spec live and invite matches already in the trust set"),
-    ("/slim join", "Wait for and join an invited SLIM group session"),
+    (
+        "/slim start node",
+        "Start a local native SLIM node with SHADI mTLS defaults",
+    ),
+    (
+        "/slim a2a-echo-peer",
+        "Serve one task-backed A2A request over SLIMRPC",
+    ),
+    (
+        "/slim a2a-send",
+        "Send a unary or streaming A2A request over SLIMRPC",
+    ),
+    (
+        "/slim create",
+        "Create a SLIM group session for a channel name",
+    ),
+    (
+        "/slim invite",
+        "Invite a participant into the active SLIM group session",
+    ),
+    (
+        "/slim invite-from",
+        "Re-resolve a member spec live and invite matches already in the trust set",
+    ),
+    (
+        "/slim join",
+        "Wait for and join an invited SLIM group session",
+    ),
     ("/snapshot list", "List git snapshot artifacts"),
     ("/snapshot show", "Show details of a git snapshot"),
     ("/resources", "Show resource usage of the sandboxed process"),
     ("/secrets list", "List available keychain secret keys"),
     ("/secrets rules", "Show secret delivery rules from policy"),
-    ("/secrets backend", "Show current secret backend configuration"),
+    (
+        "/secrets backend",
+        "Show current secret backend configuration",
+    ),
     ("/history", "Show command history"),
     ("/clear", "Clear the terminal screen"),
     ("/exit", "Exit the interactive shell (alias: /q, /quit)"),
@@ -800,12 +839,10 @@ impl ShellSession {
         };
 
         match policy_watch::query_policy(sock) {
-            Ok(policy) => {
-                match serde_json::to_string_pretty(&policy) {
-                    Ok(json) => println!("{}", json),
-                    Err(err) => eprintln!("error formatting policy: {}", err),
-                }
-            }
+            Ok(policy) => match serde_json::to_string_pretty(&policy) {
+                Ok(json) => println!("{}", json),
+                Err(err) => eprintln!("error formatting policy: {}", err),
+            },
             Err(err) => eprintln!("error querying policy: {}", err),
         }
         LoopAction::Continue
@@ -898,15 +935,13 @@ impl ShellSession {
         }
 
         match policy_watch::send_patch(sock, &patch) {
-            Ok(resp) => {
-                match serde_json::to_string_pretty(&resp) {
-                    Ok(json) => println!("{}", json),
-                    Err(_) => {
-                        println!("accepted: {}", resp.accepted);
-                        println!("message:  {}", resp.message);
-                    }
+            Ok(resp) => match serde_json::to_string_pretty(&resp) {
+                Ok(json) => println!("{}", json),
+                Err(_) => {
+                    println!("accepted: {}", resp.accepted);
+                    println!("message:  {}", resp.message);
                 }
-            }
+            },
             Err(err) => eprintln!("error patching policy: {}", err),
         }
         LoopAction::Continue
@@ -917,7 +952,10 @@ impl ShellSession {
         let sessions = control::prune_unreachable(control::discover_sockets(&dir));
 
         if sessions.is_empty() {
-            println!("no running SHADI sandbox sessions found in {}", dir.display());
+            println!(
+                "no running SHADI sandbox sessions found in {}",
+                dir.display()
+            );
         } else {
             println!("found {} session(s):", sessions.len());
             for sock in &sessions {
@@ -1021,13 +1059,7 @@ impl ShellSession {
             }
         }
         let path = resolve_trace_file(None);
-        if let Err(err) = trace_list(
-            &path,
-            limit,
-            name.as_deref(),
-            command.as_deref(),
-            exit_code,
-        ) {
+        if let Err(err) = trace_list(&path, limit, name.as_deref(), command.as_deref(), exit_code) {
             eprintln!("error: {}", err);
         }
         LoopAction::Continue
@@ -1417,16 +1449,10 @@ impl ShellSession {
                 println!();
                 println!("Memory:");
                 if let Some(rss) = r.rss_bytes {
-                    println!(
-                        "  RSS:     {}",
-                        snapshot_command::format_bytes(rss)
-                    );
+                    println!("  RSS:     {}", snapshot_command::format_bytes(rss));
                 }
                 if let Some(virt) = r.virtual_bytes {
-                    println!(
-                        "  Virtual: {}",
-                        snapshot_command::format_bytes(virt)
-                    );
+                    println!("  Virtual: {}", snapshot_command::format_bytes(virt));
                 }
                 if r.cpu_user_ms.is_some() || r.cpu_system_ms.is_some() {
                     println!();
@@ -1595,7 +1621,10 @@ pub(crate) fn run_shell_command(args: ShellArgs, initial_lines: &[String]) -> Ex
         } else {
             if use_color {
                 match &session.socket {
-                    Some(sock) => format!("\x1b[1;36mshadi\x1b[0m(\x1b[33m{}\x1b[0m)\x1b[1;36m>\x1b[0m ", short_socket_name(sock)),
+                    Some(sock) => format!(
+                        "\x1b[1;36mshadi\x1b[0m(\x1b[33m{}\x1b[0m)\x1b[1;36m>\x1b[0m ",
+                        short_socket_name(sock)
+                    ),
                     None => "\x1b[1;36mshadi>\x1b[0m ".to_string(),
                 }
             } else {
@@ -1666,7 +1695,13 @@ pub(crate) fn run_slim_create_group_command(args: SlimCreateGroupArgs) -> ExitCo
     }
 
     let initial = vec![format!("/slim create {}", args.channel)];
-    run_shell_command(ShellArgs { socket: None, attach: None }, &initial)
+    run_shell_command(
+        ShellArgs {
+            socket: None,
+            attach: None,
+        },
+        &initial,
+    )
 }
 
 /// Resolve `args.members`, union with any pre-existing `SLIM_MEMBER_DIDS`,
@@ -1732,12 +1767,17 @@ fn resolve_and_persist_group_trust(args: &SlimCreateGroupArgs) -> Result<(), Str
                 moderator_did,
                 members: trust_dids
                     .iter()
-                    .map(|did| slim_mas::MemberConfig { did: did.clone(), role: None })
+                    .map(|did| slim_mas::MemberConfig {
+                        did: did.clone(),
+                        role: None,
+                    })
                     .collect(),
             },
         );
         let config = slim_mas::MasConfig {
-            mas: Some(slim_mas::MasSettings { default_group: Some(args.channel.clone()) }),
+            mas: Some(slim_mas::MasSettings {
+                default_group: Some(args.channel.clone()),
+            }),
             groups,
         };
         match slim_mas::save_config(&config, path) {
@@ -1809,10 +1849,22 @@ fn print_banner(color: bool) {
 
     if color {
         println!("\x1b[1;36m{}\x1b[0m", border);
-        println!("\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[0], inner_width));
-        println!("\x1b[1;36m|\x1b[0m {} \x1b[1;36m|\x1b[0m", pad_display(&lines[1], inner_width));
-        println!("\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[2], inner_width));
-        println!("\x1b[1;36m|\x1b[0m \x1b[2m{}\x1b[0m \x1b[1;36m|\x1b[0m", pad_display(&lines[3], inner_width));
+        println!(
+            "\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m",
+            pad_display(&lines[0], inner_width)
+        );
+        println!(
+            "\x1b[1;36m|\x1b[0m {} \x1b[1;36m|\x1b[0m",
+            pad_display(&lines[1], inner_width)
+        );
+        println!(
+            "\x1b[1;36m|\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m|\x1b[0m",
+            pad_display(&lines[2], inner_width)
+        );
+        println!(
+            "\x1b[1;36m|\x1b[0m \x1b[2m{}\x1b[0m \x1b[1;36m|\x1b[0m",
+            pad_display(&lines[3], inner_width)
+        );
         println!("\x1b[1;36m{}\x1b[0m", border);
     } else {
         println!("{}", border);
@@ -1990,7 +2042,10 @@ mod tests {
         assert_continues(&mut s, "/policy patch --add-net-allow 1.1.1.1");
 
         let pending = s.pending_patch.as_ref().expect("pending patch");
-        assert_eq!(pending.socket, PathBuf::from("/tmp/shadi-fake-coverage.sock"));
+        assert_eq!(
+            pending.socket,
+            PathBuf::from("/tmp/shadi-fake-coverage.sock")
+        );
         assert_eq!(pending.patch.add_net_allow, vec!["1.1.1.1".to_string()]);
     }
 
@@ -2230,8 +2285,11 @@ mod tests {
         let _lock = crate::lock_test_env();
         let dir = tempfile::tempdir().expect("tempdir");
         let script = dir.path().join("fake_dirctl.sh");
-        std::fs::write(&script, "#!/bin/sh\ncase \"$1\" in search) ;; *) exit 1 ;; esac\n")
-            .expect("write script");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncase \"$1\" in search) ;; *) exit 1 ;; esac\n",
+        )
+        .expect("write script");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let _dirctl = ScopedEnvVar::set("SHADI_DIRCTL_BINARY", &script);
@@ -2323,7 +2381,10 @@ mod tests {
         let trust = trusted_dids_from_env();
         assert!(trust.contains("did:key:human"));
         assert!(trust.contains("did:key:agent"));
-        assert_eq!(std::env::var("SHADI_DIR_SERVER").as_deref(), Ok("localhost:8888"));
+        assert_eq!(
+            std::env::var("SHADI_DIR_SERVER").as_deref(),
+            Ok("localhost:8888")
+        );
     }
 
     #[test]
@@ -2413,7 +2474,10 @@ mod tests {
 
     #[test]
     fn given_session_when_slim_join_then_continues() {
-        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout 5");
+        assert_continues(
+            &mut session(),
+            "/slim join agntcy/shadi/secops-room --timeout 5",
+        );
     }
 
     #[test]
@@ -2423,12 +2487,18 @@ mod tests {
 
     #[test]
     fn given_session_when_slim_join_with_invalid_timeout_then_continues() {
-        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout nope");
+        assert_continues(
+            &mut session(),
+            "/slim join agntcy/shadi/secops-room --timeout nope",
+        );
     }
 
     #[test]
     fn given_session_when_slim_join_with_zero_timeout_then_continues() {
-        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --timeout 0");
+        assert_continues(
+            &mut session(),
+            "/slim join agntcy/shadi/secops-room --timeout 0",
+        );
     }
 
     #[test]
@@ -2438,7 +2508,10 @@ mod tests {
 
     #[test]
     fn given_session_when_slim_join_with_unknown_flag_then_continues() {
-        assert_continues(&mut session(), "/slim join agntcy/shadi/secops-room --bogus");
+        assert_continues(
+            &mut session(),
+            "/slim join agntcy/shadi/secops-room --bogus",
+        );
     }
 
     #[test]
@@ -2562,12 +2635,18 @@ mod tests {
 
     #[test]
     fn given_no_attachment_when_policy_patch_add_net_allow_then_continues() {
-        assert_continues(&mut session(), "/policy patch --add-net-allow api.example.com");
+        assert_continues(
+            &mut session(),
+            "/policy patch --add-net-allow api.example.com",
+        );
     }
 
     #[test]
     fn given_no_attachment_when_policy_patch_remove_net_allow_then_continues() {
-        assert_continues(&mut session(), "/policy patch --remove-net-allow api.example.com");
+        assert_continues(
+            &mut session(),
+            "/policy patch --remove-net-allow api.example.com",
+        );
     }
 
     #[test]
@@ -2625,47 +2704,74 @@ mod tests {
 
     #[test]
     fn given_attached_session_when_policy_patch_add_read_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --add-read /tmp");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-read /tmp",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_write_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --add-write /var/out");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-write /var/out",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --add-allow /opt/bin");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-allow /opt/bin",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_allow_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --add-allow-command npm");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-allow-command npm",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_allow_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --remove-allow-command npm");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --remove-allow-command npm",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_block_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --add-block-command curl");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-block-command curl",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_block_command_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --remove-block-command curl");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --remove-block-command curl",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_add_net_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --add-net-allow api.example.com");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --add-net-allow api.example.com",
+        );
     }
 
     #[test]
     fn given_attached_session_when_policy_patch_remove_net_allow_then_continues() {
-        assert_continues(&mut attached_session(), "/policy patch --force --remove-net-allow api.example.com");
+        assert_continues(
+            &mut attached_session(),
+            "/policy patch --force --remove-net-allow api.example.com",
+        );
     }
 
     #[test]
@@ -2821,13 +2927,8 @@ mod tests {
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
         let helper = rl.helper().unwrap();
-        let (start, candidates) = Completer::complete(
-            helper,
-            "/slim start ",
-            12,
-            &Context::new(rl.history()),
-        )
-        .unwrap();
+        let (start, candidates) =
+            Completer::complete(helper, "/slim start ", 12, &Context::new(rl.history())).unwrap();
         assert_eq!(start, 12);
         assert!(
             candidates.iter().any(|c| c.display == "node"),
@@ -2842,9 +2943,13 @@ mod tests {
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
         let helper = rl.helper().unwrap();
-        let (start, candidates) =
-            Completer::complete(helper, "/policy patch --add-r", 21, &Context::new(rl.history()))
-                .unwrap();
+        let (start, candidates) = Completer::complete(
+            helper,
+            "/policy patch --add-r",
+            21,
+            &Context::new(rl.history()),
+        )
+        .unwrap();
         assert_eq!(start, 14);
         assert!(
             candidates.iter().any(|c| c.display == "--add-read"),
@@ -2879,7 +2984,10 @@ mod tests {
         let helper = rl.helper().unwrap();
         let (_start, candidates) =
             Completer::complete(helper, "", 0, &Context::new(rl.history())).unwrap();
-        assert!(!candidates.is_empty(), "empty line should list all commands");
+        assert!(
+            !candidates.is_empty(),
+            "empty line should list all commands"
+        );
     }
 
     #[test]
@@ -2889,10 +2997,17 @@ mod tests {
         let mut rl = Editor::with_config(rl_config).unwrap();
         rl.set_helper(Some(helper));
         let helper = rl.helper().unwrap();
-        let (_start, candidates) =
-            Completer::complete(helper, "/policy patch /tmp/foo", 22, &Context::new(rl.history()))
-                .unwrap();
-        assert!(candidates.is_empty(), "non-flag token should have no completions");
+        let (_start, candidates) = Completer::complete(
+            helper,
+            "/policy patch /tmp/foo",
+            22,
+            &Context::new(rl.history()),
+        )
+        .unwrap();
+        assert!(
+            candidates.is_empty(),
+            "non-flag token should have no completions"
+        );
     }
 
     // ── help detail ──────────────────────────────────────────
@@ -3398,17 +3513,20 @@ mod tests {
 
         let mut s = session();
         assert_continues(&mut s, &format!("/attach {}", path.display()));
-        assert!(s.socket.is_none(), "socket should remain unset after failed query");
+        assert!(
+            s.socket.is_none(),
+            "socket should remain unset after failed query"
+        );
     }
 
     /// Exercises the `Ok` branch of `cmd_attach`: the path is a live control
     /// socket that responds to a policy query, so `self.socket` is set.
     #[test]
     fn given_live_socket_when_attach_then_sets_socket() {
+        use shadi_sandbox::SandboxPolicy;
         use std::collections::HashSet;
         use std::sync::atomic::{AtomicBool, AtomicU32};
         use std::sync::{Arc, Mutex};
-        use shadi_sandbox::SandboxPolicy;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let sock_path = dir.path().join("shadi-ctl-attach-success.sock");
@@ -3426,8 +3544,8 @@ mod tests {
             live_net_allowlist: None,
         }));
 
-        let _handle = policy_watch::start_control_socket(&sock_path, live)
-            .expect("start control socket");
+        let _handle =
+            policy_watch::start_control_socket(&sock_path, live).expect("start control socket");
 
         // Poll until the socket is ready (up to 2 s).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -3445,7 +3563,10 @@ mod tests {
 
         let mut s = session();
         assert_continues(&mut s, &format!("/attach {}", sock_path.display()));
-        assert!(s.socket.is_some(), "socket should be set after successful attach");
+        assert!(
+            s.socket.is_some(),
+            "socket should be set after successful attach"
+        );
     }
 
     // ── /attach completion session listing ───────────────────

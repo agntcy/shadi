@@ -65,7 +65,11 @@ pub async fn memory_get(scope: String, entry_key: String) -> Result<MemoryEntry,
 
 /// Search memory entries by query (`shadictl memory search`).
 #[tauri::command]
-pub async fn memory_search(scope: Option<String>, query: String, limit: usize) -> Result<Vec<MemoryEntry>, String> {
+pub async fn memory_search(
+    scope: Option<String>,
+    query: String,
+    limit: usize,
+) -> Result<Vec<MemoryEntry>, String> {
     let _ = (scope, query, limit);
     not_implemented(PANEL_ISSUE)
 }

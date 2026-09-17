@@ -12,41 +12,48 @@ use crate::{
 };
 use tracing::{info, warn};
 
+use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS, HANDLE_FLAG_INHERIT,
-    SetHandleInformation,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
+    HANDLE_FLAG_INHERIT,
 };
-use windows_sys::Win32::Security::{
-    DeriveCapabilitySidsFromName, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, NO_INHERITANCE,
+use windows_sys::Win32::Security::Authorization::{
+    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
+    GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows_sys::Win32::Security::Authorization::{
-    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, TRUSTEE_IS_SID,
-    TRUSTEE_W, GRANT_ACCESS, SE_FILE_OBJECT,
-};
 use windows_sys::Win32::Security::ACL;
+use windows_sys::Win32::Security::{
+    DeriveCapabilitySidsFromName, NO_INHERITANCE, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+};
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-    DeleteProcThreadAttributeList, PROCESS_INFORMATION, STARTUPINFOEXW,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+    UpdateProcThreadAttribute, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
 };
-use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
-pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
+pub fn spawn_sandboxed(
+    command: &mut Command,
+    policy: &SandboxPolicy,
+) -> Result<SandboxedChild, SandboxError> {
     let program = command.get_program().to_string_lossy().to_string();
-    let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
     let environment = build_environment_block(command);
     let current_dir = command.get_current_dir().map(path_to_wide);
-    let inherited_handles = extract_inherited_handles(command).map_err(SandboxError::ApplyFailed)?;
+    let inherited_handles =
+        extract_inherited_handles(command).map_err(SandboxError::ApplyFailed)?;
     let profile_name = sandbox_profile_name();
 
     // On Windows, kernel-level TCP channel enforcement (equivalent to Linux
@@ -95,8 +102,8 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     let appcontainer = AppContainer::new(&profile_name, policy.net_blocked())
         .map_err(SandboxError::ApplyFailed)?;
 
-    let mut rollbacks = apply_policy_acl_grants(appcontainer.sid(), policy)
-        .map_err(SandboxError::ApplyFailed)?;
+    let mut rollbacks =
+        apply_policy_acl_grants(appcontainer.sid(), policy).map_err(SandboxError::ApplyFailed)?;
 
     let process_info = match spawn_appcontainer_process(
         &program,
@@ -238,7 +245,8 @@ fn create_or_derive_appcontainer_sid(name: &str) -> Result<*mut core::ffi::c_voi
 
     if rc != 0 {
         if is_already_exists_hresult(rc) {
-            let derive_rc = unsafe { DeriveAppContainerSidFromAppContainerName(name_w.as_ptr(), &mut sid) };
+            let derive_rc =
+                unsafe { DeriveAppContainerSidFromAppContainerName(name_w.as_ptr(), &mut sid) };
             if derive_rc != 0 {
                 return Err(hresult_error_message(
                     "DeriveAppContainerSidFromAppContainerName",
@@ -253,7 +261,8 @@ fn create_or_derive_appcontainer_sid(name: &str) -> Result<*mut core::ffi::c_voi
     Ok(sid)
 }
 
-fn derive_internet_client_capabilities() -> Result<(*mut SID_AND_ATTRIBUTES, *mut SID_AND_ATTRIBUTES, u32), String> {
+fn derive_internet_client_capabilities(
+) -> Result<(*mut SID_AND_ATTRIBUTES, *mut SID_AND_ATTRIBUTES, u32), String> {
     let cap_name = to_wide("internetClient");
     let mut caps_raw: *mut *mut core::ffi::c_void = std::ptr::null_mut();
     let mut group_caps_raw: *mut *mut core::ffi::c_void = std::ptr::null_mut();
@@ -342,7 +351,9 @@ impl ProcThreadAttributeList {
             InitializeProcThreadAttributeList(std::ptr::null_mut(), count, 0, &mut size);
         }
         if size == 0 {
-            return Err(last_win32_error_message("InitializeProcThreadAttributeList"));
+            return Err(last_win32_error_message(
+                "InitializeProcThreadAttributeList",
+            ));
         }
 
         let mut buffer = vec![0u8; size];
@@ -350,7 +361,9 @@ impl ProcThreadAttributeList {
             as windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST;
         let ok = unsafe { InitializeProcThreadAttributeList(list, count, 0, &mut size) };
         if ok == 0 {
-            return Err(last_win32_error_message("InitializeProcThreadAttributeList"));
+            return Err(last_win32_error_message(
+                "InitializeProcThreadAttributeList",
+            ));
         }
 
         Ok(Self {
@@ -568,12 +581,17 @@ fn extract_inherited_handles(command: &Command) -> Result<Vec<HANDLE>, String> {
             continue;
         };
 
-        for raw in value.to_string_lossy().split(',').filter(|part| !part.is_empty()) {
+        for raw in value
+            .to_string_lossy()
+            .split(',')
+            .filter(|part| !part.is_empty())
+        {
             let handle_value = raw
                 .parse::<usize>()
                 .map_err(|_| format!("invalid inherited handle value '{}'", raw))?;
             let handle = handle_value as HANDLE;
-            let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+            let ok =
+                unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
             if ok == 0 {
                 return Err(last_win32_error_message("SetHandleInformation"));
             }
@@ -720,9 +738,8 @@ fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
     }
 
     let dacl_sddl = unsafe {
-        let value = std::ffi::OsString::from_wide(
-            std::slice::from_raw_parts(sddl_ptr, sddl_len as usize),
-        );
+        let value =
+            std::ffi::OsString::from_wide(std::slice::from_raw_parts(sddl_ptr, sddl_len as usize));
         LocalFree(sddl_ptr as *mut _);
         value.to_string_lossy().to_string()
     };
@@ -840,7 +857,9 @@ mod tests {
     #[test]
     fn already_exists_hresult_matches_raw_and_wrapped_forms() {
         assert!(is_already_exists_hresult(ERROR_ALREADY_EXISTS as i32));
-        assert!(is_already_exists_hresult(0x8007_0000u32.wrapping_add(ERROR_ALREADY_EXISTS) as i32));
+        assert!(is_already_exists_hresult(
+            0x8007_0000u32.wrapping_add(ERROR_ALREADY_EXISTS) as i32
+        ));
         assert!(!is_already_exists_hresult(5));
     }
 
@@ -855,7 +874,9 @@ mod tests {
     #[test]
     fn reparse_point_attribute_detection_works() {
         assert!(is_reparse_point_attributes(FILE_ATTRIBUTE_REPARSE_POINT));
-        assert!(is_reparse_point_attributes(FILE_ATTRIBUTE_REPARSE_POINT | 0x20));
+        assert!(is_reparse_point_attributes(
+            FILE_ATTRIBUTE_REPARSE_POINT | 0x20
+        ));
         assert!(!is_reparse_point_attributes(0));
     }
 }

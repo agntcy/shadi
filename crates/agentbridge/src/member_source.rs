@@ -274,15 +274,12 @@ pub fn resolve_adapter_peer(
         dir: dir.clone(),
     }
     .resolve()?;
-    found
-        .into_iter()
-        .find(|c| c.did == did)
-        .ok_or_else(|| {
-            format!(
-                "DID {did} was not found locally or in the Agent Directory. \
+    found.into_iter().find(|c| c.did == did).ok_or_else(|| {
+        format!(
+            "DID {did} was not found locally or in the Agent Directory. \
                  Re-register the adapter (new URL, same DID) or pass --a2a-url"
-            )
-        })
+        )
+    })
 }
 
 /// Resolve a portable name (DID, tool name, or SLIM channel) to locators.
@@ -678,7 +675,10 @@ mod tests {
         assert!(err.contains("did:key:zMissing"), "{err}");
     }
 
-    fn temp_registry() -> (tempfile::TempDir, crate::local_registry::LocalAdapterRegistry) {
+    fn temp_registry() -> (
+        tempfile::TempDir,
+        crate::local_registry::LocalAdapterRegistry,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let registry =
             crate::local_registry::LocalAdapterRegistry::with_dir(dir.path().to_path_buf());
@@ -708,10 +708,7 @@ mod tests {
             .unwrap();
         let by_name = resolve_adapter_peer("copilot", &registry, None).expect("name");
         assert_eq!(by_name.did, "did:key:zCopilot");
-        assert_eq!(
-            by_name.a2a_url.as_deref(),
-            Some("http://127.0.0.1:50151")
-        );
+        assert_eq!(by_name.a2a_url.as_deref(), Some("http://127.0.0.1:50151"));
         let by_did = resolve_adapter_peer("did:key:zCopilot", &registry, None).expect("did");
         assert_eq!(by_did.name, "copilot");
         assert_eq!(by_did.a2a_url, by_name.a2a_url);
@@ -1116,7 +1113,8 @@ esac
         let (script, _dir) = fake_dirctl_script("bafkreiother", &record.to_string());
         std::env::set_var("SHADI_DIRCTL_BINARY", &script);
         let (_tmp, registry) = temp_registry();
-        let err = resolve_adapter_peer("did:key:zWanted", &registry, Some(&test_dir())).unwrap_err();
+        let err =
+            resolve_adapter_peer("did:key:zWanted", &registry, Some(&test_dir())).unwrap_err();
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         assert!(err.contains("was not found"), "{err}");
         assert!(err.contains("did:key:zWanted"), "{err}");

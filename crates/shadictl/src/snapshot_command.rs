@@ -64,9 +64,7 @@ pub(crate) fn snapshot_list(dir_override: Option<&str>) {
             .pointer("/git/any_repo_changed")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let exit_code = entry
-            .pointer("/outcome/exit_code")
-            .and_then(|v| v.as_i64());
+        let exit_code = entry.pointer("/outcome/exit_code").and_then(|v| v.as_i64());
         let cmd = entry["command"]
             .as_array()
             .map(|a| {
@@ -129,9 +127,7 @@ fn print_snapshot_summary(snapshot: &Value) {
     let exit_code = snapshot
         .pointer("/outcome/exit_code")
         .and_then(|v| v.as_i64());
-    let error = snapshot
-        .pointer("/outcome/error")
-        .and_then(|v| v.as_str());
+    let error = snapshot.pointer("/outcome/error").and_then(|v| v.as_str());
     let duration_ms = snapshot
         .pointer("/timestamps/duration_ms")
         .and_then(|v| v.as_u64());
@@ -158,20 +154,29 @@ fn print_snapshot_summary(snapshot: &Value) {
     println!();
 
     if changed {
-        println!("Git changes detected ({} repository/ies changed):", repos_changed);
+        println!(
+            "Git changes detected ({} repository/ies changed):",
+            repos_changed
+        );
         print_repositories(snapshot);
     } else {
         println!("No git changes detected");
     }
 
     // Show snapshot file location.
-    if let Some(file) = snapshot.pointer("/layout/snapshot_file").and_then(|v| v.as_str()) {
+    if let Some(file) = snapshot
+        .pointer("/layout/snapshot_file")
+        .and_then(|v| v.as_str())
+    {
         println!("\nArtifact: {}", file);
     }
 }
 
 fn print_repositories(snapshot: &Value) {
-    let repos = match snapshot.pointer("/git/repositories").and_then(|v| v.as_array()) {
+    let repos = match snapshot
+        .pointer("/git/repositories")
+        .and_then(|v| v.as_array())
+    {
         Some(repos) => repos,
         None => {
             // Fall back to top-level diff_summary.
@@ -189,7 +194,15 @@ fn print_repositories(snapshot: &Value) {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        println!("  {} {}", root, if repo_changed { "(changed)" } else { "(unchanged)" });
+        println!(
+            "  {} {}",
+            root,
+            if repo_changed {
+                "(changed)"
+            } else {
+                "(unchanged)"
+            }
+        );
 
         if let Some(comp) = repo.get("comparison") {
             if comp["head_changed"].as_bool().unwrap_or(false) {
@@ -201,7 +214,11 @@ fn print_repositories(snapshot: &Value) {
                     .pointer("/after/head")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                println!("    HEAD: {} → {}", &before[..7.min(before.len())], &after[..7.min(after.len())]);
+                println!(
+                    "    HEAD: {} → {}",
+                    &before[..7.min(before.len())],
+                    &after[..7.min(after.len())]
+                );
             }
         }
 
@@ -279,7 +296,10 @@ mod tests {
 
     #[test]
     fn snapshot_show_handles_missing_file() {
-        snapshot_show("nonexistent-id", Some("/tmp/shadi-nonexistent-snapshot-dir-test"));
+        snapshot_show(
+            "nonexistent-id",
+            Some("/tmp/shadi-nonexistent-snapshot-dir-test"),
+        );
     }
 
     #[test]

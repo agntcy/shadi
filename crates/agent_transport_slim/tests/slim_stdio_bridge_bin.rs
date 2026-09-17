@@ -162,9 +162,7 @@ fn given_help_flag_when_bridge_bin_runs_then_usage_is_printed() {
         .expect("run bridge help");
 
     assert!(output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Usage: slim-stdio-bridge")
-    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: slim-stdio-bridge"));
 }
 
 #[test]
@@ -194,9 +192,7 @@ fn given_missing_runtime_material_when_bridge_bin_runs_then_runtime_error_is_rep
         .expect("run bridge runtime error");
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("no SLIM client certificate found")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no SLIM client certificate found"));
 }
 
 #[cfg(not(windows))]
@@ -208,7 +204,8 @@ fn given_generated_assets_when_bridge_bin_runs_then_stdio_bridge_completes_succe
     let server_tls = server_tls_material(&tls_dir);
     let participant_tls = client_tls_material(&tls_dir, "secops-a");
 
-    let node_service = slim_bindings::Service::new(format!("slim-bridge-bin-test-node-{}", std::process::id()));
+    let node_service =
+        slim_bindings::Service::new(format!("slim-bridge-bin-test-node-{}", std::process::id()));
     node_service
         .run_server(build_server_config(&endpoint, &server_tls))
         .expect("start local SLIM node");
@@ -221,13 +218,20 @@ fn given_generated_assets_when_bridge_bin_runs_then_stdio_bridge_completes_succe
             "slim-bridge-bin-test-participant-{}",
             std::process::id()
         ));
-        let participant_name = slim_bindings::Name::from_string("agntcy/shadi/secops-a".to_string())
-            .map_err(format_slim_error)?;
+        let participant_name =
+            slim_bindings::Name::from_string("agntcy/shadi/secops-a".to_string())
+                .map_err(format_slim_error)?;
         let connection_id = participant_service
-            .connect(build_client_config(&endpoint_for_participant, &participant_tls))
+            .connect(build_client_config(
+                &endpoint_for_participant,
+                &participant_tls,
+            ))
             .map_err(format_slim_error)?;
         let participant_app = participant_service
-            .create_app_with_secret(std::sync::Arc::new(participant_name.clone()), TEST_SHARED_SECRET.to_string())
+            .create_app_with_secret(
+                std::sync::Arc::new(participant_name.clone()),
+                TEST_SHARED_SECRET.to_string(),
+            )
             .map_err(format_slim_error)?;
 
         participant_app

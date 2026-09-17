@@ -164,13 +164,21 @@ mod tests {
             GroupConfig {
                 moderator_did: Some("did:key:moderator".to_string()),
                 members: vec![
-                    MemberConfig { did: "did:key:a".to_string(), role: None },
-                    MemberConfig { did: "did:key:b".to_string(), role: Some("agent".to_string()) },
+                    MemberConfig {
+                        did: "did:key:a".to_string(),
+                        role: None,
+                    },
+                    MemberConfig {
+                        did: "did:key:b".to_string(),
+                        role: Some("agent".to_string()),
+                    },
                 ],
             },
         );
         let config = MasConfig {
-            mas: Some(MasSettings { default_group: Some("discovered-room".to_string()) }),
+            mas: Some(MasSettings {
+                default_group: Some("discovered-room".to_string()),
+            }),
             groups,
         };
 
@@ -190,7 +198,10 @@ mod tests {
         let mut groups = BTreeMap::new();
         groups.insert(
             "room".to_string(),
-            GroupConfig { moderator_did: None, members: vec![] },
+            GroupConfig {
+                moderator_did: None,
+                members: vec![],
+            },
         );
         let config = MasConfig { mas: None, groups };
 

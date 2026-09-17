@@ -1,10 +1,10 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{AgentVerifier, SecretError, SecretResult, SecretStore};
 use crate::memory::SecretBytes;
 use crate::policy::SecretPolicy;
 use crate::session::SessionContext;
+use crate::{AgentVerifier, SecretError, SecretResult, SecretStore};
 
 pub struct AgentSecretAccess<'a> {
     store: &'a dyn SecretStore,
@@ -27,7 +27,11 @@ impl<'a> AgentSecretAccess<'a> {
         self.store.put(key, secret, policy)
     }
 
-    pub fn get_for_session(&self, session: &SessionContext, key: &str) -> SecretResult<SecretBytes> {
+    pub fn get_for_session(
+        &self,
+        session: &SessionContext,
+        key: &str,
+    ) -> SecretResult<SecretBytes> {
         self.verifier.verify(session)?;
         self.store.get(key)
     }

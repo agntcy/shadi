@@ -20,7 +20,11 @@ pub struct DirRecordSummary {
 
 /// Search the directory for agent records by skill (`shadictl dir search`).
 #[tauri::command]
-pub async fn dir_search(skill: String, dir_server: String, limit: usize) -> Result<Vec<DirRecordSummary>, String> {
+pub async fn dir_search(
+    skill: String,
+    dir_server: String,
+    limit: usize,
+) -> Result<Vec<DirRecordSummary>, String> {
     let _ = (skill, dir_server, limit);
     not_implemented(PANEL_ISSUE)
 }

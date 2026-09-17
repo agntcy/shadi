@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -136,10 +136,7 @@ pub fn run_stdio_bridge(args: BridgeArgs) -> Result<(), String> {
     writeln!(
         stderr,
         "connected SLIM stdio bridge as {} to {} {} session {}",
-        info.local_name,
-        info.mode,
-        info.target,
-        info.session_id
+        info.local_name, info.mode, info.target, info.session_id
     )
     .map_err(io_error)?;
 
@@ -148,8 +145,7 @@ pub fn run_stdio_bridge(args: BridgeArgs) -> Result<(), String> {
     writeln!(
         stderr,
         "published {} SLIM messages and received {} SLIM messages",
-        report.published,
-        report.received
+        report.published, report.received
     )
     .map_err(io_error)?;
     Ok(())
@@ -332,7 +328,10 @@ mod tests {
 
     #[test]
     fn given_channel_args_when_parsed_then_group_mode_is_selected() {
-        let args = vec!["--channel".to_string(), "agntcy/shadi/secops-room".to_string()];
+        let args = vec![
+            "--channel".to_string(),
+            "agntcy/shadi/secops-room".to_string(),
+        ];
 
         let parsed = parse_bridge_args(&args).expect("parse args");
         match parsed.bootstrap {
@@ -346,7 +345,10 @@ mod tests {
 
     #[test]
     fn given_destination_args_when_parsed_then_point_to_point_mode_is_selected() {
-        let args = vec!["--destination".to_string(), "agntcy/shadi/avatar".to_string()];
+        let args = vec![
+            "--destination".to_string(),
+            "agntcy/shadi/avatar".to_string(),
+        ];
 
         let parsed = parse_bridge_args(&args).expect("parse args");
         match parsed.bootstrap {

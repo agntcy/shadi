@@ -179,16 +179,17 @@ pub async fn sandbox_list_sessions(
         // deleting endpoints as a side effect of looking at them would be a
         // surprise from a panel.
         let dir = control::socket_dir();
-        let mut found: Vec<SandboxSession> = control::classify_sockets(control::discover_sockets(&dir))
-            .into_iter()
-            .filter(|(_, reachable)| *reachable)
-            .map(|(path, _)| SandboxSession {
-                name: control::session_name_from_path(&path),
-                session_id: path.to_string_lossy().into_owned(),
-                pid: None,
-                launched_here: false,
-            })
-            .collect();
+        let mut found: Vec<SandboxSession> =
+            control::classify_sockets(control::discover_sockets(&dir))
+                .into_iter()
+                .filter(|(_, reachable)| *reachable)
+                .map(|(path, _)| SandboxSession {
+                    name: control::session_name_from_path(&path),
+                    session_id: path.to_string_lossy().into_owned(),
+                    pid: None,
+                    launched_here: false,
+                })
+                .collect();
 
         let mut owned = sessions.lock().map_err(lock_poisoned)?;
         owned.retain(|_, launched| launched.child.try_wait().ok().flatten().is_none());
@@ -357,7 +358,10 @@ mod tests {
         let mut c = config();
         c.write = vec!["/nonexistent-shadi-path".to_string()];
         let err = policy_from_config(&c).unwrap_err();
-        assert!(err.starts_with("invalid write path /nonexistent-shadi-path"), "{err}");
+        assert!(
+            err.starts_with("invalid write path /nonexistent-shadi-path"),
+            "{err}"
+        );
     }
 
     #[test]

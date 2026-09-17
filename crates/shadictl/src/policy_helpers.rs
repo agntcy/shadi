@@ -12,7 +12,10 @@ pub(crate) fn format_policy(
 
 /// Map this binary's `Cli` and `PolicyFile` onto the layering rules in
 /// `shadi_sandbox::resolve`, which the desktop app resolves policy with too.
-pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy, String> {
+pub(crate) fn resolve_policy(
+    cli: &Cli,
+    file_policy: &PolicyFile,
+) -> Result<ResolvedPolicy, String> {
     let overrides = PolicyOverrides {
         profile: cli.profile.map(|profile| match profile {
             LauncherProfile::Strict => SandboxProfile::Strict,
@@ -100,7 +103,10 @@ pub(crate) fn load_policy_file(path: &Path) -> std::io::Result<PolicyFile> {
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
 
-pub(crate) fn inject_keychain_secrets(command: &mut Command, mappings: &[String]) -> Result<(), String> {
+pub(crate) fn inject_keychain_secrets(
+    command: &mut Command,
+    mappings: &[String],
+) -> Result<(), String> {
     if mappings.is_empty() {
         return Ok(());
     }
@@ -142,4 +148,3 @@ pub(crate) fn parse_key_env(value: &str) -> Result<(&str, &str), String> {
     }
     Ok((key, env))
 }
-

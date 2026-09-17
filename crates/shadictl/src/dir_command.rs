@@ -31,14 +31,17 @@ struct DirctlCachedToken {
 /// Mirrors the logic in `client.NewTokenCache()` in the dirctl Go source:
 /// `$XDG_CONFIG_HOME/dirctl/auth-token.json` or `~/.config/dirctl/auth-token.json`.
 fn dirctl_token_cache_path() -> Option<PathBuf> {
-    let config_home = std::env::var("XDG_CONFIG_HOME").ok()
-        .or_else(|| {
-            std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
-                .ok()
-                .map(|h| format!("{h}/.config"))
-        })?;
-    Some(PathBuf::from(config_home).join("dirctl").join("auth-token.json"))
+    let config_home = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()
+            .map(|h| format!("{h}/.config"))
+    })?;
+    Some(
+        PathBuf::from(config_home)
+            .join("dirctl")
+            .join("auth-token.json"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +116,7 @@ fn server_addr_args(server_addr: &str) -> Vec<&str> {
 /// prevent it from appearing in process listings.
 fn apply_token_auth(cmd: &mut Command, token: &str) {
     cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "github")
-       .env("DIRECTORY_CLIENT_GITHUB_TOKEN", token);
+        .env("DIRECTORY_CLIENT_GITHUB_TOKEN", token);
 }
 
 /// Print a human-readable one-line summary of an OASF record to stderr.
@@ -140,7 +143,10 @@ fn print_record_summary(record: &OasfRecord, reference: &str) {
         eprintln!("  domains: {}", domain_names.join(", "));
     }
     for locator in &record.locators {
-        let urls: Vec<&str> = locator.urls.iter().map(String::as_str)
+        let urls: Vec<&str> = locator
+            .urls
+            .iter()
+            .map(String::as_str)
             .chain(locator.url.as_deref())
             .collect();
         eprintln!("  {}: {}", locator.locator_type, urls.join(", "));
@@ -174,8 +180,8 @@ fn run_dir_login(args: DirLoginArgs, token_key: &str) -> ExitCode {
 
     // Inherit stdio — GitHub OAuth flow is interactive.
     cmd.stdin(std::process::Stdio::inherit())
-       .stdout(std::process::Stdio::inherit())
-       .stderr(std::process::Stdio::inherit());
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
 
     let status = match cmd.status() {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -207,13 +213,19 @@ fn run_dir_login(args: DirLoginArgs, token_key: &str) -> ExitCode {
 
     match ingest_dirctl_token(&cache_path, token_key) {
         Ok(()) => {
-            eprintln!("token ingested into SHADI secret store at key: {}", token_key);
+            eprintln!(
+                "token ingested into SHADI secret store at key: {}",
+                token_key
+            );
             ExitCode::from(0)
         }
         Err(e) => {
             // Login succeeded; only the SHADI ingestion step failed — warn but
             // don't surface a non-zero exit code so the user can still proceed.
-            eprintln!("warning: login succeeded but SHADI store ingestion failed: {}", e);
+            eprintln!(
+                "warning: login succeeded but SHADI store ingestion failed: {}",
+                e
+            );
             ExitCode::from(0)
         }
     }
@@ -221,16 +233,19 @@ fn run_dir_login(args: DirLoginArgs, token_key: &str) -> ExitCode {
 
 /// Read dirctl's cached access token and write it into the SHADI secret store.
 fn ingest_dirctl_token(cache_path: &PathBuf, token_key: &str) -> Result<(), String> {
-    let data = std::fs::read(cache_path)
-        .map_err(|e| format!("read {}: {}", cache_path.display(), e))?;
+    let data =
+        std::fs::read(cache_path).map_err(|e| format!("read {}: {}", cache_path.display(), e))?;
     let cached: DirctlCachedToken = serde_json::from_slice(&data)
         .map_err(|e| format!("parse {}: {}", cache_path.display(), e))?;
     let store = default_secret_store();
     store
-        .put(token_key, cached.access_token.as_bytes(), SecretPolicy::default())
+        .put(
+            token_key,
+            cached.access_token.as_bytes(),
+            SecretPolicy::default(),
+        )
         .map_err(|e| format!("secret store put: {}", e))
 }
-
 
 /// Return the `dirctl` binary to invoke.
 /// `SHADI_DIRCTL_BINARY` overrides the default `dirctl` in PATH, which lets
@@ -245,10 +260,10 @@ fn run_dir_pull(args: DirPullArgs, oidc_token: Option<&str>) -> ExitCode {
 
     let mut cmd = Command::new(dirctl_binary());
     cmd.arg("pull")
-       .arg(&args.reference)
-       .args(&server_args)
-       .arg("--output")
-       .arg("json");
+        .arg(&args.reference)
+        .args(&server_args)
+        .arg("--output")
+        .arg("json");
     if let Some(token) = oidc_token {
         apply_token_auth(&mut cmd, token);
     }
@@ -306,9 +321,7 @@ fn run_dir_info(args: DirInfoArgs, oidc_token: Option<&str>) -> ExitCode {
     let server_args = server_addr_args(&args.server_addr);
 
     let mut cmd = Command::new(dirctl_binary());
-    cmd.arg("info")
-       .arg(&args.reference)
-       .args(&server_args);
+    cmd.arg("info").arg(&args.reference).args(&server_args);
     if let Some(token) = oidc_token {
         apply_token_auth(&mut cmd, token);
     }
@@ -372,9 +385,7 @@ fn run_dir_verify(args: DirVerifyArgs, token: Option<&str>) -> ExitCode {
     let server_args = server_addr_args(&args.server_addr);
 
     let mut cmd = Command::new(dirctl_binary());
-    cmd.arg("verify")
-       .arg(&args.cid)
-       .args(&server_args);
+    cmd.arg("verify").arg(&args.cid).args(&server_args);
 
     if let Some(ref key) = args.key {
         cmd.arg("--key").arg(key);
@@ -401,8 +412,8 @@ fn run_dir_verify(args: DirVerifyArgs, token: Option<&str>) -> ExitCode {
 
     // Inherit stdio — human-readable output from dirctl is the primary UX.
     cmd.stdin(std::process::Stdio::inherit())
-       .stdout(std::process::Stdio::inherit())
-       .stderr(std::process::Stdio::inherit());
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
 
     let status = match cmd.status() {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -441,9 +452,9 @@ pub(crate) fn run_dir_command(cli: DirCli) -> ExitCode {
     let token = cli.gh_token.as_deref().or(keychain_token.as_deref());
 
     match cli.command {
-        DirCommand::Login(args)  => run_dir_login(args, &cli.token_key),
-        DirCommand::Pull(args)   => run_dir_pull(args, token),
-        DirCommand::Info(args)   => run_dir_info(args, token),
+        DirCommand::Login(args) => run_dir_login(args, &cli.token_key),
+        DirCommand::Pull(args) => run_dir_pull(args, token),
+        DirCommand::Info(args) => run_dir_info(args, token),
         DirCommand::Search(args) => run_dir_search(args, token),
         DirCommand::Verify(args) => run_dir_verify(args, token),
     }
@@ -493,15 +504,27 @@ mod tests {
     #[test]
     fn oasf_record_parses_full_example() {
         let record: OasfRecord = serde_json::from_str(full_oasf_json()).unwrap();
-        assert_eq!(record.name.as_deref(), Some("Tourist Scheduling Coordinator"));
+        assert_eq!(
+            record.name.as_deref(),
+            Some("Tourist Scheduling Coordinator")
+        );
         assert_eq!(record.version.as_deref(), Some("2.0.0"));
         assert_eq!(record.skills.len(), 2);
-        assert_eq!(record.skills[0].name, "agent_orchestration/task_decomposition");
+        assert_eq!(
+            record.skills[0].name,
+            "agent_orchestration/task_decomposition"
+        );
         assert_eq!(record.domains.len(), 1);
-        assert_eq!(record.domains[0].name, "hospitality_and_tourism/tourism_management");
+        assert_eq!(
+            record.domains[0].name,
+            "hospitality_and_tourism/tourism_management"
+        );
         assert_eq!(record.locators.len(), 1);
         assert_eq!(record.locators[0].locator_type, "source_code");
-        assert_eq!(record.locators[0].urls[0], "https://github.com/agntcy/agentic-apps");
+        assert_eq!(
+            record.locators[0].urls[0],
+            "https://github.com/agntcy/agentic-apps"
+        );
     }
 
     #[test]
@@ -520,7 +543,10 @@ mod tests {
     #[test]
     fn server_addr_args_returns_flag_and_value() {
         let args = server_addr_args("prod.gateway.ads.outshift.io:443");
-        assert_eq!(args, vec!["--server-addr", "prod.gateway.ads.outshift.io:443"]);
+        assert_eq!(
+            args,
+            vec!["--server-addr", "prod.gateway.ads.outshift.io:443"]
+        );
     }
 
     #[test]
@@ -583,7 +609,11 @@ mod tests {
         let path = dirctl_token_cache_path().expect("path should resolve");
         let s = path.to_str().unwrap_or("");
         assert!(s.contains("dirctl"), "expected dirctl in path, got: {}", s);
-        assert!(s.ends_with("auth-token.json"), "expected auth-token.json, got: {}", s);
+        assert!(
+            s.ends_with("auth-token.json"),
+            "expected auth-token.json, got: {}",
+            s
+        );
     }
 
     #[test]
@@ -608,7 +638,11 @@ mod tests {
         if let Some(cache_dir) = record_cache_dir() {
             let s = cache_dir.to_str().unwrap_or("");
             assert!(s.contains(".shadi"), "expected .shadi in path, got: {}", s);
-            assert!(s.contains("records"), "expected records in path, got: {}", s);
+            assert!(
+                s.contains("records"),
+                "expected records in path, got: {}",
+                s
+            );
         }
     }
 
@@ -632,8 +666,7 @@ mod tests {
     fn dir_verify_args_default_server_addr_is_prod() {
         // Clap default is the prod gateway; make sure it survives round-trip.
         use clap::Parser;
-        let args = DirVerifyArgs::try_parse_from(["verify", "bafkreitest123"])
-            .expect("parse");
+        let args = DirVerifyArgs::try_parse_from(["verify", "bafkreitest123"]).expect("parse");
         assert_eq!(args.cid, "bafkreitest123");
         assert_eq!(args.server_addr, "prod.gateway.ads.outshift.io:443");
         assert!(args.key.is_none());
@@ -647,13 +680,9 @@ mod tests {
     #[test]
     fn dir_verify_args_key_flag_is_forwarded() {
         use clap::Parser;
-        let args = DirVerifyArgs::try_parse_from([
-            "verify",
-            "bafkreitest123",
-            "--key",
-            "/tmp/cosign.pub",
-        ])
-        .expect("parse");
+        let args =
+            DirVerifyArgs::try_parse_from(["verify", "bafkreitest123", "--key", "/tmp/cosign.pub"])
+                .expect("parse");
         assert_eq!(args.key.as_deref(), Some("/tmp/cosign.pub"));
     }
 
@@ -729,9 +758,21 @@ mod tests {
         std::env::remove_var("XDG_CONFIG_HOME");
         let path = path.expect("path should resolve");
         let s = path.to_str().unwrap_or("");
-        assert!(s.contains("/custom/xdg/config"), "expected XDG path, got: {}", s);
-        assert!(s.ends_with("auth-token.json"), "expected auth-token.json suffix, got: {}", s);
-        assert!(s.contains("dirctl"), "expected dirctl component, got: {}", s);
+        assert!(
+            s.contains("/custom/xdg/config"),
+            "expected XDG path, got: {}",
+            s
+        );
+        assert!(
+            s.ends_with("auth-token.json"),
+            "expected auth-token.json suffix, got: {}",
+            s
+        );
+        assert!(
+            s.contains("dirctl"),
+            "expected dirctl component, got: {}",
+            s
+        );
     }
 
     // ── ingest_dirctl_token error paths ───────────────────────────────────────
@@ -744,7 +785,11 @@ mod tests {
         );
         assert!(result.is_err(), "should fail on missing file");
         let err = result.unwrap_err();
-        assert!(err.contains("read"), "error should mention 'read', got: {}", err);
+        assert!(
+            err.contains("read"),
+            "error should mention 'read', got: {}",
+            err
+        );
     }
 
     #[test]
@@ -755,7 +800,11 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
         assert!(result.is_err(), "should fail on invalid JSON");
         let err = result.unwrap_err();
-        assert!(err.contains("parse"), "error should mention 'parse', got: {}", err);
+        assert!(
+            err.contains("parse"),
+            "error should mention 'parse', got: {}",
+            err
+        );
     }
 
     // ── print_record_summary ──────────────────────────────────────────────────
@@ -811,10 +860,16 @@ mod tests {
             version: Some("3.0.0".to_string()),
             description: Some("A short description.".to_string()),
             skills: vec![
-                OasfClassRef { name: "nlp/translation".to_string() },
-                OasfClassRef { name: "agent_orchestration/task_decomposition".to_string() },
+                OasfClassRef {
+                    name: "nlp/translation".to_string(),
+                },
+                OasfClassRef {
+                    name: "agent_orchestration/task_decomposition".to_string(),
+                },
             ],
-            domains: vec![OasfClassRef { name: "hospitality/tourism".to_string() }],
+            domains: vec![OasfClassRef {
+                name: "hospitality/tourism".to_string(),
+            }],
             locators: vec![OasfLocator {
                 locator_type: "source_code".to_string(),
                 url: None,
@@ -876,7 +931,13 @@ mod tests {
     fn dir_search_args_with_skills_and_limit() {
         use clap::Parser;
         let args = DirSearchArgs::try_parse_from([
-            "search", "--skill", "nlp", "--skill", "code_generation", "--limit", "25",
+            "search",
+            "--skill",
+            "nlp",
+            "--skill",
+            "code_generation",
+            "--limit",
+            "25",
         ])
         .expect("parse");
         assert_eq!(args.skill, vec!["nlp", "code_generation"]);
@@ -922,7 +983,13 @@ mod tests {
     fn run_dir_login_returns_exit_code_2_when_dirctl_not_found() {
         let _guard = dirctl_env_lock().lock().expect("lock");
         std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
-        let code = run_dir_login(DirLoginArgs { no_browser: false, force: false }, "dir/test_login_nf");
+        let code = run_dir_login(
+            DirLoginArgs {
+                no_browser: false,
+                force: false,
+            },
+            "dir/test_login_nf",
+        );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         assert_eq!(code, ExitCode::from(2));
     }
@@ -933,7 +1000,13 @@ mod tests {
         // even when the binary is missing.
         let _guard = dirctl_env_lock().lock().expect("lock");
         std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
-        let code = run_dir_login(DirLoginArgs { no_browser: true, force: true }, "dir/test_login_flags");
+        let code = run_dir_login(
+            DirLoginArgs {
+                no_browser: true,
+                force: true,
+            },
+            "dir/test_login_flags",
+        );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         assert_eq!(code, ExitCode::from(2));
     }
@@ -946,7 +1019,10 @@ mod tests {
         let _guard = dirctl_env_lock().lock().expect("lock");
         std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
         let code = run_dir_login(
-            DirLoginArgs { no_browser: false, force: false },
+            DirLoginArgs {
+                no_browser: false,
+                force: false,
+            },
             "dir/test_login_success_warn",
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
@@ -1151,7 +1227,10 @@ mod tests {
         let code = run_dir_command(DirCli {
             gh_token: None,
             token_key: "dir/dispatch_login".to_string(),
-            command: DirCommand::Login(DirLoginArgs { no_browser: false, force: false }),
+            command: DirCommand::Login(DirLoginArgs {
+                no_browser: false,
+                force: false,
+            }),
         });
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         assert_eq!(code, ExitCode::from(2));
@@ -1241,8 +1320,7 @@ mod tests {
         let path = dir.path().join("nonexec_bin");
         std::fs::write(&path, b"").expect("write temp file");
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
-            .expect("chmod 000");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
         (path, dir)
     }
 
@@ -1253,7 +1331,10 @@ mod tests {
         let _guard = dirctl_env_lock().lock().expect("lock");
         std::env::set_var("SHADI_DIRCTL_BINARY", &path);
         let code = run_dir_login(
-            DirLoginArgs { no_browser: false, force: false },
+            DirLoginArgs {
+                no_browser: false,
+                force: false,
+            },
             "dir/test_login_perm",
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
@@ -1354,7 +1435,10 @@ mod tests {
         std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/true");
         std::env::set_var("XDG_CONFIG_HOME", &tmp_cfg);
         let code = run_dir_login(
-            DirLoginArgs { no_browser: false, force: false },
+            DirLoginArgs {
+                no_browser: false,
+                force: false,
+            },
             "dir/test_ingest_err",
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
@@ -1374,7 +1458,8 @@ mod tests {
         std::fs::write(
             &script_path,
             format!("#!/bin/sh\necho '{}'\n", oasf_json).as_bytes(),
-        ).expect("write script");
+        )
+        .expect("write script");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod 755");
@@ -1421,14 +1506,26 @@ mod tests {
         std::env::remove_var("USERPROFILE");
 
         let code = run_dir_login(
-            DirLoginArgs { no_browser: false, force: false },
+            DirLoginArgs {
+                no_browser: false,
+                force: false,
+            },
             "dir/test_no_cache_path",
         );
 
         // Restore env vars.
-        match xdg { Some(v) => std::env::set_var("XDG_CONFIG_HOME", v), None => {} }
-        match home { Some(v) => std::env::set_var("HOME", v), None => {} }
-        match userprofile { Some(v) => std::env::set_var("USERPROFILE", v), None => {} }
+        match xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => {}
+        }
+        match home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => {}
+        }
+        match userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => {}
+        }
         std::env::remove_var("SHADI_DIRCTL_BINARY");
 
         assert_eq!(code, ExitCode::from(0));
@@ -1441,7 +1538,10 @@ mod tests {
         let _guard = dirctl_env_lock().lock().expect("lock");
         std::env::set_var("SHADI_DIRCTL_BINARY", "/usr/bin/false");
         let code = run_dir_login(
-            DirLoginArgs { no_browser: false, force: false },
+            DirLoginArgs {
+                no_browser: false,
+                force: false,
+            },
             "dir/test_login_nonzero",
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
@@ -1460,7 +1560,8 @@ mod tests {
         std::fs::write(
             &script_path,
             format!("#!/bin/sh\necho '{}'\n", oasf_json).as_bytes(),
-        ).expect("write script");
+        )
+        .expect("write script");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod 755");

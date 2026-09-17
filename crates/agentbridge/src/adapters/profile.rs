@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn claude_argv_matches_native_order() {
-        let p = load_bundled("claude-code");    
+        let p = load_bundled("claude-code");
         let argv = render_argv(
             &p,
             "/var/workspace",
@@ -906,10 +906,7 @@ mod tests {
         std::env::remove_var("GOOSE_MODEL");
         let argv = render_argv(&p, "/ws", "hi", None, None, true);
         std::env::remove_var("GOOSE_PROVIDER");
-        assert_eq!(
-            argv,
-            vec!["run", "--text", "hi", "--no-session", "--quiet"]
-        );
+        assert_eq!(argv, vec!["run", "--text", "hi", "--no-session", "--quiet"]);
     }
 
     #[test]
@@ -941,10 +938,7 @@ mod tests {
     fn opencode_argv_uses_auto_and_dir() {
         let p = load_bundled("opencode");
         let argv = render_argv(&p, "/ws", "fix the tests", None, None, true);
-        assert_eq!(
-            argv,
-            vec!["run", "--auto", "--dir", "/ws", "fix the tests"]
-        );
+        assert_eq!(argv, vec!["run", "--auto", "--dir", "/ws", "fix the tests"]);
     }
 
     #[test]
@@ -1147,7 +1141,10 @@ echo '{"result":"ok","session_id":"sid-9"}'
         let dir = tempfile::tempdir().unwrap();
         let adapter = ProfileAdapter::new(profile, dir.path());
         let out = adapter.execute_prompt("pinned").unwrap();
-        assert!(out.contains("pinned"), "execute output should echo the prompt");
+        assert!(
+            out.contains("pinned"),
+            "execute output should echo the prompt"
+        );
     }
 
     #[test]

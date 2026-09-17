@@ -150,9 +150,8 @@ where
             AuthRequiredAction::ReProve => {}
             AuthRequiredAction::Escalate { .. } => {
                 let started = std::time::Instant::now();
-                let note = escalate().map_err(|err| {
-                    format!("AUTH_REQUIRED denied: escalate failed: {err}")
-                })?;
+                let note = escalate()
+                    .map_err(|err| format!("AUTH_REQUIRED denied: escalate failed: {err}"))?;
                 if started.elapsed() > config.timeout {
                     return Err(format!(
                         "AUTH_REQUIRED denied: escalate timed out after {}ms",
@@ -368,8 +367,9 @@ mod tests {
     #[test]
     fn send_error_propagates_without_retry() {
         let cfg = AuthRequiredConfig::default();
-        let err = run_auth_required_loop(|| Err("transport down".into()), &cfg, || Ok(String::new()))
-            .expect_err("send failure must surface");
+        let err =
+            run_auth_required_loop(|| Err("transport down".into()), &cfg, || Ok(String::new()))
+                .expect_err("send failure must surface");
         assert_eq!(err, "transport down");
     }
 

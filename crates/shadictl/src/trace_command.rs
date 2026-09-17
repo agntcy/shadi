@@ -8,7 +8,13 @@ pub(crate) fn run_trace_command(cli: TraceCli) -> ExitCode {
             name,
             command,
             exit_code,
-        } => match trace_list(&path, *limit, name.as_deref(), command.as_deref(), *exit_code) {
+        } => match trace_list(
+            &path,
+            *limit,
+            name.as_deref(),
+            command.as_deref(),
+            *exit_code,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("{}", err);

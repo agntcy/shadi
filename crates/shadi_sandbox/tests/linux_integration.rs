@@ -18,7 +18,11 @@ mod linux_integration {
         std::env::current_dir()
             .expect("current dir")
             .join(".tmp")
-            .join(format!("linux-sandbox-test-{}-{}", std::process::id(), suffix))
+            .join(format!(
+                "linux-sandbox-test-{}-{}",
+                std::process::id(),
+                suffix
+            ))
     }
 
     fn compile_read_stdout_helper(dir: &Path) -> PathBuf {
@@ -61,8 +65,7 @@ mod linux_integration {
         let helper = compile_read_stdout_helper(&allowed_dir);
 
         // Baseline: reading the file without sandbox should succeed.
-        let baseline_stdout =
-            fs::File::create(&baseline_output).expect("create baseline output");
+        let baseline_stdout = fs::File::create(&baseline_output).expect("create baseline output");
         let baseline_status = Command::new(&helper)
             .arg(&disallowed_file)
             .current_dir(&allowed_dir)
@@ -88,8 +91,7 @@ mod linux_integration {
             .allow_write_path(&allowed_dir)
             .block_network(true);
 
-        let sandbox_stdout =
-            fs::File::create(&sandbox_output).expect("create sandbox output");
+        let sandbox_stdout = fs::File::create(&sandbox_output).expect("create sandbox output");
         let mut sandbox_command = Command::new(&helper);
         sandbox_command.arg(&disallowed_file);
         sandbox_command.current_dir(&allowed_dir);

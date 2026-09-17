@@ -178,7 +178,10 @@ fn is_ip_allowed(ip_str: &str, list: &[String]) -> bool {
         if let Ok(addrs) = (p, 0u16).to_socket_addrs() {
             for sock_addr in addrs {
                 if sock_addr.ip() == incoming {
-                    debug!("net proxy: IP {} matched via DNS resolution of {}", ip_str, p);
+                    debug!(
+                        "net proxy: IP {} matched via DNS resolution of {}",
+                        ip_str, p
+                    );
                     return true;
                 }
             }
@@ -246,9 +249,7 @@ impl NetProxy {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            std::io::Error::other("net proxy restart failed to rebind")
-        }))
+        Err(last_err.unwrap_or_else(|| std::io::Error::other("net proxy restart failed to rebind")))
     }
 
     fn bind_and_start(port: u16, allowlist: NetAllowlist) -> std::io::Result<Self> {
@@ -264,7 +265,11 @@ impl NetProxy {
             })?;
 
         debug!("net proxy listening on 127.0.0.1:{}", port);
-        Ok(Self { port, stop, thread: handle })
+        Ok(Self {
+            port,
+            stop,
+            thread: handle,
+        })
     }
 
     /// The TCP port on loopback that the proxy listens on.
@@ -448,8 +453,12 @@ pub fn parse_socks5_connect<R: Read>(stream: &mut R) -> Result<Socks5Connect, So
 }
 
 fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(30))).ok();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .ok();
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(30)))
+        .ok();
 
     match parse_socks5_greeting(&mut stream) {
         Ok(()) => {
@@ -487,7 +496,10 @@ fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
         }
     };
     if !allowed {
-        warn!("net proxy: BLOCKED {} {}:{} — not in allowlist", atyp_label, host, port);
+        warn!(
+            "net proxy: BLOCKED {} {}:{} — not in allowlist",
+            atyp_label, host, port
+        );
         // REP=0x02 (connection not allowed by ruleset)
         let _ = stream.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
         return;
@@ -498,7 +510,10 @@ fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
     let upstream = match TcpStream::connect((&*host, port)) {
         Ok(s) => s,
         Err(e) => {
-            warn!("net proxy: upstream connect to {}:{} failed: {}", host, port, e);
+            warn!(
+                "net proxy: upstream connect to {}:{} failed: {}",
+                host, port, e
+            );
             // REP=0x04 (host unreachable)
             let _ = stream.write_all(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]);
             return;
@@ -576,7 +591,10 @@ mod tests {
 
     #[test]
     fn is_host_allowed_exact() {
-        assert!(is_host_allowed("api.openai.com", &["api.openai.com".into()]));
+        assert!(is_host_allowed(
+            "api.openai.com",
+            &["api.openai.com".into()]
+        ));
         assert!(!is_host_allowed("evil.com", &["api.openai.com".into()]));
     }
 
@@ -585,7 +603,7 @@ mod tests {
         let list = vec!["*.openai.com".into()];
         assert!(is_host_allowed("api.openai.com", &list));
         assert!(is_host_allowed("chat.openai.com", &list));
-        assert!(!is_host_allowed("openai.com", &list));  // apex excluded
+        assert!(!is_host_allowed("openai.com", &list)); // apex excluded
         assert!(!is_host_allowed("evilopenai.com", &list));
     }
 
@@ -719,10 +737,15 @@ mod tests {
 
     /// Do a SOCKS5 no-auth handshake + CONNECT to host:port.
     /// Returns the negotiated stream ready for tunnelled bytes.
-    fn socks5_connect(proxy_port: u16, host: &str, port: u16) -> std::io::Result<std::net::TcpStream> {
+    fn socks5_connect(
+        proxy_port: u16,
+        host: &str,
+        port: u16,
+    ) -> std::io::Result<std::net::TcpStream> {
         use std::io::{Read, Write};
         let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{proxy_port}"))?;
-        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
         // Auth negotiation: VER=5 NMETHODS=1 METHOD=0x00
         s.write_all(&[5, 1, 0])?;
         s.flush()?;
@@ -745,11 +768,12 @@ mod tests {
 
     #[test]
     fn proxy_blocks_host_not_in_allowlist() {
-        let al = NetAllowlist::new(vec![]);  // block everything
+        let al = NetAllowlist::new(vec![]); // block everything
         let proxy = NetProxy::start(al).unwrap();
 
         let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port())).unwrap();
-        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
         // Send SOCKS5 negotiation
         s.write_all(&[5, 1, 0]).unwrap();
         s.flush().unwrap();
@@ -811,11 +835,18 @@ mod tests {
         let original_port = proxy.port();
 
         let proxy2 = proxy.restart(al).unwrap();
-        assert_eq!(proxy2.port(), original_port, "restart must reuse the same port");
+        assert_eq!(
+            proxy2.port(),
+            original_port,
+            "restart must reuse the same port"
+        );
 
         // New proxy must actually accept connections on that port.
         let conn = std::net::TcpStream::connect(format!("127.0.0.1:{original_port}"));
-        assert!(conn.is_ok(), "restarted proxy not accepting on port {original_port}");
+        assert!(
+            conn.is_ok(),
+            "restarted proxy not accepting on port {original_port}"
+        );
     }
 
     #[test]

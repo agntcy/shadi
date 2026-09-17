@@ -1,9 +1,9 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{SecretError, SecretResult, SecretStore};
-use crate::policy::SecretPolicy;
 use crate::memory::SecretBytes;
+use crate::policy::SecretPolicy;
+use crate::{SecretError, SecretResult, SecretStore};
 
 pub struct NoopSecretStore;
 
@@ -44,7 +44,10 @@ mod tests {
             Err(SecretError::NotSupported)
         ));
         assert!(matches!(store.get("key"), Err(SecretError::NotSupported)));
-        assert!(matches!(store.delete("key"), Err(SecretError::NotSupported)));
+        assert!(matches!(
+            store.delete("key"),
+            Err(SecretError::NotSupported)
+        ));
         assert!(matches!(store.list_keys(), Err(SecretError::NotSupported)));
     }
 }

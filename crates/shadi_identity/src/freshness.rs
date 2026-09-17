@@ -22,18 +22,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// absorb ordinary clock skew between hosts, so no separate skew knob.
 pub const FRESHNESS_WINDOW: Duration = Duration::from_secs(300);
 
-/// A2A `Message.metadata` key carrying the sender's principal *hint*.
-///
-/// A hint, never a claim. It sits outside the envelope signature, so it is
-/// unauthenticated and attacker-mutable; the verifier may use it only as an
-/// argument to [`crate::TrustAnchor::resolve`], which checks the answer
-/// against the authority. Tampering with it can therefore cause a denial and
-/// nothing else. Do not "fix" that by moving it inside the signature — the
-/// point of this key is that the envelope format does not change.
-///
-/// Value form: `github:alice`, or `oidc:https://sso.example/realm#alice@corp.com`.
-pub const A2A_PRINCIPAL_HINT_METADATA_KEY: &str = "a2a-principal-hint";
-
 /// The application payload plus the three fields that make it single-use,
 /// time-bounded and addressed to one peer.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -95,7 +83,9 @@ impl Sealed {
 
         let age = sealed.iat.abs_diff(now_secs());
         if age > FRESHNESS_WINDOW.as_secs() {
-            return Err(format!("message age {age}s is outside the freshness window"));
+            return Err(format!(
+                "message age {age}s is outside the freshness window"
+            ));
         }
 
         // Last, so a stale or misaddressed message does not consume a jti slot.

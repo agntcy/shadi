@@ -40,7 +40,11 @@ mod windows_integration {
             .as_nanos();
         std::env::set_var(
             "SHADI_APPCONTAINER_NAME",
-            format!("shadi_sandbox_test_{}_{}", std::process::id(), unique_suffix),
+            format!(
+                "shadi_sandbox_test_{}_{}",
+                std::process::id(),
+                unique_suffix
+            ),
         );
 
         for attempt in 0..5 {

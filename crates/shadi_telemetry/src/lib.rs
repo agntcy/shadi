@@ -5,8 +5,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 
-use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider;
+use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
 use tracing_subscriber::layer::SubscriberExt;
@@ -125,7 +125,10 @@ fn traces_endpoint(endpoint: &str) -> String {
 }
 
 fn parse_bool_env(key: &str) -> bool {
-    let value = env::var(key).unwrap_or_default().trim().to_ascii_lowercase();
+    let value = env::var(key)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     matches!(value.as_str(), "1" | "true" | "yes")
 }
 
@@ -140,7 +143,10 @@ fn normalize_file_path(value: &str) -> Option<String> {
 
 fn resolve_trace_path(path: &str) -> Option<(PathBuf, String)> {
     let trace_path = Path::new(path);
-    let dir = trace_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let dir = trace_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     let file_name = trace_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -210,8 +216,14 @@ mod tests {
     fn normalize_file_path_trims_and_rejects_empty() {
         assert_eq!(normalize_file_path(""), None);
         assert_eq!(normalize_file_path("   "), None);
-        assert_eq!(normalize_file_path("/tmp/trace.jsonl"), Some("/tmp/trace.jsonl".to_string()));
-        assert_eq!(normalize_file_path("  ./traces.jsonl "), Some("./traces.jsonl".to_string()));
+        assert_eq!(
+            normalize_file_path("/tmp/trace.jsonl"),
+            Some("/tmp/trace.jsonl".to_string())
+        );
+        assert_eq!(
+            normalize_file_path("  ./traces.jsonl "),
+            Some("./traces.jsonl".to_string())
+        );
     }
 
     #[test]

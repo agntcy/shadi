@@ -20,13 +20,13 @@ use std::sync::{Arc, Mutex};
 
 use agentbridge::adapter::CliToolAdapter;
 use agentbridge::adapters::generic_stdio::GenericStdioAdapter;
-use agentbridge::open_profile_adapter;
 use agentbridge::mas::{
     AgentId, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch, EventId,
     EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
     SemanticPayload,
 };
 use agentbridge::member_source::{DirLookupOptions, MemberSource, SkillSearchSource};
+use agentbridge::open_profile_adapter;
 use agentbridge::{CliAdapter, ContextPacket};
 use serde::{Deserialize, Serialize};
 use shadi_mas::experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig};
@@ -285,46 +285,46 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
                     Arc::new(CliToolAdapter::new(Arc::new(adapter))) as Arc<dyn ToolAdapter>,
                 )
             } else if let Some(cmd) = spec.strip_prefix("generic-stdio:") {
-            let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-            let prog = parts[0];
-            let args: Vec<&str> = if parts.len() > 1 {
-                parts[1].split_whitespace().collect()
+                let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+                let prog = parts[0];
+                let args: Vec<&str> = if parts.len() > 1 {
+                    parts[1].split_whitespace().collect()
+                } else {
+                    vec![]
+                };
+                let adapter = Arc::new(
+                    GenericStdioAdapter::spawn(spec, prog, &args)
+                        .map_err(|e| format!("failed to spawn {spec}: {e}"))?,
+                );
+                (spec.clone(), Arc::new(CliToolAdapter::new(adapter)))
+            } else if let Some(rest) = spec.strip_prefix("slim:") {
+                let (agent_id, endpoint) = rest
+                    .split_once('@')
+                    .map(|(id, ep)| (id.to_string(), ep.to_string()))
+                    .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
+                std::env::set_var("SLIM_ENDPOINT", &endpoint);
+                let config = LiveA2ATaskAdapterConfig {
+                    endpoint,
+                    agent_id: "coordinator".to_string(),
+                    local_name: Some("agntcy/shadi/coordinator-a2a".to_string()),
+                    peer_agent_id: agent_id.clone(),
+                    destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+                    a2a_url: None,
+                    a2a_binding: None,
+                    peer_did: None,
+                };
+                let slim_adapter = Arc::new(SlimToolAdapter {
+                    inner: LiveA2ATaskAdapter::new(config),
+                    dispatch_count: Mutex::new(0),
+                });
+                (agent_id, slim_adapter as Arc<dyn ToolAdapter>)
             } else {
-                vec![]
-            };
-            let adapter = Arc::new(
-                GenericStdioAdapter::spawn(spec, prog, &args)
-                    .map_err(|e| format!("failed to spawn {spec}: {e}"))?,
-            );
-            (spec.clone(), Arc::new(CliToolAdapter::new(adapter)))
-        } else if let Some(rest) = spec.strip_prefix("slim:") {
-            let (agent_id, endpoint) = rest
-                .split_once('@')
-                .map(|(id, ep)| (id.to_string(), ep.to_string()))
-                .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
-            std::env::set_var("SLIM_ENDPOINT", &endpoint);
-            let config = LiveA2ATaskAdapterConfig {
-                endpoint,
-                agent_id: "coordinator".to_string(),
-                local_name: Some("agntcy/shadi/coordinator-a2a".to_string()),
-                peer_agent_id: agent_id.clone(),
-                destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
-                a2a_url: None,
-                a2a_binding: None,
-                peer_did: None,
-            };
-            let slim_adapter = Arc::new(SlimToolAdapter {
-                inner: LiveA2ATaskAdapter::new(config),
-                dispatch_count: Mutex::new(0),
-            });
-            (agent_id, slim_adapter as Arc<dyn ToolAdapter>)
-        } else {
-            return Err(format!(
-                "unknown agent spec '{spec}'. Supported: a profile id \
+                return Err(format!(
+                    "unknown agent spec '{spec}'. Supported: a profile id \
                  (claude-code[:/path], …), generic-stdio:<command>, \
                  slim:<agent-id>[@host:port]"
-            ));
-        };
+                ));
+            };
         agents.push(AgentEntry {
             id: AgentId(id_str),
             tool,
@@ -333,7 +333,13 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
     Ok(agents)
 }
 
-fn invoke_tool(tool: &Arc<dyn ToolAdapter>, prompt: &str, label: &str, phase: &str, epoch: u64) -> Result<String, String> {
+fn invoke_tool(
+    tool: &Arc<dyn ToolAdapter>,
+    prompt: &str,
+    label: &str,
+    phase: &str,
+    epoch: u64,
+) -> Result<String, String> {
     let call = ToolCall {
         provider: ToolProvider::AgentSkills,
         tool_name: "execute_prompt".to_string(),
@@ -383,7 +389,11 @@ fn build_proposal_list(proposals: &[(AgentId, String)]) -> String {
     proposals
         .iter()
         .map(|(id, code)| {
-            let first_line = code.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            let first_line = code
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim();
             let preview = if first_line.len() > 100 {
                 format!("{}…", &first_line[..100])
             } else {
@@ -503,7 +513,11 @@ pub async fn agentbridge_coordinate(
                             kind: "vote".to_string(),
                             summary: format!(
                                 "endorses '{endorsee}'{}",
-                                if valid { "" } else { " (unrecognised — skipped)" }
+                                if valid {
+                                    ""
+                                } else {
+                                    " (unrecognised — skipped)"
+                                }
                             ),
                         });
                         runtime.apply(vote_event(&voter.id, &endorsee, epoch, valid));

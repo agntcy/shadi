@@ -103,7 +103,9 @@ impl ShadiStore {
                 .didvc_verifier
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
-            guard.clone().ok_or_else(|| PyRuntimeError::new_err("verifier not configured"))?
+            guard
+                .clone()
+                .ok_or_else(|| PyRuntimeError::new_err("verifier not configured"))?
         };
 
         let (agent_id, session_id, claims) = {
@@ -131,7 +133,10 @@ impl ShadiStore {
         let span = info_span!("shadi.secret.put", secret.key = %key);
         let _guard = span.enter();
         let ctx = session.to_context();
-        let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
+        let guard = self
+            .store
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
         access
             .put_for_session(&ctx, key, secret, SecretPolicy::default())
@@ -147,9 +152,14 @@ impl ShadiStore {
         let span = info_span!("shadi.secret.get", secret.key = %key);
         let _guard = span.enter();
         let ctx = session.to_context();
-        let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
+        let guard = self
+            .store
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
-        let secret = access.get_for_session(&ctx, key).map_err(map_secret_error)?;
+        let secret = access
+            .get_for_session(&ctx, key)
+            .map_err(map_secret_error)?;
         let bytes = secret.expose(|data| data.to_vec());
         Ok(PyBytes::new_bound(py, &bytes))
     }
@@ -158,7 +168,10 @@ impl ShadiStore {
         let span = info_span!("shadi.secret.delete", secret.key = %key);
         let _guard = span.enter();
         let ctx = session.to_context();
-        let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
+        let guard = self
+            .store
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
         access
             .delete_for_session(&ctx, key)
@@ -170,7 +183,10 @@ impl ShadiStore {
         let _guard = span.enter();
         let ctx = session.to_context();
         AgentSecretAccess::require_verified(&ctx).map_err(map_secret_error)?;
-        let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
+        let guard = self
+            .store
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         guard.list_keys().map_err(map_secret_error)
     }
 }
@@ -187,7 +203,8 @@ impl SqlCipherMemoryStore {
     }
 
     fn put(&self, scope: &str, entry_key: &str, payload: &str) -> PyResult<i64> {
-        let span = info_span!("shadi.memory.put", memory.scope = %scope, memory.entry_key = %entry_key);
+        let span =
+            info_span!("shadi.memory.put", memory.scope = %scope, memory.entry_key = %entry_key);
         let _guard = span.enter();
         self.store
             .put(scope, entry_key, payload)
@@ -205,7 +222,12 @@ impl SqlCipherMemoryStore {
     }
 
     #[pyo3(signature = (query, scope=None, limit=10))]
-    fn search(&self, query: &str, scope: Option<String>, limit: usize) -> PyResult<Vec<MemoryEntry>> {
+    fn search(
+        &self,
+        query: &str,
+        scope: Option<String>,
+        limit: usize,
+    ) -> PyResult<Vec<MemoryEntry>> {
         let span = info_span!(
             "shadi.memory.search",
             memory.query = %query,
@@ -217,10 +239,7 @@ impl SqlCipherMemoryStore {
             .store
             .search(scope.as_deref(), query, limit)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        Ok(entries
-            .into_iter()
-            .map(MemoryEntry::from_native)
-            .collect())
+        Ok(entries.into_iter().map(MemoryEntry::from_native).collect())
     }
 
     #[pyo3(signature = (scope=None, limit=50))]
@@ -235,14 +254,12 @@ impl SqlCipherMemoryStore {
             .store
             .list(scope.as_deref(), limit)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        Ok(entries
-            .into_iter()
-            .map(MemoryEntry::from_native)
-            .collect())
+        Ok(entries.into_iter().map(MemoryEntry::from_native).collect())
     }
 
     fn delete(&self, scope: &str, entry_key: &str) -> PyResult<usize> {
-        let span = info_span!("shadi.memory.delete", memory.scope = %scope, memory.entry_key = %entry_key);
+        let span =
+            info_span!("shadi.memory.delete", memory.scope = %scope, memory.entry_key = %entry_key);
         let _guard = span.enter();
         self.store
             .delete(scope, entry_key)
@@ -465,12 +482,15 @@ mod tests {
             let verifier = module.getattr("verify").unwrap();
             store.set_verifier(verifier.into_py(py)).unwrap();
 
-            let mut base_session = PySessionContext::new("agent".to_string(), "session".to_string());
+            let mut base_session =
+                PySessionContext::new("agent".to_string(), "session".to_string());
             base_session.add_claim("did:example:agent".to_string());
             let session = Py::new(py, base_session).unwrap();
             let session_bound = session.bind(py);
 
-            let ok = store.verify_session(py, session_bound, b"presentation").unwrap();
+            let ok = store
+                .verify_session(py, session_bound, b"presentation")
+                .unwrap();
             assert!(ok);
             assert!(session_bound.borrow().verified);
         });
@@ -482,7 +502,11 @@ mod tests {
         ensure_python();
         Python::with_gil(|py| {
             let store = ShadiStore::new();
-            let session = Py::new(py, PySessionContext::new("agent".to_string(), "session".to_string())).unwrap();
+            let session = Py::new(
+                py,
+                PySessionContext::new("agent".to_string(), "session".to_string()),
+            )
+            .unwrap();
             let session_bound = session.bind(py);
 
             let err = store

@@ -113,9 +113,8 @@ impl AdmissionPolicy {
         let bytes = std::fs::read(path)
             .map_err(|e| IdentityError::Config(format!("read {}: {e}", path.display())))?;
 
-        let policy: Self = serde_json::from_slice(&bytes).map_err(|e| {
-            IdentityError::Config(format!("parse policy {}: {e}", path.display()))
-        })?;
+        let policy: Self = serde_json::from_slice(&bytes)
+            .map_err(|e| IdentityError::Config(format!("parse policy {}: {e}", path.display())))?;
         policy.validate()?;
 
         // Logged so configuration drift across hosts is detectable from logs
@@ -174,7 +173,11 @@ impl AdmissionPolicy {
             .find(|i| i.issuer == att.authority)
             .ok_or_else(|| format!("authority {} is not trusted", att.authority))?;
 
-        if issuer.allowed_principals.iter().any(|p| p == &att.principal) {
+        if issuer
+            .allowed_principals
+            .iter()
+            .any(|p| p == &att.principal)
+        {
             return Ok(());
         }
 
@@ -186,8 +189,7 @@ impl AdmissionPolicy {
                 .as_deref()
                 .filter(|_| att.email_verified)
                 .ok_or_else(|| "no verified email for domain policy".to_string())?;
-            let domain =
-                email_domain(email).ok_or_else(|| format!("unparseable email {email}"))?;
+            let domain = email_domain(email).ok_or_else(|| format!("unparseable email {email}"))?;
             if issuer
                 .allowed_domains
                 .iter()
@@ -405,7 +407,12 @@ mod tests {
     #[test]
     fn admits_an_attested_principal_in_an_allowed_domain() {
         let a = admitter(
-            vec![attestation(ALICE, "alice-sub", Some("alice@corp.com"), true)],
+            vec![attestation(
+                ALICE,
+                "alice-sub",
+                Some("alice@corp.com"),
+                true,
+            )],
             policy(&["corp.com"]),
         );
         match a.admit(ALICE, None) {
@@ -451,7 +458,10 @@ mod tests {
         // And with an anchor that cannot answer at all: `Denied`, not
         // `AnchorUnavailable`, proves the check precedes resolution entirely.
         let broken = Admitter::new(vec![Box::new(BrokenAnchor)], p);
-        assert!(matches!(broken.admit(ALICE, None), Admission::Denied { .. }));
+        assert!(matches!(
+            broken.admit(ALICE, None),
+            Admission::Denied { .. }
+        ));
     }
 
     #[test]
@@ -459,7 +469,12 @@ mod tests {
         let mut p = policy(&["corp.com"]);
         p.denied_principals = vec!["alice-sub".to_string()];
         let a = admitter(
-            vec![attestation(ALICE, "alice-sub", Some("alice@corp.com"), true)],
+            vec![attestation(
+                ALICE,
+                "alice-sub",
+                Some("alice@corp.com"),
+                true,
+            )],
             p,
         );
         assert!(matches!(a.admit(ALICE, None), Admission::Denied { .. }));
@@ -489,7 +504,12 @@ mod tests {
         }
         // Case folds, since domains are case-insensitive.
         let a = admitter(
-            vec![attestation(ALICE, "alice-sub", Some("Alice@CORP.COM"), true)],
+            vec![attestation(
+                ALICE,
+                "alice-sub",
+                Some("Alice@CORP.COM"),
+                true,
+            )],
             policy(&["corp.com"]),
         );
         assert!(matches!(a.admit(ALICE, None), Admission::Admitted { .. }));
@@ -498,7 +518,12 @@ mod tests {
     #[test]
     fn an_unverified_email_fails_the_domain_check() {
         let a = admitter(
-            vec![attestation(ALICE, "alice-sub", Some("alice@corp.com"), false)],
+            vec![attestation(
+                ALICE,
+                "alice-sub",
+                Some("alice@corp.com"),
+                false,
+            )],
             policy(&["corp.com"]),
         );
         assert!(matches!(a.admit(ALICE, None), Admission::Denied { .. }));
@@ -511,7 +536,10 @@ mod tests {
         let mut att = attestation(ALICE, "alice-sub", Some("alice@corp.com"), true);
         att.authority = "https://other-idp.example".to_string();
         let a = Admitter::new(
-            vec![Box::new(LocalAnchor::new("https://other-idp.example", vec![att]))],
+            vec![Box::new(LocalAnchor::new(
+                "https://other-idp.example",
+                vec![att],
+            ))],
             policy(&["corp.com"]),
         );
         match a.admit(ALICE, None) {
@@ -549,7 +577,12 @@ mod tests {
                 Box::new(LocalAnchor::new(ISSUER, vec![])),
                 Box::new(LocalAnchor::new(
                     ISSUER,
-                    vec![attestation(ALICE, "alice-sub", Some("alice@corp.com"), true)],
+                    vec![attestation(
+                        ALICE,
+                        "alice-sub",
+                        Some("alice@corp.com"),
+                        true,
+                    )],
                 )),
             ],
             policy(&["corp.com"]),

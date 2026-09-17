@@ -102,7 +102,9 @@ impl LocalAdapterRegistry {
             return Err(format!("unsafe agent name '{}'", record.name));
         }
         if record.did.is_empty() || (record.slim_endpoint.is_empty() && record.a2a_url.is_empty()) {
-            return Err("local adapter record needs a DID and slim_endpoint or a2a_url".to_string());
+            return Err(
+                "local adapter record needs a DID and slim_endpoint or a2a_url".to_string(),
+            );
         }
         fs::create_dir_all(&self.dir).map_err(|err| {
             format!(
@@ -369,7 +371,10 @@ mod tests {
             Ok(_) => panic!("empty endpoint must be rejected"),
             Err(err) => err,
         };
-        assert!(err.contains("a2a_url") || err.contains("slim_endpoint"), "{err}");
+        assert!(
+            err.contains("a2a_url") || err.contains("slim_endpoint"),
+            "{err}"
+        );
         no_ep.a2a_url = "http://127.0.0.1:9".to_string();
         registry
             .publish(&no_ep)
@@ -536,7 +541,11 @@ mod tests {
         let record: LocalAdapterRecord = serde_json::from_value(raw).unwrap();
         assert_eq!(record.a2a_binding, A2ABinding::Grpc);
         assert_eq!(
-            record.to_candidate().unicast_locator().unwrap().display_uri(),
+            record
+                .to_candidate()
+                .unicast_locator()
+                .unwrap()
+                .display_uri(),
             "grpc://127.0.0.1:50051"
         );
     }

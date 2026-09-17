@@ -93,28 +93,37 @@ mod tests {
 
     impl SecretStore for MemoryStore {
         fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
-            let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            let mut guard = self
+                .entries
+                .lock()
+                .map_err(|_| SecretError::StorageFailure)?;
             guard.insert(key.to_string(), secret.to_vec());
             Ok(())
         }
 
         fn get(&self, key: &str) -> SecretResult<SecretBytes> {
-            let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
-            let value = guard
-                .get(key)
-                .ok_or(SecretError::InvalidInput)?
-                .clone();
+            let guard = self
+                .entries
+                .lock()
+                .map_err(|_| SecretError::StorageFailure)?;
+            let value = guard.get(key).ok_or(SecretError::InvalidInput)?.clone();
             Ok(SecretBytes::new(value))
         }
 
         fn delete(&self, key: &str) -> SecretResult<()> {
-            let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            let mut guard = self
+                .entries
+                .lock()
+                .map_err(|_| SecretError::StorageFailure)?;
             guard.remove(key);
             Ok(())
         }
 
         fn list_keys(&self) -> SecretResult<Vec<String>> {
-            let guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
+            let guard = self
+                .entries
+                .lock()
+                .map_err(|_| SecretError::StorageFailure)?;
             Ok(guard.keys().cloned().collect())
         }
     }
@@ -152,7 +161,10 @@ mod tests {
 
     #[test]
     fn secret_error_display_formats_messages() {
-        assert_eq!(SecretError::NotSupported.to_string(), "operation not supported");
+        assert_eq!(
+            SecretError::NotSupported.to_string(),
+            "operation not supported"
+        );
         assert_eq!(SecretError::NotAuthorized.to_string(), "not authorized");
         assert_eq!(SecretError::InvalidInput.to_string(), "invalid input");
         assert_eq!(SecretError::StorageFailure.to_string(), "storage failure");

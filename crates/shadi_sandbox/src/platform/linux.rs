@@ -17,8 +17,8 @@ use std::path::Path;
 use std::process::Command;
 
 use landlock::{
-    Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible,
-    NetPort, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
+    Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
+    Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
 use tracing::{debug, info, warn};
 
@@ -119,8 +119,7 @@ impl LandlockConfig {
         let mut read_paths: Vec<std::path::PathBuf> = Vec::new();
         let mut write_paths: Vec<std::path::PathBuf> = Vec::new();
 
-        let compatibility =
-            policy.platform_profile() == PlatformSandboxProfile::Compatibility;
+        let compatibility = policy.platform_profile() == PlatformSandboxProfile::Compatibility;
 
         for &default in DEFAULT_READ_PATHS {
             let path = Path::new(default);
@@ -164,7 +163,13 @@ impl LandlockConfig {
 
     /// Apply the Landlock sandbox.
     fn apply(&self) -> Result<(), SandboxError> {
-        apply_landlock(self.abi, &self.read_paths, &self.write_paths, self.net_block, self.net_proxy_port)
+        apply_landlock(
+            self.abi,
+            &self.read_paths,
+            &self.write_paths,
+            self.net_block,
+            self.net_proxy_port,
+        )
     }
 }
 
@@ -183,7 +188,9 @@ pub fn spawn_sandboxed(
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            config.apply().map_err(|e| std::io::Error::other(e.to_string()))
+            config
+                .apply()
+                .map_err(|e| std::io::Error::other(e.to_string()))
         });
     }
 
@@ -266,9 +273,9 @@ fn apply_landlock(
     let ruleset = build_landlock_ruleset(abi, read_paths, write_paths, net_block, net_proxy_port)?;
 
     // 3. restrict_self() — irreversible.
-    let status = ruleset.restrict_self().map_err(|e| {
-        SandboxError::ApplyFailed(format!("restrict_self failed: {}", e))
-    })?;
+    let status = ruleset
+        .restrict_self()
+        .map_err(|e| SandboxError::ApplyFailed(format!("restrict_self failed: {}", e)))?;
 
     match status.ruleset {
         landlock::RulesetStatus::FullyEnforced => {
@@ -305,9 +312,7 @@ fn build_landlock_ruleset(
     let mut builder = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(handled_fs)
-        .map_err(|e| {
-            SandboxError::ApplyFailed(format!("failed to handle fs access: {}", e))
-        })?
+        .map_err(|e| SandboxError::ApplyFailed(format!("failed to handle fs access: {}", e)))?
         .set_compatibility(CompatLevel::BestEffort);
 
     // Network isolation (ABI V4+).
@@ -413,15 +418,13 @@ fn add_path_rule(
     match PathFd::new(path) {
         Ok(fd) => {
             debug!("Adding {} rule: {}", label, path.display());
-            ruleset
-                .add_rule(PathBeneath::new(fd, access))
-                .map_err(|e| {
-                    SandboxError::ApplyFailed(format!(
-                        "cannot add Landlock rule for {}: {}",
-                        path.display(),
-                        e,
-                    ))
-                })
+            ruleset.add_rule(PathBeneath::new(fd, access)).map_err(|e| {
+                SandboxError::ApplyFailed(format!(
+                    "cannot add Landlock rule for {}: {}",
+                    path.display(),
+                    e,
+                ))
+            })
         }
         Err(e) => {
             warn!(
@@ -557,7 +560,10 @@ mod tests {
         if let Ok(home) = std::env::var("HOME") {
             let paths = compatibility_write_paths();
             let config_path: std::path::PathBuf = format!("{}/.config", home).into();
-            assert!(paths.contains(&config_path), "missing ~/.config in write paths");
+            assert!(
+                paths.contains(&config_path),
+                "missing ~/.config in write paths"
+            );
         }
     }
 
@@ -568,7 +574,9 @@ mod tests {
         std::env::set_var("TMPDIR", "/tmp/shadi-test-tmpdir");
         let paths = compatibility_write_paths();
         assert!(
-            paths.iter().any(|p| p == Path::new("/tmp/shadi-test-tmpdir")),
+            paths
+                .iter()
+                .any(|p| p == Path::new("/tmp/shadi-test-tmpdir")),
             "TMPDIR should be in compatibility write paths"
         );
         // Restore.
@@ -646,7 +654,10 @@ mod tests {
         let policy = SandboxPolicy::new().block_network(true);
         let abi = detect_abi().expect("Landlock available");
         let config = LandlockConfig::from_policy(&policy, abi);
-        assert!(config.net_block, "net_block should be true when policy blocks network");
+        assert!(
+            config.net_block,
+            "net_block should be true when policy blocks network"
+        );
 
         let policy_no_block = SandboxPolicy::new().block_network(false);
         let config_no_block = LandlockConfig::from_policy(&policy_no_block, abi);
@@ -705,7 +716,11 @@ mod tests {
     fn set_no_new_privs_succeeds() {
         // PR_SET_NO_NEW_PRIVS is idempotent — safe to call multiple times.
         let result = set_no_new_privs();
-        assert!(result.is_ok(), "set_no_new_privs should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "set_no_new_privs should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -733,7 +748,10 @@ mod tests {
             .map(|&p| p.into())
             .collect();
         let result = build_landlock_ruleset(abi, &read, &[], false, None);
-        assert!(result.is_ok(), "build_landlock_ruleset should succeed with default paths");
+        assert!(
+            result.is_ok(),
+            "build_landlock_ruleset should succeed with default paths"
+        );
     }
 
     #[test]
@@ -742,7 +760,10 @@ mod tests {
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
         let write: Vec<std::path::PathBuf> = vec!["/tmp".into()];
         let result = build_landlock_ruleset(abi, &read, &write, false, None);
-        assert!(result.is_ok(), "build_landlock_ruleset should succeed with write paths");
+        assert!(
+            result.is_ok(),
+            "build_landlock_ruleset should succeed with write paths"
+        );
     }
 
     #[test]
@@ -751,7 +772,10 @@ mod tests {
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
         // net_block=true exercises the network branch.
         let result = build_landlock_ruleset(abi, &read, &[], true, None);
-        assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=true");
+        assert!(
+            result.is_ok(),
+            "build_landlock_ruleset should succeed with net_block=true"
+        );
     }
 
     #[test]
@@ -759,27 +783,29 @@ mod tests {
         let abi = detect_abi().expect("Landlock available");
         let read: Vec<std::path::PathBuf> = vec!["/usr".into()];
         let result = build_landlock_ruleset(abi, &read, &[], false, None);
-        assert!(result.is_ok(), "build_landlock_ruleset should succeed with net_block=false");
+        assert!(
+            result.is_ok(),
+            "build_landlock_ruleset should succeed with net_block=false"
+        );
     }
 
     #[test]
     fn build_ruleset_empty_paths() {
         let abi = detect_abi().expect("Landlock available");
         let result = build_landlock_ruleset(abi, &[], &[], false, None);
-        assert!(result.is_ok(), "build_landlock_ruleset with no paths should still succeed");
+        assert!(
+            result.is_ok(),
+            "build_landlock_ruleset with no paths should still succeed"
+        );
     }
 
     #[test]
     fn build_ruleset_mixed_existing_and_nonexistent_paths() {
         let abi = detect_abi().expect("Landlock available");
-        let read: Vec<std::path::PathBuf> = vec![
-            "/usr".into(),
-            "/nonexistent-shadi-path-xyz".into(),
-        ];
-        let write: Vec<std::path::PathBuf> = vec![
-            "/tmp".into(),
-            "/nonexistent-shadi-write-xyz".into(),
-        ];
+        let read: Vec<std::path::PathBuf> =
+            vec!["/usr".into(), "/nonexistent-shadi-path-xyz".into()];
+        let write: Vec<std::path::PathBuf> =
+            vec!["/tmp".into(), "/nonexistent-shadi-write-xyz".into()];
         let result = build_landlock_ruleset(abi, &read, &write, false, None);
         assert!(
             result.is_ok(),
@@ -823,13 +849,7 @@ mod tests {
         // filtering branch rather than the warn branch.
         let detected = detect_abi().expect("Landlock available");
         if detected >= ABI::V4 {
-            let result = build_landlock_ruleset(
-                ABI::V4,
-                &["/usr".into()],
-                &[],
-                true,
-                None,
-            );
+            let result = build_landlock_ruleset(ABI::V4, &["/usr".into()], &[], true, None);
             assert!(
                 result.is_ok(),
                 "net_block with V4+ should succeed (network filtering): {:?}",
@@ -851,7 +871,11 @@ mod tests {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
         let result = spawn_sandboxed(&mut cmd, &policy);
-        assert!(result.is_ok(), "spawn_sandboxed should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "spawn_sandboxed should succeed: {:?}",
+            result.err()
+        );
         let mut child = result.unwrap();
         let status = child.wait().expect("wait for child");
         assert!(status.success(), "echo should exit 0");
@@ -861,7 +885,11 @@ mod tests {
     fn probe_abi_v1_should_succeed() {
         // V1 is the minimum; if Landlock is available at all this passes.
         let result = probe_abi(ABI::V1);
-        assert!(result.is_ok(), "ABI V1 probe should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "ABI V1 probe should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
