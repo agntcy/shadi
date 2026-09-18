@@ -1,7 +1,7 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", not(feature = "coverage")))]
 
 use std::process::{Command, Stdio};
 
