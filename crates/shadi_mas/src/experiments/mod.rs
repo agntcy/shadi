@@ -146,9 +146,14 @@ impl LiveA2ATaskAdapter {
                 // Seal, then sign. Order is the whole point: the freshness
                 // fields must be inside the payload the envelope signature
                 // covers, or they are strippable in flight.
+                // `SHADI_ATTESTATION` is the agent's attestation JWS, minted at
+                // registration. Absent, the peer sees an unattested sender.
+                let attestation = std::env::var("SHADI_ATTESTATION").ok();
                 let payload = match self.config.peer_did.as_deref() {
-                    Some(peer_did) => shadi_identity::Sealed::seal(peer_did, &current)
-                        .map_err(|err| err.to_string())?,
+                    Some(peer_did) => {
+                        shadi_identity::Sealed::seal(peer_did, &current, attestation.as_deref())
+                            .map_err(|err| err.to_string())?
+                    }
                     // No recipient DID known, so there is no `aud` to bind to.
                     // Sends unsealed, which a receiver accepts only while its
                     // policy leaves `require_freshness` off.

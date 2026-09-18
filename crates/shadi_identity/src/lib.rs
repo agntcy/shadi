@@ -22,6 +22,7 @@ pub mod auth;
 pub mod config;
 pub mod did_proof;
 pub mod freshness;
+pub mod github_anchor;
 pub mod ssh;
 pub mod trust_anchor;
 
@@ -34,7 +35,11 @@ pub use did_proof::{
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
 pub use freshness::{ReplayCache, Sealed};
-pub use trust_anchor::{Attestation, LocalAnchor, TrustAnchor};
+pub use github_anchor::{GithubKeysAnchor, KeyListFetcher};
+pub use trust_anchor::{
+    mint_attestation, peek_principal, verify_attestation, Attestation, AttestationClaims,
+    LocalAnchor, TrustAnchor, ATTESTATION_JWS_MAX_BYTES,
+};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];

@@ -60,13 +60,34 @@ pub struct TrustedIssuer {
     /// Individual principals, as this issuer names them.
     #[serde(default)]
     pub allowed_principals: Vec<String>,
-    /// Tools this issuer's principals may run.
+    /// Tools this issuer's principals may run, matched against the
+    /// attestation's `tool` claim.
     ///
-    /// **Not enforced yet**: nothing on the wire names the *sender's* tool, so
-    /// there is no input to match against. Accepted so a deployment can write
-    /// the intended list now, and so the field is not silently dropped.
+    /// Empty means unrestricted. Fail-open here is deliberate: every policy
+    /// file written before tools were enforced omits the field, and reading
+    /// that as "no tool may run" would deny every sender on upgrade.
+    ///
+    /// **Not a boundary against a dishonest principal.** The `tool` claim is
+    /// self-asserted — the sender signs its own attestation — so this narrows
+    /// what an honest principal's agents can do, not what a compromised key
+    /// can claim. Use `denied_principals` for that.
     #[serde(default)]
     pub permitted_tools: Vec<String>,
+    /// Where this issuer publishes an account's SSH keys, `{}` standing for the
+    /// principal. Set it and the issuer is backed by a published key list; omit
+    /// it and only pinned `local_attestations` speak for it.
+    ///
+    /// From policy, never from a message: a sender-supplied URL would let it
+    /// nominate its own authority.
+    #[serde(default)]
+    pub keys_url_template: Option<String>,
+    /// How stale a fetched key list may be.
+    #[serde(default = "default_key_list_ttl")]
+    pub key_list_ttl_seconds: u64,
+}
+
+fn default_key_list_ttl() -> u64 {
+    900
 }
 
 /// The whole of a deployment's trust configuration.
@@ -95,11 +116,22 @@ pub struct AdmissionPolicy {
     /// `LocalAnchor` entries: the operator-pinned `principal -> did` pairs.
     #[serde(default)]
     pub local_attestations: Vec<Attestation>,
+    /// Tolerance on an attestation's `iat`/`exp` against local time.
+    #[serde(default = "default_clock_skew")]
+    pub clock_skew_seconds: u64,
 }
 
 fn default_stale_grace() -> u64 {
     1200
 }
+
+fn default_clock_skew() -> u64 {
+    60
+}
+
+/// Upper bound on `clock_skew_seconds`. An hour absorbs any real drift; past
+/// that the skew starts substituting for expiry rather than tolerating it.
+const MAX_CLOCK_SKEW_SECONDS: u64 = 3600;
 
 impl AdmissionPolicy {
     /// Load from disk.
@@ -138,6 +170,38 @@ impl AdmissionPolicy {
                     "trusted_issuers entry has an empty issuer".to_string(),
                 ));
             }
+            if let Some(template) = &issuer.keys_url_template {
+                // Without the placeholder every principal resolves to the same
+                // URL, which would admit one account's keys for everyone.
+                if !template.contains("{}") {
+                    return Err(IdentityError::Config(format!(
+                        "keys_url_template {template:?} has no {{}} placeholder for the principal"
+                    )));
+                }
+                if !template.starts_with("https://") {
+                    return Err(IdentityError::Config(format!(
+                        "keys_url_template {template:?} must be https"
+                    )));
+                }
+                // A published-keys anchor only ever fetches for a principal on
+                // this list, and the attestation it builds carries no verified
+                // email, so `allowed_domains` cannot admit anyone either. With
+                // an empty list the issuer silently admits nobody.
+                if issuer.allowed_principals.is_empty() {
+                    return Err(IdentityError::Config(format!(
+                        "issuer {} sets keys_url_template but no allowed_principals, so it \
+                         can admit nobody; list the principals or drop the template",
+                        issuer.issuer
+                    )));
+                }
+                // Zero would refetch the key list on every single message.
+                if issuer.key_list_ttl_seconds == 0 {
+                    return Err(IdentityError::Config(format!(
+                        "issuer {} has key_list_ttl_seconds 0, which refetches on every message",
+                        issuer.issuer
+                    )));
+                }
+            }
             for domain in &issuer.allowed_domains {
                 // Under rollout pressure the tempting entry is "*". If the
                 // grammar cannot express it, it cannot happen.
@@ -151,6 +215,39 @@ impl AdmissionPolicy {
                         "allowed_domains entry {domain:?} is not a plain ASCII domain"
                     )));
                 }
+            }
+        }
+
+        // Expiry is `now <= exp + skew`, so a large skew saturates and stops
+        // bounding anything at all.
+        if self.clock_skew_seconds > MAX_CLOCK_SKEW_SECONDS {
+            return Err(IdentityError::Config(format!(
+                "clock_skew_seconds {} exceeds {MAX_CLOCK_SKEW_SECONDS}; a skew that large \
+                 disables attestation expiry",
+                self.clock_skew_seconds
+            )));
+        }
+
+        // A pinned attestation's claims are written by hand, so an issuer that
+        // restricts tools would reject its own pins at admission time. Catch it
+        // here instead, where the operator is looking at the file.
+        for att in &self.local_attestations {
+            let Some(issuer) = self
+                .trusted_issuers
+                .iter()
+                .find(|i| i.issuer == att.authority)
+            else {
+                continue;
+            };
+            if issuer.permitted_tools.is_empty() {
+                continue;
+            }
+            if att.claims.get("tool").and_then(|t| t.as_str()).is_none() {
+                return Err(IdentityError::Config(format!(
+                    "local_attestations entry for {} has no string \"tool\" claim, but issuer {} \
+                     restricts permitted_tools, so it would be denied on every message",
+                    att.did, issuer.issuer
+                )));
             }
         }
         Ok(())
@@ -173,15 +270,13 @@ impl AdmissionPolicy {
             .find(|i| i.issuer == att.authority)
             .ok_or_else(|| format!("authority {} is not trusted", att.authority))?;
 
-        if issuer
+        let permitted = if issuer
             .allowed_principals
             .iter()
             .any(|p| p == &att.principal)
         {
-            return Ok(());
-        }
-
-        if !issuer.allowed_domains.is_empty() {
+            true
+        } else if !issuer.allowed_domains.is_empty() {
             // Email is policy input, never identity, and only when verified —
             // at some IdPs the claim is attacker-chosen.
             let email = att
@@ -190,19 +285,43 @@ impl AdmissionPolicy {
                 .filter(|_| att.email_verified)
                 .ok_or_else(|| "no verified email for domain policy".to_string())?;
             let domain = email_domain(email).ok_or_else(|| format!("unparseable email {email}"))?;
-            if issuer
+            issuer
                 .allowed_domains
                 .iter()
                 .any(|d| d.eq_ignore_ascii_case(domain))
-            {
-                return Ok(());
-            }
+        } else {
+            false
+        };
+
+        if !permitted {
+            return Err(format!(
+                "principal {} is not permitted by issuer {}",
+                att.principal, issuer.issuer
+            ));
         }
 
-        Err(format!(
-            "principal {} is not permitted by issuer {}",
-            att.principal, issuer.issuer
-        ))
+        // Applies to both routes above: being an allowed principal does not
+        // also decide which tool that principal may run. Keeping this out of
+        // the branches is what stops an allow-listed user running any tool.
+        Self::evaluate_tool(issuer, att)
+    }
+
+    fn evaluate_tool(issuer: &TrustedIssuer, att: &Attestation) -> Result<(), String> {
+        if issuer.permitted_tools.is_empty() {
+            return Ok(());
+        }
+        match att.claims.get("tool").and_then(|t| t.as_str()) {
+            Some(tool) if issuer.permitted_tools.iter().any(|t| t == tool) => Ok(()),
+            Some(tool) => Err(format!(
+                "tool {tool} is not permitted for principal {}",
+                att.principal
+            )),
+            // An absent or non-string claim is a denial, never a skipped check.
+            None => Err(format!(
+                "attestation for principal {} names no tool, but issuer {} restricts tools",
+                att.principal, issuer.issuer
+            )),
+        }
     }
 }
 
@@ -428,6 +547,91 @@ mod tests {
         }
     }
 
+    fn with_tool(mut att: Attestation, tool: &str) -> Attestation {
+        att.claims.insert("tool".to_string(), tool.into());
+        att
+    }
+
+    fn tool_policy(principals: &[&str], tools: &[&str]) -> AdmissionPolicy {
+        AdmissionPolicy {
+            trusted_issuers: vec![TrustedIssuer {
+                issuer: ISSUER.to_string(),
+                allowed_principals: principals.iter().map(|p| p.to_string()).collect(),
+                permitted_tools: tools.iter().map(|t| t.to_string()).collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_permitted_tool_is_admitted_and_others_are_denied() {
+        let policy = tool_policy(&["alice-sub"], &["claude-code", "copilot"]);
+        let allowed = with_tool(attestation(ALICE, "alice-sub", None, false), "claude-code");
+        assert!(matches!(
+            admitter(vec![allowed], policy.clone()).admit(ALICE, None),
+            Admission::Admitted { .. }
+        ));
+
+        let wrong = with_tool(attestation(ALICE, "alice-sub", None, false), "codex");
+        match admitter(vec![wrong], policy).admit(ALICE, None) {
+            Admission::Denied { reason, .. } => assert!(reason.contains("tool codex"), "{reason}"),
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    /// The tool gate has to survive *both* ways a principal can be permitted.
+    /// Inside the allow-list branch it would be skipped for exactly the users
+    /// a deployment names explicitly — silently, with no log line.
+    #[test]
+    fn the_tool_gate_applies_to_domain_matches_too() {
+        let mut policy = tool_policy(&[], &["claude-code"]);
+        policy.trusted_issuers[0].allowed_domains = vec!["corp.com".to_string()];
+        let att = with_tool(
+            attestation(ALICE, "alice-sub", Some("alice@corp.com"), true),
+            "codex",
+        );
+        match admitter(vec![att], policy).admit(ALICE, None) {
+            Admission::Denied { reason, .. } => assert!(reason.contains("tool codex"), "{reason}"),
+            other => panic!("a domain match must still be tool-checked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_attestation_with_no_tool_is_denied_only_when_tools_are_restricted() {
+        let att = attestation(ALICE, "alice-sub", None, false);
+        match admitter(
+            vec![att.clone()],
+            tool_policy(&["alice-sub"], &["claude-code"]),
+        )
+        .admit(ALICE, None)
+        {
+            Admission::Denied { reason, .. } => {
+                assert!(reason.contains("names no tool"), "{reason}")
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+
+        // Empty `permitted_tools` stays unrestricted, so existing policy files
+        // keep admitting senders that name no tool.
+        assert!(matches!(
+            admitter(vec![att], tool_policy(&["alice-sub"], &[])).admit(ALICE, None),
+            Admission::Admitted { .. }
+        ));
+    }
+
+    /// A non-string claim must not read as absent-and-allowed.
+    #[test]
+    fn a_non_string_tool_claim_is_denied() {
+        let mut att = attestation(ALICE, "alice-sub", None, false);
+        att.claims.insert("tool".to_string(), 42.into());
+        match admitter(vec![att], tool_policy(&["alice-sub"], &["claude-code"])).admit(ALICE, None)
+        {
+            Admission::Denied { .. } => {}
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
     #[test]
     fn an_unknown_did_is_unattested_not_denied() {
         let a = admitter(vec![], policy(&["corp.com"]));
@@ -598,6 +802,81 @@ mod tests {
         assert!(p.validate().is_err());
         assert!(policy(&["corp.com"]).validate().is_ok());
         assert!(policy(&[" corp.com"]).validate().is_err());
+    }
+
+    /// A template without the placeholder would resolve every principal to one
+    /// URL, admitting a single account's keys for everyone.
+    #[test]
+    fn a_keys_url_template_must_be_https_and_name_the_principal() {
+        let with_template = |t: &str| {
+            let mut p = policy(&["corp.com"]);
+            p.trusted_issuers[0].keys_url_template = Some(t.to_string());
+            p.trusted_issuers[0].allowed_principals = vec!["alice-sub".to_string()];
+            p.trusted_issuers[0].key_list_ttl_seconds = 900;
+            p
+        };
+        assert!(with_template("https://github.com/{}.keys")
+            .validate()
+            .is_ok());
+        assert!(with_template("https://github.com/keys").validate().is_err());
+        assert!(with_template("http://github.com/{}.keys")
+            .validate()
+            .is_err());
+    }
+
+    /// The anchor only fetches for a listed principal, and the attestation it
+    /// builds carries no verified email, so a domains-only issuer with a
+    /// template admits nobody at all.
+    #[test]
+    fn a_keys_url_template_needs_allowed_principals() {
+        let mut p = policy(&["corp.com"]);
+        p.trusted_issuers[0].keys_url_template = Some("https://github.com/{}.keys".to_string());
+        p.trusted_issuers[0].key_list_ttl_seconds = 900;
+        let err = p.validate().expect_err("must refuse to load").to_string();
+        assert!(err.contains("admit nobody"), "{err}");
+    }
+
+    #[test]
+    fn a_zero_key_list_ttl_refuses_to_load() {
+        let mut p = policy(&["corp.com"]);
+        p.trusted_issuers[0].keys_url_template = Some("https://github.com/{}.keys".to_string());
+        p.trusted_issuers[0].allowed_principals = vec!["alice-sub".to_string()];
+        p.trusted_issuers[0].key_list_ttl_seconds = 0;
+        let err = p.validate().expect_err("must refuse to load").to_string();
+        assert!(err.contains("key_list_ttl_seconds"), "{err}");
+    }
+
+    /// `now <= exp + skew` saturates, so a huge skew stops bounding expiry.
+    #[test]
+    fn an_absurd_clock_skew_refuses_to_load() {
+        let mut p = policy(&["corp.com"]);
+        p.clock_skew_seconds = u64::MAX;
+        let err = p.validate().expect_err("must refuse to load").to_string();
+        assert!(err.contains("disables attestation expiry"), "{err}");
+
+        p.clock_skew_seconds = 60;
+        assert!(p.validate().is_ok());
+    }
+
+    /// Pinned attestations carry hand-written claims. An issuer that restricts
+    /// tools would deny its own pins on every message, so say so at load.
+    #[test]
+    fn a_pinned_attestation_without_a_tool_refuses_to_load_under_tool_policy() {
+        let mut p = tool_policy(&["alice-sub"], &["claude-code"]);
+        p.local_attestations = vec![attestation(ALICE, "alice-sub", None, false)];
+        let err = p.validate().expect_err("must refuse to load").to_string();
+        assert!(err.contains("no string \"tool\" claim"), "{err}");
+
+        // With the claim present, or with tools unrestricted, it loads.
+        p.local_attestations = vec![with_tool(
+            attestation(ALICE, "alice-sub", None, false),
+            "claude-code",
+        )];
+        assert!(p.validate().is_ok());
+
+        let mut unrestricted = tool_policy(&["alice-sub"], &[]);
+        unrestricted.local_attestations = vec![attestation(ALICE, "alice-sub", None, false)];
+        assert!(unrestricted.validate().is_ok());
     }
 
     #[test]

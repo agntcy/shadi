@@ -222,6 +222,13 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
         None => None,
     };
 
+    // Enrol before deriving anything, so a key GitHub does not publish fails
+    // here rather than at a peer's admission check days later.
+    let attester = match args.github_login.as_deref() {
+        Some(login) => Some(enrol_github_signer(&seed_material, login, args.source)?),
+        None => None,
+    };
+
     let prefix = args.prefix.trim_end_matches('/');
     if let Some(out_dir) = args.out_dir.as_ref() {
         std::fs::create_dir_all(out_dir)
@@ -260,9 +267,101 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
         if args.human_did_key.is_some() {
             println!("Stored human binding: {}/{}/human_did", prefix, agent_name);
         }
+
+        if let Some((signer, login)) = attester.as_ref() {
+            let jws = mint_attestation(signer, login, agent_name, &did, args.attestation_days)?;
+            // Not a secret: it names a public key and authorises nothing, so it
+            // goes beside the DID document rather than into the secret store.
+            if let Some(out_dir) = args.out_dir.as_ref() {
+                let out_file = out_dir.join(format!("{}.attestation.jws", agent_name));
+                std::fs::write(&out_file, format!("{}\n", jws))
+                    .map_err(|err| format!("failed to write {}: {}", out_file.display(), err))?;
+                println!("Wrote attestation: {}", out_file.display());
+            }
+            println!("Attestation: {jws}");
+        }
+    }
+
+    if attester.is_some() {
+        println!("\nGive the sending agent its attestation, e.g.:");
+        match args.out_dir.as_ref() {
+            Some(dir) => println!(
+                "  export SHADI_ATTESTATION=$(cat {})",
+                dir.join(format!("{}.attestation.jws", args.agent_names[0]))
+                    .display()
+            ),
+            None => println!("  export SHADI_ATTESTATION=<the Attestation line above>"),
+        }
     }
 
     Ok(())
+}
+
+/// Check the SSH key is one the account publishes, and return it as a signer.
+///
+/// This is the whole of enrolment: a receiver's only authority is the account's
+/// published key list, so a key missing from it can attest nothing.
+fn enrol_github_signer(
+    seed_material: &[u8],
+    login: &str,
+    source: HumanIdentitySource,
+) -> Result<(ed25519_dalek::SigningKey, String), String> {
+    if !matches!(source, HumanIdentitySource::Ssh) {
+        return Err(
+            "--github-login requires --source ssh: the attestation is signed by the SSH key \
+             that GitHub publishes"
+                .to_string(),
+        );
+    }
+    let seed: [u8; 32] = seed_material
+        .try_into()
+        .map_err(|_| "SSH seed is not 32 bytes".to_string())?;
+    let signer = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let mine = signer.verifying_key();
+
+    let listing = fetch_github_ssh_keys(login)?;
+    let published = shadi_identity::ssh::all_ed25519_in_authorized_keys(&listing);
+    if published.is_empty() {
+        return Err(format!(
+            "https://github.com/{login}.keys publishes no ssh-ed25519 key"
+        ));
+    }
+    if !published.iter().any(|k| k.as_bytes() == mine.as_bytes()) {
+        return Err(format!(
+            "this SSH key is not among the {} key(s) published at https://github.com/{login}.keys. \
+             Upload it there, or enrol with the key you already published",
+            published.len()
+        ));
+    }
+    println!("Enrolled: github.com/{login} publishes this SSH key");
+    Ok((signer, login.to_string()))
+}
+
+fn mint_attestation(
+    signer: &ed25519_dalek::SigningKey,
+    login: &str,
+    agent_name: &str,
+    did: &str,
+    days: u64,
+) -> Result<String, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|err| format!("system clock is before the epoch: {err}"))?
+        .as_secs();
+    shadi_identity::mint_attestation(
+        signer,
+        &shadi_identity::AttestationClaims {
+            authority: "github.com".to_string(),
+            principal: login.to_string(),
+            did: did.to_string(),
+            tool: agent_name.to_string(),
+            iat: now,
+            // Saturating so an absurd --attestation-days cannot wrap into a
+            // short-but-valid window.
+            exp: now.saturating_add(days.saturating_mul(86_400)),
+        },
+    )
+    .map_err(|err| err.to_string())
 }
 
 pub(crate) fn run_verify_agent_identity(args: VerifyAgentIdentityArgs) -> Result<(), String> {

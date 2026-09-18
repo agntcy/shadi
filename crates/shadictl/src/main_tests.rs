@@ -2372,6 +2372,8 @@ fn run_cli_derive_agent_identity_missing_seed_returns_error() {
         prefix: "agents".to_string(),
         human_did_key: None,
         out_dir: None,
+        github_login: None,
+        attestation_days: 30,
     });
 
     assert_eq!(code, ExitCode::from(2));
@@ -2391,6 +2393,8 @@ fn run_cli_derive_agent_identity_missing_human_did_key_returns_error() {
         prefix: "agents".to_string(),
         human_did_key: Some(unique_key("missing-human-did-key")),
         out_dir: None,
+        github_login: None,
+        attestation_days: 30,
     });
 
     assert_eq!(code, ExitCode::from(2));
@@ -2413,6 +2417,8 @@ fn run_cli_derive_agent_identity_out_dir_conflicts_with_file_returns_error() {
         prefix: "agents".to_string(),
         human_did_key: None,
         out_dir: Some(out_dir),
+        github_login: None,
+        attestation_days: 30,
     });
 
     assert_eq!(code, ExitCode::from(2));
@@ -2438,6 +2444,8 @@ fn run_cli_derive_agent_identity_reports_store_failure() {
         prefix: "agents".to_string(),
         human_did_key: None,
         out_dir: None,
+        github_login: None,
+        attestation_days: 30,
     });
 
     test_store_clear_failures();
@@ -3303,6 +3311,8 @@ fn run_cli_derive_and_verify_agent_identity_from_ssh_key() {
         prefix: prefix.clone(),
         human_did_key: None,
         out_dir: None,
+        github_login: None,
+        attestation_days: 30,
     });
     assert_eq!(code, ExitCode::from(0));
 
@@ -3324,6 +3334,160 @@ fn run_cli_derive_and_verify_agent_identity_from_ssh_key() {
         require_human_binding: false,
     });
     assert_eq!(code, ExitCode::from(0));
+}
+
+fn enrol_args(
+    key_path: &std::path::Path,
+    agents: Vec<String>,
+    prefix: &str,
+    login: Option<&str>,
+    out_dir: Option<PathBuf>,
+) -> DeriveAgentIdentityArgs {
+    DeriveAgentIdentityArgs {
+        ssh_passphrase_secret: None,
+        source: HumanIdentitySource::Ssh,
+        human_secret: None,
+        input: Some(key_path.to_path_buf()),
+        agent_names: agents,
+        prefix: prefix.to_string(),
+        human_did_key: None,
+        out_dir,
+        github_login: login.map(str::to_string),
+        attestation_days: 30,
+    }
+}
+
+/// Registering several tools under one login: one attestation each, every one
+/// naming its own tool and its own DID.
+#[test]
+fn run_cli_github_login_mints_one_attestation_per_agent() {
+    let _guard = github_payload_lock().lock().expect("github payload lock");
+    let (pem, public_line, _did) = ssh_test_key();
+    set_test_github_payload(Some(format!(
+        "ssh-rsa AAAAB3NzaC1yc2EAAAA other\n{public_line}\n"
+    )));
+
+    let dir = temp_dir();
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, &pem).expect("write key");
+    let prefix = unique_key("enrolled");
+    let tools = vec!["claude-code".to_string(), "copilot".to_string()];
+    let out_dir = dir.path().join("out");
+
+    let code = run_derive_agent_identity_command(enrol_args(
+        &key_path,
+        tools.clone(),
+        &prefix,
+        Some("amarton"),
+        Some(out_dir.clone()),
+    ));
+    assert_eq!(code, ExitCode::from(0));
+
+    for tool in &tools {
+        // Public data, so it lands beside the DID document rather than in the
+        // secret store.
+        let jws = std::fs::read_to_string(out_dir.join(format!("{tool}.attestation.jws")))
+            .expect("attestation file");
+        let jws = jws.trim().to_string();
+        let stored_did =
+            String::from_utf8(test_store_get(&format!("{prefix}/{tool}/did")).expect("stored did"))
+                .expect("utf8");
+
+        // Verifies against the published key, and binds to this agent's DID.
+        let published =
+            shadi_identity::ssh::verifying_key_from_openssh_public_key(&public_line).unwrap();
+        let claims = shadi_identity::verify_attestation(
+            &jws,
+            &published,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            std::time::Duration::from_secs(60),
+        )
+        .expect("attestation must verify against the published key");
+
+        assert_eq!(claims.principal, "amarton");
+        assert_eq!(claims.authority, "github.com");
+        assert_eq!(claims.tool, *tool);
+        assert_eq!(claims.did, stored_did);
+    }
+}
+
+/// The enrolment check that matters: a key the account does not publish can
+/// attest nothing, and must fail here rather than at a peer days later.
+#[test]
+fn run_cli_github_login_refuses_a_key_the_account_does_not_publish() {
+    let _guard = github_payload_lock().lock().expect("github payload lock");
+    let (pem, _public_line, _did) = ssh_test_key();
+    let someone_else = {
+        let keypair = ssh_key::private::Ed25519Keypair::from_seed(&[9u8; 32]);
+        ssh_key::PrivateKey::from(keypair)
+            .public_key()
+            .to_openssh()
+            .expect("encode pub")
+    };
+    set_test_github_payload(Some(format!("{someone_else}\n")));
+
+    let dir = temp_dir();
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, &pem).expect("write key");
+    let prefix = unique_key("unpublished");
+    let out_dir = dir.path().join("out");
+
+    let code = run_derive_agent_identity_command(enrol_args(
+        &key_path,
+        vec!["claude-code".to_string()],
+        &prefix,
+        Some("amarton"),
+        Some(out_dir.clone()),
+    ));
+    assert_eq!(code, ExitCode::from(2));
+    // Enrolment runs first, so nothing is derived, stored or written.
+    assert!(test_store_get(&format!("{prefix}/claude-code/did")).is_none());
+    assert!(!out_dir.join("claude-code.attestation.jws").exists());
+}
+
+/// Without `--github-login` nothing is minted, so existing callers are
+/// unchanged.
+#[test]
+fn run_cli_without_a_github_login_mints_no_attestation() {
+    let (pem, _public_line, _did) = ssh_test_key();
+    let dir = temp_dir();
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, &pem).expect("write key");
+    let prefix = unique_key("plain");
+    let out_dir = dir.path().join("out");
+
+    let code = run_derive_agent_identity_command(enrol_args(
+        &key_path,
+        vec!["claude-code".to_string()],
+        &prefix,
+        None,
+        Some(out_dir.clone()),
+    ));
+    assert_eq!(code, ExitCode::from(0));
+    assert!(test_store_get(&format!("{prefix}/claude-code/did")).is_some());
+    assert!(!out_dir.join("claude-code.attestation.jws").exists());
+}
+
+/// The attestation is signed by the SSH key, so no other source can mint one.
+#[test]
+fn run_cli_github_login_requires_the_ssh_source() {
+    let (pem, _public_line, _did) = ssh_test_key();
+    let dir = temp_dir();
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, &pem).expect("write key");
+
+    let mut args = enrol_args(
+        &key_path,
+        vec!["claude-code".to_string()],
+        &unique_key("wrong-source"),
+        Some("amarton"),
+        None,
+    );
+    args.source = HumanIdentitySource::Seed;
+    assert_eq!(run_derive_agent_identity_command(args), ExitCode::from(2));
 }
 
 /// `ssh` roots in the key's seed, `seed` in the file's bytes — so the same
@@ -3348,6 +3512,8 @@ fn run_cli_ssh_and_seed_sources_are_not_interchangeable() {
             prefix: prefix.clone(),
             human_did_key: None,
             out_dir: None,
+            github_login: None,
+            attestation_days: 30,
         });
         assert_eq!(code, ExitCode::from(0));
         dids.push(

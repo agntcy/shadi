@@ -1050,6 +1050,16 @@ pub(crate) struct DeriveAgentIdentityArgs {
     #[arg(long = "human-did-key", value_name = "SECRET")]
     pub(crate) human_did_key: Option<String>,
 
+    /// GitHub login to attest these agents under. Requires `--source ssh`: the
+    /// attestation is signed by the SSH key itself, and enrolment fails unless
+    /// that key is one `github.com/<login>.keys` publishes.
+    #[arg(long = "github-login", value_name = "LOGIN")]
+    pub(crate) github_login: Option<String>,
+
+    /// Days an attestation stays valid. Re-run this command to reissue.
+    #[arg(long = "attestation-days", value_name = "DAYS", default_value = "30")]
+    pub(crate) attestation_days: u64,
+
     #[arg(long = "out-dir", value_name = "DIR")]
     pub(crate) out_dir: Option<PathBuf>,
 }

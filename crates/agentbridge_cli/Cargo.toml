@@ -36,6 +36,11 @@ uuid = { version = "1", features = ["v4"] }
 serde_json = "1.0"
 # Hashing the principal in admission log lines, which ship off-box.
 sha2 = "0.11"
+# Fetching a peer's published SSH keys during admission. Unauthenticated GETs
+# only; rustls to avoid a second TLS stack alongside tonic-tls. In reqwest 0.13
+# "rustls" carries the trust store with it, so there is no separate roots
+# feature to name.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 tracing = "0.1"

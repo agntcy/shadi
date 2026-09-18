@@ -22,8 +22,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// absorb ordinary clock skew between hosts, so no separate skew knob.
 pub const FRESHNESS_WINDOW: Duration = Duration::from_secs(300);
 
-/// The application payload plus the three fields that make it single-use,
-/// time-bounded and addressed to one peer.
+/// The application payload, the three fields that make it single-use,
+/// time-bounded and addressed to one peer, and the sender's attestation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Sealed {
     /// Unique per message; the replay key.
@@ -33,34 +33,45 @@ pub struct Sealed {
     /// The recipient's `did:key`. Binds the message to one peer, so an
     /// envelope captured en route to Bob is rejected by Carol.
     pub aud: String,
+    /// The sender's attestation JWS, naming who is behind the envelope's DID.
+    ///
+    /// Here rather than in an envelope header so it is covered by the envelope
+    /// signature: a relay can neither strip it to make the sender look
+    /// unattested nor swap in someone else's. `None` from a sender that has
+    /// none, which a receiver treats as unattested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub att: Option<String>,
     /// What the adapter will see. A `String` because A2A text parts are.
     pub body: String,
 }
 
 impl Sealed {
-    /// Wrap `body` for `aud`. Seal **before** signing — freshness fields
-    /// outside the signature would be trivially strippable.
-    pub fn seal(aud: &str, body: &str) -> Result<Vec<u8>, crate::IdentityError> {
+    /// Wrap `body` for `aud`, carrying `att`. Seal **before** signing —
+    /// freshness fields outside the signature would be trivially strippable.
+    pub fn seal(aud: &str, body: &str, att: Option<&str>) -> Result<Vec<u8>, crate::IdentityError> {
         serde_json::to_vec(&Self {
             jti: random_jti(),
             iat: now_secs(),
             aud: aud.to_string(),
+            att: att.map(str::to_string),
             body: body.to_string(),
         })
         .map_err(|e| crate::IdentityError::Proof(format!("seal: {e}")))
     }
 
-    /// Validate and return the inner body.
+    /// Validate and return `(body, attestation)`.
     ///
     /// `payload` must already have been envelope-verified: this checks
-    /// freshness, not authenticity. `self_did = None` skips the audience check,
-    /// for a caller that does not know its own DID. `Err` is a rejection
-    /// reason fit for a task status message.
+    /// freshness, not authenticity, and does not inspect the attestation at
+    /// all — it only hands it to the caller's admission check.
+    /// `self_did = None` skips the audience check, for a caller that does not
+    /// know its own DID. `Err` is a rejection reason fit for a task status
+    /// message.
     pub fn open(
         payload: &[u8],
         self_did: Option<&str>,
         replay: &ReplayCache,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<(Vec<u8>, Option<String>), String> {
         let sealed: Self = match serde_json::from_slice(payload) {
             Ok(sealed) => sealed,
             // A sender that predates sealing, sending a bare body. Accepting is
@@ -68,7 +79,7 @@ impl Sealed {
             // right is a deployment question, so it is a policy flag — and it
             // must be turned on once every sender seals, or this module is
             // decorative.
-            Err(_) if !replay.require_freshness => return Ok(payload.to_vec()),
+            Err(_) if !replay.require_freshness => return Ok((payload.to_vec(), None)),
             Err(e) => return Err(format!("message carries no freshness fields ({e})")),
         };
 
@@ -93,7 +104,7 @@ impl Sealed {
             return Err("replayed message (jti already seen)".to_string());
         }
 
-        Ok(sealed.body.into_bytes())
+        Ok((sealed.body.into_bytes(), sealed.att))
     }
 }
 
@@ -140,7 +151,7 @@ impl ReplayCache {
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -168,7 +179,7 @@ mod tests {
     }
 
     fn open(sealed: &Sealed, replay: &ReplayCache) -> Result<Vec<u8>, String> {
-        Sealed::open(&serde_json::to_vec(sealed).unwrap(), Some(ME), replay)
+        Sealed::open(&serde_json::to_vec(sealed).unwrap(), Some(ME), replay).map(|(body, _)| body)
     }
 
     fn fresh() -> Sealed {
@@ -176,6 +187,7 @@ mod tests {
             jti: random_jti(),
             iat: now_secs(),
             aud: ME.to_string(),
+            att: None,
             body: "review PR 412".to_string(),
         }
     }
@@ -183,15 +195,33 @@ mod tests {
     #[test]
     fn seals_and_opens_round_trip() {
         let replay = cache();
-        let payload = Sealed::seal(ME, "review PR 412").unwrap();
-        let body = Sealed::open(&payload, Some(ME), &replay).unwrap();
+        let payload = Sealed::seal(ME, "review PR 412", Some("eyJ.att.sig")).unwrap();
+        let (body, att) = Sealed::open(&payload, Some(ME), &replay).unwrap();
         assert_eq!(body, b"review PR 412");
+        assert_eq!(att.as_deref(), Some("eyJ.att.sig"));
+    }
+
+    /// An older sender omits the field entirely; the receiver must still open
+    /// the message and simply see no attestation.
+    #[test]
+    fn a_payload_without_the_attestation_field_still_opens() {
+        let replay = cache();
+        let legacy = serde_json::json!({
+            "jti": random_jti(), "iat": now_secs(), "aud": ME, "body": "task"
+        });
+        let (body, att) =
+            Sealed::open(&serde_json::to_vec(&legacy).unwrap(), Some(ME), &replay).unwrap();
+        assert_eq!(body, b"task");
+        assert!(att.is_none());
+        // And the field is omitted on the way out, not serialised as null.
+        let sealed = Sealed::seal(ME, "task", None).unwrap();
+        assert!(!String::from_utf8(sealed).unwrap().contains("att"));
     }
 
     #[test]
     fn verbatim_replay_is_rejected_on_second_delivery() {
         let replay = cache();
-        let payload = Sealed::seal(ME, "task").unwrap();
+        let payload = Sealed::seal(ME, "task", None).unwrap();
         assert!(Sealed::open(&payload, Some(ME), &replay).is_ok());
         let err = Sealed::open(&payload, Some(ME), &replay).unwrap_err();
         assert!(err.contains("replayed"), "{err}");
@@ -201,8 +231,9 @@ mod tests {
     #[test]
     fn a_distinct_jti_with_the_same_body_is_accepted() {
         let replay = cache();
-        assert!(Sealed::open(&Sealed::seal(ME, "task").unwrap(), Some(ME), &replay).is_ok());
-        assert!(Sealed::open(&Sealed::seal(ME, "task").unwrap(), Some(ME), &replay).is_ok());
+        let seal = || Sealed::seal(ME, "task", None).unwrap();
+        assert!(Sealed::open(&seal(), Some(ME), &replay).is_ok());
+        assert!(Sealed::open(&seal(), Some(ME), &replay).is_ok());
     }
 
     #[test]
@@ -257,7 +288,7 @@ mod tests {
         let lenient = ReplayCache::new(8, false);
         assert_eq!(
             Sealed::open(b"bare legacy body", Some(ME), &lenient).unwrap(),
-            b"bare legacy body"
+            (b"bare legacy body".to_vec(), None)
         );
         let strict = cache();
         assert!(Sealed::open(b"bare legacy body", Some(ME), &strict).is_err());

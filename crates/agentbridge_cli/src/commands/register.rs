@@ -69,9 +69,29 @@ fn install_admission(opts: Option<AdmissionOptions>) -> anyhow::Result<()> {
     };
     let policy = shadi_identity::AdmissionPolicy::load(opts.policy_file)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let anchors: Vec<Box<dyn shadi_identity::TrustAnchor>> = vec![Box::new(
+    let mut anchors: Vec<Box<dyn shadi_identity::TrustAnchor>> = vec![Box::new(
         shadi_identity::LocalAnchor::new("local-policy-file", policy.local_attestations.clone()),
     )];
+    // Pinned attestations first, so a peer named in the policy file needs no
+    // network at all. A published-keys anchor per issuer that configures one.
+    for issuer in &policy.trusted_issuers {
+        let Some(template) = &issuer.keys_url_template else {
+            continue;
+        };
+        tracing::info!(
+            issuer = %issuer.issuer,
+            principals = issuer.allowed_principals.len(),
+            "admitting through published SSH keys"
+        );
+        anchors.push(Box::new(shadi_identity::GithubKeysAnchor::new(
+            issuer.issuer.clone(),
+            template.clone(),
+            issuer.allowed_principals.clone(),
+            Duration::from_secs(issuer.key_list_ttl_seconds),
+            Duration::from_secs(policy.clock_skew_seconds),
+            Box::new(fetch_key_listing),
+        )));
+    }
     let gate = AdmissionGate {
         replay: Arc::new(shadi_identity::ReplayCache::new(
             REPLAY_CACHE_CAPACITY,
@@ -84,6 +104,58 @@ fn install_admission(opts: Option<AdmissionOptions>) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// GET an account's published SSH keys. No credential is sent.
+///
+/// On its own thread because admission is synchronous but runs inside the
+/// async request handlers, and `reqwest::blocking` panics if it finds a tokio
+/// runtime on the current thread.
+///
+/// A 404 is an answer — the account publishes nothing — and returns empty so
+/// the caller parks the peer as unattested instead of failing closed on it.
+///
+/// ponytail: a thread per fetch. The allow-list gate and the anchor's cache
+/// keep these rare; pool them if that stops being true.
+fn fetch_key_listing(url: &str) -> Result<String, String> {
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let mut response = reqwest::blocking::Client::builder()
+            .timeout(KEY_FETCH_TIMEOUT)
+            // The policy check that the URL is https only binds the first hop;
+            // following a redirect would let the server pick the next one.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| format!("http client: {e}"))?
+            .get(&url)
+            .send()
+            .map_err(|e| format!("get {url}: {e}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(String::new());
+        }
+        if !response.status().is_success() {
+            return Err(format!("get {url}: HTTP {}", response.status()));
+        }
+
+        // Read a bounded prefix rather than the whole body: the timeout limits
+        // how long a hostile endpoint can stream, not how much.
+        use std::io::Read as _;
+        let mut body = String::new();
+        response
+            .by_ref()
+            .take(KEY_LISTING_MAX_BYTES)
+            .read_to_string(&mut body)
+            .map_err(|e| format!("read {url}: {e}"))?;
+        Ok(body)
+    })
+    .join()
+    .map_err(|_| "key fetch thread panicked".to_string())?
+}
+
+/// Bounds a key fetch end to end, body read included.
+const KEY_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Generous for a key listing: 32 published keys are only a few KiB.
+const KEY_LISTING_MAX_BYTES: u64 = 64 * 1024;
 
 /// Without `--admission-policy-file` this is the permissive default: no admitter,
 /// and unsealed payloads accepted, i.e. exactly today's behaviour.
@@ -1308,19 +1380,20 @@ fn admit_incoming_message(
 
     // Freshness lives inside the signed payload, so it is covered by the
     // signature checked above and cannot be stripped in flight.
-    let body = match shadi_identity::Sealed::open(&verified.payload, self_did, replay) {
-        Ok(body) => body,
-        Err(reason) => {
-            return IncomingAdmission::Denied {
-                request: req,
-                reason,
+    let (body, attestation) =
+        match shadi_identity::Sealed::open(&verified.payload, self_did, replay) {
+            Ok(opened) => opened,
+            Err(reason) => {
+                return IncomingAdmission::Denied {
+                    request: req,
+                    reason,
+                }
             }
-        }
-    };
+        };
 
     let principal = match admitter {
         None => None,
-        Some(admitter) => match admitter.admit(&verified.did, None) {
+        Some(admitter) => match admitter.admit(&verified.did, attestation.as_deref()) {
             shadi_identity::Admission::Admitted { principal, .. } => Some(principal),
             shadi_identity::Admission::Denied { reason, .. } => {
                 return IncomingAdmission::Denied {
@@ -2218,7 +2291,7 @@ test push ... FAILED
     fn a_replayed_envelope_is_rejected_on_second_delivery() {
         let alice = shadi_identity::AgentIdentity::generate().unwrap();
         let me = "did:key:zBob";
-        let sealed = shadi_identity::Sealed::seal(me, "review PR 412").unwrap();
+        let sealed = shadi_identity::Sealed::seal(me, "review PR 412", None).unwrap();
         let envelope = shadi_identity::wrap_signed_message(&alice, &sealed).unwrap();
         let text = String::from_utf8(envelope).unwrap();
         let replay = lenient();
@@ -2242,7 +2315,7 @@ test push ... FAILED
     #[test]
     fn an_envelope_addressed_to_another_peer_is_rejected() {
         let alice = shadi_identity::AgentIdentity::generate().unwrap();
-        let sealed = shadi_identity::Sealed::seal("did:key:zBob", "task").unwrap();
+        let sealed = shadi_identity::Sealed::seal("did:key:zBob", "task", None).unwrap();
         let envelope = shadi_identity::wrap_signed_message(&alice, &sealed).unwrap();
         let req = sample_request(String::from_utf8(envelope).unwrap());
         match admit_incoming_message(req, None, &lenient(), Some("did:key:zCarol")) {
@@ -2439,5 +2512,26 @@ test push ... FAILED
             build_client_config("https://node:1", &tls).endpoint,
             "https://node:1"
         );
+    }
+
+    /// The only check that the admission fetch works for real: TLS roots,
+    /// redirects and the 404 mapping all come from the live service. Ignored
+    /// because it needs the network.
+    ///
+    /// `cargo test -p agntcy-agentbridge-cli -- --ignored live_key_listing`
+    #[test]
+    #[ignore = "requires network access to github.com"]
+    fn live_key_listing_fetch_works() {
+        let listing = fetch_key_listing("https://github.com/markpmarton.keys")
+            .expect("fetch should succeed — a TLS trust-store failure shows up here");
+        assert!(
+            listing.contains("ssh-ed25519"),
+            "expected published keys, got: {listing}"
+        );
+
+        // A missing account is an answer, not an outage.
+        let absent = fetch_key_listing("https://github.com/shadi-no-such-account-xyzzy-42.keys")
+            .expect("a 404 must not be an error");
+        assert!(absent.is_empty(), "404 should map to an empty listing");
     }
 }

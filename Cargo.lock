@@ -223,6 +223,7 @@ dependencies = [
  "axum",
  "clap",
  "futures",
+ "reqwest 0.13.5",
  "rustls-pki-types",
  "serde_json",
  "sha2 0.11.0",
