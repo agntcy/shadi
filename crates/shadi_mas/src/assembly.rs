@@ -37,20 +37,25 @@ pub fn infer_pattern(text: &str) -> Option<PatternKind> {
     keyword_scores(text)
 }
 
+/// First line that names a class wins. A `CLASS` marker with no name after it
+/// claims nothing, so it is skipped and later lines still count.
 fn class_line(text: &str) -> Option<PatternKind> {
     for line in text.lines() {
         let trimmed = line.trim();
-        let rest = trimmed
+        let Some(rest) = trimmed
             .strip_prefix("CLASS ")
             .or_else(|| trimmed.strip_prefix("CLASS="))
-            .or_else(|| trimmed.strip_prefix("class "))?;
-        let token = rest
+            .or_else(|| trimmed.strip_prefix("class "))
+        else {
+            continue;
+        };
+        let Some(token) = rest
             .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
-            .find(|t| !t.is_empty())?;
-        if let Some(kind) = PatternKind::parse_name(token) {
-            return Some(kind);
-        }
-        return Some(PatternKind::Unmapped);
+            .find(|t| !t.is_empty())
+        else {
+            continue;
+        };
+        return Some(PatternKind::parse_name(token).unwrap_or(PatternKind::Unmapped));
     }
     None
 }
@@ -141,6 +146,27 @@ mod tests {
         assert_eq!(
             infer_pattern("CLASS matching-markets"),
             Some(PatternKind::Unmapped)
+        );
+    }
+
+    #[test]
+    fn class_line_is_found_after_unrelated_lines() {
+        assert_eq!(
+            infer_pattern("agents debate the setup\nCLASS development"),
+            Some(PatternKind::Development)
+        );
+        assert_eq!(
+            infer_pattern("first\nsecond\n  class matching-markets\n"),
+            Some(PatternKind::Unmapped)
+        );
+    }
+
+    #[test]
+    fn class_marker_without_a_name_is_skipped() {
+        assert_eq!(infer_pattern("CLASS="), None);
+        assert_eq!(
+            infer_pattern("CLASS=\nCLASS development"),
+            Some(PatternKind::Development)
         );
     }
 
