@@ -38,6 +38,18 @@ pub trait CliAdapter: Send + Sync {
     /// Used by `CliToolAdapter` to drive the development coordination loop.
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError>;
 
+    /// Same as [`CliAdapter::execute_prompt`], but scoped to a named
+    /// conversation so that concurrent callers each keep their own harness
+    /// session instead of interleaving turns in a shared one. Default
+    /// implementation ignores the scope for adapters that hold no session.
+    fn execute_prompt_in(
+        &self,
+        _conversation: &str,
+        prompt: &str,
+    ) -> Result<String, CliAdapterError> {
+        self.execute_prompt(prompt)
+    }
+
     /// Best-effort: terminate whatever child process this adapter's most
     /// recent `execute_prompt` call spawned, if it's still running. Called
     /// during listener shutdown so an in-flight message doesn't leave an

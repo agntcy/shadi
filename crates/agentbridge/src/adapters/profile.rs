@@ -204,8 +204,11 @@ pub enum ResultKind {
     StripAfterFirstLine,
 }
 
+const DEFAULT_CONVERSATION: &str = "default";
+const MAX_TRACKED_CONVERSATIONS: usize = 64;
+
 struct State {
-    session_id: Option<String>,
+    sessions: Vec<(String, String)>,
 }
 
 /// [`CliAdapter`] driven by a [`CliProfile`].
@@ -224,41 +227,66 @@ impl ProfileAdapter {
             id: AgentId(profile.id.clone()),
             work_dir,
             profile,
-            state: Mutex::new(State { session_id: None }),
+            state: Mutex::new(State {
+                sessions: Vec::new(),
+            }),
             subprocess: TrackedSubprocess::new(),
         }
     }
 
-    fn session_id(&self) -> Result<Option<String>, CliAdapterError> {
+    fn session_id(&self, conversation: &str) -> Result<Option<String>, CliAdapterError> {
         self.state
             .lock()
-            .map(|s| s.session_id.clone())
+            .map(|s| {
+                s.sessions
+                    .iter()
+                    .find(|(name, _)| name == conversation)
+                    .map(|(_, id)| id.clone())
+            })
             .map_err(|_| CliAdapterError::Subprocess("lock poisoned".to_string()))
     }
 
-    fn store_session(&self, session_id: Option<String>) {
+    fn store_session(&self, conversation: &str, session_id: Option<String>) {
+        let Some(session_id) = session_id else {
+            return;
+        };
         if let Ok(mut state) = self.state.lock() {
-            if session_id.is_some() {
-                state.session_id = session_id;
+            match state
+                .sessions
+                .iter()
+                .position(|(name, _)| name == conversation)
+            {
+                Some(index) => {
+                    let mut entry = state.sessions.remove(index);
+                    entry.1 = session_id;
+                    state.sessions.push(entry);
+                }
+                None => {
+                    if state.sessions.len() >= MAX_TRACKED_CONVERSATIONS {
+                        state.sessions.remove(0);
+                    }
+                    state.sessions.push((conversation.to_string(), session_id));
+                }
             }
         }
     }
 
-    fn clear_session(&self) {
+    fn clear_session(&self, conversation: &str) {
         if let Ok(mut state) = self.state.lock() {
-            state.session_id = None;
+            state.sessions.retain(|(name, _)| name != conversation);
         }
     }
 
     fn run(
         &self,
+        conversation: &str,
         prompt: &str,
         system: Option<&str>,
         include_workdir_flags: bool,
         use_session: bool,
     ) -> Result<String, CliAdapterError> {
         let session = if use_session {
-            self.session_id()?
+            self.session_id(conversation)?
         } else {
             None
         };
@@ -318,7 +346,7 @@ impl ProfileAdapter {
             }
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout) {
                 if let Some(sid) = value.get(&spec.json_field).and_then(|v| v.as_str()) {
-                    self.store_session(Some(sid.to_string()));
+                    self.store_session(conversation, Some(sid.to_string()));
                 }
             }
         }
@@ -579,6 +607,7 @@ impl CliAdapter for ProfileAdapter {
 
     fn snapshot_context(&self) -> Result<ContextPacket, CliAdapterError> {
         let summary = self.run(
+            DEFAULT_CONVERSATION,
             snapshot_prompt(),
             None,
             self.profile.workdir_flags_on_snapshot,
@@ -601,6 +630,7 @@ impl CliAdapter for ProfileAdapter {
     fn inject_context(&self, ctx: &ContextPacket) -> Result<(), CliAdapterError> {
         if self.profile.system_flag.is_some() {
             self.run(
+                DEFAULT_CONVERSATION,
                 "Acknowledge you have received the handoff context and are ready to continue.",
                 Some(&inject_system(ctx)),
                 self.profile.workdir_flags_on_inject,
@@ -609,14 +639,34 @@ impl CliAdapter for ProfileAdapter {
         } else {
             let mut prompt = inject_system(ctx);
             prompt.push_str("Acknowledge you have received the handoff context.");
-            self.run(&prompt, None, self.profile.workdir_flags_on_inject, false)?;
+            self.run(
+                DEFAULT_CONVERSATION,
+                &prompt,
+                None,
+                self.profile.workdir_flags_on_inject,
+                false,
+            )?;
         }
         Ok(())
     }
 
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError> {
-        let session = self.session_id()?;
-        match self.run(prompt, None, self.profile.workdir_flags_on_execute, true) {
+        self.execute_prompt_in(DEFAULT_CONVERSATION, prompt)
+    }
+
+    fn execute_prompt_in(
+        &self,
+        conversation: &str,
+        prompt: &str,
+    ) -> Result<String, CliAdapterError> {
+        let session = self.session_id(conversation)?;
+        match self.run(
+            conversation,
+            prompt,
+            None,
+            self.profile.workdir_flags_on_execute,
+            true,
+        ) {
             Err(err)
                 if session.is_some()
                     && self
@@ -626,8 +676,14 @@ impl CliAdapter for ProfileAdapter {
                         .and_then(|s| s.retry_stderr_contains.as_deref())
                         .is_some_and(|needle| err.to_string().contains(needle)) =>
             {
-                self.clear_session();
-                self.run(prompt, None, self.profile.workdir_flags_on_execute, false)
+                self.clear_session(conversation);
+                self.run(
+                    conversation,
+                    prompt,
+                    None,
+                    self.profile.workdir_flags_on_execute,
+                    false,
+                )
             }
             other => other,
         }
@@ -1200,10 +1256,153 @@ echo '{"result":"ok","session_id":"sid-9"}'
         .unwrap();
         let adapter = ProfileAdapter::new(profile, std::env::temp_dir());
         assert_eq!(adapter.execute_prompt("one").unwrap(), "ok");
-        assert_eq!(adapter.session_id().unwrap().as_deref(), Some("sid-9"));
+        assert_eq!(
+            adapter.session_id(DEFAULT_CONVERSATION).unwrap().as_deref(),
+            Some("sid-9")
+        );
         assert_eq!(adapter.execute_prompt("two").unwrap(), "ok");
-        adapter.clear_session();
-        assert!(adapter.session_id().unwrap().is_none());
+        adapter.clear_session(DEFAULT_CONVERSATION);
+        assert!(adapter.session_id(DEFAULT_CONVERSATION).unwrap().is_none());
+    }
+
+    fn write_session_echo_bin() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        {
+            let path = dir.path().join("echo-session.cmd");
+            std::fs::write(
+                &path,
+                r#"@echo off
+setlocal enabledelayedexpansion
+set seen=
+set sid=
+:loop
+if "%~1"=="" goto done
+if "!seen!"=="1" (
+  set sid=%~1
+  set seen=
+) else (
+  if "%~1"=="--session-id" (
+    set seen=1
+  ) else (
+    set last=%~1
+  )
+)
+shift
+goto loop
+:done
+if "!sid!"=="" set sid=sid-!last!
+echo {"result":"!sid!","session_id":"!sid!"}
+"#,
+            )
+            .unwrap();
+            (dir, path)
+        }
+        #[cfg(not(windows))]
+        {
+            let path = dir.path().join("echo-session.sh");
+            std::fs::write(
+                &path,
+                r#"#!/bin/sh
+sid=""
+last=""
+seen=0
+for a in "$@"; do
+  if [ "$seen" = 1 ]; then
+    sid="$a"
+    seen=0
+  elif [ "$a" = "--session-id" ]; then
+    seen=1
+  else
+    last="$a"
+  fi
+done
+[ -z "$sid" ] && sid="sid-$last"
+printf '{"result":"%s","session_id":"%s"}\n' "$sid" "$sid"
+"#,
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            (dir, path)
+        }
+    }
+
+    fn session_echo_adapter(script: &Path) -> ProfileAdapter {
+        let profile = parse_profile(
+            &serde_json::json!({
+                "id": "session-echo",
+                "bin": script.to_string_lossy(),
+                "current_dir_workdir": false,
+                "execute": { "args": ["{session}", "{prompt}"] },
+                "session": { "json_field": "session_id", "flag": "--session-id" },
+                "result": { "kind": "json_field", "field": "result" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        ProfileAdapter::new(profile, std::env::temp_dir())
+    }
+
+    #[test]
+    fn concurrent_conversations_do_not_share_a_session() {
+        let (_dir, script) = write_session_echo_bin();
+        let adapter = session_echo_adapter(&script);
+
+        assert_eq!(adapter.execute_prompt_in("ctx-a", "one").unwrap(), "sid-one");
+        assert_eq!(adapter.execute_prompt_in("ctx-b", "two").unwrap(), "sid-two");
+
+        assert_eq!(
+            adapter.session_id("ctx-a").unwrap().as_deref(),
+            Some("sid-one")
+        );
+        assert_eq!(
+            adapter.session_id("ctx-b").unwrap().as_deref(),
+            Some("sid-two")
+        );
+        assert_eq!(
+            adapter.execute_prompt_in("ctx-a", "three").unwrap(),
+            "sid-one"
+        );
+    }
+
+    #[test]
+    fn clearing_one_conversation_keeps_the_others() {
+        let (_dir, script) = write_session_echo_bin();
+        let adapter = session_echo_adapter(&script);
+
+        adapter.execute_prompt_in("ctx-a", "one").unwrap();
+        adapter.execute_prompt_in("ctx-b", "two").unwrap();
+        adapter.clear_session("ctx-a");
+
+        assert!(adapter.session_id("ctx-a").unwrap().is_none());
+        assert_eq!(
+            adapter.session_id("ctx-b").unwrap().as_deref(),
+            Some("sid-two")
+        );
+    }
+
+    #[test]
+    fn tracked_conversations_are_bounded() {
+        let (_dir, script) = write_session_echo_bin();
+        let adapter = session_echo_adapter(&script);
+
+        for i in 0..MAX_TRACKED_CONVERSATIONS + 8 {
+            adapter.store_session(&format!("ctx-{i}"), Some(format!("sid-{i}")));
+        }
+
+        let tracked = adapter.state.lock().unwrap().sessions.len();
+        assert_eq!(tracked, MAX_TRACKED_CONVERSATIONS);
+        assert!(adapter.session_id("ctx-0").unwrap().is_none());
+        assert_eq!(
+            adapter
+                .session_id(&format!("ctx-{}", MAX_TRACKED_CONVERSATIONS + 7))
+                .unwrap()
+                .as_deref(),
+            Some(&format!("sid-{}", MAX_TRACKED_CONVERSATIONS + 7)[..])
+        );
     }
 
     #[test]
