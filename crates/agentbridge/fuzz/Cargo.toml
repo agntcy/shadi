@@ -1,0 +1,30 @@
+[package]
+name = "agntcy-agentbridge-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.agntcy-agentbridge]
+path = ".."
+
+[[bin]]
+name = "stdio-response"
+path = "fuzz_targets/stdio-response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "member-spec"
+path = "fuzz_targets/member-spec.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
