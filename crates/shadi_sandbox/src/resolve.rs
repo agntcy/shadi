@@ -211,7 +211,7 @@ pub fn describe_policy(
         platform_profile: policy.platform_profile().as_str().to_string(),
         allow_command: allow_list,
         block_command: blocked_list,
-        deny: display(policy.deny().iter().collect()),
+        deny: display(visible_deny(policy.deny())),
     }
 }
 
@@ -308,6 +308,21 @@ fn apply_deny_paths(mut policy: SandboxPolicy, paths: &[PathBuf]) -> SandboxPoli
         policy = remember_deny(policy, path.clone());
     }
     policy
+}
+
+/// One entry per denial, for display only.
+///
+/// [`remember_deny`] stores both the spelling the caller gave and its
+/// canonical form so enforcement matches either, which makes a single
+/// `--deny /tmp` read as two denied paths. Drop the spelling whose canonical
+/// form is listed separately; the policy itself keeps both.
+fn visible_deny(deny: &[PathBuf]) -> Vec<&PathBuf> {
+    deny.iter()
+        .filter(|path| match canonicalize_path(path) {
+            Ok(canonical) => canonical == ***path || !deny.contains(&canonical),
+            Err(_) => true,
+        })
+        .collect()
 }
 
 fn remember_deny(mut policy: SandboxPolicy, path: PathBuf) -> SandboxPolicy {
@@ -469,6 +484,50 @@ mod tests {
         assert!(described.read.contains(&canonical(&read_only)));
         assert!(described.write.contains(&canonical(&write_only)));
         assert!(!described.read.contains(&canonical(&both)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn describe_policy_lists_a_denied_path_once_but_denies_both_spellings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("mkdir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let overrides = PolicyOverrides {
+            deny: vec![link.clone()],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+
+        let canonical = canonicalize_path(&link).expect("canonical");
+        assert!(resolved.policy.path_is_denied(&link));
+        assert!(resolved.policy.path_is_denied(&canonical));
+
+        let described = describe_policy(&resolved.policy, &resolved.blocked, &resolved.allow);
+        assert_eq!(
+            described.deny,
+            vec![canonical.display().to_string()],
+            "one --deny should read as one denied path"
+        );
+    }
+
+    #[test]
+    fn describe_policy_keeps_a_denied_path_that_does_not_resolve() {
+        let overrides = PolicyOverrides {
+            deny: vec![PathBuf::from("/nonexistent-shadi-deny-target")],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+        let described = describe_policy(&resolved.policy, &resolved.blocked, &resolved.allow);
+        assert!(
+            described
+                .deny
+                .contains(&"/nonexistent-shadi-deny-target".to_string()),
+            "a path that cannot be canonicalized must still be listed: {:?}",
+            described.deny
+        );
     }
 
     #[test]
