@@ -120,6 +120,36 @@ pub(crate) struct ResolvedProcessSecretPolicyRule {
     pub(crate) fd_env: Option<String>,
 }
 
+impl LaunchSecretConfig {
+    pub(crate) fn rules_snapshot(&self) -> crate::policy_watch::SecretRulesSnapshot {
+        crate::policy_watch::SecretRulesSnapshot {
+            trusted_secret: self.trusted_secret.clone(),
+            trusted_secret_exec: self.trusted_secret_exec.clone(),
+            trusted_secret_fd_env: self.trusted_secret_fd_env.clone(),
+            process_secret_policy: self
+                .process_secret_policy
+                .iter()
+                .map(|rule| crate::policy_watch::ProcessSecretRuleSummary {
+                    secret: rule.secret.clone(),
+                    actions: rule.actions.clone(),
+                    children: rule
+                        .children
+                        .iter()
+                        .map(|c| c.display().to_string())
+                        .collect(),
+                    child_sha256: rule
+                        .child_sha256
+                        .iter()
+                        .map(|d| d.iter().map(|b| format!("{b:02x}")).collect())
+                        .collect(),
+                    name: rule.name.clone(),
+                    fd_env: rule.fd_env.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 impl PendingTrustedSecretDelivery {
     pub(crate) fn new(
         command: &mut Command,

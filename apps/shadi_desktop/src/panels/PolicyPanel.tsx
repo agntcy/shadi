@@ -13,6 +13,19 @@ interface LivePolicySnapshot {
   staged_write: string[];
   staged_allow: string[];
   net_allow_live: string[] | null;
+  trusted_secret: string[];
+  trusted_secret_exec: string[];
+  trusted_secret_fd_env: string[];
+  process_secret_policy: ProcessSecretRule[];
+}
+
+interface ProcessSecretRule {
+  secret: string;
+  actions: string[];
+  children: string[];
+  child_sha256: string[];
+  name: string | null;
+  fd_env: string | null;
 }
 
 interface PolicyPatch {
@@ -163,6 +176,27 @@ function SnapshotView({ snapshot }: { snapshot: LivePolicySnapshot }) {
           <PolicyList label="Network allow (live proxy)" items={snapshot.net_allow_live} />
         )}
       </div>
+      {(snapshot.trusted_secret.length > 0 ||
+        snapshot.trusted_secret_exec.length > 0 ||
+        snapshot.trusted_secret_fd_env.length > 0 ||
+        snapshot.process_secret_policy.length > 0) && (
+        <div className="pl-secrets">
+          <h3>Trusted secrets</h3>
+          <div className="pl-grid">
+            <PolicyList label="Delivered" items={snapshot.trusted_secret} />
+            <PolicyList label="Delivered on exec" items={snapshot.trusted_secret_exec} />
+            <PolicyList label="File descriptors" items={snapshot.trusted_secret_fd_env} />
+            <PolicyList
+              label="Per-process rules"
+              items={snapshot.process_secret_policy.map(
+                (rule) =>
+                  `${rule.name ?? rule.secret}: ${rule.actions.join(", ")}` +
+                  (rule.children.length > 0 ? ` -> ${rule.children.join(", ")}` : ""),
+              )}
+            />
+          </div>
+        </div>
+      )}
       {(snapshot.staged_read.length > 0 ||
         snapshot.staged_write.length > 0 ||
         snapshot.staged_allow.length > 0) && (

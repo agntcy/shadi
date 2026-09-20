@@ -95,6 +95,7 @@ fn prepare_sandbox_launch(
         Option<PendingTrustedSecretDelivery>,
         SandboxPolicy,
         Option<SlimBridgeArgs>,
+        crate::policy_watch::SecretRulesSnapshot,
     ),
     String,
 > {
@@ -166,7 +167,14 @@ fn prepare_sandbox_launch(
 
     inject_keychain_secrets(&mut command, &secret_config.inject_keychain)?;
 
-    Ok((command, pending_trusted_secrets, runtime_policy, slim_bridge))
+    let secret_rules = secret_config.rules_snapshot();
+    Ok((
+        command,
+        pending_trusted_secrets,
+        runtime_policy,
+        slim_bridge,
+        secret_rules,
+    ))
 }
 
 pub(crate) fn run_sandboxed_command(
@@ -243,6 +251,7 @@ pub(crate) fn run_sandboxed_command(
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: net_allowlist,
+            secret_rules: crate::policy_watch::SecretRulesSnapshot::default(),
         }));
         let pid = std::process::id();
         let sock_path = match cli.session_name.as_deref() {
@@ -310,7 +319,13 @@ pub(crate) fn run_sandboxed_command(
             None => resolved.policy.clone(),
         };
 
-        let (mut command, mut pending_trusted_secrets, runtime_policy, slim_bridge_args) = match prepare_sandbox_launch(
+        let (
+            mut command,
+            mut pending_trusted_secrets,
+            runtime_policy,
+            slim_bridge_args,
+            secret_rules,
+        ) = match prepare_sandbox_launch(
             cli,
             file_policy,
             cwd,
@@ -331,6 +346,12 @@ pub(crate) fn run_sandboxed_command(
                 return ExitCode::from(exit_code);
             }
         };
+
+        if let Some(ref live) = control_live {
+            if let Ok(mut guard) = live.lock() {
+                guard.secret_rules = secret_rules;
+            }
+        }
 
         let mut child = match spawn_sandboxed(&mut command, &runtime_policy) {
             Ok(child) => child,
@@ -1599,7 +1620,7 @@ mod tests {
             .allow_network_destination("1.1.1.1:80");
         let dir = temp_dir();
 
-        let (_command, _pending, runtime_policy, _bridge) =
+        let (_command, _pending, runtime_policy, _bridge, _secrets) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
 
@@ -1617,7 +1638,7 @@ mod tests {
         let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
         let expected_url = proxy.proxy_url();
 
-        let (mut command, _, _, _) =
+        let (mut command, _, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
                 .expect("prepare launch");
 
@@ -1646,7 +1667,7 @@ mod tests {
         let base_policy = SandboxPolicy::new();
         let dir = temp_dir();
 
-        let (mut command, _, _, _) =
+        let (mut command, _, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
 
@@ -1681,7 +1702,7 @@ mod tests {
         let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
         let expected_url = proxy.proxy_url();
 
-        let (mut command, _, _, _) =
+        let (mut command, _, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
                 .expect("prepare launch");
 
@@ -1777,7 +1798,7 @@ mod tests {
         let base_policy = SandboxPolicy::new();
         let dir = temp_dir();
 
-        let (mut command, _pending, _runtime_policy, bridge) =
+        let (mut command, _pending, _runtime_policy, bridge, _secrets) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, None)
                 .expect("prepare launch");
         let mut child = command.spawn().expect("spawn cat");
