@@ -1443,6 +1443,44 @@ mod tests {
     }
 
     #[test]
+    fn rules_snapshot_renders_every_rule_field_for_the_control_socket() {
+        let mut digest = [0u8; 32];
+        digest[0] = 0x0a;
+        digest[31] = 0xff;
+
+        let config = LaunchSecretConfig {
+            inject_keychain: vec!["ignored=by/snapshot".to_string()],
+            trusted_secret: vec!["TOKEN=secops/token".to_string()],
+            trusted_secret_exec: vec!["deploy=/usr/bin/deploy".to_string()],
+            trusted_secret_fd_env: vec!["TOKEN=TOKEN_FD".to_string()],
+            process_secret_policy: vec![ResolvedProcessSecretPolicyRule {
+                secret: "secops/token".to_string(),
+                actions: vec![SecretAction::Use],
+                children: vec![PathBuf::from("/usr/bin/curl")],
+                child_sha256: vec![digest],
+                name: Some("token".to_string()),
+                fd_env: Some("TOKEN_FD".to_string()),
+            }],
+        };
+
+        let snapshot = config.rules_snapshot();
+        assert_eq!(snapshot.trusted_secret, config.trusted_secret);
+        assert_eq!(snapshot.trusted_secret_exec, config.trusted_secret_exec);
+        assert_eq!(snapshot.trusted_secret_fd_env, config.trusted_secret_fd_env);
+
+        let rule = &snapshot.process_secret_policy[0];
+        assert_eq!(rule.secret, "secops/token");
+        assert_eq!(rule.actions, vec![SecretAction::Use]);
+        assert_eq!(rule.children, vec!["/usr/bin/curl".to_string()]);
+        assert_eq!(rule.name.as_deref(), Some("token"));
+        assert_eq!(rule.fd_env.as_deref(), Some("TOKEN_FD"));
+
+        // A digest byte below 0x10 has to keep its leading zero, or the
+        // reported hash is 63 characters and matches nothing.
+        assert_eq!(rule.child_sha256, vec![format!("0a{}ff", "00".repeat(30))]);
+    }
+
+    #[test]
     fn parse_name_mappings_requires_name_and_value() {
         let err = parse_name_mappings(&["broken".to_string()], "bad mapping").unwrap_err();
         assert!(err.contains("bad mapping"));
