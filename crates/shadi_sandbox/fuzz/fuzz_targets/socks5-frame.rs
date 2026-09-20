@@ -97,7 +97,7 @@ fuzz_target!(|data: &[u8]| {
         } else if candidate == "not-an-ip" && !ip_safe.iter().any(|p| p.trim() == candidate) {
             assert!(
                 !verdict,
-                "an unparseable address was allowed without a matching pattern"
+                "an unparsable address was allowed without a matching pattern"
             );
         }
     }
