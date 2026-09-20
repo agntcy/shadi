@@ -125,12 +125,18 @@ impl SandboxPolicy {
     }
 
     pub fn allow_read_path(mut self, path: impl AsRef<Path>) -> Self {
-        self.allow_read.push(path.as_ref().to_path_buf());
+        let path = path.as_ref().to_path_buf();
+        if !self.allow_read.contains(&path) {
+            self.allow_read.push(path);
+        }
         self
     }
 
     pub fn allow_write_path(mut self, path: impl AsRef<Path>) -> Self {
-        self.allow_write.push(path.as_ref().to_path_buf());
+        let path = path.as_ref().to_path_buf();
+        if !self.allow_write.contains(&path) {
+            self.allow_write.push(path);
+        }
         self
     }
 
@@ -161,12 +167,21 @@ impl SandboxPolicy {
     }
 
     pub fn allow_network_destination(mut self, destination: impl Into<String>) -> Self {
-        self.net_allow.push(destination.into());
+        let destination = destination.into();
+        if !self.net_allow.contains(&destination) {
+            self.net_allow.push(destination);
+        }
         self
     }
 
     pub fn with_network_destinations(mut self, destinations: Vec<String>) -> Self {
-        self.net_allow = destinations;
+        let mut unique = Vec::new();
+        for dest in destinations {
+            if !unique.contains(&dest) {
+                unique.push(dest);
+            }
+        }
+        self.net_allow = unique;
         self
     }
 
@@ -261,6 +276,26 @@ mod tests {
             .with_network_destinations(vec!["2.2.2.2:443".to_string()]);
 
         assert_eq!(policy.net_allow(), &["2.2.2.2:443".to_string()]);
+    }
+
+    #[test]
+    fn policy_deduplicates_duplicate_paths_and_network_destinations() {
+        let tmp_dir = tmp_root();
+        let policy = SandboxPolicy::new()
+            .allow_read_path(&tmp_dir)
+            .allow_read_path(&tmp_dir)
+            .allow_write_path(&tmp_dir)
+            .allow_write_path(&tmp_dir)
+            .deny_path(&tmp_dir)
+            .deny_path(&tmp_dir)
+            .allow_network_destination("api.github.com")
+            .allow_network_destination("api.github.com")
+            .with_network_destinations(vec!["1.1.1.1:80".to_string(), "1.1.1.1:80".to_string()]);
+
+        assert_eq!(policy.allow_read().iter().filter(|p| **p == PathBuf::from(&tmp_dir)).count(), 1);
+        assert_eq!(policy.allow_write().iter().filter(|p| **p == PathBuf::from(&tmp_dir)).count(), 1);
+        assert_eq!(policy.deny().iter().filter(|p| **p == PathBuf::from(&tmp_dir)).count(), 1);
+        assert_eq!(policy.net_allow(), &["1.1.1.1:80".to_string()]);
     }
 
     #[test]
