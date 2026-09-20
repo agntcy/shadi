@@ -146,14 +146,12 @@ pub(crate) fn dirctl_binary() -> String {
     std::env::var("SHADI_DIRCTL_BINARY").unwrap_or_else(|_| "dirctl".to_string())
 }
 
-/// Crate-wide lock serializing `SHADI_DIRCTL_BINARY` mutation across every
-/// test module in this crate — `std::env::set_var` is process-global, so
-/// tests in `dir_registry` and `member_source` that fake out `dirctl` must
-/// not run concurrently with each other.
+/// Lock serializing `SHADI_DIRCTL_BINARY` mutation. Aliases the crate-wide
+/// [`crate::env_lock`], so these tests also exclude the modules that fake
+/// out `HOME` and `AGENTBRIDGE_PROFILES_DIR`.
 #[cfg(test)]
 pub(crate) fn dirctl_env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    crate::env_lock()
 }
 
 fn tempfile_path() -> std::path::PathBuf {

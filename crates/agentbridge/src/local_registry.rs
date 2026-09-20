@@ -288,9 +288,8 @@ fn pid_is_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::env_lock;
 
     fn temp_registry() -> (tempfile::TempDir, LocalAdapterRegistry) {
         let dir = tempfile::tempdir().unwrap();
@@ -400,7 +399,7 @@ mod tests {
 
     #[test]
     fn from_env_uses_shadi_tmp_dir() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_lock().lock().expect("env lock");
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("SHADI_TMP_DIR");
         std::env::set_var("SHADI_TMP_DIR", tmp.path());
