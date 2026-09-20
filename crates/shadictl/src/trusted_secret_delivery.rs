@@ -1,6 +1,7 @@
 use super::*;
 
 use agent_secrets::memory::SecretBytes;
+use agent_secrets::{parse_key_name, parse_name_mappings};
 use std::collections::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -633,16 +634,6 @@ pub(crate) fn resolve_launch_secret_config(
     Ok(resolved)
 }
 
-fn parse_key_name<'a>(value: &'a str, error: &str) -> Result<(&'a str, &'a str), String> {
-    let mut parts = value.splitn(2, '=');
-    let key = parts.next().unwrap_or("");
-    let name = parts.next().unwrap_or("");
-    if key.is_empty() || name.is_empty() {
-        return Err(error.to_string());
-    }
-    Ok((key, name))
-}
-
 fn canonicalize_policy_program(value: &str, command: &Command) -> Result<PathBuf, String> {
     let cwd = match command.get_current_dir() {
         Some(path) => path.to_path_buf(),
@@ -650,20 +641,6 @@ fn canonicalize_policy_program(value: &str, command: &Command) -> Result<PathBuf
     };
     canonicalize_executable(Path::new(value), &cwd)
         .map_err(|err| format!("failed to resolve policy program {}: {}", value, err))
-}
-
-fn parse_name_mappings(values: &[String], error: &str) -> Result<HashMap<String, String>, String> {
-    let mut mappings = HashMap::new();
-    for value in values {
-        let (name, mapped) = parse_key_name(value, error)?;
-        if mappings
-            .insert(name.to_string(), mapped.to_string())
-            .is_some()
-        {
-            return Err(format!("{}: duplicate mapping for '{}'", error, name));
-        }
-    }
-    Ok(mappings)
 }
 
 fn parse_sha256_hex(value: &str) -> Result<[u8; 32], String> {
@@ -1480,12 +1457,6 @@ mod tests {
         assert_eq!(rule.child_sha256, vec![format!("0a{}ff", "00".repeat(30))]);
     }
 
-    #[test]
-    fn parse_name_mappings_requires_name_and_value() {
-        let err = parse_name_mappings(&["broken".to_string()], "bad mapping").unwrap_err();
-        assert!(err.contains("bad mapping"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn resolve_launch_secret_config_selects_only_matching_policy_rules() {
@@ -2039,17 +2010,6 @@ mod tests {
 
         let unrelated = std::io::Error::from_raw_os_error(libc::EINVAL);
         assert!(!is_trusted_secret_connection_error(&unrelated));
-    }
-
-    #[test]
-    fn parse_name_mappings_rejects_duplicates() {
-        let err = parse_name_mappings(
-            &["token=TOKEN_FD".to_string(), "token=OTHER_FD".to_string()],
-            "bad mapping",
-        )
-        .unwrap_err();
-        assert!(err.contains("duplicate mapping"));
-        assert!(err.contains("token"));
     }
 
     #[test]
