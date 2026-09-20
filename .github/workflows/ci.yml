@@ -133,6 +133,44 @@ jobs:
         shell: pwsh
         run: just windows-test
 
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: changes
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Setup Rust
+        if: needs.changes.outputs.workspace == 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - name: Setup Python
+        if: needs.changes.outputs.workspace == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+      - name: Restore Rust cache
+        if: needs.changes.outputs.workspace == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Linux dependencies
+        if: needs.changes.outputs.workspace == 'true'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev libssl-dev
+      # No `-D warnings`: the workspace still carries warn-level lints. This
+      # gates clippy's deny-by-default lints, which are hard errors and are how
+      # a never_loop bug reached main unnoticed.
+      - name: Clippy
+        if: needs.changes.outputs.workspace == 'true'
+        env:
+          PYO3_PYTHON: python
+        run: cargo clippy --workspace --exclude shadi_desktop --all-targets
+
   lockfiles:
     name: Lockfiles in sync
     runs-on: ubuntu-latest
