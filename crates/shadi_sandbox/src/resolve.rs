@@ -485,4 +485,42 @@ mod tests {
         assert!(resolved.policy.path_is_denied(Path::new("/etc")));
         assert!(resolved.policy.path_is_denied(Path::new("/tmp")));
     }
+
+    #[test]
+    fn resolved_policy_deduplicates_paths_across_defaults_file_and_overrides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        let file_policy = PolicyFileValues {
+            allow: vec![dir_str.clone()],
+            read: vec![dir_str.clone()],
+            write: vec![dir_str.clone()],
+            deny: vec![dir_str.clone()],
+            net_allow: vec!["api.github.com".to_string()],
+            ..Default::default()
+        };
+        let overrides = PolicyOverrides {
+            allow: vec![dir.path().to_path_buf(), dir.path().to_path_buf()],
+            deny: vec![dir.path().to_path_buf()],
+            net_allow: vec!["api.github.com".to_string()],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &file_policy).expect("resolve");
+        let described = describe_policy(&resolved.policy, &resolved.blocked, &resolved.allow);
+
+        let canonical = canonicalize_path(dir.path()).expect("canonical").display().to_string();
+        assert_eq!(described.allow.iter().filter(|&p| p == &canonical).count(), 1);
+        assert_eq!(described.net_allow.iter().filter(|&d| d == "api.github.com").count(), 1);
+    }
+
+    #[test]
+    fn resolved_policy_deduplicates_working_dir_default_and_override() {
+        let overrides = PolicyOverrides {
+            allow: vec![PathBuf::from(".")],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+        let described = describe_policy(&resolved.policy, &resolved.blocked, &resolved.allow);
+        let cwd = canonicalize_path(Path::new(".")).expect("canonical").display().to_string();
+        assert_eq!(described.allow.iter().filter(|&p| p == &cwd).count(), 1);
+    }
 }
