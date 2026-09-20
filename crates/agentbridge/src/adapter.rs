@@ -172,6 +172,21 @@ mod tests {
     // --- Tests --------------------------------------------------------------
 
     #[test]
+    fn execute_prompt_in_defaults_to_the_unscoped_prompt() {
+        let adapter = MockAdapter {
+            id: AgentId("mock".to_string()),
+            response: "answered".to_string(),
+        };
+
+        // MockAdapter does not override the scoped call, so this exercises the
+        // default body every session-less adapter inherits.
+        assert_eq!(
+            adapter.execute_prompt_in("ctx-a", "hello").unwrap(),
+            adapter.execute_prompt("hello").unwrap()
+        );
+    }
+
+    #[test]
     fn mock_adapter_all_methods_callable() {
         let adapter = MockAdapter {
             id: AgentId("test-id".to_string()),

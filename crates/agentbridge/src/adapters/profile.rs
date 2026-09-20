@@ -246,10 +246,7 @@ impl ProfileAdapter {
             .map_err(|_| CliAdapterError::Subprocess("lock poisoned".to_string()))
     }
 
-    fn store_session(&self, conversation: &str, session_id: Option<String>) {
-        let Some(session_id) = session_id else {
-            return;
-        };
+    fn store_session(&self, conversation: &str, session_id: String) {
         if let Ok(mut state) = self.state.lock() {
             match state
                 .sessions
@@ -346,7 +343,7 @@ impl ProfileAdapter {
             }
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout) {
                 if let Some(sid) = value.get(&spec.json_field).and_then(|v| v.as_str()) {
-                    self.store_session(conversation, Some(sid.to_string()));
+                    self.store_session(conversation, sid.to_string());
                 }
             }
         }
@@ -1351,8 +1348,14 @@ printf '{"result":"%s","session_id":"%s"}\n' "$sid" "$sid"
         let (_dir, script) = write_session_echo_bin();
         let adapter = session_echo_adapter(&script);
 
-        assert_eq!(adapter.execute_prompt_in("ctx-a", "one").unwrap(), "sid-one");
-        assert_eq!(adapter.execute_prompt_in("ctx-b", "two").unwrap(), "sid-two");
+        assert_eq!(
+            adapter.execute_prompt_in("ctx-a", "one").unwrap(),
+            "sid-one"
+        );
+        assert_eq!(
+            adapter.execute_prompt_in("ctx-b", "two").unwrap(),
+            "sid-two"
+        );
 
         assert_eq!(
             adapter.session_id("ctx-a").unwrap().as_deref(),
@@ -1385,12 +1388,34 @@ printf '{"result":"%s","session_id":"%s"}\n' "$sid" "$sid"
     }
 
     #[test]
+    fn a_poisoned_session_lock_does_not_panic_the_caller() {
+        let (_dir, script) = write_session_echo_bin();
+        let adapter = std::sync::Arc::new(session_echo_adapter(&script));
+
+        let poisoner = std::sync::Arc::clone(&adapter);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.state.lock().unwrap();
+            panic!("poison the session map");
+        })
+        .join();
+        std::panic::set_hook(hook);
+
+        // A listener thread that died mid-update must not take the rest of the
+        // adapter with it: the writes give up quietly and the read reports it.
+        adapter.store_session("ctx-a", "sid-a".to_string());
+        adapter.clear_session("ctx-a");
+        assert!(adapter.session_id("ctx-a").is_err());
+    }
+
+    #[test]
     fn tracked_conversations_are_bounded() {
         let (_dir, script) = write_session_echo_bin();
         let adapter = session_echo_adapter(&script);
 
         for i in 0..MAX_TRACKED_CONVERSATIONS + 8 {
-            adapter.store_session(&format!("ctx-{i}"), Some(format!("sid-{i}")));
+            adapter.store_session(&format!("ctx-{i}"), format!("sid-{i}"));
         }
 
         let tracked = adapter.state.lock().unwrap().sessions.len();
