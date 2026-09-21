@@ -103,7 +103,6 @@ impl<'a> SecureAgentChannel<'a> {
 mod tests {
     use super::*;
     use agent_secrets::{SecretError, SecretStore};
-    use agent_secrets::policy::SecretPolicy;
     use agent_secrets::memory::SecretBytes;
     use std::sync::Mutex;
 
@@ -126,7 +125,7 @@ mod tests {
     struct MemoryStore;
 
     impl SecretStore for MemoryStore {
-        fn put(&self, _key: &str, _secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+        fn put(&self, _key: &str, _secret: &[u8]) -> SecretResult<()> {
             Ok(())
         }
 
@@ -257,7 +256,7 @@ mod tests {
     #[test]
     fn memory_store_methods_return_ok() {
         let store = MemoryStore;
-        store.put("key", b"value", SecretPolicy::default()).unwrap();
+        store.put("key", b"value").unwrap();
         assert!(store.list_keys().unwrap().is_empty());
         store.delete("key").unwrap();
     }

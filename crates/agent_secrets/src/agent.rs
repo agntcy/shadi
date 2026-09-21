@@ -3,7 +3,6 @@
 
 use crate::{AgentVerifier, SecretError, SecretResult, SecretStore};
 use crate::memory::SecretBytes;
-use crate::policy::SecretPolicy;
 use crate::session::SessionContext;
 
 pub struct AgentSecretAccess<'a> {
@@ -21,10 +20,9 @@ impl<'a> AgentSecretAccess<'a> {
         session: &SessionContext,
         key: &str,
         secret: &[u8],
-        policy: SecretPolicy,
     ) -> SecretResult<()> {
         self.verifier.verify(session)?;
-        self.store.put(key, secret, policy)
+        self.store.put(key, secret)
     }
 
     pub fn get_for_session(&self, session: &SessionContext, key: &str) -> SecretResult<SecretBytes> {

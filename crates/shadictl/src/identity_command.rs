@@ -108,10 +108,10 @@ pub(crate) fn run_did_from_github(args: DidFromGitHubArgs) -> Result<(), String>
 
     let store = default_secret_store();
     store
-        .put(&did_key, did.as_bytes(), SecretPolicy::default())
+        .put(&did_key, did.as_bytes())
         .map_err(|err| format!("failed to store secret {}: {}", did_key, err))?;
     store
-        .put(&did_doc_key, output.as_bytes(), SecretPolicy::default())
+        .put(&did_doc_key, output.as_bytes())
         .map_err(|err| format!("failed to store secret {}: {}", did_doc_key, err))?;
 
     if let Some(out_file) = args.out_file.as_ref() {
@@ -364,22 +364,22 @@ pub(crate) fn store_derived_agent_identity(
     let public_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
 
     store
-        .put(&private_key_name, private_b64.as_bytes(), SecretPolicy::default())
+        .put(&private_key_name, private_b64.as_bytes())
         .map_err(|err| format!("failed to store secret {}: {}", private_key_name, err))?;
     store
-        .put(&public_key_name, public_b64.as_bytes(), SecretPolicy::default())
+        .put(&public_key_name, public_b64.as_bytes())
         .map_err(|err| format!("failed to store secret {}: {}", public_key_name, err))?;
     store
-        .put(&did_key_name, did.as_bytes(), SecretPolicy::default())
+        .put(&did_key_name, did.as_bytes())
         .map_err(|err| format!("failed to store secret {}: {}", did_key_name, err))?;
     store
-        .put(&diddoc_key_name, diddoc_json.as_bytes(), SecretPolicy::default())
+        .put(&diddoc_key_name, diddoc_json.as_bytes())
         .map_err(|err| format!("failed to store secret {}: {}", diddoc_key_name, err))?;
 
     if let Some(human_did) = human_did {
         let binding_key = format!("{}/{}/human_did", prefix, agent_name);
         store
-            .put(&binding_key, human_did.as_bytes(), SecretPolicy::default())
+            .put(&binding_key, human_did.as_bytes())
             .map_err(|err| format!("failed to store secret {}: {}", binding_key, err))?;
     }
 
@@ -463,7 +463,7 @@ pub(crate) fn run_put_key(args: PutKeyArgs) -> Result<(), String> {
         .map_err(|err| format!("failed to read {}: {}", args.input.display(), err))?;
     let store = default_secret_store();
     store
-        .put(&args.key, &payload, SecretPolicy::default())
+        .put(&args.key, &payload)
         .map_err(|err| format!("failed to store secret {}: {}", args.key, err))?;
     println!("Stored OpenPGP key in secret: {}", args.key);
     Ok(())

@@ -77,15 +77,12 @@ SHADI exposes the same secrets, session, and sandbox surface to both Rust and Py
     - `AgentVerifier`: verifies a session before secret access.
     - `SessionContext`: session metadata used by `AgentVerifier`.
     - `AgentSecretAccess`: gatekeeper for per-session secret access.
-    - `SecretPolicy`: per-secret policy metadata (currently default only).
     - `SecretBytes`: zeroizing wrapper for secret material.
 
     #### Example: verify then access secrets
 
     ```rust
-    use agent_secrets::{
-        AgentSecretAccess, AgentVerifier, SecretError, SecretPolicy, SessionContext,
-    };
+    use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretError, SessionContext};
 
     struct AllowVerifier;
 
@@ -107,7 +104,7 @@ SHADI exposes the same secrets, session, and sandbox surface to both Rust and Py
         let mut session = SessionContext::new("agent-1", "session-1");
         session.verified = true;
 
-        access.put_for_session(&session, "app/config", b"secret", SecretPolicy::default())?;
+        access.put_for_session(&session, "app/config", b"secret")?;
         let secret = access.get_for_session(&session, "app/config")?;
         let value = secret.expose(|bytes| bytes.to_vec());
 

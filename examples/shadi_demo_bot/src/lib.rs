@@ -17,8 +17,8 @@ use a2a_server::{
     ServiceParams as A2AServiceParams,
 };
 use agent_secrets::{
-    AgentSecretAccess, AgentVerifier, SecretBytes, SecretError, SecretPolicy, SecretResult,
-    SecretStore, SessionContext,
+    AgentSecretAccess, AgentVerifier, SecretBytes, SecretError, SecretResult, SecretStore,
+    SessionContext,
 };
 #[cfg(not(windows))]
 use agent_transport_slim::{NativeSlimBootstrap, NativeSlimSession, SecureAgentChannel};
@@ -224,7 +224,7 @@ struct InMemorySecretStore {
 }
 
 impl SecretStore for InMemorySecretStore {
-    fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+    fn put(&self, key: &str, secret: &[u8]) -> SecretResult<()> {
         let mut guard = self
             .entries
             .lock()
@@ -694,12 +694,7 @@ fn run_secret_checks(report: &mut DemoReport) {
     let unverified = SessionContext::new("demo-bot", "unverified-session");
     record_unverified_secret_access(
         report,
-        access.put_for_session(
-            &unverified,
-            "demo/api-token",
-            b"demo-token",
-            SecretPolicy::default(),
-        ),
+        access.put_for_session(&unverified, "demo/api-token", b"demo-token"),
     );
 
     let mut verified = SessionContext::new("demo-bot", "verified-session");
@@ -707,16 +702,7 @@ fn run_secret_checks(report: &mut DemoReport) {
 
     let outcome = (|| -> Result<String, String> {
         access
-            .put_for_session(
-                &verified,
-                "demo/api-token",
-                b"demo-token",
-                SecretPolicy {
-                    allow_export: false,
-                    max_uses: Some(1),
-                    ttl_seconds: Some(60),
-                },
-            )
+            .put_for_session(&verified, "demo/api-token", b"demo-token")
             .map_err(secret_err_to_string)?;
 
         let secret = access

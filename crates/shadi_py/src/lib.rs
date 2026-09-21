@@ -6,8 +6,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use agent_secrets::{
-    AgentSecretAccess, AgentVerifier, SecretError, SecretPolicy, SecretResult, SecretStore,
-    SessionContext,
+    AgentSecretAccess, AgentVerifier, SecretError, SecretResult, SecretStore, SessionContext,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -137,7 +136,7 @@ impl ShadiStore {
         let guard = self.store.lock().map_err(|_| PyRuntimeError::new_err("lock poisoned"))?;
         let access = AgentSecretAccess::new(guard.as_ref(), &self.verifier);
         access
-            .put_for_session(&ctx, key, secret, SecretPolicy::default())
+            .put_for_session(&ctx, key, secret)
             .map_err(map_secret_error)
     }
 

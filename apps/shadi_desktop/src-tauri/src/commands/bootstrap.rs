@@ -13,7 +13,7 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-use agent_secrets::{SecretPolicy, SecretStore};
+use agent_secrets::SecretStore;
 use rcgen::string::Ia5String;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -98,7 +98,7 @@ pub fn save_config(path: &Path, config: &IdentityConfig) -> Result<(), String> {
 
 pub fn store_seed(store: &dyn SecretStore, seed: &[u8]) -> Result<(), String> {
     store
-        .put(SEED_SECRET_KEY, seed, SecretPolicy::default())
+        .put(SEED_SECRET_KEY, seed)
         .map_err(|e| format!("failed to store the derivation root: {e}"))
 }
 

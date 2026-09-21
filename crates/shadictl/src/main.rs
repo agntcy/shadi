@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use shadi_sandbox::{spawn_sandboxed, NetAllowlist, NetProxy, SandboxPolicy};
-use agent_secrets::{SecretPolicy, SecretStore};
+use agent_secrets::SecretStore;
 use shadi_memory::{MemoryEntry, SqlCipherStore};
 use slim_mas::{is_member_allowed, load_config as load_mas_config, resolve_group, resolve_group_dids};
 use sequoia_openpgp as openpgp;
@@ -95,7 +95,7 @@ struct TestSecretStore;
 
 #[cfg(test)]
 impl SecretStore for TestSecretStore {
-    fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> agent_secrets::SecretResult<()> {
+    fn put(&self, key: &str, secret: &[u8]) -> agent_secrets::SecretResult<()> {
         if test_secret_store_put_failures()
             .lock()
             .map_err(|_| agent_secrets::SecretError::StorageFailure)?
