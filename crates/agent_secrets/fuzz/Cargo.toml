@@ -1,0 +1,23 @@
+[package]
+name = "agntcy-shadi-agent-secrets-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.agntcy-shadi-agent-secrets]
+path = ".."
+
+[[bin]]
+name = "secret-mapping"
+path = "fuzz_targets/secret-mapping.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -6,6 +6,7 @@ on:
       - "crates/shadi_sandbox/**"
       - "crates/shadi_identity/**"
       - "crates/agentbridge/**"
+      - "crates/agent_secrets/**"
       - ".github/workflows/fuzz.yml"
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - "crates/shadi_sandbox/**"
       - "crates/shadi_identity/**"
       - "crates/agentbridge/**"
+      - "crates/agent_secrets/**"
       - ".github/workflows/fuzz.yml"
   # The pull-request run is a smoke test. Finding anything deeper needs time,
   # so the nightly run gets five minutes per target instead of one.
@@ -45,6 +47,7 @@ jobs:
           - { target: did-proof,        crate: shadi_identity, runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           - { target: stdio-response,   crate: agentbridge,    runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           - { target: member-spec,      crate: agentbridge,    runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
+          - { target: secret-mapping,   crate: agent_secrets,  runner: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           # The profile builder is behind cfg(target_os = "macos") and the
           # target returns immediately anywhere else, so running it on Linux
           # would report coverage that never executed a line.

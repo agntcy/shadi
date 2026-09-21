@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod mapping;
 pub mod memory;
 pub mod platform;
 pub mod policy;
@@ -12,6 +13,7 @@ use std::fmt;
 
 pub use agent::AgentSecretAccess;
 pub use auth::{AgentVerifier, DidProofVerifier, NoopVerifier};
+pub use mapping::{parse_key_name, parse_name_mappings};
 pub use memory::SecretBytes;
 pub use policy::SecretPolicy;
 pub use session::SessionContext;
