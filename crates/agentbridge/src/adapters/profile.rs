@@ -643,8 +643,9 @@ mod tests {
     use super::*;
 
     /// `load_profile` / `render_argv` read process env. Parallel tests must
-    /// not interleave `set_var` with those lookups.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// not interleave `set_var` with those lookups — including tests in other
+    /// modules, so this is the crate-wide lock rather than a local one.
+    use crate::env_lock as profile_env_lock;
 
     fn load_bundled(id: &str) -> CliProfile {
         load_profile(id)
@@ -790,7 +791,7 @@ mod tests {
     #[test]
     fn goose_argv_is_noninteractive_run() {
         let p = load_bundled("goose");
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         std::env::remove_var("GOOSE_PROVIDER");
         std::env::remove_var("GOOSE_MODEL");
         let argv = render_argv(&p, "/ws", "summarize src/", Some("be terse"), None, true);
@@ -811,7 +812,7 @@ mod tests {
     #[test]
     fn collect_pass_env_copies_api_key_suffix_from_host() {
         let p = load_bundled("goose");
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         std::env::set_var("AGENTBRIDGE_FAKE_API_KEY", "test-key-not-a-secret");
         let env = collect_pass_env(&p);
         std::env::remove_var("AGENTBRIDGE_FAKE_API_KEY");
@@ -824,7 +825,7 @@ mod tests {
     #[test]
     fn goose_pass_env_harvests_api_key_env_from_custom_providers() {
         let p = load_bundled("goose");
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         let home = tempfile::tempdir().unwrap();
         let providers = home.path().join(".config/goose/custom_providers");
         std::fs::create_dir_all(&providers).unwrap();
@@ -871,7 +872,7 @@ mod tests {
 
     #[test]
     fn goose_provider_api_key_env_names_skips_missing_home_and_dir() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         let old_home = std::env::var_os("HOME");
         std::env::remove_var("HOME");
         assert!(goose_provider_api_key_env_names().is_empty());
@@ -888,7 +889,7 @@ mod tests {
     fn collect_pass_env_copies_explicit_pass_env_names() {
         let mut p = load_bundled("opencode");
         p.pass_env = vec!["AGENTBRIDGE_TEST_PASS".into()];
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         std::env::set_var("AGENTBRIDGE_TEST_PASS", "test-key-not-a-secret");
         let env = collect_pass_env(&p);
         std::env::remove_var("AGENTBRIDGE_TEST_PASS");
@@ -901,7 +902,7 @@ mod tests {
     #[test]
     fn goose_env_flags_omit_blank_provider() {
         let p = load_bundled("goose");
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         std::env::set_var("GOOSE_PROVIDER", "   ");
         std::env::remove_var("GOOSE_MODEL");
         let argv = render_argv(&p, "/ws", "hi", None, None, true);
@@ -915,7 +916,7 @@ mod tests {
     #[test]
     fn goose_argv_passes_provider_and_model_from_host_env() {
         let p = load_bundled("goose");
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         std::env::set_var("GOOSE_PROVIDER", "openai");
         std::env::set_var("GOOSE_MODEL", "test-model");
         let argv = render_argv(&p, "/ws", "hi", None, None, true);
@@ -974,14 +975,14 @@ mod tests {
 
     #[test]
     fn load_profile_skips_generic_stdio() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         assert!(load_profile("generic-stdio").unwrap().is_none());
         assert!(load_profile("no-such-profile").unwrap().is_none());
     }
 
     #[test]
     fn open_profile_adapter_reads_id_and_workdir() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         let (id, adapter) = open_profile_adapter("claude-code:/var/ws")
             .unwrap()
             .expect("bundled");
@@ -1274,7 +1275,7 @@ echo '{"result":"ok","session_id":"sid-9"}'
             }"#,
         )
         .unwrap();
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         std::env::set_var("AGENTBRIDGE_TEST_EXTRA_ARGS", "--flag value");
         let argv = render_argv(&p, "/ws", "hi", None, None, true);
         std::env::remove_var("AGENTBRIDGE_TEST_EXTRA_ARGS");
@@ -1283,7 +1284,7 @@ echo '{"result":"ok","session_id":"sid-9"}'
 
     #[test]
     fn load_profile_reads_override_dir() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = profile_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("override-probe.json"),
