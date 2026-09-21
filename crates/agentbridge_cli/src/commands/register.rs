@@ -536,8 +536,11 @@ impl AgentExecutor for AgentBridgeExecutor {
                 format!("stored handoff ({})", preview(&prompt, 80))
             } else {
                 let prompt_for_cli = prompt;
-                match tokio::task::spawn_blocking(move || adapter.execute_prompt(&prompt_for_cli))
-                    .await
+                let conversation = context_id.clone();
+                match tokio::task::spawn_blocking(move || {
+                    adapter.execute_prompt_in(&conversation, &prompt_for_cli)
+                })
+                .await
                 {
                     Ok(Ok(text)) => text,
                     Ok(Err(e)) => format!("agentbridge error: {e}"),

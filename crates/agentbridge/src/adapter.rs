@@ -38,6 +38,18 @@ pub trait CliAdapter: Send + Sync {
     /// Used by `CliToolAdapter` to drive the development coordination loop.
     fn execute_prompt(&self, prompt: &str) -> Result<String, CliAdapterError>;
 
+    /// Same as [`CliAdapter::execute_prompt`], but scoped to a named
+    /// conversation so that concurrent callers each keep their own harness
+    /// session instead of interleaving turns in a shared one. Default
+    /// implementation ignores the scope for adapters that hold no session.
+    fn execute_prompt_in(
+        &self,
+        _conversation: &str,
+        prompt: &str,
+    ) -> Result<String, CliAdapterError> {
+        self.execute_prompt(prompt)
+    }
+
     /// Best-effort: terminate whatever child process this adapter's most
     /// recent `execute_prompt` call spawned, if it's still running. Called
     /// during listener shutdown so an in-flight message doesn't leave an
@@ -158,6 +170,21 @@ mod tests {
     }
 
     // --- Tests --------------------------------------------------------------
+
+    #[test]
+    fn execute_prompt_in_defaults_to_the_unscoped_prompt() {
+        let adapter = MockAdapter {
+            id: AgentId("mock".to_string()),
+            response: "answered".to_string(),
+        };
+
+        // MockAdapter does not override the scoped call, so this exercises the
+        // default body every session-less adapter inherits.
+        assert_eq!(
+            adapter.execute_prompt_in("ctx-a", "hello").unwrap(),
+            adapter.execute_prompt("hello").unwrap()
+        );
+    }
 
     #[test]
     fn mock_adapter_all_methods_callable() {
