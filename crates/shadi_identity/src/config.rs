@@ -27,6 +27,19 @@ pub fn did_provider_config(
     did: &str,
     audience: Option<&str>,
 ) -> IdentityProviderConfig {
+    did_provider_config_with_ttl(private_pem, did, audience, DEFAULT_TOKEN_TTL)
+}
+
+/// [`did_provider_config`] with a caller-chosen credential lifetime.
+///
+/// SLIM mints a fresh DID-JWT on every `get_token`, so `ttl` is how long any
+/// one minted credential stays valid, not how long the agent can authenticate.
+pub fn did_provider_config_with_ttl(
+    private_pem: &str,
+    did: &str,
+    audience: Option<&str>,
+    ttl: Duration,
+) -> IdentityProviderConfig {
     IdentityProviderConfig::Jwt {
         config: ClientJwtAuth {
             key: JwtKeyType::Encoding {
@@ -43,7 +56,7 @@ pub fn did_provider_config(
             // requires an issuer claim to be present.
             issuer: Some(did.to_string()),
             subject: Some(did.to_string()),
-            duration: DEFAULT_TOKEN_TTL,
+            duration: ttl,
         },
     }
 }
