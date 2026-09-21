@@ -556,6 +556,149 @@ mod tests {
         assert!(validate_sddl("S:(ML;;;;;LW)").is_err());
         assert!(validate_sddl("D:(A;;FA;;;SY)\x00evil").is_err());
     }
+
+    /// Deterministic xorshift, so a failure names an input the next run
+    /// reproduces exactly.
+    #[cfg(target_os = "windows")]
+    struct Rng(u64);
+
+    #[cfg(target_os = "windows")]
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+
+        fn string(&mut self, max_len: usize) -> String {
+            const ALPHABET: &[char] = &[
+                'D', 'S', ':', 'P', '(', ')', ';', 'A', 'F', 'Y', 'B', '\\', '\x00', '\n', '\t',
+                'é', ' ', '0',
+            ];
+            let len = self.below(max_len + 1);
+            (0..len)
+                .map(|_| ALPHABET[self.below(ALPHABET.len())])
+                .collect()
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validate_sddl_accepts_only_control_free_dacl_strings() {
+        let mut rng = Rng(0x5eed_1234_abcd_ef01);
+        for i in 0..20_000 {
+            // Half the inputs already carry the DACL prefix; an unbiased
+            // alphabet almost never clears that check, which would leave the
+            // accepting branch untested.
+            let candidate = if i % 2 == 0 {
+                format!("D:{}", rng.string(22))
+            } else {
+                rng.string(24)
+            };
+            if validate_sddl(&candidate).is_ok() {
+                assert!(
+                    candidate.starts_with("D:"),
+                    "validate_sddl accepted {candidate:?}, which is not a DACL string"
+                );
+                assert!(
+                    !candidate.chars().any(char::is_control),
+                    "validate_sddl accepted {candidate:?}, which carries a control character"
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn journal_hmac_separates_the_path_from_the_sddl() {
+        let key = b"test-key-32-bytes-long-enough!!!";
+        assert_ne!(
+            compute_journal_hmac(key, "a\x00b", "c"),
+            compute_journal_hmac(key, "a", "b\x00c"),
+            "a path that embeds the separator must not forge another entry's tag"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn journal_entry_is_trusted_only_when_signed_and_well_formed() {
+        let key = b"test-key-32-bytes-long-enough!!!";
+        let signed = |path: &str, sddl: &str| WindowsAclRollbackJournalEntry {
+            path: path.to_string(),
+            dacl_sddl: sddl.to_string(),
+            hmac: compute_journal_hmac(key, path, sddl),
+        };
+
+        assert!(journal_entry_is_trusted(key, &signed(r"C:\temp\foo", "D:(A;;FA;;;SY)")).is_ok());
+
+        // Signed with this key, but the SDDL would still be handed to
+        // ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        let err = journal_entry_is_trusted(key, &signed(r"C:\temp\foo", "S:(ML;;;;;LW)"))
+            .expect_err("a signed entry with a non-DACL string must be refused");
+        assert!(err.contains("D:"), "{err}");
+
+        // Signed with a key the recovering process does not hold.
+        let mut forged = signed(r"C:\temp\foo", "D:(A;;FA;;;SY)");
+        forged.hmac = compute_journal_hmac(
+            b"a-different-key-of-the-same-size",
+            &forged.path,
+            &forged.dacl_sddl,
+        );
+        assert!(journal_entry_is_trusted(key, &forged).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rewriting_any_journal_field_breaks_trust() {
+        let key = b"test-key-32-bytes-long-enough!!!";
+        let mut rng = Rng(0x1234_5eed_fee1_dead);
+
+        for _ in 0..2_000 {
+            let path = format!(r"C:\temp\{}", rng.string(8));
+            let sddl = format!("D:{}", rng.string(12));
+            let entry = WindowsAclRollbackJournalEntry {
+                path: path.clone(),
+                dacl_sddl: sddl.clone(),
+                hmac: compute_journal_hmac(key, &path, &sddl),
+            };
+
+            // A round trip through the journal file format preserves trust.
+            let json = serde_json::to_string(&entry).expect("serialize");
+            let reloaded: WindowsAclRollbackJournalEntry =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                journal_entry_is_trusted(key, &reloaded).is_ok(),
+                journal_entry_is_trusted(key, &entry).is_ok(),
+                "the journal format changed the verdict for {entry:?}"
+            );
+
+            // Rewriting the path or the SDDL without the key must not verify.
+            let repathed = WindowsAclRollbackJournalEntry {
+                path: format!("{path}x"),
+                dacl_sddl: sddl.clone(),
+                hmac: entry.hmac.clone(),
+            };
+            assert!(
+                journal_entry_is_trusted(key, &repathed).is_err(),
+                "a rewritten path kept its tag: {repathed:?}"
+            );
+
+            let resddled = WindowsAclRollbackJournalEntry {
+                path: path.clone(),
+                dacl_sddl: format!("{sddl}(A;;FA;;;WD)"),
+                hmac: entry.hmac.clone(),
+            };
+            assert!(
+                journal_entry_is_trusted(key, &resddled).is_err(),
+                "a rewritten SDDL kept its tag: {resddled:?}"
+            );
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -809,7 +952,11 @@ fn load_or_create_hmac_key() -> Result<Vec<u8>, String> {
     }
 }
 
-/// Compute HMAC-SHA256 over `path || dacl_sddl`.
+/// Compute HMAC-SHA256 binding `path` to `dacl_sddl`.
+///
+/// Each field is length-prefixed rather than separated by a byte: a plain
+/// separator leaves the tag covering one concatenated string, so the boundary
+/// between the two fields is not part of what is signed.
 #[cfg(target_os = "windows")]
 fn compute_journal_hmac(key: &[u8], path: &str, dacl_sddl: &str) -> String {
     use hmac::{Hmac, KeyInit, Mac};
@@ -818,10 +965,28 @@ fn compute_journal_hmac(key: &[u8], path: &str, dacl_sddl: &str) -> String {
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key)
         .expect("HMAC key length is always valid");
-    mac.update(path.as_bytes());
-    mac.update(b"\x00");
-    mac.update(dacl_sddl.as_bytes());
+    for field in [path, dacl_sddl] {
+        mac.update(&(field.len() as u64).to_le_bytes());
+        mac.update(field.as_bytes());
+    }
     hex::encode(mac.finalize().into_bytes())
+}
+
+/// Decide whether a journal entry read off disk may be applied.
+///
+/// The journal directory is locked down to owner and SYSTEM, but recovery
+/// runs against whatever is on disk after a crash, so the HMAC is what
+/// actually stands between a rewritten entry and `SetNamedSecurityInfoW`.
+#[cfg(target_os = "windows")]
+fn journal_entry_is_trusted(
+    key: &[u8],
+    entry: &WindowsAclRollbackJournalEntry,
+) -> Result<(), String> {
+    let expected = compute_journal_hmac(key, &entry.path, &entry.dacl_sddl);
+    if entry.hmac != expected {
+        return Err("HMAC mismatch".to_string());
+    }
+    validate_sddl(&entry.dacl_sddl)
 }
 
 /// Validate that an SDDL string has a plausible format before trusting it.
@@ -961,24 +1126,12 @@ pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
         let journal: WindowsAclRollbackJournalEntry =
             serde_json::from_str(&data).map_err(|err| err.to_string())?;
 
-        // Verify HMAC before trusting journal content.
-        let expected_hmac = compute_journal_hmac(&key, &journal.path, &journal.dacl_sddl);
-        if journal.hmac != expected_hmac {
-            warn!(
-                target: "shadi.sandbox.windows",
-                journal = %path.display(),
-                "rejecting tampered ACL rollback journal (HMAC mismatch)"
-            );
-            continue;
-        }
-
-        // Validate SDDL syntax before applying.
-        if let Err(err) = validate_sddl(&journal.dacl_sddl) {
+        if let Err(err) = journal_entry_is_trusted(&key, &journal) {
             warn!(
                 target: "shadi.sandbox.windows",
                 journal = %path.display(),
                 error = %err,
-                "rejecting ACL rollback journal with invalid SDDL"
+                "rejecting untrusted ACL rollback journal"
             );
             continue;
         }
