@@ -32,13 +32,39 @@ enum Request<'a> {
     Execute { prompt: &'a str },
 }
 
-#[derive(Deserialize)]
-struct Response {
-    ok: bool,
+/// Maximum bytes accepted for one response line, including the newline.
+/// Mirrors `shadi_sandbox::control::CONTROL_LINE_MAX_BYTES`: a subprocess
+/// that never emits a newline must not be able to grow this buffer without
+/// bound.
+pub const STDIO_LINE_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+pub struct Response {
+    pub ok: bool,
     #[serde(default)]
-    data: serde_json::Value,
+    pub data: serde_json::Value,
     #[serde(default)]
-    error: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Read one newline-terminated response from `reader` and decode it.
+///
+/// Rejects a line longer than [`STDIO_LINE_MAX_BYTES`] instead of buffering
+/// whatever the subprocess sends.
+pub fn read_response<R: BufRead>(reader: &mut R) -> Result<Response, CliAdapterError> {
+    let mut buf = String::new();
+    let read = Read::take(&mut *reader, STDIO_LINE_MAX_BYTES as u64 + 1).read_line(&mut buf)?;
+    if read == 0 {
+        return Err(CliAdapterError::Protocol(
+            "subprocess closed stdout before answering".to_string(),
+        ));
+    }
+    if read > STDIO_LINE_MAX_BYTES {
+        return Err(CliAdapterError::Protocol(format!(
+            "response line exceeds {STDIO_LINE_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(serde_json::from_str(buf.trim())?)
 }
 
 // --- I/O abstraction --------------------------------------------------------
@@ -126,13 +152,7 @@ impl GenericStdioAdapter {
             .flush()
             .map_err(|e| CliAdapterError::Subprocess(e.to_string()))?;
 
-        let mut buf = String::new();
-        io.reader
-            .read_line(&mut buf)
-            .map_err(|e| CliAdapterError::Subprocess(e.to_string()))?;
-
-        let resp: Response = serde_json::from_str(buf.trim())?;
-        Ok(resp)
+        read_response(&mut io.reader)
     }
 }
 
@@ -194,6 +214,59 @@ mod tests {
             _child: None,
             io: Mutex::new(Io::from_buffers(writer, reader)),
         }
+    }
+
+    #[test]
+    fn read_response_rejects_a_line_over_the_cap() {
+        let mut line = vec![b'a'; STDIO_LINE_MAX_BYTES + 1];
+        line.push(b'\n');
+        let err = read_response(&mut line.as_slice()).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "oversize line should be rejected by the cap, got: {err}"
+        );
+    }
+
+    /// Serves `a` forever and trips if asked for more than `limit` bytes, so a
+    /// reader that buffers without bound fails the test instead of hanging.
+    struct EndlessReader {
+        served: usize,
+        limit: usize,
+    }
+
+    impl Read for EndlessReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.served += buf.len();
+            assert!(
+                self.served <= self.limit,
+                "read_response pulled {} bytes from a subprocess that never sent a newline",
+                self.served
+            );
+            buf.fill(b'a');
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn read_response_stops_pulling_from_a_subprocess_that_never_sends_a_newline() {
+        let mut reader = BufReader::new(EndlessReader {
+            served: 0,
+            limit: 1024 * 1024,
+        });
+        let err = read_response(&mut reader).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "an endless line must be rejected by the cap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_response_reports_eof_rather_than_a_parse_error() {
+        let err = read_response(&mut b"".as_slice()).unwrap_err();
+        assert!(
+            err.to_string().contains("closed stdout"),
+            "EOF should name the closed subprocess, got: {err}"
+        );
     }
 
     #[test]
