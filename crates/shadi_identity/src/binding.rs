@@ -325,15 +325,69 @@ mod tests {
     fn splitting_a_truncated_certificate_fails() {
         let (human, agent) = human_and_agent();
         let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
-        // Every prefix short of the full five fields is truncated.
-        for cut in [22, 40, 80] {
-            if cut < cert.len() {
-                assert!(
-                    split_binding(&cert[..cut]).is_err(),
-                    "accepted a {cut}-byte prefix"
-                );
-            }
+        // Every prefix short of the full five fields is truncated. The last
+        // field has no trailing newline, so the whole certificate is one too.
+        for cut in [MAGIC.len(), MAGIC.len() + 8, cert.len() / 2, cert.len()] {
+            assert!(
+                split_binding(&cert[..cut]).is_err(),
+                "accepted a {cut}-byte prefix"
+            );
         }
+    }
+
+    #[test]
+    fn splitting_something_that_is_not_a_certificate_fails() {
+        let err = split_binding(b"WRONG-MAGIC/1\na\nb\nc\n1\nd\npayload").unwrap_err();
+        assert!(
+            err.to_string().contains("not a SHADI-AGENT-BINDING/1"),
+            "{err}"
+        );
+        assert!(split_binding(b"").is_err());
+    }
+
+    #[test]
+    fn splitting_stops_at_the_size_cap() {
+        // A header whose fields never end must not be scanned without bound.
+        let mut flood = Vec::from(MAGIC);
+        flood.push(b'\n');
+        flood.extend(std::iter::repeat_n(b'a', BINDING_MAX_BYTES * 2));
+        flood.push(b'\n');
+        let err = split_binding(&flood).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn issuing_rejects_a_field_longer_than_the_line_cap() {
+        let (human, agent) = human_and_agent();
+        let long_name = "n".repeat(BINDING_LINE_MAX_BYTES + 1);
+        let err = issue_binding(&human, &agent.did(), &long_name, LATER).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn verifying_rejects_a_field_longer_than_the_line_cap() {
+        let (human, agent) = human_and_agent();
+        let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        // Swap the agent name for one past the cap; the signature would fail
+        // anyway, but the length guard has to fire first.
+        let bloated = String::from_utf8(cert)
+            .unwrap()
+            .replacen("claude-code", &"n".repeat(BINDING_LINE_MAX_BYTES + 1), 1)
+            .into_bytes();
+        let err = verify_binding(&bloated, NOW).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn verifying_rejects_an_expiry_that_is_not_a_timestamp() {
+        let (human, agent) = human_and_agent();
+        let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        let mangled = String::from_utf8(cert)
+            .unwrap()
+            .replacen(&LATER.to_string(), "not-a-number", 1)
+            .into_bytes();
+        let err = verify_binding(&mangled, NOW).unwrap_err();
+        assert!(err.to_string().contains("unix timestamp"), "{err}");
     }
 
     #[test]
