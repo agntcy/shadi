@@ -25,5 +25,5 @@ ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed2
 
 [dev-dependencies]
 slim_config = { package = "agntcy-slim-config", version = "0.16.0" }
-slim_auth = { package = "agntcy-slim-auth", version = "0.15.3" }
+slim_auth = { package = "agntcy-slim-auth", version = "0.16.0" }
 tokio = { version = "1", features = ["full"] }
