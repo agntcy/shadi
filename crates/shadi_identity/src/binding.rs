@@ -333,10 +333,15 @@ mod tests {
         let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
         // Every prefix short of the full five fields is truncated. The last
         // field has no trailing newline, so the whole certificate is one too.
-        for cut in [MAGIC.len(), MAGIC.len() + 8, cert.len() / 2, cert.len()] {
+        // The label comes from the loop index, not from the certificate: a
+        // length derived from `cert` counts as certificate-derived data.
+        for (case, cut) in [MAGIC.len(), MAGIC.len() + 8, cert.len() / 2, cert.len()]
+            .into_iter()
+            .enumerate()
+        {
             assert!(
                 split_binding(&cert[..cut]).is_err(),
-                "accepted a {cut}-byte prefix"
+                "case {case} accepted a truncated prefix"
             );
         }
     }
