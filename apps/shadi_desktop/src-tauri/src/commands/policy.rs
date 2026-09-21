@@ -50,6 +50,26 @@ pub struct LivePolicySnapshot {
     /// The live network allowlist, when the session's proxy applied a
     /// network patch immediately rather than staging it.
     pub net_allow_live: Option<Vec<String>>,
+    /// Trusted-secret delivery as resolved at launch. Rule names and targets
+    /// only — a secret's value never crosses the socket.
+    #[serde(default)]
+    pub trusted_secret: Vec<String>,
+    #[serde(default)]
+    pub trusted_secret_exec: Vec<String>,
+    #[serde(default)]
+    pub trusted_secret_fd_env: Vec<String>,
+    #[serde(default)]
+    pub process_secret_policy: Vec<ProcessSecretRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessSecretRule {
+    pub secret: String,
+    pub actions: Vec<String>,
+    pub children: Vec<String>,
+    pub child_sha256: Vec<String>,
+    pub name: Option<String>,
+    pub fd_env: Option<String>,
 }
 
 /// The policy a sandbox is launched with (`sandbox_launch`'s

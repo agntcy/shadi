@@ -3424,6 +3424,7 @@ mod tests {
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: None,
+            secret_rules: Default::default(),
         }));
 
         let _handle = policy_watch::start_control_socket(&sock_path, live)

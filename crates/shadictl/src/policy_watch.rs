@@ -51,6 +51,24 @@ use tracing::info_span;
 
 /// Mutable policy state shared between the main thread and the control socket
 /// listener thread.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub(crate) struct SecretRulesSnapshot {
+    pub(crate) trusted_secret: Vec<String>,
+    pub(crate) trusted_secret_exec: Vec<String>,
+    pub(crate) trusted_secret_fd_env: Vec<String>,
+    pub(crate) process_secret_policy: Vec<ProcessSecretRuleSummary>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ProcessSecretRuleSummary {
+    pub(crate) secret: String,
+    pub(crate) actions: Vec<crate::cli_types::SecretAction>,
+    pub(crate) children: Vec<String>,
+    pub(crate) child_sha256: Vec<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) fd_env: Option<String>,
+}
+
 pub(crate) struct LivePolicy {
     pub(crate) policy: SandboxPolicy,
     pub(crate) blocked: HashSet<String>,
@@ -66,6 +84,7 @@ pub(crate) struct LivePolicy {
     /// Live network allowlist shared with the userspace proxy.
     /// When `Some`, network patches update this directly — no restart needed.
     pub(crate) live_net_allowlist: Option<NetAllowlist>,
+    pub(crate) secret_rules: SecretRulesSnapshot,
 }
 
 /// Handle to a running control listener. Dropping it removes the endpoint file.
@@ -290,6 +309,10 @@ fn handle_query(live: &Arc<Mutex<LivePolicy>>) -> ControlResponse {
         "staged_allow": guard.staged_allow,
         "net_allow_live": guard.live_net_allowlist.as_ref().map(|al| al.snapshot()),
         "restart_requested": guard.restart_requested.load(Ordering::SeqCst),
+        "trusted_secret": guard.secret_rules.trusted_secret,
+        "trusted_secret_exec": guard.secret_rules.trusted_secret_exec,
+        "trusted_secret_fd_env": guard.secret_rules.trusted_secret_fd_env,
+        "process_secret_policy": guard.secret_rules.process_secret_policy,
     });
 
     ControlResponse::Policy {
@@ -540,6 +563,7 @@ mod tests {
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: None,
+            secret_rules: Default::default(),
         }))
     }
 
@@ -627,6 +651,41 @@ mod tests {
             }
             _ => panic!("expected Policy"),
         }
+    }
+
+    #[test]
+    fn handle_query_reports_trusted_secret_rules() {
+        let live = test_live_policy();
+        if let Ok(mut guard) = live.lock() {
+            guard.secret_rules = SecretRulesSnapshot {
+                trusted_secret: vec!["TOKEN=secops/token".to_string()],
+                trusted_secret_exec: vec!["deploy=ops/deploy".to_string()],
+                trusted_secret_fd_env: vec!["TOKEN_FD".to_string()],
+                process_secret_policy: vec![ProcessSecretRuleSummary {
+                    secret: "secops/token".to_string(),
+                    actions: vec![crate::cli_types::SecretAction::Use],
+                    children: vec!["/usr/bin/curl".to_string()],
+                    child_sha256: vec!["ab".repeat(32)],
+                    name: Some("token".to_string()),
+                    fd_env: Some("TOKEN_FD".to_string()),
+                }],
+            };
+        }
+
+        let ControlResponse::Policy { policy } = handle_query(&live) else {
+            panic!("expected Policy");
+        };
+        assert_eq!(policy["trusted_secret"][0], "TOKEN=secops/token");
+        assert_eq!(policy["trusted_secret_exec"][0], "deploy=ops/deploy");
+        assert_eq!(policy["trusted_secret_fd_env"][0], "TOKEN_FD");
+        let rule = &policy["process_secret_policy"][0];
+        assert_eq!(rule["secret"], "secops/token");
+        assert_eq!(rule["children"][0], "/usr/bin/curl");
+        assert_eq!(rule["fd_env"], "TOKEN_FD");
+        assert!(
+            !policy.to_string().contains("sentinel"),
+            "the response must carry rule names, never secret values"
+        );
     }
 
     #[test]
@@ -771,6 +830,7 @@ mod tests {
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: Some(al.clone()),
+            secret_rules: Default::default(),
         }));
         let patch = PolicyPatch {
             add_net_allow: vec!["dup.com".to_string(), "dup.com".to_string()],
@@ -1039,6 +1099,7 @@ mod tests {
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: Some(al.clone()),
+            secret_rules: Default::default(),
         }));
 
         let patch = PolicyPatch {
@@ -1126,6 +1187,7 @@ mod tests {
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: None,
+            secret_rules: Default::default(),
         }));
         let resp = handle_query(&live);
         match resp {
@@ -1155,6 +1217,7 @@ mod tests {
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: Some(al.clone()),
+            secret_rules: Default::default(),
         }));
 
         let patch = PolicyPatch {
@@ -1201,6 +1264,7 @@ mod tests {
             staged_write: Vec::new(),
             staged_allow: Vec::new(),
             live_net_allowlist: Some(al.clone()),
+            secret_rules: Default::default(),
         }));
 
         let patch = PolicyPatch {
