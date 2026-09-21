@@ -254,7 +254,10 @@ mod tests {
             .into_bytes();
 
         let err = verify_binding(&forged, NOW).unwrap_err();
-        assert!(err.to_string().contains("does not verify"), "{err}");
+        assert!(
+            err.to_string().contains("does not verify"),
+            "should fail signature verification"
+        );
     }
 
     #[test]
@@ -295,7 +298,10 @@ mod tests {
         // The expiry is signed, so pushing it out breaks the signature rather
         // than buying more time.
         let err = verify_binding(&extended, NOW).unwrap_err();
-        assert!(err.to_string().contains("does not verify"), "{err}");
+        assert!(
+            err.to_string().contains("does not verify"),
+            "should fail signature verification"
+        );
     }
 
     #[test]
@@ -303,7 +309,7 @@ mod tests {
         let (human, agent) = human_and_agent();
         let cert = issue_binding(&human, &agent.did(), "claude-code", NOW - 1).unwrap();
         let err = verify_binding(&cert, NOW).unwrap_err();
-        assert!(err.to_string().contains("expired"), "{err}");
+        assert!(err.to_string().contains("expired"), "should report expiry");
         // Valid before it lapsed.
         assert!(verify_binding(&cert, NOW - 2).is_ok());
     }
@@ -340,7 +346,7 @@ mod tests {
         let err = split_binding(b"WRONG-MAGIC/1\na\nb\nc\n1\nd\npayload").unwrap_err();
         assert!(
             err.to_string().contains("not a SHADI-AGENT-BINDING/1"),
-            "{err}"
+            "should reject a foreign magic line"
         );
         assert!(split_binding(b"").is_err());
     }
@@ -353,7 +359,10 @@ mod tests {
         flood.extend(std::iter::repeat_n(b'a', BINDING_MAX_BYTES * 2));
         flood.push(b'\n');
         let err = split_binding(&flood).unwrap_err();
-        assert!(err.to_string().contains("exceeds"), "{err}");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
     }
 
     #[test]
@@ -361,7 +370,10 @@ mod tests {
         let (human, agent) = human_and_agent();
         let long_name = "n".repeat(BINDING_LINE_MAX_BYTES + 1);
         let err = issue_binding(&human, &agent.did(), &long_name, LATER).unwrap_err();
-        assert!(err.to_string().contains("exceeds"), "{err}");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
     }
 
     #[test]
@@ -375,7 +387,10 @@ mod tests {
             .replacen("claude-code", &"n".repeat(BINDING_LINE_MAX_BYTES + 1), 1)
             .into_bytes();
         let err = verify_binding(&bloated, NOW).unwrap_err();
-        assert!(err.to_string().contains("exceeds"), "{err}");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
     }
 
     #[test]
@@ -387,7 +402,10 @@ mod tests {
             .replacen(&LATER.to_string(), "not-a-number", 1)
             .into_bytes();
         let err = verify_binding(&mangled, NOW).unwrap_err();
-        assert!(err.to_string().contains("unix timestamp"), "{err}");
+        assert!(
+            err.to_string().contains("unix timestamp"),
+            "should report a bad timestamp"
+        );
     }
 
     #[test]
@@ -408,7 +426,10 @@ mod tests {
     fn an_oversize_certificate_is_rejected_before_parsing() {
         let flood = vec![b'a'; BINDING_MAX_BYTES + 1];
         let err = verify_binding(&flood, NOW).unwrap_err();
-        assert!(err.to_string().contains("exceeds"), "{err}");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
     }
 
     #[test]
