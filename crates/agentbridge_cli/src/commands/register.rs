@@ -1946,7 +1946,10 @@ test push ... FAILED
 
         match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
             MessageAdmission::Forged { reason } => {
-                assert!(reason.contains("was signed by"), "{reason}");
+                assert!(
+                    reason.contains("was signed by"),
+                    "rejection should name the signing agent"
+                );
             }
             _ => panic!("replaying another agent's binding must be refused"),
         }
@@ -1962,7 +1965,10 @@ test push ... FAILED
 
         match admit_binding(verified.did, &verified.payload, &[admitted.did()], BIND_NOW) {
             MessageAdmission::Forged { reason } => {
-                assert!(reason.contains("not admitted"), "{reason}");
+                assert!(
+                    reason.contains("not admitted"),
+                    "rejection should say the human is not admitted"
+                );
             }
             _ => panic!("an unlisted human must be refused"),
         }
@@ -1976,7 +1982,12 @@ test push ... FAILED
         let verified = shadi_identity::unwrap_signed_message(&envelope).unwrap();
 
         match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
-            MessageAdmission::Forged { reason } => assert!(reason.contains("expired"), "{reason}"),
+            MessageAdmission::Forged { reason } => {
+                assert!(
+                    reason.contains("expired"),
+                    "rejection should say the binding expired"
+                );
+            }
             _ => panic!("an expired binding must be refused"),
         }
     }
@@ -2002,7 +2013,10 @@ test push ... FAILED
         // Once humans are listed, proving only yourself is not enough.
         match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
             MessageAdmission::AuthRequired { reason } => {
-                assert!(reason.contains("binding required"), "{reason}");
+                assert!(
+                    reason.contains("binding required"),
+                    "challenge should ask for a binding"
+                );
             }
             _ => panic!("an unbound agent must be challenged once humans are listed"),
         }
