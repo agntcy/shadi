@@ -176,6 +176,34 @@ pub fn verify_binding(certificate: &[u8], now: u64) -> Result<VerifiedBinding, I
     })
 }
 
+/// Split a certificate carried as a prefix of `bytes` from what follows.
+///
+/// A binding travels inside the agent's own DID-proof payload, so it is a
+/// header on a larger message rather than the whole of it. The certificate is
+/// the magic line plus five fields; everything after them is the payload.
+pub fn split_binding(bytes: &[u8]) -> Result<(&[u8], &[u8]), IdentityError> {
+    if !looks_like_binding(bytes) {
+        return Err(IdentityError::Proof(
+            "not a SHADI-AGENT-BINDING/1 certificate".to_string(),
+        ));
+    }
+    let mut end = MAGIC.len();
+    for _ in 0..5 {
+        let rest = &bytes[end + 1..];
+        let rel = rest
+            .iter()
+            .position(|b| *b == b'\n')
+            .ok_or_else(|| IdentityError::Proof("binding certificate is truncated".to_string()))?;
+        end += 1 + rel;
+        if end > BINDING_MAX_BYTES {
+            return Err(IdentityError::Proof(format!(
+                "binding certificate exceeds {BINDING_MAX_BYTES} bytes"
+            )));
+        }
+    }
+    Ok((&bytes[..end], &bytes[end + 1..]))
+}
+
 fn canonical(human_did: &str, agent_did: &str, agent_name: &str, not_after: u64) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(DOMAIN);
@@ -278,6 +306,34 @@ mod tests {
         assert!(err.to_string().contains("expired"), "{err}");
         // Valid before it lapsed.
         assert!(verify_binding(&cert, NOW - 2).is_ok());
+    }
+
+    #[test]
+    fn a_binding_carried_as_a_header_splits_from_its_payload() {
+        let (human, agent) = human_and_agent();
+        let mut envelope = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        envelope.push(b'\n');
+        envelope.extend_from_slice(b"the actual prompt\nwith two lines");
+
+        let (cert, rest) = split_binding(&envelope).unwrap();
+        assert_eq!(rest, b"the actual prompt\nwith two lines");
+        let verified = verify_binding(cert, NOW).unwrap();
+        assert_eq!(verified.agent_did, agent.did());
+    }
+
+    #[test]
+    fn splitting_a_truncated_certificate_fails() {
+        let (human, agent) = human_and_agent();
+        let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        // Every prefix short of the full five fields is truncated.
+        for cut in [22, 40, 80] {
+            if cut < cert.len() {
+                assert!(
+                    split_binding(&cert[..cut]).is_err(),
+                    "accepted a {cut}-byte prefix"
+                );
+            }
+        }
     }
 
     #[test]
