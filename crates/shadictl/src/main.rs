@@ -189,6 +189,32 @@ pub(crate) fn scrub_test_secret_backend_env(command: &mut Command) {
     }
 }
 
+/// Wait out the ETXTBSY window after writing an executable.
+///
+/// Writing a file and then exec'ing it is racy in a threaded test binary: a
+/// child forked by another test inherits the writable fd for the instant
+/// before its own exec, and exec'ing the file inside that window is refused.
+/// The code under test execs whatever path an env var names, so the
+/// invocation cannot be routed through a shell — probe until the kernel
+/// allows the exec instead.
+#[cfg(all(test, unix))]
+pub(crate) fn wait_until_executable(path: &std::path::Path) {
+    // ETXTBSY is 26 on both Linux and macOS.
+    const ETXTBSY: i32 = 26;
+    for _ in 0..200 {
+        match std::process::Command::new(path)
+            .arg("--shadi-exec-probe")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Err(err) if err.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            _ => return,
+        }
+    }
+}
 
 fn main() -> ExitCode {
     shadi_telemetry::init("shadi-core");

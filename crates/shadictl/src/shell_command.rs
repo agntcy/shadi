@@ -2234,6 +2234,7 @@ mod tests {
             .expect("write script");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::wait_until_executable(&script);
         let _dirctl = ScopedEnvVar::set("SHADI_DIRCTL_BINARY", &script);
 
         assert_continues(&mut session(), "/slim invite-from skill:whatever");
