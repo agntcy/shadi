@@ -952,7 +952,6 @@ mod tests {
     /// CID and to `pull <cid> ... --output json` with a full a2a-module record,
     /// so `SkillSearchSource`/`DidLookupSource` can be exercised end to end
     /// without a real Directory server.
-    #[cfg(unix)]
     /// Wait out the ETXTBSY window after writing an executable.
     ///
     /// Writing a file and then exec'ing it is racy in a threaded test binary:
@@ -961,6 +960,7 @@ mod tests {
     /// refused. The production code under test execs whatever path an env var
     /// names, so the invocation cannot be routed through a shell here — probe
     /// until the kernel allows the exec instead.
+    #[cfg(unix)]
     fn wait_until_executable(path: &std::path::Path) {
         // ETXTBSY is 26 on both Linux and macOS.
         const ETXTBSY: i32 = 26;
@@ -979,6 +979,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn fake_dirctl_script(cid: &str, record_json: &str) -> (std::path::PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("fake_dirctl.sh");
