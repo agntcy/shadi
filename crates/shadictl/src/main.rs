@@ -199,20 +199,21 @@ pub(crate) fn scrub_test_secret_backend_env(command: &mut Command) {
 /// allows the exec instead.
 #[cfg(all(test, unix))]
 pub(crate) fn wait_until_executable(path: &std::path::Path) {
-    // ETXTBSY is 26 on both Linux and macOS.
-    const ETXTBSY: i32 = 26;
     for _ in 0..200 {
-        match std::process::Command::new(path)
+        let Err(err) = std::process::Command::new(path)
             .arg("--shadi-exec-probe")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-        {
-            Err(err) if err.raw_os_error() == Some(ETXTBSY) => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            _ => return,
+        else {
+            return;
+        };
+        // ETXTBSY, 26 on both Linux and macOS. Anything else is not the race
+        // this waits out, so give up rather than spin.
+        if err.raw_os_error() != Some(26) {
+            return;
         }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 

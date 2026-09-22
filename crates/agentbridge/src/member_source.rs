@@ -960,23 +960,68 @@ mod tests {
     /// refused. The production code under test execs whatever path an env var
     /// names, so the invocation cannot be routed through a shell here — probe
     /// until the kernel allows the exec instead.
+    /// True when a spawn failed because the file is still open for writing.
+    ///
+    /// Split out so the decision is testable without manufacturing the race:
+    /// Linux reports ETXTBSY for a writable fd held anywhere, macOS does not.
+    #[cfg(unix)]
+    fn is_text_file_busy(err: &std::io::Error) -> bool {
+        // ETXTBSY, 26 on both Linux and macOS.
+        err.raw_os_error() == Some(26)
+    }
+
     #[cfg(unix)]
     fn wait_until_executable(path: &std::path::Path) {
-        // ETXTBSY is 26 on both Linux and macOS.
-        const ETXTBSY: i32 = 26;
         for _ in 0..200 {
-            match std::process::Command::new(path)
+            let Err(err) = std::process::Command::new(path)
                 .arg("--shadi-exec-probe")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-            {
-                Err(err) if err.raw_os_error() == Some(ETXTBSY) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                _ => return,
+            else {
+                return;
+            };
+            if !is_text_file_busy(&err) {
+                return;
             }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_busy_text_file_is_worth_waiting_for() {
+        assert!(is_text_file_busy(&std::io::Error::from_raw_os_error(26)));
+        assert!(!is_text_file_busy(&std::io::Error::from_raw_os_error(2)));
+        assert!(!is_text_file_busy(&std::io::Error::other("nope")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waiting_gives_up_on_a_failure_that_is_not_the_race() {
+        // ENOENT, not ETXTBSY: there is nothing to wait for, so this must
+        // return rather than spin for a second.
+        let started = std::time::Instant::now();
+        wait_until_executable(std::path::Path::new("/nonexistent-shadi-exec-probe"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "should not retry a spawn failure it cannot fix"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waiting_returns_once_the_script_can_run() {
+        let (path, _dir) = fake_dirctl_script_search_fails();
+        wait_until_executable(&path);
+        assert!(
+            std::process::Command::new(&path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok(),
+            "the script should be runnable once the wait returns"
+        );
     }
 
     #[cfg(unix)]
