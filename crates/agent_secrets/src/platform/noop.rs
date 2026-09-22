@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{SecretError, SecretResult, SecretStore};
-use crate::policy::SecretPolicy;
 use crate::memory::SecretBytes;
 
 pub struct NoopSecretStore;
@@ -14,7 +13,7 @@ impl NoopSecretStore {
 }
 
 impl SecretStore for NoopSecretStore {
-    fn put(&self, _key: &str, _secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+    fn put(&self, _key: &str, _secret: &[u8]) -> SecretResult<()> {
         Err(SecretError::NotSupported)
     }
 
@@ -40,7 +39,7 @@ mod tests {
         let store = NoopSecretStore::new();
 
         assert!(matches!(
-            store.put("key", b"secret", SecretPolicy::default()),
+            store.put("key", b"secret"),
             Err(SecretError::NotSupported)
         ));
         assert!(matches!(store.get("key"), Err(SecretError::NotSupported)));

@@ -227,7 +227,7 @@ fn ingest_dirctl_token(cache_path: &PathBuf, token_key: &str) -> Result<(), Stri
         .map_err(|e| format!("parse {}: {}", cache_path.display(), e))?;
     let store = default_secret_store();
     store
-        .put(token_key, cached.access_token.as_bytes(), SecretPolicy::default())
+        .put(token_key, cached.access_token.as_bytes())
         .map_err(|e| format!("secret store put: {}", e))
 }
 

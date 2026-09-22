@@ -6,7 +6,6 @@ pub mod auth;
 pub mod mapping;
 pub mod memory;
 pub mod platform;
-pub mod policy;
 pub mod session;
 
 use std::fmt;
@@ -15,7 +14,6 @@ pub use agent::AgentSecretAccess;
 pub use auth::{AgentVerifier, DidProofVerifier, NoopVerifier};
 pub use mapping::{parse_key_name, parse_name_mappings};
 pub use memory::SecretBytes;
-pub use policy::SecretPolicy;
 pub use session::SessionContext;
 
 #[cfg(feature = "onepassword")]
@@ -46,7 +44,7 @@ impl std::error::Error for SecretError {}
 pub type SecretResult<T> = Result<T, SecretError>;
 
 pub trait SecretStore: Send + Sync {
-    fn put(&self, key: &str, secret: &[u8], policy: SecretPolicy) -> SecretResult<()>;
+    fn put(&self, key: &str, secret: &[u8]) -> SecretResult<()>;
     fn get(&self, key: &str) -> SecretResult<SecretBytes>;
     fn delete(&self, key: &str) -> SecretResult<()>;
     fn list_keys(&self) -> SecretResult<Vec<String>>;
@@ -94,7 +92,7 @@ mod tests {
     }
 
     impl SecretStore for MemoryStore {
-        fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+        fn put(&self, key: &str, secret: &[u8]) -> SecretResult<()> {
             let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
             guard.insert(key.to_string(), secret.to_vec());
             Ok(())
@@ -128,9 +126,7 @@ mod tests {
         let access = AgentSecretAccess::new(&store, &verifier);
         let session = SessionContext::new("agent", "session");
 
-        access
-            .put_for_session(&session, "key", b"value", SecretPolicy::default())
-            .unwrap();
+        access.put_for_session(&session, "key", b"value").unwrap();
 
         let secret = access.get_for_session(&session, "key").unwrap();
         let got = secret.expose(|bytes| bytes.to_vec());
@@ -147,7 +143,7 @@ mod tests {
         let session = SessionContext::new("agent", "session");
 
         let err = access
-            .put_for_session(&session, "key", b"value", SecretPolicy::default())
+            .put_for_session(&session, "key", b"value")
             .unwrap_err();
         assert!(matches!(err, SecretError::NotAuthorized));
     }
@@ -168,12 +164,8 @@ mod tests {
     #[test]
     fn memory_store_lists_inserted_keys() {
         let store = MemoryStore::new();
-        store
-            .put("alpha", b"one", SecretPolicy::default())
-            .expect("put alpha");
-        store
-            .put("beta", b"two", SecretPolicy::default())
-            .expect("put beta");
+        store.put("alpha", b"one").expect("put alpha");
+        store.put("beta", b"two").expect("put beta");
 
         let mut keys = store.list_keys().expect("list keys");
         keys.sort();

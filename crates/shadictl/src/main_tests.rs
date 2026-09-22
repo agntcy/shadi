@@ -6,7 +6,6 @@
     use std::sync::{Mutex, OnceLock};
     use agent_secrets::{SecretError, SecretResult};
     use agent_secrets::memory::SecretBytes;
-    use agent_secrets::policy::SecretPolicy;
 
     static GITHUB_PAYLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static STORE_FAILURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1386,7 +1385,7 @@
     }
 
     impl SecretStore for MemoryStore {
-        fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+        fn put(&self, key: &str, secret: &[u8]) -> SecretResult<()> {
             let mut guard = self.entries.lock().map_err(|_| SecretError::StorageFailure)?;
             guard.insert(key.to_string(), secret.to_vec());
             Ok(())
@@ -1413,8 +1412,8 @@
     #[test]
     fn list_keychain_with_store_filters_prefix() {
         let store = MemoryStore::new();
-        store.put("secops/a", b"1", SecretPolicy::default()).unwrap();
-        store.put("other/b", b"2", SecretPolicy::default()).unwrap();
+        store.put("secops/a", b"1").unwrap();
+        store.put("other/b", b"2").unwrap();
 
         let keys = list_keychain_with_store(&store, Some("secops/")).unwrap();
         assert_eq!(keys, vec!["secops/a".to_string()]);
@@ -1423,8 +1422,8 @@
     #[test]
     fn list_keychain_with_store_sorts_keys() {
         let store = MemoryStore::new();
-        store.put("b", b"1", SecretPolicy::default()).unwrap();
-        store.put("a", b"2", SecretPolicy::default()).unwrap();
+        store.put("b", b"1").unwrap();
+        store.put("a", b"2").unwrap();
 
         let keys = list_keychain_with_store(&store, None).unwrap();
         assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
@@ -1433,7 +1432,7 @@
     #[test]
     fn inject_keychain_with_store_sets_env() {
         let store = MemoryStore::new();
-        store.put("secops/token", b"value", SecretPolicy::default()).unwrap();
+        store.put("secops/token", b"value").unwrap();
 
         let mut command = Command::new("/usr/bin/true");
         inject_keychain_with_store(&store, &mut command, &["secops/token=TOKEN".to_string()]).unwrap();

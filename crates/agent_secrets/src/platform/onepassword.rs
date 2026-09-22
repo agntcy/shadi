@@ -10,7 +10,6 @@ use base64::Engine;
 use serde::Deserialize;
 
 use crate::memory::SecretBytes;
-use crate::policy::SecretPolicy;
 use crate::{SecretError, SecretResult, SecretStore};
 
 const SHADI_TAG: &str = "shadi";
@@ -161,7 +160,7 @@ fn parse_item_titles(output: &str) -> SecretResult<Vec<String>> {
 }
 
 impl SecretStore for OnePasswordStore {
-    fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+    fn put(&self, key: &str, secret: &[u8]) -> SecretResult<()> {
         let encoded = BASE64.encode(secret);
         if self.item_exists(key)? {
             let field_arg = format!("notesPlain={}", encoded);
@@ -354,7 +353,7 @@ mod tests {
         assert!(matches!(store.get("test-key"), Err(SecretError::NotSupported)));
         assert!(matches!(store.delete("test-key"), Err(SecretError::NotSupported)));
         assert!(matches!(
-            store.put("test-key", b"value", SecretPolicy::default()),
+            store.put("test-key", b"value"),
             Err(SecretError::NotSupported)
         ));
     }

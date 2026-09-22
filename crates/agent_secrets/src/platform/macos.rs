@@ -16,7 +16,6 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::{SecretError, SecretResult, SecretStore};
 use crate::memory::SecretBytes;
-use crate::policy::SecretPolicy;
 
 pub struct MacosKeychainStore {
     service: String,
@@ -174,7 +173,7 @@ impl MacosKeychainStore {
 }
 
 impl SecretStore for MacosKeychainStore {
-    fn put(&self, key: &str, secret: &[u8], _policy: SecretPolicy) -> SecretResult<()> {
+    fn put(&self, key: &str, secret: &[u8]) -> SecretResult<()> {
         set_generic_password(&self.service, key, secret).map_err(|err| {
             eprintln!("keychain put failed: {}", err);
             SecretError::StorageFailure
@@ -244,7 +243,7 @@ mod tests {
         let key = unique_key("shadi-key");
         let secret = b"secret-value";
 
-        store.put(&key, secret, SecretPolicy::default()).unwrap();
+        store.put(&key, secret).unwrap();
         let got = store.get(&key).unwrap();
         let value = got.expose(|bytes| bytes.to_vec());
         assert_eq!(value, secret);
@@ -257,8 +256,8 @@ mod tests {
         let key_one = unique_key("shadi-key-a");
         let key_two = unique_key("shadi-key-b");
 
-        store.put(&key_one, b"value-a", SecretPolicy::default()).unwrap();
-        store.put(&key_two, b"value-b", SecretPolicy::default()).unwrap();
+        store.put(&key_one, b"value-a").unwrap();
+        store.put(&key_two, b"value-b").unwrap();
 
         let keys = store.list_keys().unwrap();
         assert!(keys.iter().any(|item| item == &key_one));
@@ -274,9 +273,7 @@ mod tests {
     #[test]
     fn list_keys_excludes_registry_account() {
         let store = MacosKeychainStore::new(unique_service());
-        store
-            .put(REGISTRY_ACCOUNT, b"value", SecretPolicy::default())
-            .unwrap();
+        store.put(REGISTRY_ACCOUNT, b"value").unwrap();
         let keys = store.list_keys().unwrap();
         assert!(!keys.iter().any(|key| key == REGISTRY_ACCOUNT));
         store.delete(REGISTRY_ACCOUNT).unwrap();
@@ -287,8 +284,8 @@ mod tests {
         let store = MacosKeychainStore::new(unique_service());
         let key = unique_key("shadi-key");
 
-        store.put(&key, b"value", SecretPolicy::default()).unwrap();
-        store.put(&key, b"value", SecretPolicy::default()).unwrap();
+        store.put(&key, b"value").unwrap();
+        store.put(&key, b"value").unwrap();
 
         let keys = store.list_keys().unwrap();
         let count = keys.iter().filter(|item| *item == &key).count();
