@@ -318,6 +318,19 @@
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn waiting_for_an_executable_gives_up_on_an_unrelated_failure() {
+        // ENOENT, not ETXTBSY: nothing to wait for, so it must return rather
+        // than spin out its retry budget.
+        let started = std::time::Instant::now();
+        crate::wait_until_executable(std::path::Path::new("/nonexistent-shadi-exec-probe"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "should not retry a spawn failure it cannot fix"
+        );
+    }
+
     #[test]
     fn resolve_policy_merges_paths_and_commands() {
         let read_dir = temp_dir();

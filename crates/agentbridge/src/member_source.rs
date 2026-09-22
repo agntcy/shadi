@@ -952,6 +952,78 @@ mod tests {
     /// CID and to `pull <cid> ... --output json` with a full a2a-module record,
     /// so `SkillSearchSource`/`DidLookupSource` can be exercised end to end
     /// without a real Directory server.
+    /// Wait out the ETXTBSY window after writing an executable.
+    ///
+    /// Writing a file and then exec'ing it is racy in a threaded test binary:
+    /// a child forked by another test inherits the writable fd for the instant
+    /// before its own exec, and exec'ing the file inside that window is
+    /// refused. The production code under test execs whatever path an env var
+    /// names, so the invocation cannot be routed through a shell here — probe
+    /// until the kernel allows the exec instead.
+    /// True when a spawn failed because the file is still open for writing.
+    ///
+    /// Split out so the decision is testable without manufacturing the race:
+    /// Linux reports ETXTBSY for a writable fd held anywhere, macOS does not.
+    #[cfg(unix)]
+    fn is_text_file_busy(err: &std::io::Error) -> bool {
+        // ETXTBSY, 26 on both Linux and macOS.
+        err.raw_os_error() == Some(26)
+    }
+
+    #[cfg(unix)]
+    fn wait_until_executable(path: &std::path::Path) {
+        for _ in 0..200 {
+            let Err(err) = std::process::Command::new(path)
+                .arg("--shadi-exec-probe")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            else {
+                return;
+            };
+            if !is_text_file_busy(&err) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_busy_text_file_is_worth_waiting_for() {
+        assert!(is_text_file_busy(&std::io::Error::from_raw_os_error(26)));
+        assert!(!is_text_file_busy(&std::io::Error::from_raw_os_error(2)));
+        assert!(!is_text_file_busy(&std::io::Error::other("nope")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waiting_gives_up_on_a_failure_that_is_not_the_race() {
+        // ENOENT, not ETXTBSY: there is nothing to wait for, so this must
+        // return rather than spin for a second.
+        let started = std::time::Instant::now();
+        wait_until_executable(std::path::Path::new("/nonexistent-shadi-exec-probe"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "should not retry a spawn failure it cannot fix"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waiting_returns_once_the_script_can_run() {
+        let (path, _dir) = fake_dirctl_script_search_fails();
+        wait_until_executable(&path);
+        assert!(
+            std::process::Command::new(&path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok(),
+            "the script should be runnable once the wait returns"
+        );
+    }
+
     #[cfg(unix)]
     fn fake_dirctl_script(cid: &str, record_json: &str) -> (std::path::PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -968,6 +1040,7 @@ esac
         std::fs::write(&path, script).expect("write script");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
         (path, dir)
     }
 
@@ -995,6 +1068,7 @@ esac
         std::fs::write(&path, script).expect("write script");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
         (path, dir)
     }
 
@@ -1006,6 +1080,7 @@ esac
         std::fs::write(&path, "#!/bin/sh\necho 'boom' >&2\nexit 1\n").expect("write script");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
         (path, dir)
     }
 

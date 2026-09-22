@@ -1378,6 +1378,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod 755");
+        crate::wait_until_executable(&script_path);
 
         // Use a fresh temp dir as HOME so record_cache_dir() always resolves to
         // an empty directory — guaranteeing the cache-write branch (L280) is hit.
@@ -1464,6 +1465,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod 755");
+        crate::wait_until_executable(&script_path);
 
         // Create a temp *file* (not a directory) and use it as HOME.
         // record_cache_dir() returns Some("$HOME/.shadi/records"), and

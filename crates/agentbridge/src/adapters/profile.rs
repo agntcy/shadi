@@ -1236,12 +1236,13 @@ echo '{"result":"ok","session_id":"sid-9"}'
     #[test]
     fn session_is_stored_and_retried_on_stderr_needle() {
         let (_dir, script) = write_session_retry_bin();
+        let (bin, args) = script_args(&script);
         let profile = parse_profile(
             &serde_json::json!({
                 "id": "session",
-                "bin": script.to_string_lossy(),
+                "bin": bin,
                 "current_dir_workdir": false,
-                "execute": { "args": ["{session}", "{prompt}"] },
+                "execute": { "args": args },
                 "session": {
                     "json_field": "session_id",
                     "flag": "--session-id",
@@ -1328,13 +1329,41 @@ printf '{"result":"%s","session_id":"%s"}\n' "$sid" "$sid"
         }
     }
 
+    /// How to invoke a script this test just generated.
+    ///
+    /// Writing a file and then exec'ing it is racy in a threaded test binary:
+    /// a child forked by another test inherits the writable fd for the instant
+    /// before its own exec, and exec'ing the file inside that window fails
+    /// with ETXTBSY. Handing the path to a shell reads the file instead, which
+    /// cannot hit that. Windows dispatches `.cmd` through the shell already.
+    #[cfg(not(windows))]
+    fn script_invocation(script: &Path) -> (String, Vec<String>) {
+        (
+            "/bin/sh".to_string(),
+            vec![script.to_string_lossy().into_owned()],
+        )
+    }
+
+    #[cfg(windows)]
+    fn script_invocation(script: &Path) -> (String, Vec<String>) {
+        (script.to_string_lossy().into_owned(), Vec::new())
+    }
+
+    fn script_args(script: &Path) -> (String, Vec<String>) {
+        let (bin, mut args) = script_invocation(script);
+        args.push("{session}".to_string());
+        args.push("{prompt}".to_string());
+        (bin, args)
+    }
+
     fn session_echo_adapter(script: &Path) -> ProfileAdapter {
+        let (bin, args) = script_args(script);
         let profile = parse_profile(
             &serde_json::json!({
                 "id": "session-echo",
-                "bin": script.to_string_lossy(),
+                "bin": bin,
                 "current_dir_workdir": false,
-                "execute": { "args": ["{session}", "{prompt}"] },
+                "execute": { "args": args },
                 "session": { "json_field": "session_id", "flag": "--session-id" },
                 "result": { "kind": "json_field", "field": "result" }
             })
