@@ -16,7 +16,10 @@ pub use auth_required::{
     AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
 };
 use shadi_a2a::{insert_dest_did, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator};
-use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
+use slim_bindings::{
+    BackoffConfig, CaSource, ClientConfig, ExponentialBackoff, Name, Service, TlsClientConfig,
+    TlsSource,
+};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 const DEFAULT_LOCAL_ORG: &str = "agntcy";
@@ -481,6 +484,14 @@ fn readable_message_text(message: &Message) -> String {
 fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     let mut config = ClientConfig::default();
     config.endpoint = resolve_client_endpoint_value(endpoint);
+    // The adapter owns retries; SLIM's default connection retry loop is unbounded.
+    config.connect_timeout = Some(Duration::from_secs(5));
+    config.backoff = Some(BackoffConfig::Exponential {
+        config: ExponentialBackoff {
+            max_attempts: 1,
+            ..Default::default()
+        },
+    });
     config.tls = TlsClientConfig {
         insecure: false,
         insecure_skip_verify: false,
@@ -790,6 +801,9 @@ mod transport_tests {
         };
         let config = build_client_config_for_endpoint("node:47357", &tls);
         assert_eq!(config.endpoint, "https://node:47357");
+        assert_eq!(config.connect_timeout, Some(Duration::from_secs(5)));
+        assert!(matches!(config.backoff,
+            Some(BackoffConfig::Exponential { config }) if config.max_attempts == 1));
         assert!(!config.tls.insecure);
         assert_eq!(config.tls.tls_version, "tls1.3");
         match config.tls.source {
