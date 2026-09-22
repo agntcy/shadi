@@ -29,7 +29,15 @@
   },
   "packageRules": [
     {
-      "description": "The OpenTelemetry crates must move together: bumping one leaves two opentelemetry versions in the tree and the KeyValue types stop matching. tracing-opentelemetry tracks its own number (0.33 pairs with otel 0.32).",
+      "description": "Low-risk bumps in one PR to keep the review load down.",
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
+      ],
+      "groupName": "patch and minor"
+    },
+    {
+      "description": "The OpenTelemetry crates must move together: bumping one leaves two opentelemetry versions in the tree and SdkTracer stops implementing Tracer. tracing-opentelemetry tracks its own number and trails by a release (0.33 pairs with otel 0.32), so an otel bump is only safe once its partner ships. Dashboard approval surfaces the update without opening a PR that cannot build, rather than a version ceiling that has to be hand-edited every cycle.",
       "matchManagers": [
         "cargo"
       ],
@@ -37,7 +45,8 @@
         "/^opentelemetry/",
         "tracing-opentelemetry"
       ],
-      "groupName": "opentelemetry"
+      "groupName": "opentelemetry",
+      "dependencyDashboardApproval": true
     },
     {
       "description": "The SLIM crates must move together: slim_auth 0.14 caps below 0.15 while slim_rpc 2.3 requires it, which puts two versions in the tree and breaks the TokenProvider bounds.",
@@ -61,7 +70,7 @@
       "enabled": false
     },
     {
-      "description": "rusqlite 0.38+ pulls a second libsqlite3-sys (links=sqlite3) that conflicts with SLIM 2.3.0 → mls-rs-provider-sqlite 0.22 → rusqlite 0.37. Re-enable when slim-persistence moves off rusqlite ^0.37.",
+      "description": "rusqlite 0.38+ pulls a second libsqlite3-sys (links=sqlite3) that conflicts with SLIM 2.3.0 \u2192 mls-rs-provider-sqlite 0.22 \u2192 rusqlite 0.37. Re-enable when slim-persistence moves off rusqlite ^0.37.",
       "matchManagers": [
         "cargo"
       ],
@@ -71,18 +80,20 @@
       "enabled": false
     },
     {
-      "description": "Low-risk bumps in one PR to keep the review load down.",
-      "matchUpdateTypes": [
-        "patch",
-        "minor"
-      ],
-      "groupName": "patch and minor"
-    },
-    {
       "matchManagers": [
         "github-actions"
       ],
       "groupName": "github actions"
+    },
+    {
+      "description": "agntcy-slim-auth 0.16 requires mls-rs-crypto-awslc 0.25 -> aws-lc-rs =1.16.3, while a2a-slimrpc (0.2.9 included) still requires slim_auth ^0.15.3 -> mls-rs-crypto-awslc 0.23 -> aws-lc-rs =1.16.2. mls-rs-crypto-awslc pins aws-lc-rs exactly, so two of its versions can never coexist. Remove this ceiling once a2a-slimrpc moves to slim_auth 0.16 (a2aproject/a2a-rs#289).",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "agntcy-slim-auth"
+      ],
+      "allowedVersions": "<0.16"
     }
   ]
 }
