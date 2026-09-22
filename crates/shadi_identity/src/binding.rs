@@ -176,6 +176,34 @@ pub fn verify_binding(certificate: &[u8], now: u64) -> Result<VerifiedBinding, I
     })
 }
 
+/// Split a certificate carried as a prefix of `bytes` from what follows.
+///
+/// A binding travels inside the agent's own DID-proof payload, so it is a
+/// header on a larger message rather than the whole of it. The certificate is
+/// the magic line plus five fields; everything after them is the payload.
+pub fn split_binding(bytes: &[u8]) -> Result<(&[u8], &[u8]), IdentityError> {
+    if !looks_like_binding(bytes) {
+        return Err(IdentityError::Proof(
+            "not a SHADI-AGENT-BINDING/1 certificate".to_string(),
+        ));
+    }
+    let mut end = MAGIC.len();
+    for _ in 0..5 {
+        let rest = &bytes[end + 1..];
+        let rel = rest
+            .iter()
+            .position(|b| *b == b'\n')
+            .ok_or_else(|| IdentityError::Proof("binding certificate is truncated".to_string()))?;
+        end += 1 + rel;
+        if end > BINDING_MAX_BYTES {
+            return Err(IdentityError::Proof(format!(
+                "binding certificate exceeds {BINDING_MAX_BYTES} bytes"
+            )));
+        }
+    }
+    Ok((&bytes[..end], &bytes[end + 1..]))
+}
+
 fn canonical(human_did: &str, agent_did: &str, agent_name: &str, not_after: u64) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(DOMAIN);
@@ -226,7 +254,10 @@ mod tests {
             .into_bytes();
 
         let err = verify_binding(&forged, NOW).unwrap_err();
-        assert!(err.to_string().contains("does not verify"), "{err}");
+        assert!(
+            err.to_string().contains("does not verify"),
+            "should fail signature verification"
+        );
     }
 
     #[test]
@@ -267,7 +298,10 @@ mod tests {
         // The expiry is signed, so pushing it out breaks the signature rather
         // than buying more time.
         let err = verify_binding(&extended, NOW).unwrap_err();
-        assert!(err.to_string().contains("does not verify"), "{err}");
+        assert!(
+            err.to_string().contains("does not verify"),
+            "should fail signature verification"
+        );
     }
 
     #[test]
@@ -275,9 +309,108 @@ mod tests {
         let (human, agent) = human_and_agent();
         let cert = issue_binding(&human, &agent.did(), "claude-code", NOW - 1).unwrap();
         let err = verify_binding(&cert, NOW).unwrap_err();
-        assert!(err.to_string().contains("expired"), "{err}");
+        assert!(err.to_string().contains("expired"), "should report expiry");
         // Valid before it lapsed.
         assert!(verify_binding(&cert, NOW - 2).is_ok());
+    }
+
+    #[test]
+    fn a_binding_carried_as_a_header_splits_from_its_payload() {
+        let (human, agent) = human_and_agent();
+        let mut envelope = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        envelope.push(b'\n');
+        envelope.extend_from_slice(b"the actual prompt\nwith two lines");
+
+        let (cert, rest) = split_binding(&envelope).unwrap();
+        assert_eq!(rest, b"the actual prompt\nwith two lines");
+        let verified = verify_binding(cert, NOW).unwrap();
+        assert_eq!(verified.agent_did, agent.did());
+    }
+
+    #[test]
+    fn splitting_a_truncated_certificate_fails() {
+        let (human, agent) = human_and_agent();
+        let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        // Every prefix short of the full five fields is truncated. The last
+        // field has no trailing newline, so the whole certificate is one too.
+        // The label comes from the loop index, not from the certificate: a
+        // length derived from `cert` counts as certificate-derived data.
+        for (case, cut) in [MAGIC.len(), MAGIC.len() + 8, cert.len() / 2, cert.len()]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                split_binding(&cert[..cut]).is_err(),
+                "case {case} accepted a truncated prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn splitting_something_that_is_not_a_certificate_fails() {
+        let err = split_binding(b"WRONG-MAGIC/1\na\nb\nc\n1\nd\npayload").unwrap_err();
+        assert!(
+            err.to_string().contains("not a SHADI-AGENT-BINDING/1"),
+            "should reject a foreign magic line"
+        );
+        assert!(split_binding(b"").is_err());
+    }
+
+    #[test]
+    fn splitting_stops_at_the_size_cap() {
+        // A header whose fields never end must not be scanned without bound.
+        let mut flood = Vec::from(MAGIC);
+        flood.push(b'\n');
+        flood.extend(std::iter::repeat_n(b'a', BINDING_MAX_BYTES * 2));
+        flood.push(b'\n');
+        let err = split_binding(&flood).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
+    }
+
+    #[test]
+    fn issuing_rejects_a_field_longer_than_the_line_cap() {
+        let (human, agent) = human_and_agent();
+        let long_name = "n".repeat(BINDING_LINE_MAX_BYTES + 1);
+        let err = issue_binding(&human, &agent.did(), &long_name, LATER).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
+    }
+
+    #[test]
+    fn verifying_rejects_a_field_longer_than_the_line_cap() {
+        let (human, agent) = human_and_agent();
+        let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        // Swap the agent name for one past the cap; the signature would fail
+        // anyway, but the length guard has to fire first.
+        let bloated = String::from_utf8(cert)
+            .unwrap()
+            .replacen("claude-code", &"n".repeat(BINDING_LINE_MAX_BYTES + 1), 1)
+            .into_bytes();
+        let err = verify_binding(&bloated, NOW).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
+    }
+
+    #[test]
+    fn verifying_rejects_an_expiry_that_is_not_a_timestamp() {
+        let (human, agent) = human_and_agent();
+        let cert = issue_binding(&human, &agent.did(), "claude-code", LATER).unwrap();
+        let mangled = String::from_utf8(cert)
+            .unwrap()
+            .replacen(&LATER.to_string(), "not-a-number", 1)
+            .into_bytes();
+        let err = verify_binding(&mangled, NOW).unwrap_err();
+        assert!(
+            err.to_string().contains("unix timestamp"),
+            "should report a bad timestamp"
+        );
     }
 
     #[test]
@@ -298,7 +431,10 @@ mod tests {
     fn an_oversize_certificate_is_rejected_before_parsing() {
         let flood = vec![b'a'; BINDING_MAX_BYTES + 1];
         let err = verify_binding(&flood, NOW).unwrap_err();
-        assert!(err.to_string().contains("exceeds"), "{err}");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "should report the size cap"
+        );
     }
 
     #[test]

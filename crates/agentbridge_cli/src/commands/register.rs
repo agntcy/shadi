@@ -492,8 +492,18 @@ impl AgentExecutor for AgentBridgeExecutor {
             }
         }
         let raw = match ctx.message.as_ref().map(admit_message) {
-            Some(MessageAdmission::Proven { did, payload }) => {
-                tracing::info!(%did, "admitted A2A message with proven agent DID");
+            Some(MessageAdmission::Proven {
+                did,
+                human_did,
+                payload,
+            }) => {
+                match &human_did {
+                    Some(human) => tracing::info!(
+                        %did, %human,
+                        "admitted A2A message from an agent bound to a human"
+                    ),
+                    None => tracing::info!(%did, "admitted A2A message with proven agent DID"),
+                }
                 payload
             }
             Some(MessageAdmission::AuthRequired { reason }) => {
@@ -1162,9 +1172,35 @@ fn terminal_task(
 
 /// Admission decided from the message alone, so the executor can reach it.
 enum MessageAdmission {
-    Proven { did: String, payload: String },
-    AuthRequired { reason: String },
-    Forged { reason: String },
+    Proven {
+        did: String,
+        /// The human this agent is bound to, when the message carried a
+        /// binding certificate. `None` means the agent proved only itself.
+        human_did: Option<String>,
+        payload: String,
+    },
+    AuthRequired {
+        reason: String,
+    },
+    Forged {
+        reason: String,
+    },
+}
+
+/// Human DIDs whose agents this listener admits, from
+/// `SHADI_MEMBER_HUMAN_DIDS`.
+///
+/// Unset means bindings stay optional: one that is present is still verified,
+/// but an agent may prove only itself, which is the behaviour before bindings
+/// existed. Set, and every message must carry a binding from a listed human.
+fn allowed_human_dids() -> Vec<String> {
+    std::env::var("SHADI_MEMBER_HUMAN_DIDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Application-layer gate: the payload must be signed by the claimed agent DID.
@@ -1178,18 +1214,95 @@ fn admit_message(message: &Message) -> MessageAdmission {
             reason: "DID proof required on the message".to_string(),
         };
     }
-    match shadi_identity::unwrap_signed_message(text.as_bytes()) {
-        Ok(verified) => MessageAdmission::Proven {
-            did: verified.did,
-            payload: String::from_utf8_lossy(&verified.payload).into_owned(),
-        },
+    let verified = match shadi_identity::unwrap_signed_message(text.as_bytes()) {
+        Ok(verified) => verified,
         Err(shadi_identity::IdentityError::Proof(msg)) if msg.contains("forged DID") => {
-            MessageAdmission::Forged { reason: msg }
+            return MessageAdmission::Forged { reason: msg };
         }
-        Err(_) => MessageAdmission::AuthRequired {
-            reason: "DID proof required on the message".to_string(),
-        },
+        Err(_) => {
+            return MessageAdmission::AuthRequired {
+                reason: "DID proof required on the message".to_string(),
+            };
+        }
+    };
+    admit_binding(
+        verified.did,
+        &verified.payload,
+        &allowed_human_dids(),
+        now_unix(),
+    )
+}
+
+/// Second gate: whose agent is this?
+///
+/// The binding rides inside the agent's own signed payload, so a peer cannot
+/// attach one the agent did not carry. It is checked against the agent DID the
+/// outer proof established — presenting another agent's certificate fails.
+fn admit_binding(
+    did: String,
+    payload: &[u8],
+    allowed_humans: &[String],
+    now: u64,
+) -> MessageAdmission {
+    if !shadi_identity::looks_like_binding(payload) {
+        if allowed_humans.is_empty() {
+            return MessageAdmission::Proven {
+                did,
+                human_did: None,
+                payload: String::from_utf8_lossy(payload).into_owned(),
+            };
+        }
+        return MessageAdmission::AuthRequired {
+            reason: "agent binding required: this listener admits agents by human DID".to_string(),
+        };
     }
+
+    let (certificate, rest) = match shadi_identity::split_binding(payload) {
+        Ok(split) => split,
+        Err(err) => {
+            return MessageAdmission::AuthRequired {
+                reason: format!("agent binding is malformed: {err}"),
+            };
+        }
+    };
+    let binding = match shadi_identity::verify_binding(certificate, now) {
+        Ok(binding) => binding,
+        Err(err) => {
+            return MessageAdmission::Forged {
+                reason: format!("agent binding rejected: {err}"),
+            };
+        }
+    };
+    if binding.agent_did != did {
+        return MessageAdmission::Forged {
+            reason: format!(
+                "agent binding is for {}, but the message was signed by {did}",
+                binding.agent_did
+            ),
+        };
+    }
+    if !allowed_humans.is_empty() && !allowed_humans.iter().any(|h| *h == binding.human_did) {
+        return MessageAdmission::Forged {
+            reason: format!(
+                "human {} is not admitted by this listener",
+                binding.human_did
+            ),
+        };
+    }
+
+    tracing::info!(agent = %did, human = %binding.human_did, "admitted a bound agent");
+    MessageAdmission::Proven {
+        did,
+        human_did: Some(binding.human_did),
+        payload: String::from_utf8_lossy(rest).into_owned(),
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The URL is not the name. If the caller addressed a DID, only that agent
@@ -1779,6 +1892,136 @@ test push ... FAILED
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn bound_envelope(
+        human: &shadi_identity::AgentIdentity,
+        agent: &shadi_identity::AgentIdentity,
+        name: &str,
+        not_after: u64,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut inner = shadi_identity::issue_binding(human, &agent.did(), name, not_after)
+            .expect("issue binding");
+        inner.push(b'\n');
+        inner.extend_from_slice(payload);
+        shadi_identity::wrap_signed_message(agent, &inner).expect("wrap")
+    }
+
+    const BIND_NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn a_bound_agent_is_admitted_and_reports_its_human() {
+        let human = shadi_identity::AgentIdentity::generate().unwrap();
+        let agent = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = bound_envelope(&human, &agent, "claude-code", BIND_NOW + 60, b"real prompt");
+        let verified = shadi_identity::unwrap_signed_message(&envelope).unwrap();
+
+        match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
+            MessageAdmission::Proven {
+                did,
+                human_did,
+                payload,
+            } => {
+                assert_eq!(did, agent.did());
+                assert_eq!(human_did.as_deref(), Some(human.did().as_str()));
+                assert_eq!(payload, "real prompt");
+            }
+            _ => panic!("a bound agent from an admitted human must be accepted"),
+        }
+    }
+
+    #[test]
+    fn a_binding_for_a_different_agent_is_rejected() {
+        let human = shadi_identity::AgentIdentity::generate().unwrap();
+        let agent = shadi_identity::AgentIdentity::generate().unwrap();
+        let other = shadi_identity::AgentIdentity::generate().unwrap();
+
+        // A real certificate for `other`, replayed by `agent` inside its own
+        // signed payload.
+        let mut inner =
+            shadi_identity::issue_binding(&human, &other.did(), "copilot", BIND_NOW + 60).unwrap();
+        inner.push(b'\n');
+        inner.extend_from_slice(b"prompt");
+        let envelope = shadi_identity::wrap_signed_message(&agent, &inner).unwrap();
+        let verified = shadi_identity::unwrap_signed_message(&envelope).unwrap();
+
+        match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
+            MessageAdmission::Forged { reason } => {
+                assert!(
+                    reason.contains("was signed by"),
+                    "rejection should name the signing agent"
+                );
+            }
+            _ => panic!("replaying another agent's binding must be refused"),
+        }
+    }
+
+    #[test]
+    fn a_binding_from_an_unlisted_human_is_rejected() {
+        let stranger = shadi_identity::AgentIdentity::generate().unwrap();
+        let admitted = shadi_identity::AgentIdentity::generate().unwrap();
+        let agent = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = bound_envelope(&stranger, &agent, "claude-code", BIND_NOW + 60, b"p");
+        let verified = shadi_identity::unwrap_signed_message(&envelope).unwrap();
+
+        match admit_binding(verified.did, &verified.payload, &[admitted.did()], BIND_NOW) {
+            MessageAdmission::Forged { reason } => {
+                assert!(
+                    reason.contains("not admitted"),
+                    "rejection should say the human is not admitted"
+                );
+            }
+            _ => panic!("an unlisted human must be refused"),
+        }
+    }
+
+    #[test]
+    fn an_expired_binding_is_rejected() {
+        let human = shadi_identity::AgentIdentity::generate().unwrap();
+        let agent = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = bound_envelope(&human, &agent, "claude-code", BIND_NOW - 1, b"p");
+        let verified = shadi_identity::unwrap_signed_message(&envelope).unwrap();
+
+        match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
+            MessageAdmission::Forged { reason } => {
+                assert!(
+                    reason.contains("expired"),
+                    "rejection should say the binding expired"
+                );
+            }
+            _ => panic!("an expired binding must be refused"),
+        }
+    }
+
+    #[test]
+    fn an_unbound_agent_is_admitted_only_while_no_human_is_listed() {
+        let agent = shadi_identity::AgentIdentity::generate().unwrap();
+        let human = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&agent, b"bare prompt").unwrap();
+        let verified = shadi_identity::unwrap_signed_message(&envelope).unwrap();
+
+        // No allow-list: today's behaviour, so this stays additive.
+        match admit_binding(verified.did.clone(), &verified.payload, &[], BIND_NOW) {
+            MessageAdmission::Proven {
+                human_did, payload, ..
+            } => {
+                assert!(human_did.is_none());
+                assert_eq!(payload, "bare prompt");
+            }
+            _ => panic!("an unbound agent must still be admitted when no human is listed"),
+        }
+
+        // Once humans are listed, proving only yourself is not enough.
+        match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
+            MessageAdmission::AuthRequired { reason } => {
+                assert!(
+                    reason.contains("binding required"),
+                    "challenge should ask for a binding"
+                );
+            }
+            _ => panic!("an unbound agent must be challenged once humans are listed"),
+        }
+    }
+
     #[test]
     fn admit_unsigned_message_parks_auth_required() {
         match admit_message(&sample_request("plain task").message) {
@@ -1960,7 +2203,7 @@ test push ... FAILED
         let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
         let text = String::from_utf8(envelope).unwrap();
         match admit_message(&sample_request(text).message) {
-            MessageAdmission::Proven { did, payload } => {
+            MessageAdmission::Proven { did, payload, .. } => {
                 assert_eq!(did, id.did());
                 assert_eq!(payload, "real prompt");
             }
