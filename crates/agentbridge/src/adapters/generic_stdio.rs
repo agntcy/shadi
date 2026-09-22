@@ -117,6 +117,23 @@ pub struct GenericStdioAdapter {
 }
 
 impl GenericStdioAdapter {
+    /// Attach a process launched by the host (for example with SHADi's sandbox).
+    /// The host retains ownership of the child and its shutdown lifecycle.
+    pub fn from_streams(
+        id: impl Into<String>,
+        writer: impl Write + Send + 'static,
+        reader: impl Read + Send + 'static,
+    ) -> Self {
+        Self {
+            id: AgentId(id.into()),
+            _child: None,
+            io: Mutex::new(Io {
+                writer: Box::new(writer),
+                reader: BufReader::new(Box::new(reader)),
+            }),
+        }
+    }
+
     /// Spawn `command` (with optional `args`) and return an adapter bound to
     /// that subprocess.
     pub fn spawn(

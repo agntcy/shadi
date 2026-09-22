@@ -187,8 +187,13 @@ dependencies = [
 name = "agntcy-agentbridge"
 version = "0.2.1"
 dependencies = [
+ "a2a-lf",
+ "a2a-server-lf",
  "agntcy-shadi-a2a",
+ "agntcy-shadi-identity",
  "agntcy-shadi-mas",
+ "async-trait",
+ "futures",
  "libc",
  "serde",
  "serde_json",

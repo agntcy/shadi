@@ -4,16 +4,17 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::mediation::{require_allow, MediationHook, MediationPoint, MediationRequest};
 use a2a::*;
 use a2a_client::A2AClient;
 use agent_secrets::{DidProofVerifier, SessionContext};
 
 pub mod auth_required;
+use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 pub use auth_required::{
     audit_auth_required, decide_auth_required, is_auth_required, run_auth_required_loop,
     AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
 };
-use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 use shadi_a2a::{insert_dest_did, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator};
 use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
@@ -78,7 +79,6 @@ impl TaskAdapter for RecordingTaskAdapter {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveA2ATaskAdapterConfig {
     pub endpoint: String,
@@ -106,6 +106,7 @@ pub struct LiveTaskDispatchRecord {
 pub struct LiveA2ATaskAdapter {
     config: LiveA2ATaskAdapterConfig,
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
+    mediation: Option<Arc<dyn MediationHook>>,
 }
 
 impl LiveA2ATaskAdapter {
@@ -113,7 +114,13 @@ impl LiveA2ATaskAdapter {
         Self {
             config,
             dispatches: Mutex::new(Vec::new()),
+            mediation: None,
         }
+    }
+
+    pub fn with_mediation(mut self, hook: Arc<dyn MediationHook>) -> Self {
+        self.mediation = Some(hook);
+        self
     }
 
     pub fn dispatches(&self) -> Result<Vec<LiveTaskDispatchRecord>, String> {
@@ -144,11 +151,49 @@ impl LiveA2ATaskAdapter {
                     .lock()
                     .map_err(|_| "live A2A task body lock poisoned".to_string())?
                     .clone();
-                let signed = shadi_identity::sign_message_from_env(&self.config.agent_id, current.as_bytes())
-                    .map_err(|err| err.to_string())?;
+                // Build once per logical send, not once per transport retry.
+                let mut message = Message::new(Role::User, Vec::new());
+                if let Some(peer_did) = self.config.peer_did.as_deref() {
+                    message = insert_dest_did(message, peer_did);
+                }
+                if let Some(correlation) = &task.correlation_id {
+                    message
+                        .metadata
+                        .get_or_insert_with(Default::default)
+                        .insert("shadi-correlation-id".into(), correlation.clone().into());
+                }
+                if let Some(hook) = &self.mediation {
+                    let request = MediationRequest {
+                        evaluation_id: format!("sender-{}", message.message_id),
+                        point: MediationPoint::Sender,
+                        message_id: message.message_id.clone(),
+                        task_id: None,
+                        correlation_id: task.correlation_id.clone(),
+                        local_agent: self.config.agent_id.clone(),
+                        peer: self
+                            .config
+                            .peer_did
+                            .clone()
+                            .or(self.config.destination.clone()),
+                        verified_sender_did: None,
+                        payload: None,
+                    };
+                    TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| e.to_string())?
+                        .block_on(require_allow(hook.as_ref(), &request))
+                        .map_err(|e| e.to_string())?;
+                }
+                let signed = shadi_identity::sign_message_from_env(
+                    &self.config.agent_id,
+                    current.as_bytes(),
+                )
+                .map_err(|err| err.to_string())?;
                 let signed_text = String::from_utf8(signed)
                     .map_err(|err| format!("DID proof envelope is not UTF-8: {err}"))?;
-                self.send_signed_task(task, &signed_text)
+                message.parts = vec![Part::text(signed_text)];
+                self.send_signed_task(task, &message)
             },
             &auth_cfg,
             || {
@@ -161,30 +206,33 @@ impl LiveA2ATaskAdapter {
                 Ok(note)
             },
         )?;
+        if let SendMessageResponse::Task(task) = &response {
+            if matches!(task.status.state, TaskState::Rejected | TaskState::Failed) {
+                return Err(describe_a2a_response(&response));
+            }
+        }
         Ok(describe_a2a_response(&response))
     }
 
     fn send_signed_task(
         &self,
         task: &TaskEnvelope,
-        signed_text: &str,
+        message: &Message,
     ) -> Result<SendMessageResponse, String> {
         if let Some(a2a_url) = self.config.a2a_url.as_deref() {
-            let locator = A2ALocator::new(
-                self.config.a2a_binding.unwrap_or(A2ABinding::Grpc),
-                a2a_url,
-            );
+            let locator =
+                A2ALocator::new(self.config.a2a_binding.unwrap_or(A2ABinding::Grpc), a2a_url);
             if locator.binding.is_unicast() {
-                return self.send_signed_task_unicast(task, signed_text, &locator);
+                return self.send_signed_task_unicast(task, message, &locator);
             }
         }
-        self.send_signed_task_slim(task, signed_text)
+        self.send_signed_task_slim(task, message)
     }
 
     fn send_signed_task_unicast(
         &self,
         task: &TaskEnvelope,
-        signed_text: &str,
+        message: &Message,
         locator: &A2ALocator,
     ) -> Result<SendMessageResponse, String> {
         let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
@@ -214,12 +262,8 @@ impl LiveA2ATaskAdapter {
                 .await
                 .map_err(|err| format!("A2A connect {via}: {err}"))?;
             let client = A2AClient::new(Box::new(channel));
-            let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
-            if let Some(peer_did) = self.config.peer_did.as_deref() {
-                message = insert_dest_did(message, peer_did);
-            }
             let request = SendMessageRequest {
-                message,
+                message: message.clone(),
                 configuration: None,
                 metadata: None,
                 tenant: None,
@@ -236,7 +280,7 @@ impl LiveA2ATaskAdapter {
     fn send_signed_task_slim(
         &self,
         task: &TaskEnvelope,
-        signed_text: &str,
+        message: &Message,
     ) -> Result<SendMessageResponse, String> {
         let tls = resolve_client_tls_material_for_agent(Some(&self.config.agent_id))?;
         let local_name = self
@@ -270,7 +314,10 @@ impl LiveA2ATaskAdapter {
             ));
             let attempt_result = (|| -> Result<SendMessageResponse, String> {
                 let connection_id = service
-                    .connect(build_client_config_for_endpoint(&self.config.endpoint, &tls))
+                    .connect(build_client_config_for_endpoint(
+                        &self.config.endpoint,
+                        &tls,
+                    ))
                     .map_err(format_slim_error)?;
                 let local_name_ref = Arc::new(parse_slim_name(&local_name)?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
@@ -318,7 +365,7 @@ impl LiveA2ATaskAdapter {
                 };
                 let client = A2AClient::new(Box::new(channel));
                 let request = SendMessageRequest {
-                    message: Message::new(Role::User, vec![Part::text(signed_text.to_string())]),
+                    message: message.clone(),
                     configuration: None,
                     metadata: None,
                     tenant: None,
@@ -351,7 +398,10 @@ impl LiveA2ATaskAdapter {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            format!("failed to send A2A task {} for an unknown reason", task.task_id)
+            format!(
+                "failed to send A2A task {} for an unknown reason",
+                task.task_id
+            )
         }))
     }
 }
@@ -383,7 +433,6 @@ impl TaskAdapter for LiveA2ATaskAdapter {
         Ok(())
     }
 }
-
 
 #[derive(Clone)]
 struct TlsMaterial {
@@ -448,7 +497,9 @@ fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Client
     config
 }
 
-fn resolve_client_tls_material_for_agent(agent_id_override: Option<&str>) -> Result<TlsMaterial, String> {
+fn resolve_client_tls_material_for_agent(
+    agent_id_override: Option<&str>,
+) -> Result<TlsMaterial, String> {
     let cert_override = std::env::var_os("SLIM_TLS_CERT").map(PathBuf::from);
     let key_override = std::env::var_os("SLIM_TLS_KEY").map(PathBuf::from);
     let ca = std::env::var_os("SLIM_TLS_CA")
@@ -552,7 +603,10 @@ fn canonical_slim_name(agent_id: &str) -> String {
     if agent_id.contains('/') {
         agent_id.to_string()
     } else {
-        format!("{}/{}/{}", DEFAULT_LOCAL_ORG, DEFAULT_LOCAL_NAMESPACE, agent_id)
+        format!(
+            "{}/{}/{}",
+            DEFAULT_LOCAL_ORG, DEFAULT_LOCAL_NAMESPACE, agent_id
+        )
     }
 }
 
@@ -563,8 +617,8 @@ fn format_slim_error(err: slim_bindings::SlimError) -> String {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use agent_secrets::AgentVerifier;
     use crate::types::{Epoch, PatternKind};
+    use agent_secrets::AgentVerifier;
 
     fn sample_task() -> TaskEnvelope {
         TaskEnvelope {
@@ -583,10 +637,7 @@ mod transport_tests {
 
     #[test]
     fn canonical_slim_name_preserves_qualified_names() {
-        assert_eq!(
-            canonical_slim_name("acme/team/avatar"),
-            "acme/team/avatar"
-        );
+        assert_eq!(canonical_slim_name("acme/team/avatar"), "acme/team/avatar");
     }
 
     #[test]
@@ -630,7 +681,10 @@ mod transport_tests {
     fn readable_message_text_joins_text_parts() {
         let message = Message::new(
             Role::Agent,
-            vec![Part::text("first".to_string()), Part::text("second".to_string())],
+            vec![
+                Part::text("first".to_string()),
+                Part::text("second".to_string()),
+            ],
         );
         assert_eq!(readable_message_text(&message), "first second");
     }
@@ -760,6 +814,44 @@ mod transport_tests {
             peer_did: None,
         });
         assert!(adapter.dispatches().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn sender_denial_happens_before_identity_or_transport_access() {
+        use crate::mediation::MediationDecision;
+        struct Deny;
+        impl MediationHook for Deny {
+            fn evaluate<'a>(
+                &'a self,
+                request: &'a MediationRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<MediationDecision, String>> + Send + 'a,
+                >,
+            > {
+                assert_eq!(request.point, MediationPoint::Sender);
+                assert!(request.payload.is_none());
+                assert!(request.verified_sender_did.is_none());
+                assert!(!request.message_id.is_empty());
+                Box::pin(std::future::ready(Ok(MediationDecision::Deny {
+                    reason: "stop before send".into(),
+                })))
+            }
+        }
+        let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+            endpoint: "invalid".into(),
+            agent_id: "no-credentials".into(),
+            local_name: None,
+            peer_agent_id: "peer".into(),
+            destination: None,
+            a2a_url: None,
+            a2a_binding: None,
+            peer_did: None,
+        })
+        .with_mediation(Arc::new(Deny));
+        let error = adapter.dispatch(sample_task()).unwrap_err();
+        assert_eq!(error, "mediation denied: stop before send");
+        assert!(adapter.dispatches().unwrap().is_empty());
     }
 
     #[test]
