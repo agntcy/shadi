@@ -21,6 +21,14 @@ pub const BACKLOG_COST: f64 = 2.0;
 pub const SMOOTH: f64 = 0.5;
 pub const RHO: f64 = 1.0;
 pub const PAPER_DEMAND: [f64; 8] = [4.0, 4.0, 4.0, 8.0, 8.0, 8.0, 4.0, 4.0];
+/// Weight on the previous order in [`CascadeEngine::formula_value`].
+///
+/// Zero reproduces the behaviour this engine has always had, where the order
+/// ignores the smoothing penalty that `apply_orders` charges against it. Set it
+/// above zero to make the recommended order account for that penalty; the
+/// paper's appendix sensitivity `rho/(gamma+rho)` is this term, and `gamma =
+/// rho` is an older fork variant.
+pub const GAMMA: f64 = 0.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CascadeEngineConfig {
@@ -32,6 +40,7 @@ pub struct CascadeEngineConfig {
     pub backlog_cost: f64,
     pub smooth: f64,
     pub rho: f64,
+    pub gamma: f64,
 }
 
 impl CascadeEngineConfig {
@@ -39,16 +48,35 @@ impl CascadeEngineConfig {
         if participants.len() < 2 {
             return Err("cascade needs at least two stages".to_string());
         }
+        let participant_count = participants.len();
         Ok(Self {
             participants,
             lead: LEAD,
             target_i: TARGET_I,
-            demand: PAPER_DEMAND.to_vec(),
+            demand: demand_for(participant_count),
             hold_cost: HOLD_COST,
             backlog_cost: BACKLOG_COST,
             smooth: SMOOTH,
             rho: RHO,
+            gamma: GAMMA,
         })
+    }
+
+    /// First period where demand rises above the baseline.
+    ///
+    /// Information moves one stage per round, so a shock here reaches stage 0
+    /// at round `shock_index + (stages - 1)`.
+    pub fn shock_index(demand: &[f64]) -> usize {
+        let baseline = demand.first().copied().unwrap_or(0.0);
+        demand
+            .iter()
+            .position(|value| *value > baseline)
+            .unwrap_or(0)
+    }
+
+    /// Rounds needed for the shock to reach stage 0 and be scored.
+    pub fn rounds_needed(&self) -> u64 {
+        (Self::shock_index(&self.demand) + self.participants.len()) as u64
     }
 
     pub fn index_of(&self, id: &AgentId) -> Option<usize> {
@@ -58,6 +86,24 @@ impl CascadeEngineConfig {
     pub fn paper_horizon(&self) -> u64 {
         self.demand.len() as u64
     }
+}
+
+/// The paper's demand series, extended so the shock can reach stage 0.
+///
+/// The series is a pulse: baseline, a step up for three periods, then baseline
+/// again. It was a fixed eight samples whatever the chain length, and
+/// `paper_horizon` caps a run at that length, so on a chain of six or more
+/// stages the shock could never arrive no matter what `--max-rounds` was set
+/// to, and every such chain reported the same flat result. Padding with the
+/// trailing baseline leaves chains of five or fewer byte-for-byte unchanged.
+fn demand_for(stages: usize) -> Vec<f64> {
+    let mut demand = PAPER_DEMAND.to_vec();
+    let needed = CascadeEngineConfig::shock_index(&demand) + stages;
+    let baseline = demand.last().copied().unwrap_or(0.0);
+    while demand.len() < needed {
+        demand.push(baseline);
+    }
+    demand
 }
 
 #[derive(Clone, Debug)]
@@ -142,7 +188,9 @@ impl CascadeEngine {
             - self.inventory[index]
             - self.pipeline_sum(index))
         .max(0.0);
-        (q_hat + self.config.rho * self.qbar(index)) / (1.0 + self.config.rho)
+        let gamma = self.config.gamma;
+        (q_hat + gamma * self.last_q[index] + self.config.rho * self.qbar(index))
+            / (1.0 + gamma + self.config.rho)
     }
 
     fn apply_orders(&mut self, orders: Vec<f64>) {
@@ -319,6 +367,97 @@ mod tests {
                 );
         }
         last
+    }
+
+    #[test]
+    fn short_chains_keep_the_paper_series_exactly() {
+        for n in 2..=5 {
+            let cfg = CascadeEngineConfig::scaled(ids(n)).expect("cfg");
+            assert_eq!(
+                cfg.demand,
+                PAPER_DEMAND.to_vec(),
+                "chain of {n} must still run the paper instance unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn a_longer_chain_gets_a_series_the_shock_can_cross() {
+        // The shock starts at index 3 and moves one stage per round, so it
+        // reaches stage 0 at round 3 + (n - 1). paper_horizon caps the run at
+        // the series length, so the series has to be at least that long.
+        for n in [6, 7, 10, 20] {
+            let cfg = CascadeEngineConfig::scaled(ids(n)).expect("cfg");
+            let shock = CascadeEngineConfig::shock_index(&cfg.demand);
+            assert_eq!(shock, 3, "padding must not move the step");
+            assert!(
+                cfg.paper_horizon() > (shock + n - 1) as u64,
+                "chain of {n}: horizon {} cannot reach stage 0 at round {}",
+                cfg.paper_horizon(),
+                shock + n - 1
+            );
+            // Padding is baseline, so the pulse itself is untouched.
+            assert_eq!(&cfg.demand[..PAPER_DEMAND.len()], &PAPER_DEMAND[..]);
+        }
+    }
+
+    /// Run a chain to its horizon and return stage 0's final order.
+    fn stage_zero_after_full_run(cfg: CascadeEngineConfig) -> f64 {
+        let horizon = cfg.paper_horizon();
+        let mut rt = MasRuntime::new(CascadeEngine::new(Epoch(0), cfg));
+        for epoch in 0..horizon {
+            announce_all(&mut rt, epoch);
+        }
+        rt.engine().last_q()[0]
+    }
+
+    #[test]
+    fn a_longer_chain_still_registers_the_shock_at_stage_zero() {
+        let n = 8;
+        let with_shock = CascadeEngineConfig::scaled(ids(n)).expect("cfg");
+
+        // Control: same length and dynamics, but demand never steps up. Stage 0
+        // moves for ordinary inventory reasons either way, so "it changed" says
+        // nothing — only a difference against this control shows the shock
+        // actually propagated the length of the chain.
+        let mut flat = with_shock.clone();
+        let baseline = flat.demand[0];
+        flat.demand = vec![baseline; flat.demand.len()];
+
+        let shocked = stage_zero_after_full_run(with_shock);
+        let control = stage_zero_after_full_run(flat);
+
+        assert!(
+            (shocked - control).abs() > 1e-9,
+            "stage 0 ended at {shocked} with and without the shock on a chain of {n}: it never arrived"
+        );
+    }
+
+    #[test]
+    fn gamma_is_off_by_default_and_changes_the_order_when_set() {
+        let base = CascadeEngineConfig::scaled(ids(4)).expect("cfg");
+        assert_eq!(base.gamma, 0.0, "default must reproduce the existing order");
+
+        let mut damped = base.clone();
+        damped.gamma = 4.0;
+
+        let plain = CascadeEngine::new(Epoch(0), base);
+        let smooth = CascadeEngine::new(Epoch(0), damped);
+
+        let mut differed = false;
+        for i in 0..4 {
+            let previous = plain.last_q()[i];
+            let without = plain.formula_value(i);
+            let with = smooth.formula_value(i);
+            if (without - with).abs() > 1e-12 {
+                differed = true;
+                assert!(
+                    (with - previous).abs() < (without - previous).abs(),
+                    "stage {i}: gamma should pull {without} toward {previous}, got {with}"
+                );
+            }
+        }
+        assert!(differed, "gamma had no effect on any stage's order");
     }
 
     #[test]
