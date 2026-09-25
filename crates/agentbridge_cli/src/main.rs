@@ -180,6 +180,16 @@ enum Cmd {
         /// Run ASSEMBLY first and infer the CONVERGE class from agent replies.
         #[arg(long)]
         assembly: bool,
+
+        /// Identifier for this coordination run. Scopes the coordinator's SLIM
+        /// name so concurrent runs on one node do not collide, and keys the
+        /// report. Generated when omitted.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Write a machine-readable run report to this path as JSON.
+        #[arg(long)]
+        report: Option<String>,
     },
 }
 
@@ -266,17 +276,21 @@ fn main() {
             slim_endpoint,
             pattern,
             assembly,
-        } => commands::coordinate::run(
-            &goal,
-            &agents,
+            session,
+            report,
+        } => commands::coordinate::run(commands::coordinate::Options {
+            goal: &goal,
+            agent_specs: &agents,
             quorum,
             max_rounds,
-            output.as_deref(),
+            output: output.as_deref(),
             require_human,
-            &slim_endpoint,
+            slim_endpoint: &slim_endpoint,
             pattern,
             assembly,
-        ),
+            session: session.clone(),
+            report: report.as_deref(),
+        }),
     };
 
     if let Err(e) = result {

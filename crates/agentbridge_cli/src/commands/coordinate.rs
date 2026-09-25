@@ -17,6 +17,87 @@ use shadi_mas::{
 };
 use std::sync::{Arc, Mutex};
 
+/// One finalized epoch, as the controller scored it.
+struct EpochRecord {
+    epoch: u64,
+    metric: f64,
+    delta: f64,
+    improved: bool,
+}
+
+/// What a coordination run produced, for `--report`.
+///
+/// `unparsed_announcements` and `failed_announcements` are reported because the
+/// loop substitutes the agent's previous value when it cannot read a reply; an
+/// uncounted substitution is indistinguishable from a deliberate hold.
+#[derive(Default)]
+struct RunSummary {
+    halt: String,
+    epochs: Vec<EpochRecord>,
+    terminal_metric: Option<f64>,
+    lower_is_better: bool,
+    agent_values: Vec<(String, f64)>,
+    applied: usize,
+    finalized: usize,
+    rejected: usize,
+    deferred: usize,
+    unparsed_announcements: usize,
+    failed_announcements: usize,
+}
+
+impl RunSummary {
+    fn unmapped() -> Self {
+        Self {
+            halt: "unmapped".to_string(),
+            ..Self::default()
+        }
+    }
+}
+
+fn write_report(
+    path: &str,
+    session: &str,
+    pattern: PatternKind,
+    summary: &RunSummary,
+) -> anyhow::Result<()> {
+    let epochs: Vec<serde_json::Value> = summary
+        .epochs
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "epoch": e.epoch,
+                "metric": e.metric,
+                "delta": e.delta,
+                "improved": e.improved,
+            })
+        })
+        .collect();
+    let agent_values: serde_json::Map<String, serde_json::Value> = summary
+        .agent_values
+        .iter()
+        .map(|(id, v)| (id.clone(), serde_json::json!(v)))
+        .collect();
+    let doc = serde_json::json!({
+        "session": session,
+        "pattern": pattern.as_str(),
+        "halt": summary.halt,
+        "epochs": epochs,
+        "terminal_metric": summary.terminal_metric,
+        "lower_is_better": summary.lower_is_better,
+        "agent_values": agent_values,
+        "counters": {
+            "applied": summary.applied,
+            "finalized": summary.finalized,
+            "rejected": summary.rejected,
+            "deferred": summary.deferred,
+            "unparsed_announcements": summary.unparsed_announcements,
+            "failed_announcements": summary.failed_announcements,
+        },
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&doc)? + "\n")
+        .map_err(|e| anyhow::anyhow!("failed to write report to {path}: {e}"))
+}
+
 struct AgentEntry {
     id: AgentId,
     tool: Arc<dyn ToolAdapter>,
@@ -35,18 +116,39 @@ struct AgentEntry {
 ///
 /// This guarantees the endorsement phase actually runs before finalization,
 /// so the winner is the agent whose implementation earned the most peer votes.
-pub fn run(
-    goal: &str,
-    agent_specs: &[String],
-    quorum: usize,
-    max_rounds: u64,
-    output: Option<&str>,
-    require_human: bool,
-    slim_endpoint: &str,
-    pattern: PatternKind,
-    assembly: bool,
-) -> anyhow::Result<()> {
-    let agents = build_agents(agent_specs, slim_endpoint)?;
+pub struct Options<'a> {
+    pub goal: &'a str,
+    pub agent_specs: &'a [String],
+    pub quorum: usize,
+    pub max_rounds: u64,
+    pub output: Option<&'a str>,
+    pub require_human: bool,
+    pub slim_endpoint: &'a str,
+    pub pattern: PatternKind,
+    pub assembly: bool,
+    pub session: Option<String>,
+    pub report: Option<&'a str>,
+}
+
+pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
+    let Options {
+        goal,
+        agent_specs,
+        quorum,
+        max_rounds,
+        output,
+        require_human,
+        slim_endpoint,
+        pattern,
+        assembly,
+        session,
+        report,
+    } = opts;
+
+    let session = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    println!("session={session}");
+
+    let agents = build_agents(agent_specs, slim_endpoint, &session)?;
     if agents.is_empty() {
         anyhow::bail!(
             "no agents specified — use --agents claude-code,cursor-agent,copilot,codex \
@@ -59,9 +161,16 @@ pub fn run(
         pattern = run_assembly(goal, &agents, pattern)?;
     }
     if pattern.is_converge_class() {
-        return run_converge(goal, &agents, max_rounds, pattern);
+        let summary = run_converge(goal, &agents, max_rounds, pattern)?;
+        if let Some(path) = report {
+            write_report(path, &session, pattern, &summary)?;
+        }
+        return Ok(());
     }
     if pattern == PatternKind::Unmapped {
+        if let Some(path) = report {
+            write_report(path, &session, pattern, &RunSummary::unmapped())?;
+        }
         anyhow::bail!("ASSEMBLY inferred an unmapped class; CONVERGE will not start");
     }
 
@@ -211,7 +320,7 @@ fn run_converge(
     agents: &[AgentEntry],
     max_rounds: u64,
     pattern: PatternKind,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RunSummary> {
     let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
     match pattern {
         PatternKind::Preference => {
@@ -241,7 +350,8 @@ fn drive_converge<E: ConvergeSurface>(
     agents: &[AgentEntry],
     engine: E,
     horizon: u64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RunSummary> {
+    let mut summary = RunSummary::default();
     let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
     let mut runtime = MasRuntime::new(engine);
     let mut ctl = ConvergeController::new(ids, horizon, runtime.engine().lower_is_better(), 3);
@@ -278,10 +388,19 @@ fn drive_converge<E: ConvergeSurface>(
                             decision,
                         });
                     }
-                    parse_announce(&text).unwrap_or(fallback)
+                    match parse_announce(&text) {
+                        Some(value) => value,
+                        None => {
+                            // A substituted value is indistinguishable from a
+                            // deliberate hold unless it is counted.
+                            summary.unparsed_announcements += 1;
+                            fallback
+                        }
+                    }
                 }
                 Err(e) => {
                     println!("  [{}] announce failed: {e}", agent.id.0);
+                    summary.failed_announcements += 1;
                     fallback
                 }
             };
@@ -293,33 +412,56 @@ fn drive_converge<E: ConvergeSurface>(
             );
             last = runtime.apply(ev);
         }
-        if let EventOutcome::Finalized(ref summary) = last {
+        if let EventOutcome::Finalized(ref finalized) = last {
             let metric = runtime.engine().metric();
-            let signal = ctl.record_metric(summary.epoch, metric);
+            let signal = ctl.record_metric(finalized.epoch, metric);
             println!(
                 "  finalized epoch {} metric={:.6} delta={:.6} improved={}",
-                summary.epoch.0, signal.metric, signal.delta, signal.improved
+                finalized.epoch.0, signal.metric, signal.delta, signal.improved
             );
+            summary.epochs.push(EpochRecord {
+                epoch: finalized.epoch.0,
+                metric: signal.metric,
+                delta: signal.delta,
+                improved: signal.improved,
+            });
         }
         if ctl.conclude_votes().is_some() {
             break;
         }
     }
 
-    match ctl.halt() {
-        Some(ConvergeHalt::MajorityStop) => println!("CONVERGE halt: majority STOP"),
-        Some(ConvergeHalt::Plateau) => println!("CONVERGE halt: plateau"),
-        Some(ConvergeHalt::PaperHorizon) => println!("CONVERGE halt: paper horizon"),
-        Some(ConvergeHalt::NoSolution) => println!("CONVERGE halt: no solution"),
-        Some(ConvergeHalt::Unmapped) => println!("CONVERGE halt: unmapped class"),
-        None => println!("CONVERGE halt: max rounds"),
-    }
+    let halt = match ctl.halt() {
+        Some(ConvergeHalt::MajorityStop) => "majority-stop",
+        Some(ConvergeHalt::Plateau) => "plateau",
+        Some(ConvergeHalt::PaperHorizon) => "paper-horizon",
+        Some(ConvergeHalt::NoSolution) => "no-solution",
+        Some(ConvergeHalt::Unmapped) => "unmapped",
+        None => "max-rounds",
+    };
+    println!("CONVERGE halt: {halt}");
+    summary.halt = halt.to_string();
+    summary.terminal_metric = Some(runtime.engine().metric());
+    summary.lower_is_better = runtime.engine().lower_is_better();
+    summary.agent_values = agents
+        .iter()
+        .map(|a| {
+            (
+                a.id.0.clone(),
+                runtime.engine().current_value(&a.id).unwrap_or(f64::NAN),
+            )
+        })
+        .collect();
     let c = runtime.engine().counters();
     println!(
         "Counters: applied={} finalized={} rejected={} deferred={}",
         c.applied, c.finalized, c.rejected, c.deferred
     );
-    Ok(())
+    summary.applied = c.applied;
+    summary.finalized = c.finalized;
+    summary.rejected = c.rejected;
+    summary.deferred = c.deferred;
+    Ok(summary)
 }
 
 // ─── Prompt builders ─────────────────────────────────────────────────────────
@@ -560,7 +702,11 @@ fn truncate(s: &str, max: usize) -> String {
 
 // ─── Agent spec parser ────────────────────────────────────────────────────────
 
-fn build_agents(specs: &[String], slim_endpoint: &str) -> anyhow::Result<Vec<AgentEntry>> {
+fn build_agents(
+    specs: &[String],
+    slim_endpoint: &str,
+    session: &str,
+) -> anyhow::Result<Vec<AgentEntry>> {
     let mut agents = Vec::new();
     for spec in specs {
         let (id_str, tool): (String, Arc<dyn ToolAdapter>) = if let Some((id, adapter)) =
@@ -592,7 +738,7 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> anyhow::Result<Vec<Age
             let config = LiveA2ATaskAdapterConfig {
                 endpoint: endpoint.clone(),
                 agent_id: "coordinator".to_string(),
-                local_name: Some("agntcy/shadi/coordinator-a2a".to_string()),
+                local_name: Some(format!("agntcy/shadi/coordinator-{session}-a2a-client")),
                 peer_agent_id: agent_id.clone(),
                 destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
                 a2a_url: None,
@@ -731,7 +877,7 @@ mod tests {
             "cursor-agent".to_string(),
             "slim:peer@127.0.0.1:47357".to_string(),
         ];
-        let agents = build_agents(&specs, "127.0.0.1:47357").expect("build");
+        let agents = build_agents(&specs, "127.0.0.1:47357", "test-session").expect("build");
         let ids: Vec<&str> = agents.iter().map(|a| a.id.0.as_str()).collect();
         assert_eq!(
             ids,
@@ -740,9 +886,54 @@ mod tests {
     }
 
     #[test]
+    fn report_records_substituted_announcements_and_epochs() {
+        let dir = std::env::temp_dir().join(format!("ab-report-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let path = dir.join("report.json");
+
+        let summary = RunSummary {
+            halt: "plateau".to_string(),
+            epochs: vec![EpochRecord {
+                epoch: 0,
+                metric: 2.5,
+                delta: -0.5,
+                improved: true,
+            }],
+            terminal_metric: Some(2.5),
+            lower_is_better: true,
+            agent_values: vec![("goose-0".to_string(), 1.25)],
+            applied: 3,
+            finalized: 1,
+            rejected: 0,
+            deferred: 0,
+            unparsed_announcements: 2,
+            failed_announcements: 1,
+        };
+        write_report(
+            path.to_str().expect("utf8 path"),
+            "sess-1",
+            PatternKind::Preference,
+            &summary,
+        )
+        .expect("write report");
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(doc["session"], "sess-1");
+        assert_eq!(doc["halt"], "plateau");
+        assert_eq!(doc["epochs"][0]["improved"], true);
+        assert_eq!(doc["agent_values"]["goose-0"], 1.25);
+        // A substituted announcement must stay visible in the report.
+        assert_eq!(doc["counters"]["unparsed_announcements"], 2);
+        assert_eq!(doc["counters"]["failed_announcements"], 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn build_agents_rejects_unknown_specs() {
         let specs = vec!["totally-unknown".to_string()];
-        assert!(build_agents(&specs, "127.0.0.1:47357").is_err());
+        assert!(build_agents(&specs, "127.0.0.1:47357", "test-session").is_err());
     }
 
     struct ReplyTool(&'static str);
