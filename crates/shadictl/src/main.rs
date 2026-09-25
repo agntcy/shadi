@@ -237,6 +237,7 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::DidFromGitHub(command) => run_did_from_github_command(command),
         Commands::DidFromSsh(command) => run_did_from_ssh_command(command),
         Commands::GetSecret(command) => run_get_secret_command(command),
+        Commands::DeleteSecret(command) => run_delete_secret_command(command),
         Commands::DeriveAgentDid(command) => run_derive_agent_did_command(command),
         Commands::DeriveAgentIdentity(command) => run_derive_agent_identity_command(command),
         Commands::VerifyAgentIdentity(command) => run_verify_agent_identity_command(command),
