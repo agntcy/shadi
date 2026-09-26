@@ -1562,6 +1562,75 @@
     }
 
     #[test]
+    fn delete_secret_removes_the_key_through_the_store() {
+        let _guard = lock_test_env();
+        test_store_clear_failures();
+        test_store_put("secops/gone", b"value");
+        assert!(test_store_get("secops/gone").is_some());
+
+        run_delete_secret(DeleteSecretArgs {
+            key: "secops/gone".to_string(),
+        })
+        .expect("delete should succeed");
+
+        assert!(
+            test_store_get("secops/gone").is_none(),
+            "the key must be gone from the store, not just reported deleted"
+        );
+    }
+
+    #[test]
+    fn delete_secret_reports_a_store_failure() {
+        let _guard = lock_test_env();
+        test_store_clear_failures();
+        test_store_put("secops/stuck", b"value");
+        test_store_fail_delete("secops/stuck");
+
+        let err = run_delete_secret(DeleteSecretArgs {
+            key: "secops/stuck".to_string(),
+        })
+        .expect_err("a failing store must surface");
+        assert!(err.contains("secops/stuck"), "{err}");
+
+        test_store_clear_failures();
+    }
+
+    #[test]
+    fn delete_secret_command_maps_failure_to_a_nonzero_exit() {
+        let _guard = lock_test_env();
+        test_store_clear_failures();
+        test_store_put("secops/exit", b"value");
+
+        let ok = run_delete_secret_command(DeleteSecretArgs {
+            key: "secops/exit".to_string(),
+        });
+        assert_eq!(ok, ExitCode::from(0));
+
+        test_store_put("secops/exit", b"value");
+        test_store_fail_delete("secops/exit");
+        let failed = run_delete_secret_command(DeleteSecretArgs {
+            key: "secops/exit".to_string(),
+        });
+        assert_eq!(failed, ExitCode::from(2));
+
+        test_store_clear_failures();
+    }
+
+    #[test]
+    fn run_named_command_dispatches_delete_secret_variant() {
+        let _guard = lock_test_env();
+        test_store_clear_failures();
+        test_store_put("secops/dispatch", b"value");
+
+        let code = run_named_command(Commands::DeleteSecret(DeleteSecretArgs {
+            key: "secops/dispatch".to_string(),
+        }));
+
+        assert_eq!(code, ExitCode::from(0));
+        assert!(test_store_get("secops/dispatch").is_none());
+    }
+
+    #[test]
     fn run_named_command_dispatches_trace_variant() {
         let dir = temp_dir();
         let trace_file = dir.path().join("trace.jsonl");

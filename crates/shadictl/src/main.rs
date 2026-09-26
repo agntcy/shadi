@@ -66,6 +66,9 @@ static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::
 static TEST_SECRET_STORE_PUT_FAILURES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[cfg(test)]
+static TEST_SECRET_STORE_DELETE_FAILURES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+#[cfg(test)]
 static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(test)]
@@ -123,6 +126,14 @@ impl SecretStore for TestSecretStore {
     }
 
     fn delete(&self, key: &str) -> agent_secrets::SecretResult<()> {
+        if test_secret_store_delete_failures()
+            .lock()
+            .map_err(|_| agent_secrets::SecretError::StorageFailure)?
+            .contains(key)
+        {
+            return Err(agent_secrets::SecretError::StorageFailure);
+        }
+
         let mut guard = test_secret_store_map()
             .lock()
             .map_err(|_| agent_secrets::SecretError::StorageFailure)?;
@@ -161,6 +172,19 @@ fn test_store_get(key: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
+fn test_secret_store_delete_failures() -> &'static Mutex<HashSet<String>> {
+    TEST_SECRET_STORE_DELETE_FAILURES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(test)]
+fn test_store_fail_delete(key: &str) {
+    let mut guard = test_secret_store_delete_failures()
+        .lock()
+        .expect("test store delete failures lock");
+    guard.insert(key.to_string());
+}
+
+#[cfg(test)]
 fn test_store_fail_put(key: &str) {
     let mut guard = test_secret_store_put_failures()
         .lock()
@@ -170,6 +194,10 @@ fn test_store_fail_put(key: &str) {
 
 #[cfg(test)]
 fn test_store_clear_failures() {
+    test_secret_store_delete_failures()
+        .lock()
+        .expect("test store delete failures lock")
+        .clear();
     let mut guard = test_secret_store_put_failures()
         .lock()
         .expect("test store put failures lock");
