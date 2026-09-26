@@ -158,6 +158,8 @@ pub(crate) enum Commands {
     DidFromSsh(DidFromSshArgs),
     #[command(name = "get-secret")]
     GetSecret(GetSecretArgs),
+    #[command(name = "delete-secret")]
+    DeleteSecret(DeleteSecretArgs),
     #[command(name = "derive-agent-did")]
     DeriveAgentDid(DeriveAgentDidArgs),
     #[command(name = "derive-agent-identity")]
@@ -897,6 +899,16 @@ pub(crate) struct DidFromSshArgs {
 #[derive(Parser, Debug)]
 #[command(name = "get-secret", about = "Read a secret from the SHADI secret store")]
 pub(crate) struct GetSecretArgs {
+    #[arg(long = "key", value_name = "KEY")]
+    pub(crate) key: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "delete-secret",
+    about = "Delete a secret from the SHADI secret store"
+)]
+pub(crate) struct DeleteSecretArgs {
     #[arg(long = "key", value_name = "KEY")]
     pub(crate) key: String,
 }

@@ -210,9 +210,34 @@ impl SecretStore for MacosKeychainStore {
         self.update_registry_on_delete(key)
     }
 
+    /// Registry entries whose keychain item still exists.
+    ///
+    /// The registry is only maintained by this store's own put and delete, so
+    /// anything removed with Keychain Access or `security` leaves an entry
+    /// behind. Reporting those made the inventory disagree with reality, and
+    /// deleting the registry item is not a fix: it hides live keys instead.
+    /// A missing item is definitive — a locked or unavailable keychain reports
+    /// something other than not-found — so a stale entry is pruned rather than
+    /// re-checked on every listing.
     fn list_keys(&self) -> SecretResult<Vec<String>> {
-        let keys = self.load_registry()?;
-        Ok(keys.into_iter().filter(|key| key != REGISTRY_ACCOUNT).collect())
+        let mut live = Vec::new();
+        let mut stale = false;
+        for key in self.load_registry()? {
+            if key == REGISTRY_ACCOUNT {
+                continue;
+            }
+            match self.get(&key) {
+                // The value is dropped straight away; this only asks whether
+                // the item is there.
+                Ok(_) => live.push(key),
+                Err(SecretError::InvalidInput) => stale = true,
+                Err(err) => return Err(err),
+            }
+        }
+        if stale {
+            self.store_registry(&live)?;
+        }
+        Ok(live)
     }
 }
 
@@ -311,6 +336,10 @@ mod tests {
     fn list_keys_trims_registry_entries() {
         let service = unique_service();
         let store = MacosKeychainStore::new(service.clone());
+        // The items have to exist: an entry naming a missing item is stale and
+        // is no longer reported, so this would otherwise pass vacuously.
+        store.put("key-a", b"a").unwrap();
+        store.put("key-b", b"b").unwrap();
         let payload = b"key-a\n\n  key-b  \n";
         set_generic_password(&service, REGISTRY_ACCOUNT, payload).unwrap();
 
@@ -318,6 +347,44 @@ mod tests {
         assert!(keys.contains(&"key-a".to_string()));
         assert!(keys.contains(&"key-b".to_string()));
 
+        store.delete("key-a").unwrap();
+        store.delete("key-b").unwrap();
+        store.delete(REGISTRY_ACCOUNT).unwrap();
+    }
+
+    #[test]
+    fn list_keys_drops_an_entry_whose_item_is_gone() {
+        let service = unique_service();
+        let store = MacosKeychainStore::new(service.clone());
+        store.put("kept", b"1").unwrap();
+        store.put("removed", b"2").unwrap();
+
+        // Removed behind the store's back, as Keychain Access or `security
+        // delete-generic-password` would.
+        delete_generic_password(&service, "removed").unwrap();
+
+        assert_eq!(store.list_keys().unwrap(), vec!["kept".to_string()]);
+
+        // Pruned, so the missing item is not re-checked on every listing.
+        assert_eq!(store.load_registry().unwrap(), vec!["kept".to_string()]);
+
+        store.delete("kept").unwrap();
+        store.delete(REGISTRY_ACCOUNT).unwrap();
+    }
+
+    #[test]
+    fn list_keys_leaves_the_registry_alone_when_nothing_is_stale() {
+        let service = unique_service();
+        let store = MacosKeychainStore::new(service.clone());
+        store.put("a", b"1").unwrap();
+        store.put("b", b"2").unwrap();
+
+        let before = store.load_registry().unwrap();
+        assert_eq!(store.list_keys().unwrap(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(store.load_registry().unwrap(), before);
+
+        store.delete("a").unwrap();
+        store.delete("b").unwrap();
         store.delete(REGISTRY_ACCOUNT).unwrap();
     }
 

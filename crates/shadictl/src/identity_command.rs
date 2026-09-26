@@ -30,6 +30,16 @@ pub(crate) fn run_verify_agent_identity_command(parsed: VerifyAgentIdentityArgs)
     }
 }
 
+pub(crate) fn run_delete_secret_command(parsed: DeleteSecretArgs) -> ExitCode {
+    match run_delete_secret(parsed) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(2)
+        }
+    }
+}
+
 pub(crate) fn run_get_secret_command(parsed: GetSecretArgs) -> ExitCode {
     match run_get_secret(parsed) {
         Ok(()) => ExitCode::from(0),
@@ -137,6 +147,23 @@ pub(crate) fn run_get_secret(args: GetSecretArgs) -> Result<(), String> {
     let value = secret.expose(|bytes| bytes.to_vec());
     let value = secret_bytes_to_utf8(&value)?;
     println!("{}", value);
+    Ok(())
+}
+
+/// Delete through the store so the keychain registry is updated.
+///
+/// Removing an item with Keychain Access or `security` leaves the registry
+/// naming a key that no longer exists; there was no in-SHADI way to delete at
+/// all, so every deletion went behind the store's back.
+pub(crate) fn run_delete_secret(args: DeleteSecretArgs) -> Result<(), String> {
+    let store = default_secret_store();
+    store
+        .delete(&args.key)
+        .map_err(|_| format!("keychain delete failed for {}", args.key))?;
+    // The key name is not secret — --list-keychain prints every one of them —
+    // but CodeQL treats an argument reaching stdout as cleartext logging, and
+    // the caller just typed this key, so naming it back adds little.
+    println!("Deleted secret");
     Ok(())
 }
 
