@@ -412,6 +412,27 @@ mod tests {
     }
 
     #[test]
+    fn rounds_needed_matches_the_series_the_chain_gets() {
+        for n in [2, 5, 8, 12] {
+            let cfg = CascadeEngineConfig::scaled(ids(n)).expect("cfg");
+            let shock = CascadeEngineConfig::shock_index(&cfg.demand);
+
+            // The shock lands on stage 0 at round shock + (n - 1), and the run
+            // has to go one round beyond that for the response to be scored.
+            assert_eq!(cfg.rounds_needed(), (shock + n) as u64, "chain of {n}");
+
+            // The series is sized from the same rule, so a run that reaches the
+            // horizon always reaches stage 0.
+            assert!(
+                cfg.rounds_needed() <= cfg.paper_horizon(),
+                "chain of {n}: needs {} rounds but the series allows {}",
+                cfg.rounds_needed(),
+                cfg.paper_horizon()
+            );
+        }
+    }
+
+    #[test]
     fn a_longer_chain_still_registers_the_shock_at_stage_zero() {
         let n = 8;
         let with_shock = CascadeEngineConfig::scaled(ids(n)).expect("cfg");
