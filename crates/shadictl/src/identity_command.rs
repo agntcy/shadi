@@ -160,7 +160,10 @@ pub(crate) fn run_delete_secret(args: DeleteSecretArgs) -> Result<(), String> {
     store
         .delete(&args.key)
         .map_err(|_| format!("keychain delete failed for {}", args.key))?;
-    println!("Deleted secret: {}", args.key);
+    // The key name is not secret — --list-keychain prints every one of them —
+    // but CodeQL treats an argument reaching stdout as cleartext logging, and
+    // the caller just typed this key, so naming it back adds little.
+    println!("Deleted secret");
     Ok(())
 }
 
