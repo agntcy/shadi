@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::mediation::{require_allow, MediationHook, MediationPoint, MediationRequest};
+use crate::observation::{publish, ResponseEvent, ResponseObservation, ResponseObserver};
 use a2a::*;
 use a2a_client::A2AClient;
 use agent_secrets::{DidProofVerifier, SessionContext};
@@ -110,6 +111,7 @@ pub struct LiveA2ATaskAdapter {
     config: LiveA2ATaskAdapterConfig,
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
     mediation: Option<Arc<dyn MediationHook>>,
+    observer: Option<Arc<dyn ResponseObserver>>,
 }
 
 impl LiveA2ATaskAdapter {
@@ -118,11 +120,17 @@ impl LiveA2ATaskAdapter {
             config,
             dispatches: Mutex::new(Vec::new()),
             mediation: None,
+            observer: None,
         }
     }
 
     pub fn with_mediation(mut self, hook: Arc<dyn MediationHook>) -> Self {
         self.mediation = Some(hook);
+        self
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn ResponseObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -165,22 +173,22 @@ impl LiveA2ATaskAdapter {
                         .get_or_insert_with(Default::default)
                         .insert("shadi-correlation-id".into(), correlation.clone().into());
                 }
+                let request = MediationRequest {
+                    evaluation_id: format!("sender-{}", message.message_id),
+                    point: MediationPoint::Sender,
+                    message_id: message.message_id.clone(),
+                    task_id: None,
+                    correlation_id: task.correlation_id.clone(),
+                    local_agent: self.config.agent_id.clone(),
+                    peer: self
+                        .config
+                        .peer_did
+                        .clone()
+                        .or(self.config.destination.clone()),
+                    verified_sender_did: None,
+                    payload: None,
+                };
                 if let Some(hook) = &self.mediation {
-                    let request = MediationRequest {
-                        evaluation_id: format!("sender-{}", message.message_id),
-                        point: MediationPoint::Sender,
-                        message_id: message.message_id.clone(),
-                        task_id: None,
-                        correlation_id: task.correlation_id.clone(),
-                        local_agent: self.config.agent_id.clone(),
-                        peer: self
-                            .config
-                            .peer_did
-                            .clone()
-                            .or(self.config.destination.clone()),
-                        verified_sender_did: None,
-                        payload: None,
-                    };
                     TokioRuntimeBuilder::new_current_thread()
                         .enable_all()
                         .build()
@@ -196,7 +204,24 @@ impl LiveA2ATaskAdapter {
                 let signed_text = String::from_utf8(signed)
                     .map_err(|err| format!("DID proof envelope is not UTF-8: {err}"))?;
                 message.parts = vec![Part::text(signed_text)];
-                self.send_signed_task(task, &message)
+                let started = Instant::now();
+                let result = self.send_signed_task(task, &message);
+                if let Some(observer) = &self.observer {
+                    publish(
+                        observer.as_ref(),
+                        ResponseObservation::new(
+                            if result.is_ok() {
+                                ResponseEvent::Received
+                            } else {
+                                ResponseEvent::Failed
+                            },
+                            &request,
+                            started.elapsed(),
+                            result.as_ref().map_err(String::as_str),
+                        ),
+                    );
+                }
+                result
             },
             &auth_cfg,
             || {

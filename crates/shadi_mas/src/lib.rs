@@ -5,6 +5,7 @@ mod adapters;
 mod assembly;
 pub mod experiments;
 pub mod mediation;
+pub mod observation;
 mod runtime;
 mod types;
 

@@ -13,6 +13,7 @@ use shadi_a2a::A2ABinding;
 use shadi_mas::{
     experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
     mediation::{require_allow, MediationFailure, MediationHook, MediationPoint, MediationRequest},
+    observation::{publish, ResponseEvent, ResponseObservation, ResponseObserver},
     Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
 use std::sync::Arc;
@@ -23,6 +24,7 @@ pub struct AgentBridgeExecutor {
     slim_endpoint: Option<String>,
     verbose: bool,
     mediation: Option<Arc<dyn MediationHook>>,
+    observer: Option<Arc<dyn ResponseObserver>>,
 }
 
 impl AgentBridgeExecutor {
@@ -38,11 +40,17 @@ impl AgentBridgeExecutor {
             slim_endpoint,
             verbose,
             mediation: None,
+            observer: None,
         }
     }
 
     pub fn with_mediation(mut self, hook: Arc<dyn MediationHook>) -> Self {
         self.mediation = Some(hook);
+        self
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn ResponseObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 }
@@ -248,6 +256,7 @@ fn dispatch_peer_handoff(
     inbound_prompt: &str,
     reply: &str,
     mediation: Option<Arc<dyn MediationHook>>,
+    observer: Option<Arc<dyn ResponseObserver>>,
 ) -> Result<(), String> {
     let registry = LocalAdapterRegistry::from_env();
     let target = resolve_handoff_target(to, slim_fallback, &registry)?;
@@ -263,6 +272,10 @@ fn dispatch_peer_handoff(
     });
     let adapter = match mediation {
         Some(hook) => adapter.with_mediation(hook),
+        None => adapter,
+    };
+    let adapter = match observer {
+        Some(observer) => adapter.with_observer(observer),
         None => adapter,
     };
     let prompt = render_peer_handoff(from, to, inbound_prompt, reply);
@@ -364,6 +377,12 @@ impl AgentExecutor for AgentBridgeExecutor {
         let history = ctx.message.clone().map(|m| vec![m]);
         let inbound_prompt = prompt.clone();
 
+        let observation_request = mediation_request.clone();
+        let observer = self.observer.clone();
+        let handoff_observer = observer.clone();
+        let response_started = std::time::Instant::now();
+        let execution_error = Arc::new(std::sync::OnceLock::new());
+        let captured_error = execution_error.clone();
         let respond = async move {
             if let (Some(hook), Some(request)) = (&mediation, &mediation_request) {
                 if let Err(failure) = require_allow(hook.as_ref(), request).await {
@@ -391,8 +410,12 @@ impl AgentExecutor for AgentBridgeExecutor {
                 .await
                 {
                     Ok(Ok(text)) => text,
-                    Ok(Err(e)) => format!("agentbridge error: {e}"),
+                    Ok(Err(e)) => {
+                        let _ = captured_error.set(e.to_string());
+                        format!("agentbridge error: {e}")
+                    }
                     Err(join_err) => {
+                        let _ = captured_error.set(join_err.to_string());
                         format!("agentbridge error: adapter task panicked: {join_err}")
                     }
                 }
@@ -417,6 +440,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                         &inbound,
                         &reply,
                         mediation,
+                        handoff_observer,
                     )
                 })
                 .await;
@@ -470,7 +494,28 @@ impl AgentExecutor for AgentBridgeExecutor {
             ]
         };
 
-        Box::pin(futures::stream::once(respond).flat_map(futures::stream::iter))
+        Box::pin(
+            futures::stream::once(respond)
+                .flat_map(futures::stream::iter)
+                .map(move |event| {
+                    if let (Some(observer), Some(request), Ok(StreamResponse::Task(task))) =
+                        (&observer, &observation_request, &event)
+                    {
+                        let mut observation = ResponseObservation::new(
+                            ResponseEvent::Produced,
+                            request,
+                            response_started.elapsed(),
+                            Ok(&SendMessageResponse::Task(task.clone())),
+                        );
+                        if let Some(error) = execution_error.get() {
+                            observation.error = Some(error.chars().take(4096).collect());
+                            observation.truncated |= error.chars().count() > 4096;
+                        }
+                        publish(observer.as_ref(), observation);
+                    }
+                    event
+                }),
+        )
     }
 
     fn cancel(
@@ -706,12 +751,22 @@ mod tests {
         }
         fn execute_prompt(&self, _: &str) -> Result<String, crate::CliAdapterError> {
             self.1.fetch_add(1, Ordering::SeqCst);
+            if self.0 .0 == "broken" {
+                return Err(crate::CliAdapterError::Protocol("execution failed".into()));
+            }
             Ok("executed".into())
         }
     }
     struct TestHook {
         answer: Result<MediationDecision, String>,
         seen: Mutex<Vec<MediationRequest>>,
+    }
+    #[derive(Default)]
+    struct TestObserver(Mutex<Vec<ResponseObservation>>);
+    impl ResponseObserver for TestObserver {
+        fn observe(&self, observation: ResponseObservation) {
+            self.0.lock().unwrap().push(observation);
+        }
     }
     impl MediationHook for TestHook {
         fn evaluate<'a>(
@@ -739,6 +794,7 @@ mod tests {
             (Err("offline".into()), TaskState::Failed, 0),
         ] {
             let counter = Arc::new(AtomicUsize::new(0));
+            let observer = Arc::new(TestObserver::default());
             let hook = Arc::new(TestHook {
                 answer,
                 seen: Mutex::new(Vec::new()),
@@ -752,7 +808,8 @@ mod tests {
                 None,
                 false,
             )
-            .with_mediation(hook.clone());
+            .with_mediation(hook.clone())
+            .with_observer(observer.clone());
             let handler = DefaultRequestHandler::new(executor, InMemoryTaskStore::new());
             let text = String::from_utf8(
                 shadi_identity::wrap_signed_message(&id, b"verified prompt").unwrap(),
@@ -768,6 +825,15 @@ mod tests {
             };
             assert_eq!(task.status.state, state);
             assert_eq!(counter.load(Ordering::SeqCst), calls);
+            let observations = observer.0.lock().unwrap();
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].request_message_id, message_id);
+            assert_eq!(observations[0].event, ResponseEvent::Produced);
+            assert_eq!(observations[0].task_state, Some(state.clone()));
+            assert_eq!(
+                observations[0].response_message_id.as_deref(),
+                task.status.message.as_ref().map(|m| m.message_id.as_str())
+            );
             let stored = handler
                 .get_task(
                     &params,
@@ -789,6 +855,48 @@ mod tests {
             );
             assert_eq!(seen[0].message_id, message_id);
         }
+    }
+
+    #[tokio::test]
+    async fn response_observation_records_execution_error_without_changing_the_reply() {
+        let id = shadi_identity::AgentIdentity::generate().unwrap();
+        let observer = Arc::new(TestObserver::default());
+        let handler = DefaultRequestHandler::new(
+            AgentBridgeExecutor::new(
+                Arc::new(CountAdapter(
+                    shadi_mas::AgentId("broken".into()),
+                    Arc::new(AtomicUsize::new(0)),
+                )),
+                None,
+                None,
+                false,
+            )
+            .with_observer(observer.clone()),
+            InMemoryTaskStore::new(),
+        );
+        let text = String::from_utf8(shadi_identity::wrap_signed_message(&id, b"prompt").unwrap())
+            .unwrap();
+        let SendMessageResponse::Task(task) = handler
+            .send_message(&ServiceParams::default(), sample_request(text))
+            .await
+            .unwrap()
+        else {
+            panic!("expected task")
+        };
+        // Preserve the executor's existing wire result; only add telemetry.
+        assert_eq!(task.status.state, TaskState::Completed);
+        let events = observer.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("execution failed"));
+        assert!(events[0]
+            .response
+            .as_ref()
+            .unwrap()
+            .starts_with("agentbridge error:"));
     }
 
     #[tokio::test]
