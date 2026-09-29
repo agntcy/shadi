@@ -217,6 +217,7 @@ dependencies = [
  "agntcy-shadi-sandbox",
  "agntcy-slim-bindings",
  "agntcy-slim-config",
+ "agntcy-slim-persistence",
  "agntcy-slim-rpc",
  "anyhow",
  "async-trait",
@@ -247,6 +248,7 @@ dependencies = [
  "a2a-slimrpc",
  "agntcy-shadi-agent-secrets",
  "agntcy-slim-bindings",
+ "agntcy-slim-persistence",
  "async-stream",
  "async-trait",
  "axum",
@@ -276,6 +278,7 @@ dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
  "agntcy-slim-bindings",
+ "agntcy-slim-persistence",
 ]
 
 [[package]]
@@ -296,6 +299,7 @@ dependencies = [
  "agntcy-shadi-telemetry",
  "agntcy-slim-bindings",
  "agntcy-slim-config",
+ "agntcy-slim-persistence",
  "agntcy-slim-proto",
  "agntcy-slim-rpc",
  "async-trait",
@@ -332,6 +336,7 @@ dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-bindings",
  "agntcy-slim-config",
+ "agntcy-slim-persistence",
  "base64 0.23.1",
  "bs58",
  "ed25519-dalek",
@@ -355,6 +360,7 @@ dependencies = [
  "agntcy-shadi-agent-transport-slim",
  "agntcy-shadi-identity",
  "agntcy-slim-bindings",
+ "agntcy-slim-persistence",
  "serde",
  "serde_json",
  "tempfile",
