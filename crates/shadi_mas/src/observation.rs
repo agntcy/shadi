@@ -124,7 +124,7 @@ pub fn publish(observer: &dyn ResponseObserver, observation: ResponseObservation
 mod tests {
     use super::*;
     use crate::mediation::MediationPoint;
-    use a2a::{Message, Role, Task, TaskStatus};
+    use a2a::{Artifact, Message, Role, Task, TaskStatus};
 
     fn request() -> MediationRequest {
         MediationRequest {
@@ -200,6 +200,68 @@ mod tests {
         assert!(failed.response.is_none());
         assert!(failed.response_message_id.is_none());
         assert_eq!(failed.error.as_deref(), Some("connection closed"));
+    }
+
+    #[test]
+    fn captures_artifacts_without_exporting_request_history() {
+        let artifacts = vec![Artifact {
+            artifact_id: "artifact".into(),
+            name: None,
+            description: None,
+            parts: vec![Part::text("result")],
+            metadata: None,
+            extensions: None,
+        }];
+        let task = Task {
+            id: "task".into(),
+            context_id: "context".into(),
+            status: TaskStatus {
+                state: TaskState::Completed,
+                message: None,
+                timestamp: None,
+            },
+            artifacts: Some(artifacts.clone()),
+            history: Some(vec![Message::new(
+                Role::User,
+                vec![Part::text("private history")],
+            )]),
+            metadata: None,
+        };
+        let observed = ResponseObservation::new(
+            ResponseEvent::Produced,
+            &request(),
+            Duration::ZERO,
+            Ok(&SendMessageResponse::Task(task)),
+        );
+        let response: serde_json::Value =
+            serde_json::from_str(observed.response.as_ref().unwrap()).unwrap();
+        assert_eq!(response, serde_json::to_value(artifacts).unwrap());
+        assert!(!serde_json::to_string(&observed)
+            .unwrap()
+            .contains("private history"));
+        assert_eq!(observed.task_id.as_deref(), Some("task"));
+        assert!(observed.response_message_id.is_none());
+        assert!(observed.error.is_none());
+    }
+
+    #[test]
+    fn preserves_structured_response_parts() {
+        let parts: Vec<Part> = serde_json::from_value(serde_json::json!([
+            {"kind": "text", "text": "result"},
+            {"kind": "data", "data": {"score": 42}}
+        ]))
+        .unwrap();
+        let response = SendMessageResponse::Message(Message::new(Role::Agent, parts.clone()));
+        let observed = ResponseObservation::new(
+            ResponseEvent::Received,
+            &request(),
+            Duration::ZERO,
+            Ok(&response),
+        );
+        let captured: serde_json::Value =
+            serde_json::from_str(observed.response.as_ref().unwrap()).unwrap();
+        assert_eq!(captured, serde_json::to_value(parts).unwrap());
+        assert!(!observed.truncated);
     }
 
     #[test]

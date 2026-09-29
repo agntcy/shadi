@@ -89,17 +89,6 @@ impl Io {
             reader: BufReader::new(Box::new(stdout)),
         })
     }
-
-    #[cfg(test)]
-    fn from_buffers(
-        writer: impl Write + Send + 'static,
-        reader: impl Read + Send + 'static,
-    ) -> Self {
-        Self {
-            writer: Box::new(writer),
-            reader: BufReader::new(Box::new(reader)),
-        }
-    }
 }
 
 // --- Adapter ----------------------------------------------------------------
@@ -226,10 +215,44 @@ mod tests {
         // tested separately via the Request serde).
         let writer = Vec::<u8>::new();
 
-        GenericStdioAdapter {
-            id: AgentId("test".to_string()),
-            _child: None,
-            io: Mutex::new(Io::from_buffers(writer, reader)),
+        GenericStdioAdapter::from_streams("test", writer, reader)
+    }
+
+    #[test]
+    fn attached_streams_exchange_framed_requests_without_owning_a_child() {
+        #[derive(Clone, Default)]
+        struct Writer(std::sync::Arc<Mutex<(Vec<u8>, usize)>>);
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.lock().unwrap().1 += 1;
+                Ok(())
+            }
+        }
+        let writer = Writer::default();
+        let adapter = GenericStdioAdapter::from_streams(
+            "host-child",
+            writer.clone(),
+            Cursor::new(b"{\"ok\":true,\"data\":\"first\"}\n{\"ok\":true,\"data\":\"second\"}\n"),
+        );
+        assert_eq!(adapter.agent_id().0, "host-child");
+        assert!(adapter._child.is_none());
+        for expected in ["first", "second"] {
+            assert_eq!(adapter.execute_prompt("line 1\nline 2").unwrap(), expected);
+        }
+        let captured = writer.0.lock().unwrap();
+        assert_eq!(captured.1, 2);
+        let lines: Vec<_> = captured.0.split_inclusive(|byte| *byte == b'\n').collect();
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            assert_eq!(line.last(), Some(&b'\n'));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(line).unwrap(),
+                serde_json::json!({"cmd": "execute", "prompt": "line 1\nline 2"})
+            );
         }
     }
 

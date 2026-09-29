@@ -751,6 +751,7 @@ mod tests {
         }
         fn execute_prompt(&self, _: &str) -> Result<String, crate::CliAdapterError> {
             self.1.fetch_add(1, Ordering::SeqCst);
+            assert_ne!(self.0 .0, "panicking", "adapter panicked");
             if self.0 .0 == "broken" {
                 return Err(crate::CliAdapterError::Protocol("execution failed".into()));
             }
@@ -815,7 +816,13 @@ mod tests {
                 shadi_identity::wrap_signed_message(&id, b"verified prompt").unwrap(),
             )
             .unwrap();
-            let request = sample_request(text);
+            let mut request = sample_request(text);
+            request.message.metadata = Some(
+                serde_json::from_value(serde_json::json!({
+                    "shadi-correlation-id": "correlated-task"
+                }))
+                .unwrap(),
+            );
             let message_id = request.message.message_id.clone();
             let params = ServiceParams::default();
             let SendMessageResponse::Task(task) =
@@ -828,6 +835,10 @@ mod tests {
             let observations = observer.0.lock().unwrap();
             assert_eq!(observations.len(), 1);
             assert_eq!(observations[0].request_message_id, message_id);
+            assert_eq!(
+                observations[0].correlation_id.as_deref(),
+                Some("correlated-task")
+            );
             assert_eq!(observations[0].event, ResponseEvent::Produced);
             assert_eq!(observations[0].task_state, Some(state.clone()));
             assert_eq!(
@@ -859,44 +870,45 @@ mod tests {
 
     #[tokio::test]
     async fn response_observation_records_execution_error_without_changing_the_reply() {
-        let id = shadi_identity::AgentIdentity::generate().unwrap();
-        let observer = Arc::new(TestObserver::default());
-        let handler = DefaultRequestHandler::new(
-            AgentBridgeExecutor::new(
-                Arc::new(CountAdapter(
-                    shadi_mas::AgentId("broken".into()),
-                    Arc::new(AtomicUsize::new(0)),
-                )),
-                None,
-                None,
-                false,
-            )
-            .with_observer(observer.clone()),
-            InMemoryTaskStore::new(),
-        );
-        let text = String::from_utf8(shadi_identity::wrap_signed_message(&id, b"prompt").unwrap())
-            .unwrap();
-        let SendMessageResponse::Task(task) = handler
-            .send_message(&ServiceParams::default(), sample_request(text))
-            .await
-            .unwrap()
-        else {
-            panic!("expected task")
-        };
-        // Preserve the executor's existing wire result; only add telemetry.
-        assert_eq!(task.status.state, TaskState::Completed);
-        let events = observer.0.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(events[0]
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("execution failed"));
-        assert!(events[0]
-            .response
-            .as_ref()
-            .unwrap()
-            .starts_with("agentbridge error:"));
+        for (adapter_id, expected_error) in
+            [("broken", "execution failed"), ("panicking", "panicked")]
+        {
+            let id = shadi_identity::AgentIdentity::generate().unwrap();
+            let observer = Arc::new(TestObserver::default());
+            let handler = DefaultRequestHandler::new(
+                AgentBridgeExecutor::new(
+                    Arc::new(CountAdapter(
+                        shadi_mas::AgentId(adapter_id.into()),
+                        Arc::new(AtomicUsize::new(0)),
+                    )),
+                    None,
+                    None,
+                    false,
+                )
+                .with_observer(observer.clone()),
+                InMemoryTaskStore::new(),
+            );
+            let text =
+                String::from_utf8(shadi_identity::wrap_signed_message(&id, b"prompt").unwrap())
+                    .unwrap();
+            let SendMessageResponse::Task(task) = handler
+                .send_message(&ServiceParams::default(), sample_request(text))
+                .await
+                .unwrap()
+            else {
+                panic!("expected task")
+            };
+            // Preserve the executor's existing wire result; only add telemetry.
+            assert_eq!(task.status.state, TaskState::Completed);
+            let events = observer.0.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(events[0].error.as_ref().unwrap().contains(expected_error));
+            assert!(events[0]
+                .response
+                .as_ref()
+                .unwrap()
+                .starts_with("agentbridge error:"));
+        }
     }
 
     #[tokio::test]
@@ -919,12 +931,177 @@ mod tests {
             .with_mediation(hook.clone()),
             InMemoryTaskStore::new(),
         );
-        handler
-            .send_message(&ServiceParams::default(), sample_request("unsigned"))
-            .await
-            .unwrap();
+        let id = shadi_identity::AgentIdentity::generate().unwrap();
+        let signed = |payload: &[u8]| {
+            String::from_utf8(shadi_identity::wrap_signed_message(&id, payload).unwrap()).unwrap()
+        };
+        let mut wrong_destination = sample_request(signed(b"prompt"));
+        wrong_destination.message =
+            shadi_a2a::insert_dest_did(wrong_destination.message, "did:key:zOther");
+        for (request, state) in [
+            (sample_request("unsigned"), TaskState::AuthRequired),
+            (
+                sample_request("SHADI-DID-PROOF/1\ninvalid"),
+                TaskState::AuthRequired,
+            ),
+            (
+                sample_request(signed(b"SHADI-AGENT-BINDING/1\ninvalid")),
+                TaskState::AuthRequired,
+            ),
+            (
+                sample_request(
+                    String::from_utf8(bound_envelope(&id, &id, "b", 1, b"expired")).unwrap(),
+                ),
+                TaskState::Rejected,
+            ),
+            (wrong_destination, TaskState::Rejected),
+        ] {
+            let SendMessageResponse::Task(task) = handler
+                .send_message(&ServiceParams::default(), request)
+                .await
+                .unwrap()
+            else {
+                panic!("expected admission task")
+            };
+            assert_eq!(task.status.state, state);
+        }
         assert!(hook.seen.lock().unwrap().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    fn empty_context() -> a2a_server::ExecutorContext {
+        a2a_server::ExecutorContext {
+            message: None,
+            task_id: "task".into(),
+            stored_task: None,
+            context_id: "context".into(),
+            metadata: None,
+            user: None,
+            service_params: Default::default(),
+            tenant: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_message_is_rejected_only_when_mediation_is_configured() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let executor = AgentBridgeExecutor::new(
+            Arc::new(CountAdapter(
+                shadi_mas::AgentId("b".into()),
+                counter.clone(),
+            )),
+            None,
+            None,
+            true,
+        );
+        let events = executor.execute(empty_context()).collect::<Vec<_>>().await;
+        assert!(
+            matches!(&events[1], Ok(StreamResponse::Task(task)) if task.status.state == TaskState::Completed)
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        let hook = Arc::new(TestHook {
+            answer: Ok(MediationDecision::Allow {}),
+            seen: Mutex::new(Vec::new()),
+        });
+        let executor = executor.with_mediation(hook.clone());
+        let events = executor.execute(empty_context()).collect::<Vec<_>>().await;
+        assert!(
+            matches!(&events[0], Ok(StreamResponse::Task(task)) if task.status.state == TaskState::Rejected)
+        );
+        assert!(hook.seen.lock().unwrap().is_empty());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        let events = executor.cancel(empty_context()).collect::<Vec<_>>().await;
+        assert!(
+            matches!(&events[0], Ok(StreamResponse::Task(task)) if task.status.state == TaskState::Canceled && task.id == "task" && task.context_id == "context")
+        );
+    }
+
+    #[tokio::test]
+    async fn bound_handoff_is_gated_but_does_not_execute_the_adapter() {
+        let identity = shadi_identity::AgentIdentity::generate().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let hook = Arc::new(TestHook {
+            answer: Ok(MediationDecision::Allow {}),
+            seen: Mutex::new(Vec::new()),
+        });
+        let handler = DefaultRequestHandler::new(
+            AgentBridgeExecutor::new(
+                Arc::new(CountAdapter(
+                    shadi_mas::AgentId("b".into()),
+                    counter.clone(),
+                )),
+                None,
+                None,
+                false,
+            )
+            .with_mediation(hook.clone()),
+            InMemoryTaskStore::new(),
+        );
+        let prompt = b"envelope\nbody:\nHANDOFF from a to b\nupdated context";
+        let signed = bound_envelope(&identity, &identity, "a", now_unix() + 60, prompt);
+        let SendMessageResponse::Task(task) = handler
+            .send_message(
+                &ServiceParams::default(),
+                sample_request(String::from_utf8(signed).unwrap()),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected handoff task")
+        };
+        assert_eq!(task.status.state, TaskState::Completed);
+        assert!(extract_text(task.status.message.as_ref().unwrap()).starts_with("stored handoff"));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        let seen = hook.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].payload.as_deref(),
+            Some(std::str::from_utf8(prompt).unwrap())
+        );
+    }
+
+    #[test]
+    fn peer_handoff_inherits_sender_mediation_before_connecting() {
+        let _guard = crate::env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("SHADI_TMP_DIR");
+        std::env::set_var("SHADI_TMP_DIR", dir.path());
+        let registry = LocalAdapterRegistry::from_env();
+        let _lease = registry
+            .publish(&handoff_record(
+                "b",
+                "did:key:zPeer",
+                "",
+                "http://127.0.0.1:9",
+            ))
+            .unwrap();
+        let hook = Arc::new(TestHook {
+            answer: Ok(MediationDecision::Deny {
+                reason: "handoff denied".into(),
+            }),
+            seen: Mutex::new(Vec::new()),
+        });
+        let observer = Arc::new(TestObserver::default());
+        let result = dispatch_peer_handoff(
+            "a",
+            "b",
+            None,
+            "prompt",
+            "reply",
+            Some(hook.clone()),
+            Some(observer.clone()),
+        );
+        match previous {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        assert!(result.unwrap_err().contains("handoff denied"));
+        let seen = hook.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].point, MediationPoint::Sender);
+        assert_eq!(seen[0].local_agent, "a");
+        assert_eq!(seen[0].peer.as_deref(), Some("did:key:zPeer"));
+        assert!(observer.0.lock().unwrap().is_empty());
     }
     fn sample_request(text: impl Into<String>) -> SendMessageRequest {
         SendMessageRequest {
@@ -1263,10 +1440,13 @@ test push ... FAILED
     fn admit_unsigned_message_parks_auth_required() {
         match admit_message(&sample_request("plain task").message) {
             MessageAdmission::AuthRequired { reason } => {
-                assert!(reason.contains("DID proof required"), "{reason}");
+                assert!(
+                    reason.contains("DID proof required"),
+                    "expected a DID proof challenge"
+                );
             }
-            MessageAdmission::Proven { did, .. } => panic!("unsigned text proved as {did}"),
-            MessageAdmission::Forged { reason } => panic!("expected parked, got forged: {reason}"),
+            MessageAdmission::Proven { .. } => panic!("unsigned text must not prove an identity"),
+            MessageAdmission::Forged { .. } => panic!("unsigned text must be parked, not rejected"),
         }
     }
 
@@ -1283,13 +1463,16 @@ test push ... FAILED
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
         match admit_message(&sample_request(forged).message) {
             MessageAdmission::Forged { reason } => {
-                assert!(reason.contains("forged DID"), "{reason}");
+                assert!(
+                    reason.contains("forged DID"),
+                    "expected a forged DID rejection"
+                );
             }
-            MessageAdmission::AuthRequired { reason } => {
-                panic!("forged DID must be rejected, not parked: {reason}");
+            MessageAdmission::AuthRequired { .. } => {
+                panic!("forged DID must be rejected, not parked");
             }
-            MessageAdmission::Proven { did, .. } => {
-                panic!("forged DID must not prove as {did}");
+            MessageAdmission::Proven { .. } => {
+                panic!("forged DID must not prove an identity");
             }
         }
     }
