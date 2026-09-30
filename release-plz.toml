@@ -25,6 +25,7 @@ release = false
 [[package]]
 name = "agntcy-shadi-cli"
 git_release_enable = true
+semver_check = false
 # The root CHANGELOG is the workspace-wide view, so release-plz owns it rather
 # than anyone maintaining it by hand — the hand-written one had drifted twelve
 # days and two releases behind. Paths are relative to the root Cargo.toml, so
@@ -48,3 +49,29 @@ changelog_include = [
 [[package]]
 name = "agntcy-agentbridge-cli"
 git_release_enable = true
+semver_check = false
+
+# cargo-semver-checks builds rustdoc for the published baseline as well as the
+# current tree, and every baseline on crates.io predates the slim-persistence
+# pin, so it still resolves two mls-rs trees and fails to compile. The crates
+# that do not pull slim keep the check. Re-enable these once a pinned version
+# of each has been published (agntcy/shadi#338).
+[[package]]
+name = "agntcy-agentbridge"
+semver_check = false
+
+[[package]]
+name = "agntcy-shadi-a2a"
+semver_check = false
+
+[[package]]
+name = "agntcy-shadi-agent-transport-slim"
+semver_check = false
+
+[[package]]
+name = "agntcy-shadi-identity"
+semver_check = false
+
+[[package]]
+name = "agntcy-shadi-mas"
+semver_check = false
