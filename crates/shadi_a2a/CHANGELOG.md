@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.1.6...agntcy-shadi-a2a-v0.2.0) - 2026-09-30
+
+### Fixed
+
+- *(deps)* pin agntcy-slim-persistence and unblock releases ([#339](https://github.com/agntcy/shadi/pull/339))
+
 ## [0.1.6](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.1.5...agntcy-shadi-a2a-v0.1.6) - 2026-09-09
 
 ### Added

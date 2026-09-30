@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.2.0...agntcy-shadi-sandbox-v0.2.1) - 2026-09-30
+
+### Added
+
+- *(sandbox)* bound proxy connections and finish the SOCKS5 fuzzing ([#290](https://github.com/agntcy/shadi/pull/290))
+
+### Fixed
+
+- *(sandbox)* list a denied path once in the policy description ([#314](https://github.com/agntcy/shadi/pull/314))
+- *(sandbox)* bind the ACL journal HMAC to its field boundary ([#310](https://github.com/agntcy/shadi/pull/310))
+- *(sandbox)* deduplicate resolved policy paths and network destinations ([#302](https://github.com/agntcy/shadi/pull/302)) ([#303](https://github.com/agntcy/shadi/pull/303))
+- *(shadi_py)* default sandbox policies to the minimal platform profile ([#299](https://github.com/agntcy/shadi/pull/299))
+
+### Other
+
+- *(agentbridge)* fuzz the stdio response and member spec parsers ([#307](https://github.com/agntcy/shadi/pull/307))
+- *(sandbox)* fuzz resolve_session_socket ([#291](https://github.com/agntcy/shadi/pull/291))
+- *(sandbox)* hold the port lock in every test that binds one ([#289](https://github.com/agntcy/shadi/pull/289))
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.1.4...agntcy-shadi-sandbox-v0.2.0) - 2026-09-15
 
 ### Added

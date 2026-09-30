@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.1.7...agntcy-agentbridge-cli-v0.1.8) - 2026-09-30
+
+### Added
+
+- *(agentbridge)* add --session and --report to coordinate ([#330](https://github.com/agntcy/shadi/pull/330))
+- *(agentbridge)* verify the human binding at admission ([#327](https://github.com/agntcy/shadi/pull/327))
+- *(agentbridge)* serve the agent card at the well-known path ([#287](https://github.com/agntcy/shadi/pull/287))
+
+### Fixed
+
+- *(deps)* pin agntcy-slim-persistence and unblock releases ([#339](https://github.com/agntcy/shadi/pull/339))
+- *(agentbridge)* key harness sessions by A2A contextId ([#306](https://github.com/agntcy/shadi/pull/306))
+- *(agentbridge)* park and reject as real tasks the client can fetch ([#293](https://github.com/agntcy/shadi/pull/293))
+
+### Other
+
+- *(agentbridge)* serialise the TLS tests against each other ([#288](https://github.com/agntcy/shadi/pull/288))
+
 ## [0.1.7](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.1.6...agntcy-agentbridge-cli-v0.1.7) - 2026-09-15
 
 ### Added

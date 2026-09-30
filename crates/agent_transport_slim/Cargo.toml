@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-shadi-agent-transport-slim"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 description = "SLIM transport integration and stdio bridge support for SHADI."
 license.workspace = true
@@ -14,8 +14,8 @@ default = []
 slim = []
 
 [dependencies]
-agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.3.0", path = "../agent_secrets" }
-shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.1", path = "../shadi_identity" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.0", path = "../agent_secrets" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.2", path = "../shadi_identity" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
 # Not used directly: holds the transitive mls-rs line together. slim-persistence
 # 0.1.1 moved to mls-rs 0.56 in a patch release while slim-mls 0.3.10 is on 0.54,
