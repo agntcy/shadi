@@ -12,9 +12,9 @@ name = "agentbridge"
 path = "src/main.rs"
 
 [dependencies]
-agentbridge = { package = "agntcy-agentbridge", version = "0.2.2", path = "../agentbridge" }
-shadi_mas = { package = "agntcy-shadi-mas", version = "0.3.1", path = "../shadi_mas" }
-shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.7", path = "../shadi_a2a" }
+agentbridge = { package = "agntcy-agentbridge", version = "0.3.0", path = "../agentbridge" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.4.0", path = "../shadi_mas" }
+shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.2.0", path = "../shadi_a2a" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
 # Not used directly: holds the transitive mls-rs line together. slim-persistence
 # 0.1.1 moved to mls-rs 0.56 in a patch release while slim-mls 0.3.10 is on 0.54,
