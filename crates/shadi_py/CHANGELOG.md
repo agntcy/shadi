@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/agntcy/shadi/compare/agntcy-shadi-py-v0.1.8...agntcy-shadi-py-v0.1.9) - 2026-09-30
+
+### Fixed
+
+- *(agent_secrets)* remove unused secret policy ([#325](https://github.com/agntcy/shadi/pull/325))
+- *(shadi_py)* default sandbox policies to the minimal platform profile ([#299](https://github.com/agntcy/shadi/pull/299))
+
+### Other
+
+- Fix/pyo3 0.29 build ([#268](https://github.com/agntcy/shadi/pull/268))
+
 ## [0.1.8](https://github.com/agntcy/shadi/compare/agntcy-shadi-py-v0.1.7...agntcy-shadi-py-v0.1.8) - 2026-09-15
 
 ### Other

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-secrets-v0.3.0...agntcy-shadi-agent-secrets-v0.4.0) - 2026-09-30
+
+### Fixed
+
+- *(agent_secrets)* stop listing secrets whose keychain item is gone ([#331](https://github.com/agntcy/shadi/pull/331))
+- *(agent_secrets)* remove unused secret policy ([#325](https://github.com/agntcy/shadi/pull/325))
+
+### Other
+
+- *(agent_secrets)* fuzz the secret mapping parser ([#309](https://github.com/agntcy/shadi/pull/309))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-secrets-v0.2.1...agntcy-shadi-agent-secrets-v0.3.0) - 2026-09-09
 
 ### Added

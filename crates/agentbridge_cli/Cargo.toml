@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-agentbridge-cli"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 rust-version.workspace = true
 description = "CLI binary for the agentbridge general-purpose agent interconnect."
@@ -12,9 +12,9 @@ name = "agentbridge"
 path = "src/main.rs"
 
 [dependencies]
-agentbridge = { package = "agntcy-agentbridge", version = "0.2.1", path = "../agentbridge" }
-shadi_mas = { package = "agntcy-shadi-mas", version = "0.3.0", path = "../shadi_mas" }
-shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.6", path = "../shadi_a2a" }
+agentbridge = { package = "agntcy-agentbridge", version = "0.2.2", path = "../agentbridge" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.3.1", path = "../shadi_mas" }
+shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.1.7", path = "../shadi_a2a" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
 # Not used directly: holds the transitive mls-rs line together. slim-persistence
 # 0.1.1 moved to mls-rs 0.56 in a patch release while slim-mls 0.3.10 is on 0.54,
@@ -29,9 +29,9 @@ a2a-pb = { version = "0.2.0" }
 tonic = { version = "0.14", features = ["transport"] }
 tonic-tls = { version = "0.7", default-features = false, features = ["rustls"] }
 rustls-pki-types = "1.9"
-agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.3.0", path = "../agent_secrets" }
-shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.1", path = "../shadi_identity" }
-shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.2.0", path = "../shadi_sandbox" }
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.0", path = "../agent_secrets" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.2", path = "../shadi_identity" }
+shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.2.1", path = "../shadi_sandbox" }
 async-trait = "0.1"
 futures = "0.3"
 anyhow = "1"

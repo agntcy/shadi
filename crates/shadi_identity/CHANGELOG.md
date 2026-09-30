@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.2.1...agntcy-shadi-identity-v0.2.2) - 2026-09-30
+
+### Added
+
+- *(agentbridge)* verify the human binding at admission ([#327](https://github.com/agntcy/shadi/pull/327))
+- *(identity)* add human-to-agent binding certificates ([#321](https://github.com/agntcy/shadi/pull/321))
+
+### Fixed
+
+- *(deps)* pin agntcy-slim-persistence and unblock releases ([#339](https://github.com/agntcy/shadi/pull/339))
+
+### Other
+
+- *(identity)* pin that DID credentials are minted per call ([#315](https://github.com/agntcy/shadi/pull/315))
+
 ## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.2.0...agntcy-shadi-identity-v0.2.1) - 2026-09-15
 
 ### Other

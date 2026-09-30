@@ -7,6 +7,45 @@ workspace-wide view of each release.
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.10...agntcy-shadi-cli-v0.1.11) - 2026-09-30
+
+### Added
+
+- *(shadictl)* report trusted-secret rules over the control socket ([#305](https://github.com/agntcy/shadi/pull/305))
+- *(agentbridge)* add --session and --report to coordinate ([#330](https://github.com/agntcy/shadi/pull/330))
+- *(agentbridge)* verify the human binding at admission ([#327](https://github.com/agntcy/shadi/pull/327))
+- *(agentbridge)* serve the agent card at the well-known path ([#287](https://github.com/agntcy/shadi/pull/287))
+- *(identity)* add human-to-agent binding certificates ([#321](https://github.com/agntcy/shadi/pull/321))
+- *(sandbox)* bound proxy connections and finish the SOCKS5 fuzzing ([#290](https://github.com/agntcy/shadi/pull/290))
+
+### Fixed
+
+- *(deps)* pin agntcy-slim-persistence and unblock releases ([#339](https://github.com/agntcy/shadi/pull/339))
+- *(agent_secrets)* stop listing secrets whose keychain item is gone ([#331](https://github.com/agntcy/shadi/pull/331))
+- *(agent_secrets)* remove unused secret policy ([#325](https://github.com/agntcy/shadi/pull/325))
+- *(agentbridge)* stop exec'ing generated scripts in the session tests ([#324](https://github.com/agntcy/shadi/pull/324))
+- *(agentbridge)* key harness sessions by A2A contextId ([#306](https://github.com/agntcy/shadi/pull/306))
+- *(agentbridge)* serialize every env-mutating test on one lock ([#311](https://github.com/agntcy/shadi/pull/311))
+- *(agentbridge)* terminate every child on shutdown, not just the newest ([#281](https://github.com/agntcy/shadi/pull/281))
+- *(agentbridge)* stop claude --add-dir from swallowing the prompt ([#275](https://github.com/agntcy/shadi/pull/275))
+- *(agentbridge)* park and reject as real tasks the client can fetch ([#293](https://github.com/agntcy/shadi/pull/293))
+- *(mas)* scale the cascade demand series with the chain, and expose gamma ([#332](https://github.com/agntcy/shadi/pull/332))
+- *(shadi_mas)* scan every line for the ASSEMBLY CLASS marker ([#308](https://github.com/agntcy/shadi/pull/308))
+- *(shadi_py)* default sandbox policies to the minimal platform profile ([#299](https://github.com/agntcy/shadi/pull/299))
+- *(sandbox)* list a denied path once in the policy description ([#314](https://github.com/agntcy/shadi/pull/314))
+- *(sandbox)* bind the ACL journal HMAC to its field boundary ([#310](https://github.com/agntcy/shadi/pull/310))
+- *(sandbox)* deduplicate resolved policy paths and network destinations ([#302](https://github.com/agntcy/shadi/pull/302)) ([#303](https://github.com/agntcy/shadi/pull/303))
+
+### Other
+
+- *(agent_secrets)* fuzz the secret mapping parser ([#309](https://github.com/agntcy/shadi/pull/309))
+- *(agentbridge)* fuzz the stdio response and member spec parsers ([#307](https://github.com/agntcy/shadi/pull/307))
+- *(agentbridge)* serialise the TLS tests against each other ([#288](https://github.com/agntcy/shadi/pull/288))
+- *(identity)* pin that DID credentials are minted per call ([#315](https://github.com/agntcy/shadi/pull/315))
+- Fix/pyo3 0.29 build ([#268](https://github.com/agntcy/shadi/pull/268))
+- *(sandbox)* fuzz resolve_session_socket ([#291](https://github.com/agntcy/shadi/pull/291))
+- *(sandbox)* hold the port lock in every test that binds one ([#289](https://github.com/agntcy/shadi/pull/289))
+
 ## [0.1.10](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.9...agntcy-shadi-cli-v0.1.10) - 2026-09-15
 
 ### Other

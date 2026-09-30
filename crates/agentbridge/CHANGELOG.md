@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.2.1...agntcy-agentbridge-v0.2.2) - 2026-09-30
+
+### Fixed
+
+- *(agentbridge)* stop exec'ing generated scripts in the session tests ([#324](https://github.com/agntcy/shadi/pull/324))
+- *(agentbridge)* key harness sessions by A2A contextId ([#306](https://github.com/agntcy/shadi/pull/306))
+- *(agentbridge)* serialize every env-mutating test on one lock ([#311](https://github.com/agntcy/shadi/pull/311))
+- *(agentbridge)* terminate every child on shutdown, not just the newest ([#281](https://github.com/agntcy/shadi/pull/281))
+- *(agentbridge)* stop claude --add-dir from swallowing the prompt ([#275](https://github.com/agntcy/shadi/pull/275))
+
+### Other
+
+- *(agentbridge)* fuzz the stdio response and member spec parsers ([#307](https://github.com/agntcy/shadi/pull/307))
+
 ## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.2.0...agntcy-agentbridge-v0.2.1) - 2026-09-15
 
 ### Added
