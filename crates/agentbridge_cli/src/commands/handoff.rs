@@ -23,7 +23,8 @@ pub fn run(
     save: Option<&str>,
     slim_endpoint: &str,
 ) -> anyhow::Result<()> {
-    let src = open_peer(from_spec, slim_endpoint)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let src = open_peer(from_spec, slim_endpoint, runtime.handle())?;
     println!("Source '{}' connected.", src.label());
 
     let ctx = src.snapshot().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -40,7 +41,7 @@ pub fn run(
         println!("Context saved to {path}.");
     }
 
-    let dst = open_peer(to_spec, slim_endpoint)?;
+    let dst = open_peer(to_spec, slim_endpoint, runtime.handle())?;
     println!("Destination '{}' connected.", dst.label());
     dst.inject(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("Context successfully handed off to '{}'.", dst.label());
@@ -54,6 +55,7 @@ pub fn run_from_file(
     to_spec: &str,
     slim_endpoint: &str,
 ) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
     let bytes = std::fs::read(context_path)?;
     let ctx = ContextPacket::from_bytes(&bytes)?;
     println!(
@@ -62,7 +64,7 @@ pub fn run_from_file(
         ctx.conversation.len(),
     );
 
-    let dst = open_peer(to_spec, slim_endpoint)?;
+    let dst = open_peer(to_spec, slim_endpoint, runtime.handle())?;
     dst.inject(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("Context injected into '{}'.", dst.label());
     Ok(())
@@ -181,7 +183,11 @@ fn render_inject_prompt(ctx: &ContextPacket) -> String {
     system
 }
 
-fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
+fn open_peer(
+    spec: &str,
+    slim_endpoint: &str,
+    runtime: &tokio::runtime::Handle,
+) -> anyhow::Result<HandoffPeer> {
     if let Some((label, adapter)) =
         open_profile_adapter(spec).map_err(|e| anyhow::anyhow!("{e}"))?
     {
@@ -217,7 +223,7 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
         };
         return Ok(HandoffPeer::Slim {
             agent_id,
-            adapter: LiveA2ATaskAdapter::new(config),
+            adapter: LiveA2ATaskAdapter::new(config, runtime.clone()),
         });
     }
     spawn_stdio(spec, spec)
@@ -245,15 +251,18 @@ mod tests {
 
     #[test]
     fn open_peer_accepts_native_and_slim_specs() {
-        let claude = open_peer("claude-code", "127.0.0.1:47357").expect("claude");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let claude = open_peer("claude-code", "127.0.0.1:47357", runtime.handle()).expect("claude");
         assert_eq!(claude.label(), "claude-code");
-        let copilot = open_peer("copilot", "127.0.0.1:47357").expect("copilot");
+        let copilot = open_peer("copilot", "127.0.0.1:47357", runtime.handle()).expect("copilot");
         assert_eq!(copilot.label(), "copilot");
-        let codex = open_peer("codex", "127.0.0.1:47357").expect("codex");
+        let codex = open_peer("codex", "127.0.0.1:47357", runtime.handle()).expect("codex");
         assert_eq!(codex.label(), "codex");
-        let cursor = open_peer("cursor-agent", "127.0.0.1:47357").expect("cursor");
+        let cursor =
+            open_peer("cursor-agent", "127.0.0.1:47357", runtime.handle()).expect("cursor");
         assert_eq!(cursor.label(), "cursor-agent");
-        match open_peer("slim:peer@10.0.0.1:9", "127.0.0.1:47357").expect("slim") {
+        match open_peer("slim:peer@10.0.0.1:9", "127.0.0.1:47357", runtime.handle()).expect("slim")
+        {
             HandoffPeer::Slim { agent_id, .. } => assert_eq!(agent_id, "peer"),
             other => panic!("expected slim peer, got {}", other.label()),
         }
@@ -263,7 +272,9 @@ mod tests {
     fn slim_from_self_does_not_open_a2a_client_to_own_listener() {
         let prev = std::env::var("SHADI_AGENT_ID").ok();
         std::env::set_var("SHADI_AGENT_ID", "claude-code");
-        let peer = open_peer("slim:claude-code", "127.0.0.1:47357").expect("self slim");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let peer =
+            open_peer("slim:claude-code", "127.0.0.1:47357", runtime.handle()).expect("self slim");
         match peer {
             HandoffPeer::SelfSlim { agent_id } => assert_eq!(agent_id, "claude-code"),
             other => panic!("expected SelfSlim, got {}", other.label()),

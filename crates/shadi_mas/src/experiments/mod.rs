@@ -11,6 +11,8 @@ use a2a_client::A2AClient;
 use agent_secrets::{DidProofVerifier, SessionContext};
 
 pub mod auth_required;
+#[cfg(test)]
+mod runtime_tests;
 use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 pub use auth_required::{
     audit_auth_required, decide_auth_required, is_auth_required, run_auth_required_loop,
@@ -21,7 +23,7 @@ use slim_bindings::{
     BackoffConfig, CaSource, ClientConfig, ExponentialBackoff, Name, Service, TlsClientConfig,
     TlsSource,
 };
-use tokio::runtime::Builder as TokioRuntimeBuilder;
+use tokio::runtime::Handle;
 
 const DEFAULT_LOCAL_ORG: &str = "agntcy";
 const DEFAULT_LOCAL_NAMESPACE: &str = "shadi";
@@ -109,15 +111,23 @@ pub struct LiveTaskDispatchRecord {
 
 pub struct LiveA2ATaskAdapter {
     config: LiveA2ATaskAdapterConfig,
+    runtime: Handle,
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
     mediation: Option<Arc<dyn MediationHook>>,
     observer: Option<Arc<dyn ResponseObserver>>,
 }
 
 impl LiveA2ATaskAdapter {
-    pub fn new(config: LiveA2ATaskAdapterConfig) -> Self {
+    /// Use the host's runtime for authorization and transport across all sends.
+    ///
+    /// The host must keep the runtime alive until the adapter and its hooks are
+    /// dropped. A handle does not own the runtime. Prefer a multi-thread runtime;
+    /// a current-thread runtime must be driven elsewhere while dispatch blocks.
+    /// Call synchronous `dispatch` from a blocking thread, not an async task.
+    pub fn new(config: LiveA2ATaskAdapterConfig, runtime: Handle) -> Self {
         Self {
             config,
+            runtime,
             dispatches: Mutex::new(Vec::new()),
             mediation: None,
             observer: None,
@@ -189,10 +199,7 @@ impl LiveA2ATaskAdapter {
                     payload: None,
                 };
                 if let Some(hook) = &self.mediation {
-                    TokioRuntimeBuilder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| e.to_string())?
+                    self.runtime
                         .block_on(require_allow(hook.as_ref(), &request))
                         .map_err(|e| e.to_string())?;
                 }
@@ -279,12 +286,8 @@ impl LiveA2ATaskAdapter {
             format!("mas-task-session-{}", task.task_id),
         )
         .with_proven_did(proven_did);
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
         let locator = locator.clone();
-        runtime.block_on(async {
+        self.runtime.block_on(async {
             let via = locator.display_uri();
             let channel = A2AChannel::connect(locator, Arc::new(DidProofVerifier), session)
                 .await
@@ -366,11 +369,6 @@ impl LiveA2ATaskAdapter {
                 app.subscribe(local_name_ref.clone(), Some(connection_id))
                     .map_err(format_slim_error)?;
 
-                let runtime = TokioRuntimeBuilder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|err| format!("failed to create tokio runtime: {}", err))?;
-
                 // Outbound payload is DID-signed above; the verifier requires that proof.
                 let session = SessionContext::new(
                     &self.config.agent_id,
@@ -381,7 +379,7 @@ impl LiveA2ATaskAdapter {
                 // slim_rpc::Channel captures `tokio::runtime::Handle::current()` at
                 // construction, so build the transport inside the runtime context.
                 let channel = {
-                    let _enter = runtime.enter();
+                    let _enter = self.runtime.enter();
                     A2AChannelBuilder::new(
                         app.clone(),
                         remote_name_ref,
@@ -399,7 +397,8 @@ impl LiveA2ATaskAdapter {
                     tenant: None,
                 };
 
-                let response = runtime
+                let response = self
+                    .runtime
                     .block_on(async {
                         let response = client.send_message(&request).await?;
                         client.destroy().await?;
@@ -842,16 +841,20 @@ mod transport_tests {
 
     #[test]
     fn live_task_adapter_starts_with_no_dispatches() {
-        let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
-            endpoint: "node:47357".to_string(),
-            agent_id: "avatar".to_string(),
-            local_name: None,
-            peer_agent_id: "peer".to_string(),
-            destination: None,
-            a2a_url: None,
-            a2a_binding: None,
-            peer_did: None,
-        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let adapter = LiveA2ATaskAdapter::new(
+            LiveA2ATaskAdapterConfig {
+                endpoint: "node:47357".to_string(),
+                agent_id: "avatar".to_string(),
+                local_name: None,
+                peer_agent_id: "peer".to_string(),
+                destination: None,
+                a2a_url: None,
+                a2a_binding: None,
+                peer_did: None,
+            },
+            runtime.handle().clone(),
+        );
         assert!(adapter.dispatches().expect("lock").is_empty());
     }
 
@@ -877,16 +880,20 @@ mod transport_tests {
                 })))
             }
         }
-        let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
-            endpoint: "invalid".into(),
-            agent_id: "no-credentials".into(),
-            local_name: None,
-            peer_agent_id: "peer".into(),
-            destination: None,
-            a2a_url: None,
-            a2a_binding: None,
-            peer_did: None,
-        })
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let adapter = LiveA2ATaskAdapter::new(
+            LiveA2ATaskAdapterConfig {
+                endpoint: "invalid".into(),
+                agent_id: "no-credentials".into(),
+                local_name: None,
+                peer_agent_id: "peer".into(),
+                destination: None,
+                a2a_url: None,
+                a2a_binding: None,
+                peer_did: None,
+            },
+            runtime.handle().clone(),
+        )
         .with_mediation(Arc::new(Deny));
         let error = adapter.dispatch(sample_task()).unwrap_err();
         assert_eq!(error, "mediation denied: stop before send");

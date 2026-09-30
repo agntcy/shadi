@@ -201,7 +201,7 @@ pub async fn agentbridge_delegate(
             a2a_binding: None,
             peer_did: None,
         };
-        let adapter = LiveA2ATaskAdapter::new(config);
+        let adapter = LiveA2ATaskAdapter::new(config, tokio::runtime::Handle::current());
 
         let task_id = uuid::Uuid::new_v4().to_string();
         let task = TaskEnvelope {
@@ -314,7 +314,7 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
                 peer_did: None,
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
-                inner: LiveA2ATaskAdapter::new(config),
+                inner: LiveA2ATaskAdapter::new(config, tokio::runtime::Handle::current()),
                 dispatch_count: Mutex::new(0),
             });
             (agent_id, slim_adapter as Arc<dyn ToolAdapter>)

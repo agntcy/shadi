@@ -14,6 +14,14 @@ There is no policy-service implementation or IoC dependency in SHADi. Hosts own
 authentication, payload-export policy, telemetry, and transport of the decision.
 Existing callers without a hook retain their existing behavior.
 
+Hosts construct `LiveA2ATaskAdapter::new(config, runtime.handle().clone())` using
+a long-lived Tokio runtime. Authorization and transport reuse that runtime across
+sends and retries; automatic peer handoffs use the receiver's running runtime.
+Adapters sharing a pooled HTTP hook should use the same runtime. Keep the runtime
+alive until adapters, hooks and observation workers have stopped; a `Handle` does
+not keep it alive. Prefer a multi-thread runtime and call synchronous `dispatch`
+from a blocking thread (`spawn_blocking` when calling from async code).
+
 Sender events contain metadata only. Receiver events contain the verified
 plaintext and proven sender DID. `peer` at the sender is the intended recipient,
 not a verified remote identity. Correlation metadata is useful for telemetry,

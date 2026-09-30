@@ -55,7 +55,8 @@ pub fn run(
         a2a_binding: unicast.as_ref().map(|l| l.binding),
         peer_did: Some(peer.did.clone()),
     };
-    let adapter = LiveA2ATaskAdapter::new(config);
+    let runtime = tokio::runtime::Runtime::new()?;
+    let adapter = LiveA2ATaskAdapter::new(config, runtime.handle().clone());
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let via = match locator.as_ref() {

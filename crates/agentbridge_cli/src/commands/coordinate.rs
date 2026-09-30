@@ -148,7 +148,8 @@ pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
     let session = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     println!("session={session}");
 
-    let agents = build_agents(agent_specs, slim_endpoint, &session)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let agents = build_agents(agent_specs, slim_endpoint, &session, runtime.handle())?;
     if agents.is_empty() {
         anyhow::bail!(
             "no agents specified — use --agents claude-code,cursor-agent,copilot,codex \
@@ -706,6 +707,7 @@ fn build_agents(
     specs: &[String],
     slim_endpoint: &str,
     session: &str,
+    runtime: &tokio::runtime::Handle,
 ) -> anyhow::Result<Vec<AgentEntry>> {
     let mut agents = Vec::new();
     for spec in specs {
@@ -747,7 +749,7 @@ fn build_agents(
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
                 agent_id: agent_id.clone(),
-                inner: LiveA2ATaskAdapter::new(config),
+                inner: LiveA2ATaskAdapter::new(config, runtime.clone()),
                 dispatch_count: Mutex::new(0),
             });
             (agent_id, slim_adapter as Arc<dyn ToolAdapter>)
@@ -877,7 +879,9 @@ mod tests {
             "cursor-agent".to_string(),
             "slim:peer@127.0.0.1:47357".to_string(),
         ];
-        let agents = build_agents(&specs, "127.0.0.1:47357", "test-session").expect("build");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let agents = build_agents(&specs, "127.0.0.1:47357", "test-session", runtime.handle())
+            .expect("build");
         let ids: Vec<&str> = agents.iter().map(|a| a.id.0.as_str()).collect();
         assert_eq!(
             ids,
@@ -933,7 +937,8 @@ mod tests {
     #[test]
     fn build_agents_rejects_unknown_specs() {
         let specs = vec!["totally-unknown".to_string()];
-        assert!(build_agents(&specs, "127.0.0.1:47357", "test-session").is_err());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(build_agents(&specs, "127.0.0.1:47357", "test-session", runtime.handle()).is_err());
     }
 
     struct ReplyTool(&'static str);

@@ -260,16 +260,20 @@ fn dispatch_peer_handoff(
 ) -> Result<(), String> {
     let registry = LocalAdapterRegistry::from_env();
     let target = resolve_handoff_target(to, slim_fallback, &registry)?;
-    let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
-        endpoint: target.slim_endpoint.clone().unwrap_or_default(),
-        agent_id: from.to_string(),
-        local_name: Some(format!("agntcy/shadi/{from}-a2a-client")),
-        peer_agent_id: target.peer_agent_id.clone(),
-        destination: Some(format!("agntcy/shadi/{}-a2a", target.peer_agent_id)),
-        a2a_url: target.a2a_url,
-        a2a_binding: target.a2a_binding,
-        peer_did: target.peer_did,
-    });
+    // This runs in spawn_blocking on the receiver's still-running runtime.
+    let adapter = LiveA2ATaskAdapter::new(
+        LiveA2ATaskAdapterConfig {
+            endpoint: target.slim_endpoint.clone().unwrap_or_default(),
+            agent_id: from.to_string(),
+            local_name: Some(format!("agntcy/shadi/{from}-a2a-client")),
+            peer_agent_id: target.peer_agent_id.clone(),
+            destination: Some(format!("agntcy/shadi/{}-a2a", target.peer_agent_id)),
+            a2a_url: target.a2a_url,
+            a2a_binding: target.a2a_binding,
+            peer_did: target.peer_did,
+        },
+        tokio::runtime::Handle::current(),
+    );
     let adapter = match mediation {
         Some(hook) => adapter.with_mediation(hook),
         None => adapter,
@@ -1062,6 +1066,8 @@ mod tests {
 
     #[test]
     fn peer_handoff_inherits_sender_mediation_before_connecting() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
         let _guard = crate::env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let previous = std::env::var_os("SHADI_TMP_DIR");

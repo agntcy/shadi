@@ -360,6 +360,7 @@ dependencies = [
  "agntcy-shadi-agent-transport-slim",
  "agntcy-shadi-identity",
  "agntcy-slim-bindings",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tempfile",
