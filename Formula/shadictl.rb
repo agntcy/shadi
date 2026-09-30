@@ -4,31 +4,31 @@
 class Shadictl < Formula
   desc "Command-line interface for SHADI policy, secrets, memory, and SLIM operations."
   homepage "https://github.com/agntcy/shadi"
-  version "0.1.10"
+  version "0.1.11"
   license "Apache-2.0"
   head "https://github.com/agntcy/shadi.git", branch: "main"
 
   on_macos do
     on_arm do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.10/shadictl-v0.1.10-aarch64-apple-darwin.tar.gz"
-      sha256 "08b0f8455d2640c29eadd323716793beb0e1efcda343a3e9c9dd43b77f19836c"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.11/shadictl-v0.1.11-aarch64-apple-darwin.tar.gz"
+      sha256 "8af1c676a962f1e167049ea0d377be5334b59d6fd90c828f7169a332178eb1ca"
     end
 
     on_intel do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.10/shadictl-v0.1.10-x86_64-apple-darwin.tar.gz"
-      sha256 "0ba8aff1bb43f47915f3ca7ec1f11db6b783f4e61502ab885a90f8f8931617fc"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.11/shadictl-v0.1.11-x86_64-apple-darwin.tar.gz"
+      sha256 "d06c495cd495d91d7d495d2982ab611074652d1478c96c985de049683eb525c3"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.10/shadictl-v0.1.10-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "f093064f4a34399e18a7dc589cc393e2b8bb603052ed75137b8f693abf45dcc5"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.11/shadictl-v0.1.11-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "17e252d9d1a7dd19923c17da84b8481640431c47e32fce861f806c819a3039a0"
     end
 
     on_intel do
-      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.10/shadictl-v0.1.10-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "bb52a0255f7aa756574c93dffa2ef78792afc73bef998d5b200e7f4d6b77d352"
+      url "https://github.com/agntcy/shadi/releases/download/agntcy-shadi-cli-v0.1.11/shadictl-v0.1.11-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "9166908b9ce69106ac3757f8ab1e471004e64573cf7c5b213d6f3b63f50e6326"
     end
 
     depends_on "patchelf" => :build
