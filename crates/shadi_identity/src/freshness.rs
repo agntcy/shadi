@@ -50,7 +50,7 @@ impl Sealed {
         principal_hint: Option<&str>,
     ) -> Result<Vec<u8>, crate::IdentityError> {
         serde_json::to_vec(&Self {
-            jti: random_jti(),
+            jti: random_jti()?,
             iat: now_secs(),
             aud: aud.to_string(),
             principal_hint: principal_hint.map(str::to_string),
@@ -157,14 +157,11 @@ fn now_secs() -> u64 {
         .unwrap_or_default()
 }
 
-fn random_jti() -> String {
+fn random_jti() -> Result<String, crate::IdentityError> {
     let mut bytes = [0u8; 16];
-    // A failure here would make every jti identical, which reads as a replay.
-    // Fall back to the clock so the message is rejected, never silently unique.
-    if getrandom::fill(&mut bytes).is_err() {
-        bytes[..8].copy_from_slice(&now_secs().to_be_bytes());
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::fill(&mut bytes)
+        .map_err(|e| crate::IdentityError::Proof(format!("seal: jti: {e}")))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(test)]
@@ -183,7 +180,7 @@ mod tests {
 
     fn fresh() -> Sealed {
         Sealed {
-            jti: random_jti(),
+            jti: random_jti().unwrap(),
             iat: now_secs(),
             aud: ME.to_string(),
             principal_hint: None,
@@ -228,7 +225,7 @@ mod tests {
     fn a_payload_without_a_principal_hint_still_opens() {
         let replay = cache();
         let legacy = serde_json::json!({
-            "jti": random_jti(), "iat": now_secs(), "aud": ME, "body": "task"
+            "jti": random_jti().unwrap(), "iat": now_secs(), "aud": ME, "body": "task"
         });
         let (body, hint) =
             Sealed::open(&serde_json::to_vec(&legacy).unwrap(), Some(ME), &replay).unwrap();
