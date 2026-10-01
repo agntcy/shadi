@@ -72,15 +72,16 @@ impl PublishedKeysAnchor {
     }
 
     fn keys_for(&self, principal: &str) -> Result<Vec<VerifyingKey>, IdentityError> {
-        if let Some((cached, at)) = self.cache().get(principal) {
+        let fresh = self.cache().get(principal).and_then(|(cached, at)| {
             let ttl = if cached.is_ok() {
                 self.ttl
             } else {
                 FETCH_FAILURE_TTL
             };
-            if at.elapsed() < ttl {
-                return cached.clone().map_err(IdentityError::Config);
-            }
+            (at.elapsed() < ttl).then(|| cached.clone())
+        });
+        if let Some(cached) = fresh {
+            return cached.map_err(IdentityError::Config);
         }
 
         let url = self.keys_url_template.replace("{}", principal);
@@ -189,6 +190,16 @@ mod tests {
         )
     }
 
+    /// A fetcher that counts its own calls. Shared across tests that assert a
+    /// call count, whether zero (never reached) or one (served from cache).
+    fn counting_fetcher(calls: &Arc<AtomicUsize>, result: Result<String, String>) -> KeyListFetcher {
+        let seen = Arc::clone(calls);
+        Box::new(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            result.clone()
+        })
+    }
+
     #[test]
     fn a_published_key_is_vouched_for_and_an_absent_one_is_not() {
         let mine = key();
@@ -209,16 +220,12 @@ mod tests {
     #[test]
     fn a_cached_failure_is_reused_without_refetching() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&calls);
         let anchor = PublishedKeysAnchor::new(
             "github.com",
             "https://github.com/{}.keys",
             vec!["alice".to_string()],
             TTL,
-            Box::new(move |_| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                Err("connection refused".to_string())
-            }),
+            counting_fetcher(&calls, Err("connection refused".to_string())),
         );
         assert!(anchor.vouches_for("alice", &key()).is_err());
         assert!(anchor.vouches_for("alice", &key()).is_err());
@@ -239,16 +246,12 @@ mod tests {
     #[test]
     fn a_principal_outside_the_allow_list_costs_no_request() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&calls);
         let anchor = PublishedKeysAnchor::new(
             "github.com",
             "https://github.com/{}.keys",
             vec!["alice".to_string()],
             TTL,
-            Box::new(move |_| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                Ok(String::new())
-            }),
+            counting_fetcher(&calls, Ok(String::new())),
         );
         assert!(!anchor.vouches_for("mallory", &key()).unwrap());
         assert_eq!(
@@ -261,18 +264,13 @@ mod tests {
     #[test]
     fn a_second_lookup_is_served_from_cache() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&calls);
         let mine = key();
-        let body = listing(&[&mine]);
         let anchor = PublishedKeysAnchor::new(
             "github.com",
             "https://github.com/{}.keys",
             vec!["alice".to_string()],
             TTL,
-            Box::new(move |_| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                Ok(body.clone())
-            }),
+            counting_fetcher(&calls, Ok(listing(&[&mine]))),
         );
         assert!(anchor.vouches_for("alice", &mine).unwrap());
         assert!(anchor.vouches_for("alice", &mine).unwrap());
@@ -335,10 +333,10 @@ mod tests {
             ),
         ];
         for anchor in anchors {
+            let authority = anchor.authority();
             assert!(
                 anchor.vouches_for("alice", &id.verifying_key()).unwrap(),
-                "{} did not vouch",
-                anchor.authority()
+                "{authority} did not vouch"
             );
         }
     }
