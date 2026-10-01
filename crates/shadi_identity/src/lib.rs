@@ -25,7 +25,9 @@ pub mod freshness;
 pub mod ssh;
 pub mod trust_anchor;
 
-pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
+pub use auth::{
+    build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth,
+};
 pub use binding::{
     issue_binding, looks_like_binding, split_binding, verify_binding, VerifiedBinding,
 };
@@ -127,9 +129,9 @@ impl AgentIdentity {
 
     /// Same as [`Self::from_signing_key_bytes`] from a slice (must be 32 bytes).
     pub fn from_signing_key_slice(bytes: &[u8]) -> Result<Self, IdentityError> {
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| IdentityError::KeyGen("Ed25519 signing key must be 32 bytes".to_string()))?;
+        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+            IdentityError::KeyGen("Ed25519 signing key must be 32 bytes".to_string())
+        })?;
         Ok(Self::from_signing_key_bytes(&arr))
     }
 
@@ -186,7 +188,10 @@ pub fn verifier_config_from_dids<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
-    Ok(config::did_verifier_config(&jwks_from_dids(dids)?, audience))
+    Ok(config::did_verifier_config(
+        &jwks_from_dids(dids)?,
+        audience,
+    ))
 }
 
 /// Encode an Ed25519 public key as a `did:key` (`did:key:z<base58btc(0xed01 || pubkey)>`).
@@ -307,7 +312,10 @@ mod tests {
     #[test]
     fn parse_did_key_rejects_valid_base58_wrong_multicodec() {
         // Valid base58 multibase, but not the Ed25519 multicodec/length.
-        let bad = format!("did:key:z{}", bs58::encode([0x12u8, 0x00, 1, 2, 3]).into_string());
+        let bad = format!(
+            "did:key:z{}",
+            bs58::encode([0x12u8, 0x00, 1, 2, 3]).into_string()
+        );
         assert!(parse_did_key(&bad).is_err());
     }
 
@@ -319,7 +327,7 @@ mod tests {
         assert!(IdentityError::Pkcs8("x".into())
             .to_string()
             .contains("PKCS#8"));
-        assert!(            IdentityError::InvalidDid("x".into())
+        assert!(IdentityError::InvalidDid("x".into())
             .to_string()
             .contains("invalid did:key"));
         assert!(IdentityError::Proof("x".into())
