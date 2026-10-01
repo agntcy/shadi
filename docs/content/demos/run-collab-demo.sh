@@ -8,8 +8,8 @@
 # first hop; the finishing listener dispatches that A2A handoff itself.
 # Override the set with COLLAB_AGENTS=goose,claude-code (comma-separated).
 # Goose uses the operator's existing Goose config; this script does not set a
-# model or provider. --net-allow includes cisco.com and *.cisco.com. Extra
-# hosts: COLLAB_NET_ALLOW=host1,host2.
+# model or provider. --net-allow includes cisco.com:443 and *.cisco.com:443. Extra
+# HOST:PORT entries: COLLAB_NET_ALLOW=host1:443,host2:443.
 #
 # Problems (set PROBLEM=lru|fifo|both, default lru):
 #   lru   — Lru<K, V> cache (many stubs; typically ~20 two-line hops)
@@ -101,11 +101,12 @@ export AGENTBRIDGE_A2A_FORWARD=1
 export AGENTBRIDGE_A2A_PEERS="${AGENTS[*]}"
 AGENTBRIDGE_A2A_PEERS="${AGENTBRIDGE_A2A_PEERS// /,}"
 
-# SLIM or per-agent gRPC listen ports, plus cisco.com (and subdomains).
-# COLLAB_NET_ALLOW adds more hosts.
+# SLIM or per-agent gRPC listen ports, plus cisco.com (and subdomains) on 443.
+# Without --watch-policy the kernel enforces ports, so 443 opens to any host.
+# COLLAB_NET_ALLOW adds more HOST:PORT entries.
 NET_ALLOW_FLAGS=(
-  --net-allow cisco.com
-  --net-allow "*.cisco.com"
+  --net-allow cisco.com:443
+  --net-allow "*.cisco.com:443"
 )
 A2A_LISTEN_ADDRS=()
 if unicast_transport; then

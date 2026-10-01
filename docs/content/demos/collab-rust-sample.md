@@ -13,7 +13,7 @@ This page is one live `PROBLEM=lru` transcript (17 hops, **SOLVED**).
 The next run may choose different peers or write different two-line
 edits. How to start the script is in the
 [round-robin Rust demo](collab-rust.md). `--net-allow` includes
-`cisco.com` and `*.cisco.com`. Goose uses the operator's existing
+`cisco.com:443` and `*.cisco.com:443`. Goose uses the operator's existing
 config; this sample does not describe that setup.
 
 | | |

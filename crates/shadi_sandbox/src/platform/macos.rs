@@ -288,20 +288,19 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
         rules.push(format!(
             "(allow network-outbound (remote tcp \"localhost:{proxy_port}\"))"
         ));
+        push_net_allow_ports(&mut rules, policy)?;
     } else if !policy.net_allow().is_empty() {
-        // net_allow without proxy: enable full outbound (macOS seatbelt cannot
-        // filter by arbitrary hostname/IP at spawn time; the allow list is
-        // authoritative for audit and is enforced at kernel level on Linux via
-        // Landlock ConnectTcp rules).
-        rules.push("(allow network-outbound)".to_string());
-        // A2A gRPC `--a2a-listen` binds a TCP port. Seatbelt outbound-only
-        // would accept register then fail inside tonic with "transport error".
-        rules.push("(allow network-bind)".to_string());
-        rules.push("(allow network-inbound)".to_string());
+        if policy.net_blocked() {
+            push_net_allow_ports(&mut rules, policy)?;
+        } else {
+            rules.push("(allow network-outbound)".to_string());
+            rules.push("(allow network-bind)".to_string());
+            rules.push("(allow network-inbound)".to_string());
+        }
         // Node-based CLIs (copilot, codex, cursor-agent) abort in V8 init
         // unless they can look up the rest of the Mach bootstrap and signal
-        // child processes. net_allow already opens outbound TCP on macOS;
-        // these two rules are the matching runtime allowances.
+        // child processes. A net_allow list means a networked CLI; these are
+        // its runtime allowances.
         if !compatibility_profile {
             rules.push("(allow mach-lookup)".to_string());
             rules.push("(allow signal)".to_string());
@@ -319,6 +318,32 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
     }
 
     Ok(rules.join("\n"))
+}
+
+/// Per-port rules for `net_allow` (see `SandboxPolicy::kernel_net_ports`).
+/// Listed ports also allow bind and inbound so `--a2a-listen` can serve.
+fn push_net_allow_ports(
+    rules: &mut Vec<String>,
+    policy: &SandboxPolicy,
+) -> Result<(), SandboxError> {
+    for allowed in policy
+        .kernel_net_ports()
+        .map_err(SandboxError::ApplyFailed)?
+    {
+        let port = allowed.port;
+        if allowed.any_host {
+            rules.push(format!(
+                "(allow network-outbound (remote tcp \"*:{port}\"))"
+            ));
+        } else if allowed.loopback {
+            rules.push(format!(
+                "(allow network-outbound (remote tcp \"localhost:{port}\"))"
+            ));
+        }
+        rules.push(format!("(allow network-bind (local tcp \"*:{port}\"))"));
+        rules.push(format!("(allow network-inbound (local tcp \"*:{port}\"))"));
+    }
+    Ok(())
 }
 
 fn escape_profile_string(value: &str) -> Result<String, SandboxError> {
@@ -469,45 +494,94 @@ mod tests {
         assert!(!profile.contains("(allow network*)"));
     }
 
+    fn has_line(profile: &str, rule: &str) -> bool {
+        profile.lines().any(|line| line.trim() == rule)
+    }
+
     #[test]
-    fn build_profile_enables_outbound_when_net_allow_destinations_present() {
+    fn build_profile_opens_only_the_listed_ports_when_network_is_blocked() {
         let policy = SandboxPolicy::new()
             .use_minimal_platform_profile()
             .block_network(true)
             .allow_network_destination("1.1.1.1:80")
-            .allow_network_destination("127.0.0.1");
+            .allow_network_destination("127.0.0.1:47357");
 
         let profile = build_profile(&policy).unwrap();
 
-        // Seatbelt cannot filter by destination IP; we just enable outbound.
-        assert!(profile.contains("(allow network-outbound)"));
+        assert!(has_line(
+            &profile,
+            r#"(allow network-outbound (remote tcp "*:80"))"#
+        ));
+        assert!(has_line(
+            &profile,
+            r#"(allow network-outbound (remote tcp "localhost:47357"))"#
+        ));
+        for port in [80, 47357] {
+            assert!(has_line(
+                &profile,
+                &format!(r#"(allow network-bind (local tcp "*:{port}"))"#)
+            ));
+            assert!(has_line(
+                &profile,
+                &format!(r#"(allow network-inbound (local tcp "*:{port}"))"#)
+            ));
+        }
+        for blanket in [
+            "(allow network-outbound)",
+            "(allow network-bind)",
+            "(allow network-inbound)",
+            "(allow network*)",
+        ] {
+            assert!(
+                !has_line(&profile, blanket),
+                "{blanket} would open every port"
+            );
+        }
         assert!(
-            profile.contains("(allow network-bind)"),
-            "net_allow should allow TCP listen for --a2a-listen"
-        );
-        assert!(profile.contains("(allow network-inbound)"));
-        assert!(!profile.contains("(allow network*)"));
-        assert!(
-            profile.lines().any(|line| line.trim() == "(allow mach-lookup)"),
+            has_line(&profile, "(allow mach-lookup)"),
             "net_allow should lift mach-lookup so Node CLIs can start"
         );
-        assert!(profile.contains("(allow signal)"));
-        assert!(profile.contains("(allow ipc-posix-shm)"));
+        assert!(has_line(&profile, "(allow signal)"));
+        assert!(has_line(&profile, "(allow ipc-posix-shm)"));
         assert!(
-            profile.contains("(allow network-outbound (local unix-socket))"),
+            has_line(&profile, "(allow network-outbound (local unix-socket))"),
             "net_allow should allow local unix sockets for CLI app-servers"
         );
     }
 
     #[test]
-    fn build_profile_net_allow_overrides_blanket_block() {
+    fn build_profile_rejects_a_port_less_entry_when_network_is_blocked() {
         let policy = SandboxPolicy::new()
             .block_network(true)
             .allow_network_destination("1.1.1.1");
 
+        let err = build_profile(&policy).unwrap_err().to_string();
+        assert!(err.contains("--net-allow 1.1.1.1 has no port"), "{err}");
+    }
+
+    #[test]
+    fn build_profile_proxy_mode_keeps_loopback_entries_direct() {
+        let policy = SandboxPolicy::new()
+            .block_network(true)
+            .allow_network_destination("127.0.0.1:47357")
+            .allow_network_destination("api.github.com:443")
+            .allow_network_destination("github.com")
+            .with_net_proxy_port(1080);
+
         let profile = build_profile(&policy).unwrap();
-        assert!(profile.contains("(allow network-outbound)"));
-        assert!(!profile.contains("(allow network*)"));
+
+        assert!(has_line(
+            &profile,
+            r#"(allow network-outbound (remote tcp "localhost:1080"))"#
+        ));
+        assert!(has_line(
+            &profile,
+            r#"(allow network-outbound (remote tcp "localhost:47357"))"#
+        ));
+        assert!(
+            !profile.contains(r#"(remote tcp "*:443")"#),
+            "a remote entry must go through the proxy, not connect directly"
+        );
     }
 
     #[test]

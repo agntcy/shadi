@@ -43,8 +43,9 @@ COLLAB_AGENTS=goose,claude-code PROBLEM=lru MAX_CYCLES=12 bash docs/content/demo
 TRANSPORT=grpc PROBLEM=fifo bash docs/content/demos/run-collab-demo.sh
 ```
 
-`--net-allow` includes `cisco.com` and `*.cisco.com`. Add more hosts with
-`COLLAB_NET_ALLOW=host.example.com` (comma-separated).
+`--net-allow` includes `cisco.com:443` and `*.cisco.com:443`; without
+`--watch-policy` that opens port 443 to any host. Add more with
+`COLLAB_NET_ALLOW=host.example.com:443` (comma-separated).
 
 The script starts a SLIM node (unless `TRANSPORT=grpc`), registers the adapters under
 `shadictl --net-block` (DID-signed A2A, `list --local` leases), then
@@ -90,8 +91,8 @@ fifo `cargo test` outcome is [A2A unicast](a2a-grpc.md)
   model or endpoint. Host `GOOSE_PROVIDER` / `GOOSE_MODEL` are passed as
   `goose run --provider` / `--model`. Host `GOOSE_*`, `OPENAI_*`,
   `*_API_KEY`, and Goose provider `api_key_env` names are forwarded.
-  `--net-allow` includes `cisco.com`
-  and `*.cisco.com` (plus any `COLLAB_NET_ALLOW` overrides). A hop only
+  `--net-allow` includes `cisco.com:443`
+  and `*.cisco.com:443` (plus any `COLLAB_NET_ALLOW` overrides). A hop only
   produces Rust if that CLI already works on the host. Network or tool
   errors are not applied to the file.
 

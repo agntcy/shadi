@@ -103,7 +103,7 @@ You can pass a JSON policy file to avoid long CLI arguments:
   "write": ["./output"],
   "deny": ["/etc"],
   "net_block": true,
-  "net_allow": ["api.github.com", "127.0.0.1"],
+  "net_allow": ["api.github.com:443", "127.0.0.1:47357"],
   "allow_command": ["rm"],
   "block_command": ["curl"],
   "process_inject_keychain": [
@@ -446,9 +446,26 @@ In **Compatibility** mode, `mach-lookup` remains unrestricted to support
 third-party tools (1Password CLI, `gh`, `git` credential helpers, etc.) that
 communicate with background daemons via Mach IPC.
 
-Network filtering on macOS remains all-or-nothing because Seatbelt does not
-support domain-level or port-level allowlists. `net_blocked` disables all TCP/IP;
-Unix-domain sockets can still be selectively allowed.
+### Network allow-lists
+
+Without `--watch-policy`, `net_allow` is enforced per port in the kernel:
+Seatbelt matches a remote host only as `localhost` or `*`, and Landlock matches
+ports alone.
+
+| Entry | macOS (Seatbelt) | Linux (Landlock V4+) |
+| --- | --- | --- |
+| Loopback `HOST:PORT` (`127.0.0.1`, `::1`, `localhost`) | That port on loopback only | That port on any host |
+| Any other `HOST:PORT` | That port on any host | That port on any host |
+| `HOST` with no port | Refused at launch | Refused at launch |
+
+Every listed port can also be bound, so `register --a2a-listen` can serve on it.
+With `--watch-policy`, outbound TCP goes through the proxy, which enforces names
+and wildcards; loopback entries stay directly reachable so a local SLIM node
+still works. Kernel rules are fixed at launch, so a runtime `add_net_allow`
+patch changes only what the proxy allows. On Windows, `net_block` removes the
+AppContainer's network capability entirely and `net_allow` is not applied.
+`net_blocked` disables all TCP/IP; Unix-domain sockets can still be selectively
+allowed.
 
 ## Notes
 

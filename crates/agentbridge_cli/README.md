@@ -230,7 +230,9 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 > `shadictl --net-block --net-allow <listen-addr> --`. Kernel
 > sandboxes (Seatbelt/Landlock/AppContainer) are inherited by child processes,
 > so this confines whatever CLI tool the adapter spawns with no extra code in
-> agentbridge itself.
+> agentbridge itself. The CLI can reach only the listed ports: give it its API
+> endpoint as `--net-allow api.example.com:443` (port 443 to any host), or add
+> `--watch-policy` to enforce host names.
 
 ## Live SLIM demo
 

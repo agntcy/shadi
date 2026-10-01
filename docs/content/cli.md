@@ -28,7 +28,7 @@ cargo run -p agntcy-shadi-cli -- [FLAGS] -- [COMMAND]
 - `--write PATH`: Allow write access under PATH (can be repeated).
 - `--deny PATH`: Subtract PATH from compiled platform defaults and from allows (can be repeated). See [Sandbox and Policies → Compiled defaults, aliases, and deny](sandbox.md#compiled-defaults-aliases-and-deny).
 - `--net-block`: Block network access.
-- `--net-allow HOST[:PORT]`: Allow network access to a specific host (repeatable).
+- `--net-allow HOST:PORT`: Allow TCP to a port (repeatable). Without `--watch-policy` it is enforced per port, not per host — see [Network allow-lists](sandbox.md#network-allow-lists). A bare `HOST` is enforced by name and needs `--watch-policy`.
 - `--allow-command CMD`: Allow a command that is blocked by default (repeatable).
 - `--inject-keychain KEY=ENV`: Read a secret and inject it as an env var before launch (repeatable).
 - `--list-keychain`: List secrets in the SHADI store.
