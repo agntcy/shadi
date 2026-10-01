@@ -21,6 +21,7 @@ pub mod auth;
 pub mod binding;
 pub mod config;
 pub mod did_proof;
+pub mod freshness;
 pub mod ssh;
 
 pub use auth::{build_did_auth, create_app, did_auth_from_env, require_did_auth_from_env, SlimAuth};
@@ -31,6 +32,7 @@ pub use did_proof::{
     looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
+pub use freshness::{ReplayCache, Sealed};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
