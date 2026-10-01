@@ -273,7 +273,8 @@ Controls:
   private to trusted peers.
 - **Enforced**: `register --slim-endpoint` refuses to start unless it is running
   under a SHADI [sandbox](sandbox.md) with network blocked by default
-  (`shadi_sandbox::sandbox_enforced_from_env`). Seatbelt/Landlock/AppContainer
+  (`shadi_sandbox::sandbox_enforced`, which checks that the kernel refuses
+  outbound connections rather than trusting environment variables). Seatbelt/Landlock/AppContainer
   sandboxes are kernel-enforced and inherited by child processes, so wrapping
   `agentbridge register` in `shadictl` confines whatever CLI tool the adapter
   spawns to run a task — agentbridge has no sandboxing logic of its own, it

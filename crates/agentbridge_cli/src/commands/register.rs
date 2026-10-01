@@ -890,9 +890,9 @@ fn default_skills() -> Vec<AgentSkill> {
 /// processes, so wrapping `agentbridge register` in `shadictl`'s sandbox is
 /// enough to constrain whatever CLI tool an adapter spawns to run a task —
 /// no sandboxing code is needed in agentbridge itself. See
-/// [`shadi_sandbox::sandbox_enforced_from_env`].
+/// [`shadi_sandbox::sandbox_enforced`].
 fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String> {
-    if shadi_sandbox::sandbox_enforced_from_env() {
+    if shadi_sandbox::sandbox_enforced() {
         return Ok(());
     }
     Err(format!(
@@ -1670,7 +1670,10 @@ mod tests {
         );
 
         std::env::set_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV, "1");
-        assert!(require_sandbox_enforced("copilot", "127.0.0.1:47357").is_ok());
+        assert!(
+            require_sandbox_enforced("copilot", "127.0.0.1:47357").is_err(),
+            "exporting both flags without a sandbox must not pass the gate"
+        );
 
         std::env::remove_var(shadi_sandbox::SANDBOX_ACTIVE_ENV);
         std::env::remove_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV);
