@@ -204,6 +204,31 @@ mod tests {
         assert!(anchor.vouches_for("alice", &key()).is_err());
     }
 
+    /// A remembered failure is reused within `FETCH_FAILURE_TTL`, so an
+    /// outage costs one fetch per principal rather than one per message.
+    #[test]
+    fn a_cached_failure_is_reused_without_refetching() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let anchor = PublishedKeysAnchor::new(
+            "github.com",
+            "https://github.com/{}.keys",
+            vec!["alice".to_string()],
+            TTL,
+            Box::new(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Err("connection refused".to_string())
+            }),
+        );
+        assert!(anchor.vouches_for("alice", &key()).is_err());
+        assert!(anchor.vouches_for("alice", &key()).is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a cached failure must not be refetched"
+        );
+    }
+
     /// An empty listing is a negative answer, so a 404 must not fail closed.
     #[test]
     fn an_empty_listing_answers_no() {
