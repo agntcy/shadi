@@ -192,7 +192,10 @@ mod tests {
 
     /// A fetcher that counts its own calls. Shared across tests that assert a
     /// call count, whether zero (never reached) or one (served from cache).
-    fn counting_fetcher(calls: &Arc<AtomicUsize>, result: Result<String, String>) -> KeyListFetcher {
+    fn counting_fetcher(
+        calls: &Arc<AtomicUsize>,
+        result: Result<String, String>,
+    ) -> KeyListFetcher {
         let seen = Arc::clone(calls);
         Box::new(move |_| {
             seen.fetch_add(1, Ordering::SeqCst);
@@ -339,5 +342,27 @@ mod tests {
                 "{authority} did not vouch"
             );
         }
+    }
+
+    /// A key stops being trusted once its cache entry expires, not just when
+    /// it's removed from the listing - a zero TTL makes every lookup stale
+    #[test]
+    fn expired_entry_is_refetched() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mine = key();
+        let anchor = PublishedKeysAnchor::new(
+            "github.com",
+            "https://github.com/{}.keys",
+            vec!["alice".to_string()],
+            Duration::ZERO,
+            counting_fetcher(&calls, Ok(listing(&[&mine]))),
+        );
+        assert!(anchor.vouches_for("alice", &mine).unwrap());
+        assert!(anchor.vouches_for("alice", &mine).unwrap());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "expired cache entry must be refetched"
+        );
     }
 }
