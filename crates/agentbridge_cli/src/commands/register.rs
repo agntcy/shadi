@@ -37,6 +37,7 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server as TonicServer;
+use tracing::Instrument;
 
 /// Agent Directory server + auth to publish this adapter's `AgentCard` to.
 pub struct DirPublishOptions<'a> {
@@ -489,8 +490,19 @@ impl AgentExecutor for AgentBridgeExecutor {
         // can be fetched, cancelled and resumed like any other.
         let task_id = ctx.task_id.clone();
         let context_id = ctx.context_id.clone();
+        let span = tracing::info_span!(
+            "shadi.a2a.receive",
+            otel.kind = "server",
+            a2a.task_id = %task_id,
+            a2a.context_id = %context_id,
+            peer.did = tracing::field::Empty,
+            a2a.outcome = tracing::field::Empty,
+        );
+        let _guard = span.enter();
         if let Some(message) = ctx.message.as_ref() {
             if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
+                span.record("a2a.outcome", "rejected");
+                tracing::warn!(%reason, "refused a task addressed to another agent");
                 return terminal_task(task_id, context_id, TaskState::Rejected, reason);
             }
         }
@@ -507,14 +519,19 @@ impl AgentExecutor for AgentBridgeExecutor {
                     ),
                     None => tracing::info!(%did, "admitted A2A message with proven agent DID"),
                 }
+                span.record("peer.did", did.as_str());
                 (payload, Some(did))
             }
             Some(MessageAdmission::AuthRequired { reason }) => {
                 // Non-terminal: the client re-proves and sends again with this
                 // task id, and the stored task carries on from here.
+                span.record("a2a.outcome", "auth_required");
+                tracing::info!(%reason, "parked a task until the sender proves its DID");
                 return terminal_task(task_id, context_id, TaskState::AuthRequired, reason);
             }
             Some(MessageAdmission::Forged { reason }) => {
+                span.record("a2a.outcome", "rejected");
+                tracing::warn!(%reason, "refused a task with a forged DID");
                 return terminal_task(task_id, context_id, TaskState::Rejected, reason);
             }
             None => ("(no prompt)".to_string(), None),
@@ -586,6 +603,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                 session = session.with_did(did);
             }
             if let Err(reason) = egress::check(egress.as_ref(), &session, &response) {
+                tracing::Span::current().record("a2a.outcome", "withheld");
                 return vec![Ok(StreamResponse::Task(Task {
                     id: task_id,
                     context_id,
@@ -610,8 +628,19 @@ impl AgentExecutor for AgentBridgeExecutor {
                 let inbound = inbound_prompt.clone();
                 let reply = response_text.clone();
                 let slim_fallback = slim_endpoint.clone();
+                // The onward send runs on a blocking thread; carry the span
+                // there so it shows up as part of this request.
+                let parent = tracing::Span::current();
                 let forwarded = tokio::task::spawn_blocking(move || {
-                    dispatch_peer_handoff(&from, &to, slim_fallback.as_deref(), &inbound, &reply)
+                    parent.in_scope(|| {
+                        dispatch_peer_handoff(
+                            &from,
+                            &to,
+                            slim_fallback.as_deref(),
+                            &inbound,
+                            &reply,
+                        )
+                    })
                 })
                 .await;
                 match forwarded {
@@ -627,6 +656,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                 }
             }
 
+            tracing::Span::current().record("a2a.outcome", "completed");
             vec![
                 Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
                     task_id: task_id.clone(),
@@ -653,7 +683,9 @@ impl AgentExecutor for AgentBridgeExecutor {
             ]
         };
 
-        Box::pin(futures::stream::once(respond).flat_map(futures::stream::iter))
+        Box::pin(
+            futures::stream::once(respond.instrument(span.clone())).flat_map(futures::stream::iter),
+        )
     }
 
     fn cancel(
@@ -2287,6 +2319,129 @@ test push ... FAILED
         let seen = policy.seen.lock().unwrap().clone().expect("checked");
         assert_eq!(seen.destination_did, Some(sender_did));
         assert_eq!(seen.content.as_deref(), Some("the reply"));
+    }
+
+    /// Span fields and events, as `span field=value` and `span: message`
+    /// lines, from the thread it is installed on.
+    #[derive(Clone, Default)]
+    struct Trace(Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct Fields(Vec<(String, String)>);
+
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let name = field.name().to_string();
+            self.0.push((name, format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for Trace
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_record(
+            &self,
+            id: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let span = ctx.span(id).map_or("-", |span| span.name());
+            let mut fields = Fields(Vec::new());
+            values.record(&mut fields);
+            let mut lines = self.0.lock().unwrap();
+            lines.extend(fields.0.into_iter().map(|(k, v)| format!("{span} {k}={v}")));
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let span = ctx.event_span(event).map_or("-", |span| span.name());
+            let mut fields = Fields(Vec::new());
+            event.record(&mut fields);
+            let message = fields.0.into_iter().find(|(k, _)| k == "message");
+            let message = message.map(|(_, v)| v).unwrap_or_default();
+            self.0.lock().unwrap().push(format!("{span}: {message}"));
+        }
+    }
+
+    impl Trace {
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+        }
+
+        fn assert_has(&self, expected: &[&str]) {
+            let lines = self.0.lock().unwrap();
+            for line in expected {
+                assert!(
+                    lines.iter().any(|l| l == line),
+                    "{line:?} not in {lines:#?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_leaves_its_decisions_on_the_receive_span() {
+        let trace = Trace::default();
+        let _installed = trace.install();
+        let (task, sender_did) = reply_through(egress::policy()).await;
+        assert_eq!(task.status.state, TaskState::Completed);
+        trace.assert_has(&[
+            &format!("shadi.a2a.receive peer.did={sender_did}"),
+            "shadi.a2a.receive: admitted A2A message with proven agent DID",
+            "shadi.a2a.receive: egress policy allowed a message",
+            "shadi.a2a.receive a2a.outcome=completed",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn a_withheld_reply_shows_on_the_receive_span() {
+        let trace = Trace::default();
+        let _installed = trace.install();
+        let _ = reply_through(egress_policy(false)).await;
+        trace.assert_has(&[
+            "shadi.a2a.receive: egress policy refused a message",
+            "shadi.a2a.receive a2a.outcome=withheld",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn refused_and_parked_tasks_record_why_on_the_receive_span() {
+        let trace = Trace::default();
+        let _installed = trace.install();
+        let handler = silent_handler();
+        let params = A2AServiceParams::default();
+
+        let unsigned = sample_request("plain task");
+        let _ = handler.send_message(&params, unsigned).await;
+        trace.assert_has(&[
+            "shadi.a2a.receive: parked a task until the sender proves its DID",
+            "shadi.a2a.receive a2a.outcome=auth_required",
+        ]);
+
+        let honest = shadi_identity::AgentIdentity::generate().unwrap();
+        let impostor = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = String::from_utf8(envelope).unwrap();
+        let signature = envelope.lines().nth(2).unwrap();
+        let forged = format!("SHADI-DID-PROOF/1\n{}\n{signature}\ntask", impostor.did());
+        let _ = handler.send_message(&params, sample_request(forged)).await;
+        trace.assert_has(&["shadi.a2a.receive: refused a task with a forged DID"]);
+
+        let mut addressed = sample_request("task");
+        addressed.message = shadi_a2a::insert_dest_did(addressed.message, "did:key:zSomeoneElse");
+        let _ = handler.send_message(&params, addressed).await;
+        trace.assert_has(&[
+            "shadi.a2a.receive: refused a task addressed to another agent",
+            "shadi.a2a.receive a2a.outcome=rejected",
+        ]);
     }
 
     #[tokio::test]

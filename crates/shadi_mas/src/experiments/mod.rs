@@ -158,6 +158,19 @@ impl LiveA2ATaskAdapter {
     }
 
     fn send_task(&self, task: &TaskEnvelope) -> Result<String, String> {
+        let span = tracing::info_span!(
+            "shadi.a2a.send",
+            otel.kind = "client",
+            a2a.task_id = %task.task_id,
+            peer.agent_id = %self.config.peer_agent_id,
+            peer.did = tracing::field::Empty,
+            a2a.outcome = tracing::field::Empty,
+        );
+        if let Some(did) = self.config.peer_did.as_deref() {
+            span.record("peer.did", did);
+        }
+        let _guard = span.enter();
+
         let body = Mutex::new(render_task_message(task));
         let auth_cfg = AuthRequiredConfig::from_env();
         let response = run_auth_required_loop(
@@ -182,8 +195,15 @@ impl LiveA2ATaskAdapter {
                 guard.push_str(&note);
                 Ok(note)
             },
-        )?;
-        a2a_reply(&response)
+        )
+        .inspect_err(|error| {
+            span.record("a2a.outcome", "error");
+            tracing::warn!(%error, "A2A send failed");
+        })?;
+        span.record("a2a.outcome", reply_outcome(&response));
+        a2a_reply(&response).inspect_err(|reason| {
+            tracing::warn!(%reason, "the peer did not complete the task");
+        })
     }
 
     fn send_signed_task(
@@ -424,7 +444,13 @@ impl AgentVerifier for DidProofThen {
         request: &RequestContext,
     ) -> SecretResult<()> {
         DidProofVerifier.verify_request(session, request)?;
-        self.0.verify_request(session, request)
+        let evaluation_id = request.evaluation_id();
+        let decision = self.0.verify_request(session, request);
+        match &decision {
+            Ok(()) => tracing::info!(evaluation_id, "egress policy allowed a message"),
+            Err(err) => tracing::warn!(evaluation_id, %err, "egress policy refused a message"),
+        }
+        decision
     }
 
     fn wants_content(&self) -> bool {
@@ -459,6 +485,22 @@ fn describe_a2a_response(response: &SendMessageResponse) -> String {
             .as_ref()
             .map(readable_message_text)
             .unwrap_or_else(|| format!("task {} completed", task.id)),
+    }
+}
+
+/// The `a2a.outcome` a send span records for the peer's reply.
+fn reply_outcome(response: &SendMessageResponse) -> &'static str {
+    let SendMessageResponse::Task(task) = response else {
+        return "replied";
+    };
+    match task.status.state {
+        TaskState::Completed => "completed",
+        TaskState::Rejected => "rejected",
+        TaskState::Failed => "failed",
+        TaskState::Canceled => "canceled",
+        TaskState::AuthRequired => "auth_required",
+        TaskState::InputRequired => "input_required",
+        TaskState::Unspecified | TaskState::Submitted | TaskState::Working => "working",
     }
 }
 
@@ -759,6 +801,112 @@ mod transport_tests {
             history: None,
             metadata: None,
         })
+    }
+
+    /// The span fields and events `run` leaves, as `span field=value` and
+    /// `span: message` lines.
+    fn trace_of(run: impl FnOnce()) -> Vec<String> {
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Clone, Default)]
+        struct Lines(Arc<Mutex<Vec<String>>>);
+
+        struct Fields(Vec<(String, String)>);
+
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                let name = field.name().to_string();
+                self.0.push((name, format!("{value:?}")));
+            }
+
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.push((field.name().to_string(), value.to_string()));
+            }
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for Lines
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_record(
+                &self,
+                id: &tracing::span::Id,
+                values: &tracing::span::Record<'_>,
+                ctx: Context<'_, S>,
+            ) {
+                let span = ctx.span(id).map_or("-", |span| span.name());
+                let mut fields = Fields(Vec::new());
+                values.record(&mut fields);
+                let mut lines = self.0.lock().unwrap();
+                lines.extend(fields.0.into_iter().map(|(k, v)| format!("{span} {k}={v}")));
+            }
+
+            fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+                let span = ctx.event_span(event).map_or("-", |span| span.name());
+                let mut fields = Fields(Vec::new());
+                event.record(&mut fields);
+                let message = fields.0.into_iter().find(|(k, _)| k == "message");
+                let message = message.map(|(_, v)| v).unwrap_or_default();
+                self.0.lock().unwrap().push(format!("{span}: {message}"));
+            }
+        }
+
+        let lines = Lines::default();
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(lines.clone()), run);
+        let recorded = lines.0.lock().unwrap().clone();
+        recorded
+    }
+
+    #[test]
+    fn a_failed_send_records_its_outcome_on_the_send_span() {
+        let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+            endpoint: "node:47357".to_string(),
+            agent_id: "avatar".to_string(),
+            local_name: None,
+            peer_agent_id: "peer".to_string(),
+            destination: None,
+            a2a_url: None,
+            a2a_binding: None,
+            peer_did: Some("did:key:zPeer".to_string()),
+        });
+        let lines = trace_of(|| {
+            assert!(adapter.dispatch(sample_task()).is_err());
+        });
+        let has = |line: &str| lines.iter().any(|l| l == line);
+        assert!(has("shadi.a2a.send peer.did=did:key:zPeer"), "{lines:#?}");
+        assert!(has("shadi.a2a.send a2a.outcome=error"), "{lines:#?}");
+        assert!(has("shadi.a2a.send: A2A send failed"), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_policy_decision_is_an_event_with_its_evaluation_id() {
+        let proven = SessionContext::new("avatar", "s").with_proven_did("did:key:zAvatar");
+        let request = RequestContext::new();
+        let refusing = sample_adapter().with_verifier(Arc::new(Refuse)).verifier();
+        let allowing = sample_adapter().with_verifier(Arc::new(Allow)).verifier();
+        let lines = trace_of(|| {
+            let _ = refusing.verify_request(&proven, &request);
+            let _ = allowing.verify_request(&proven, &request);
+        });
+        let has = |line: &str| lines.iter().any(|l| l == line);
+        assert!(has("-: egress policy refused a message"), "{lines:#?}");
+        assert!(has("-: egress policy allowed a message"), "{lines:#?}");
+    }
+
+    #[test]
+    fn reply_outcome_names_the_peer_state() {
+        let cases = [
+            (TaskState::Completed, "completed"),
+            (TaskState::Rejected, "rejected"),
+            (TaskState::Failed, "failed"),
+            (TaskState::Working, "working"),
+        ];
+        for (state, outcome) in cases {
+            assert_eq!(reply_outcome(&task_reply(state, None)), outcome);
+        }
+        let message = SendMessageResponse::Message(Message::new(Role::Agent, vec![]));
+        assert_eq!(reply_outcome(&message), "replied");
     }
 
     #[test]
