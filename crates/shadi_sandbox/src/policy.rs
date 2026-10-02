@@ -232,6 +232,85 @@ impl SandboxPolicy {
     }
 }
 
+/// A TCP port the kernel lets through while the network is restricted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KernelNetPort {
+    pub(crate) port: u16,
+    /// Direct connects to any host on this port.
+    pub(crate) any_host: bool,
+    /// Direct connects to loopback on this port.
+    pub(crate) loopback: bool,
+}
+
+impl SandboxPolicy {
+    /// The ports `net_allow` opens in the kernel; each also allows bind and inbound.
+    ///
+    /// Seatbelt matches a remote host only as `localhost` or `*`, and Landlock
+    /// matches ports alone, so the kernel enforces an entry per port. In proxy
+    /// mode only loopback entries connect directly and the proxy checks the
+    /// rest by name. An entry without a port has no kernel form, so outside
+    /// proxy mode it is an error rather than a silent allow or deny.
+    pub(crate) fn kernel_net_ports(&self) -> Result<Vec<KernelNetPort>, String> {
+        let proxy = self.net_proxy_port.is_some();
+        let mut ports: Vec<KernelNetPort> = Vec::new();
+        for entry in &self.net_allow {
+            let Some((host, port)) = split_host_port(entry)? else {
+                if proxy {
+                    continue;
+                }
+                return Err(format!(
+                    "--net-allow {entry} has no port; without --watch-policy the allow-list is \
+                     enforced per port, so add one (for example {entry}:443) or use --watch-policy"
+                ));
+            };
+            let loopback = is_loopback_host(host);
+            let slot = match ports.iter().position(|p| p.port == port) {
+                Some(index) => &mut ports[index],
+                None => {
+                    ports.push(KernelNetPort {
+                        port,
+                        any_host: false,
+                        loopback: false,
+                    });
+                    ports.last_mut().expect("just pushed")
+                }
+            };
+            slot.loopback |= loopback;
+            slot.any_host |= !loopback && !proxy;
+        }
+        Ok(ports)
+    }
+}
+
+/// Split `host:port` or `[v6]:port`; `Ok(None)` when the entry names no port.
+fn split_host_port(entry: &str) -> Result<Option<(&str, u16)>, String> {
+    let (host, port) = if let Some(rest) = entry.strip_prefix('[') {
+        match rest.split_once("]:") {
+            Some(split) => split,
+            None => return Ok(None),
+        }
+    } else {
+        match entry.split_once(':') {
+            Some((host, port)) if !port.contains(':') => (host, port),
+            _ => return Ok(None),
+        }
+    };
+    if host.is_empty() {
+        return Err(format!("--net-allow {entry} has no host"));
+    }
+    match port.parse::<u16>() {
+        Ok(port) if port != 0 => Ok(Some((host, port))),
+        _ => Err(format!("--net-allow {entry} has an invalid port")),
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 impl Default for SandboxPolicy {
     fn default() -> Self {
         Self::new()
@@ -308,6 +387,126 @@ mod tests {
     fn policy_can_allow_local_unix_sockets() {
         let policy = SandboxPolicy::new().allow_local_unix_sockets();
         assert!(policy.local_unix_sockets_allowed());
+    }
+
+    fn ports(policy: SandboxPolicy) -> Vec<KernelNetPort> {
+        policy.kernel_net_ports().expect("valid net_allow")
+    }
+
+    fn blocked(entries: &[&str]) -> SandboxPolicy {
+        let mut policy = SandboxPolicy::new().block_network(true);
+        for entry in entries {
+            policy = policy.allow_network_destination(*entry);
+        }
+        policy
+    }
+
+    #[test]
+    fn loopback_entries_open_only_loopback() {
+        for entry in ["127.0.0.1:47357", "localhost:47357", "[::1]:47357"] {
+            assert_eq!(
+                ports(blocked(&[entry])),
+                [KernelNetPort {
+                    port: 47357,
+                    any_host: false,
+                    loopback: true
+                }],
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_entries_open_their_port_to_any_host() {
+        assert_eq!(
+            ports(blocked(&[
+                "api.github.com:443",
+                "*.example.com:8443",
+                "1.1.1.1:80"
+            ])),
+            [
+                KernelNetPort {
+                    port: 443,
+                    any_host: true,
+                    loopback: false
+                },
+                KernelNetPort {
+                    port: 8443,
+                    any_host: true,
+                    loopback: false
+                },
+                KernelNetPort {
+                    port: 80,
+                    any_host: true,
+                    loopback: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn one_port_named_twice_merges() {
+        assert_eq!(
+            ports(blocked(&["127.0.0.1:443", "api.github.com:443"])),
+            [KernelNetPort {
+                port: 443,
+                any_host: true,
+                loopback: true
+            }]
+        );
+    }
+
+    #[test]
+    fn an_entry_without_a_port_is_an_error_without_the_proxy() {
+        for entry in [
+            "api.anthropic.com",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "*.github.com",
+        ] {
+            let err = blocked(&[entry]).kernel_net_ports().unwrap_err();
+            assert!(
+                err.contains("has no port") && err.contains("--watch-policy"),
+                "{entry}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_ports_and_hosts_are_errors() {
+        for (entry, want) in [
+            ("host:0", "invalid port"),
+            ("host:65536", "invalid port"),
+            ("host:", "invalid port"),
+            ("host:http", "invalid port"),
+            (":443", "no host"),
+        ] {
+            let err = blocked(&[entry]).kernel_net_ports().unwrap_err();
+            assert!(err.contains(want), "{entry}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_proxy_connects_only_loopback_directly() {
+        let policy = blocked(&["127.0.0.1:47357", "api.github.com:443", "github.com"])
+            .with_net_proxy_port(1080);
+        assert_eq!(
+            ports(policy),
+            [
+                KernelNetPort {
+                    port: 47357,
+                    any_host: false,
+                    loopback: true
+                },
+                KernelNetPort {
+                    port: 443,
+                    any_host: false,
+                    loopback: false
+                },
+            ],
+            "a port-less name is the proxy's to enforce, and a remote port opens bind only"
+        );
     }
 }
 

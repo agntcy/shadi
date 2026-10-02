@@ -110,7 +110,7 @@ step "Part 2 done."
 # narrower than what that CLI itself needs (its own API endpoints, install
 # path, or credential/config directory aren't in --net-allow/--read) — not a
 # SHADI bug. The policy here only grants what agentbridge's own SLIM listener
-# needs; add tool-specific --read/--net-allow entries if you want the wrapped
+# needs; add tool-specific --read and --net-allow HOST:443 entries if you want the wrapped
 # CLI's own network/filesystem calls to succeed too. The script continues
 # regardless.
 
