@@ -6,11 +6,16 @@ mod linux_integration {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use shadi_sandbox::{spawn_sandboxed, SandboxPolicy};
 
     fn unique_test_root() -> PathBuf {
+        // The tests run in parallel and the clock can read the same for both
+        // (macOS ticks in microseconds), so a counter keeps each root apart.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time went backwards")
@@ -18,7 +23,7 @@ mod linux_integration {
         std::env::current_dir()
             .expect("current dir")
             .join(".tmp")
-            .join(format!("linux-sandbox-test-{}-{}", std::process::id(), suffix))
+            .join(format!("linux-sandbox-test-{}-{suffix}-{n}", std::process::id()))
     }
 
     fn compile_helper(dir: &Path, name: &str) -> PathBuf {
