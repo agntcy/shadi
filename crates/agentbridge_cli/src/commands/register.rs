@@ -252,7 +252,7 @@ struct AgentBridgeExecutor {
     agent_did: Option<String>,
     slim_endpoint: Option<String>,
     verbose: bool,
-    egress: Option<Arc<dyn AgentVerifier>>,
+    egress: Arc<dyn AgentVerifier>,
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -539,7 +539,7 @@ impl AgentExecutor for AgentBridgeExecutor {
         let context_id = ctx.context_id.clone();
         let history = ctx.message.clone().map(|m| vec![m]);
         let inbound_prompt = prompt.clone();
-        let egress_policy = self.egress.clone();
+        let egress = Arc::clone(&self.egress);
         let agent_did = self.agent_did.clone();
 
         let respond = async move {
@@ -581,25 +581,23 @@ impl AgentExecutor for AgentBridgeExecutor {
             }
             // Checked before anything prints it or forwards it, so a reply the
             // policy withholds reaches neither the log nor another peer.
-            if let Some(policy) = egress_policy.as_deref() {
-                let mut session = SessionContext::new(&agent_id, &context_id);
-                if let Some(did) = agent_did.as_deref() {
-                    session = session.with_did(did);
-                }
-                if let Err(reason) = egress::check(policy, &session, &response) {
-                    return vec![Ok(StreamResponse::Task(Task {
-                        id: task_id,
-                        context_id,
-                        status: TaskStatus {
-                            state: TaskState::Rejected,
-                            message: Some(Message::new(Role::Agent, vec![Part::text(reason)])),
-                            timestamp: None,
-                        },
-                        artifacts: None,
-                        history,
-                        metadata: None,
-                    }))];
-                }
+            let mut session = SessionContext::new(&agent_id, &context_id);
+            if let Some(did) = agent_did.as_deref() {
+                session = session.with_did(did);
+            }
+            if let Err(reason) = egress::check(egress.as_ref(), &session, &response) {
+                return vec![Ok(StreamResponse::Task(Task {
+                    id: task_id,
+                    context_id,
+                    status: TaskStatus {
+                        state: TaskState::Rejected,
+                        message: Some(Message::new(Role::Agent, vec![Part::text(reason)])),
+                        timestamp: None,
+                    },
+                    artifacts: None,
+                    history,
+                    metadata: None,
+                }))];
             }
 
             println!("\n┌─ A2A send [{agent_id}] ({} ms)", elapsed_ms);
@@ -698,7 +696,7 @@ impl AgentBridgeRequestHandler {
         a2a_binding: A2ABinding,
         ready: Arc<Notify>,
         verbose: bool,
-        egress: Option<Arc<dyn AgentVerifier>>,
+        egress: Arc<dyn AgentVerifier>,
     ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
@@ -2101,7 +2099,7 @@ test push ... FAILED
             A2ABinding::Jsonrpc,
             Arc::new(Notify::new()),
             false,
-            None,
+            egress::policy(),
         )
     }
 
@@ -2228,13 +2226,17 @@ test push ... FAILED
         }
     }
 
-    async fn reply_through(allow: bool) -> (Task, Arc<EgressPolicy>, String) {
-        let sender = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&sender, b"hello").unwrap();
-        let policy = Arc::new(EgressPolicy {
+    fn egress_policy(allow: bool) -> Arc<EgressPolicy> {
+        Arc::new(EgressPolicy {
             allow,
             seen: std::sync::Mutex::new(None),
-        });
+        })
+    }
+
+    /// Run one signed task through a listener whose replies pass `policy`.
+    async fn reply_through(policy: Arc<dyn AgentVerifier>) -> (Task, String) {
+        let sender = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&sender, b"hello").unwrap();
         let handler = AgentBridgeRequestHandler::new(
             Arc::new(ReplyAdapter(shadi_mas::AgentId("claude-code".to_string()))),
             "claude-code",
@@ -2244,7 +2246,7 @@ test push ... FAILED
             A2ABinding::Jsonrpc,
             Arc::new(Notify::new()),
             false,
-            Some(policy.clone()),
+            policy,
         );
         let request = sample_request(String::from_utf8(envelope).unwrap());
         let response = handler
@@ -2252,23 +2254,35 @@ test push ... FAILED
             .await
             .expect("a refusal is a task state, not a transport error");
         match response {
-            SendMessageResponse::Task(task) => (task, policy, sender.did().to_string()),
+            SendMessageResponse::Task(task) => (task, sender.did().to_string()),
             SendMessageResponse::Message(m) => panic!("expected a task, got {m:?}"),
         }
     }
 
     #[tokio::test]
+    async fn with_no_rules_the_reply_goes_out() {
+        let (task, _) = reply_through(egress::policy()).await;
+        assert_eq!(task.status.state, TaskState::Completed);
+        let text = extract_text(task.status.message.as_ref().expect("a reply"));
+        assert_eq!(text, "the reply");
+    }
+
+    #[tokio::test]
     async fn a_reply_the_egress_policy_refuses_is_withheld() {
-        let (task, _, _) = reply_through(false).await;
+        let policy = egress_policy(false);
+        let (task, _) = reply_through(policy.clone()).await;
         assert_eq!(task.status.state, TaskState::Rejected);
         let text = extract_text(task.status.message.as_ref().expect("a reason"));
         assert!(text.contains("withheld by egress policy"), "{text}");
         assert!(!text.contains("the reply"), "leaked: {text}");
+        let seen = policy.seen.lock().unwrap().clone().expect("checked");
+        assert!(text.contains(seen.evaluation_id()), "{text}");
     }
 
     #[tokio::test]
     async fn the_egress_policy_sees_the_reply_and_where_it_goes() {
-        let (task, policy, sender_did) = reply_through(true).await;
+        let policy = egress_policy(true);
+        let (task, sender_did) = reply_through(policy.clone()).await;
         assert_eq!(task.status.state, TaskState::Completed);
         let seen = policy.seen.lock().unwrap().clone().expect("checked");
         assert_eq!(seen.destination_did, Some(sender_did));
