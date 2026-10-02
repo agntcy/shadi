@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use a2a::*;
 use a2a_client::A2AClient;
-use agent_secrets::{DidProofVerifier, SessionContext};
+use agent_secrets::{
+    AgentVerifier, DidProofVerifier, RequestContext, SecretResult, SessionContext,
+};
 
 pub mod auth_required;
 pub use auth_required::{
@@ -109,6 +111,7 @@ pub struct LiveTaskDispatchRecord {
 pub struct LiveA2ATaskAdapter {
     config: LiveA2ATaskAdapterConfig,
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
+    policy: Option<Arc<dyn AgentVerifier>>,
 }
 
 impl LiveA2ATaskAdapter {
@@ -116,6 +119,22 @@ impl LiveA2ATaskAdapter {
         Self {
             config,
             dispatches: Mutex::new(Vec::new()),
+            policy: None,
+        }
+    }
+
+    /// Check every task this adapter sends with `policy` as well. The DID
+    /// proof check always runs first, so a policy can refuse what it allows
+    /// but never allow what it refuses.
+    pub fn with_verifier(mut self, policy: Arc<dyn AgentVerifier>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    fn verifier(&self) -> Arc<dyn AgentVerifier> {
+        match &self.policy {
+            Some(policy) => Arc::new(DidProofThen(Arc::clone(policy))),
+            None => Arc::new(DidProofVerifier),
         }
     }
 
@@ -224,7 +243,7 @@ impl LiveA2ATaskAdapter {
         let locator = locator.clone();
         runtime.block_on(async {
             let via = locator.display_uri();
-            let channel = A2AChannel::connect(locator, Arc::new(DidProofVerifier), session)
+            let channel = A2AChannel::connect(locator, self.verifier(), session)
                 .await
                 .map_err(|err| format!("A2A connect {via}: {err}"))?;
             let client = A2AClient::new(Box::new(channel));
@@ -317,14 +336,9 @@ impl LiveA2ATaskAdapter {
                 // construction, so build the transport inside the runtime context.
                 let channel = {
                     let _enter = runtime.enter();
-                    A2AChannelBuilder::new(
-                        app.clone(),
-                        remote_name_ref,
-                        Arc::new(DidProofVerifier),
-                        session,
-                    )
-                    .connection_id(connection_id)
-                    .build()
+                    A2AChannelBuilder::new(app.clone(), remote_name_ref, self.verifier(), session)
+                        .connection_id(connection_id)
+                        .build()
                 };
                 let client = A2AClient::new(Box::new(channel));
                 let request = SendMessageRequest {
@@ -394,6 +408,29 @@ impl TaskAdapter for LiveA2ATaskAdapter {
     }
 }
 
+
+/// [`DidProofVerifier`], then the caller's policy.
+struct DidProofThen(Arc<dyn AgentVerifier>);
+
+impl AgentVerifier for DidProofThen {
+    fn verify(&self, session: &SessionContext) -> SecretResult<()> {
+        DidProofVerifier.verify(session)?;
+        self.0.verify(session)
+    }
+
+    fn verify_request(
+        &self,
+        session: &SessionContext,
+        request: &RequestContext,
+    ) -> SecretResult<()> {
+        DidProofVerifier.verify_request(session, request)?;
+        self.0.verify_request(session, request)
+    }
+
+    fn wants_content(&self) -> bool {
+        self.0.wants_content()
+    }
+}
 
 #[derive(Clone)]
 struct TlsMaterial {
@@ -866,6 +903,61 @@ mod transport_tests {
         assert_eq!(readable_message_text(&tagged), "signed");
         let untagged = adapter(None).task_message("signed");
         assert_eq!(shadi_a2a::dest_did_from_message(&untagged), None);
+    }
+
+    struct Allow;
+
+    impl AgentVerifier for Allow {
+        fn verify(&self, _session: &SessionContext) -> SecretResult<()> {
+            Ok(())
+        }
+
+        fn wants_content(&self) -> bool {
+            true
+        }
+    }
+
+    struct Refuse;
+
+    impl AgentVerifier for Refuse {
+        fn verify(&self, _session: &SessionContext) -> SecretResult<()> {
+            Err(agent_secrets::SecretError::NotAuthorized)
+        }
+    }
+
+    fn sample_adapter() -> LiveA2ATaskAdapter {
+        LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+            endpoint: "node:47357".to_string(),
+            agent_id: "avatar".to_string(),
+            local_name: None,
+            peer_agent_id: "peer".to_string(),
+            destination: None,
+            a2a_url: None,
+            a2a_binding: None,
+            peer_did: None,
+        })
+    }
+
+    #[test]
+    fn a_policy_runs_after_the_did_check_and_cannot_replace_it() {
+        let proven = SessionContext::new("avatar", "s").with_proven_did("did:key:zAvatar");
+        let unproven = SessionContext::new("avatar", "s");
+        let request = RequestContext::new();
+
+        let plain = sample_adapter().verifier();
+        assert!(plain.verify_request(&proven, &request).is_ok());
+        assert!(plain.verify_request(&unproven, &request).is_err());
+        assert!(!plain.wants_content());
+
+        let allowing = sample_adapter().with_verifier(Arc::new(Allow)).verifier();
+        assert!(allowing.verify_request(&proven, &request).is_ok());
+        assert!(allowing.verify_request(&unproven, &request).is_err());
+        assert!(allowing.verify(&unproven).is_err());
+        assert!(allowing.wants_content());
+
+        let refusing = sample_adapter().with_verifier(Arc::new(Refuse)).verifier();
+        assert!(refusing.verify_request(&proven, &request).is_err());
+        assert!(refusing.verify(&proven).is_err());
     }
 
     #[test]

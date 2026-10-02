@@ -74,8 +74,12 @@ SHADI exposes the same secrets, session, and sandbox surface to both Rust and Py
     #### Core traits and types
 
     - `SecretStore`: storage backend (platform keychain by default).
-    - `AgentVerifier`: verifies a session before secret access.
+    - `AgentVerifier`: verifies a session before secret access, and each A2A
+      request before it is sent (`verify_request`, which defaults to `verify`).
     - `SessionContext`: session metadata used by `AgentVerifier`.
+    - `RequestContext`: one A2A request as `verify_request` sees it: a locally
+      generated `evaluation_id`, the sender-chosen message id, the destination
+      DID, and the message text only when the verifier's `wants_content` is true.
     - `AgentSecretAccess`: gatekeeper for per-session secret access.
     - `SecretBytes`: zeroizing wrapper for secret material.
 
