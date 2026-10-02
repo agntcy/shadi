@@ -164,7 +164,7 @@ impl LiveA2ATaskAdapter {
                 Ok(note)
             },
         )?;
-        Ok(describe_a2a_response(&response))
+        a2a_reply(&response)
     }
 
     fn send_signed_task(
@@ -416,6 +416,26 @@ fn describe_a2a_response(response: &SendMessageResponse) -> String {
             .map(readable_message_text)
             .unwrap_or_else(|| format!("task {} completed", task.id)),
     }
+}
+
+/// A peer's `Rejected` or `Failed` task is an error, so callers never mistake
+/// its reason for a result.
+fn a2a_reply(response: &SendMessageResponse) -> Result<String, String> {
+    let SendMessageResponse::Task(task) = response else {
+        return Ok(describe_a2a_response(response));
+    };
+    let outcome = match task.status.state {
+        TaskState::Rejected => "rejected by the peer",
+        TaskState::Failed => "failed on the peer",
+        _ => return Ok(describe_a2a_response(response)),
+    };
+    let reason = task
+        .status
+        .message
+        .as_ref()
+        .map(readable_message_text)
+        .unwrap_or_else(|| "no reason given".to_string());
+    Err(format!("A2A task {} {outcome}: {reason}", task.id))
 }
 
 fn readable_message_text(message: &Message) -> String {
@@ -679,6 +699,47 @@ mod transport_tests {
             describe_a2a_response(&SendMessageResponse::Task(task)),
             "task task-9 completed"
         );
+    }
+
+    fn task_reply(state: TaskState, reason: Option<&str>) -> SendMessageResponse {
+        SendMessageResponse::Task(Task {
+            id: "task-9".to_string(),
+            context_id: "ctx-9".to_string(),
+            status: TaskStatus {
+                state,
+                message: reason
+                    .map(|text| Message::new(Role::Agent, vec![Part::text(text.to_string())])),
+                timestamp: None,
+            },
+            artifacts: None,
+            history: None,
+            metadata: None,
+        })
+    }
+
+    #[test]
+    fn a2a_reply_turns_rejected_and_failed_tasks_into_errors() {
+        assert_eq!(
+            a2a_reply(&task_reply(TaskState::Rejected, Some("unsigned request"))),
+            Err("A2A task task-9 rejected by the peer: unsigned request".to_string())
+        );
+        assert_eq!(
+            a2a_reply(&task_reply(TaskState::Failed, None)),
+            Err("A2A task task-9 failed on the peer: no reason given".to_string())
+        );
+    }
+
+    #[test]
+    fn a2a_reply_passes_other_replies_through() {
+        assert_eq!(
+            a2a_reply(&task_reply(TaskState::Completed, Some("done"))),
+            Ok("done".to_string())
+        );
+        let message = SendMessageResponse::Message(Message::new(
+            Role::Agent,
+            vec![Part::text("hi".to_string())],
+        ));
+        assert_eq!(a2a_reply(&message), Ok("hi".to_string()));
     }
 
     #[test]
