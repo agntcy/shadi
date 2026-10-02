@@ -3,6 +3,7 @@
 
 mod channel;
 mod locator;
+mod trace_context;
 
 pub use channel::{
     dest_did_from_message, insert_dest_did, request_context, A2AChannel, A2AChannelBuilder,
@@ -10,4 +11,5 @@ pub use channel::{
     A2A_SRC_DID_METADATA_KEY,
 };
 pub use locator::{A2ABinding, A2ALocator};
+pub use trace_context::set_remote_parent;
 pub use a2a_slimrpc::{SLIM_SRC_METADATA_KEY, SlimRpcHandler, register_collaborate};

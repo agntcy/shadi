@@ -498,6 +498,9 @@ impl AgentExecutor for AgentBridgeExecutor {
             peer.did = tracing::field::Empty,
             a2a.outcome = tracing::field::Empty,
         );
+        if let Some(message) = ctx.message.as_ref() {
+            shadi_a2a::set_remote_parent(&span, message);
+        }
         let _guard = span.enter();
         if let Some(message) = ctx.message.as_ref() {
             if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
@@ -2484,6 +2487,41 @@ test push ... FAILED
             "shadi.a2a.receive: refused a task addressed to another agent",
             "shadi.a2a.receive a2a.outcome=rejected",
         ]);
+    }
+
+    #[tokio::test]
+    async fn the_receive_span_joins_the_senders_trace() {
+        use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporterBuilder::new().build();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+        let _traced = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+
+        // What a sender's channel adds: its span's traceparent.
+        let sender = tracing::info_span!("sender").context();
+        let sender = sender.span().span_context().clone();
+        let traceparent = format!("00-{}-{}-01", sender.trace_id(), sender.span_id());
+        let mut request = sample_request("plain task");
+        request.message.metadata = Some(std::collections::HashMap::from([(
+            "traceparent".to_string(),
+            serde_json::Value::String(traceparent),
+        )]));
+        let _ = silent_handler()
+            .send_message(&A2AServiceParams::default(), request)
+            .await;
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        let receive = spans
+            .iter()
+            .find(|span| span.name == "shadi.a2a.receive")
+            .expect("the receive span was exported");
+        assert_eq!(receive.span_context.trace_id(), sender.trace_id());
+        assert_eq!(receive.parent_span_id, sender.span_id());
     }
 
     #[tokio::test]
