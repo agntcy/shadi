@@ -12,6 +12,7 @@ use a2a_server::{
     AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
     ServiceParams as A2AServiceParams,
 };
+use agent_secrets::{AgentVerifier, SessionContext};
 use agentbridge::{
     adapters::{
         generic_stdio::GenericStdioAdapter,
@@ -25,9 +26,10 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use shadi_a2a::{A2ABinding, SlimRpcHandler};
+
+use super::egress;
 use shadi_mas::{
-    experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
-    Epoch, PatternKind, TaskAdapter, TaskEnvelope,
+    experiments::LiveA2ATaskAdapterConfig, Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
 use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
 use slim_rpc::Server;
@@ -250,6 +252,7 @@ struct AgentBridgeExecutor {
     agent_did: Option<String>,
     slim_endpoint: Option<String>,
     verbose: bool,
+    egress: Option<Arc<dyn AgentVerifier>>,
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -454,7 +457,7 @@ fn dispatch_peer_handoff(
 ) -> Result<(), String> {
     let registry = LocalAdapterRegistry::from_env();
     let target = resolve_handoff_target(to, slim_fallback, &registry)?;
-    let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+    let adapter = super::egress::live_adapter(LiveA2ATaskAdapterConfig {
         endpoint: target.slim_endpoint.clone().unwrap_or_default(),
         agent_id: from.to_string(),
         local_name: Some(format!("agntcy/shadi/{from}-a2a-client")),
@@ -491,7 +494,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                 return terminal_task(task_id, context_id, TaskState::Rejected, reason);
             }
         }
-        let raw = match ctx.message.as_ref().map(admit_message) {
+        let (raw, sender_did) = match ctx.message.as_ref().map(admit_message) {
             Some(MessageAdmission::Proven {
                 did,
                 human_did,
@@ -504,7 +507,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                     ),
                     None => tracing::info!(%did, "admitted A2A message with proven agent DID"),
                 }
-                payload
+                (payload, Some(did))
             }
             Some(MessageAdmission::AuthRequired { reason }) => {
                 // Non-terminal: the client re-proves and sends again with this
@@ -514,7 +517,7 @@ impl AgentExecutor for AgentBridgeExecutor {
             Some(MessageAdmission::Forged { reason }) => {
                 return terminal_task(task_id, context_id, TaskState::Rejected, reason);
             }
-            None => "(no prompt)".to_string(),
+            None => ("(no prompt)".to_string(), None),
         };
 
         // Extract the body from the task envelope rendered by render_task_message().
@@ -536,6 +539,8 @@ impl AgentExecutor for AgentBridgeExecutor {
         let context_id = ctx.context_id.clone();
         let history = ctx.message.clone().map(|m| vec![m]);
         let inbound_prompt = prompt.clone();
+        let egress_policy = self.egress.clone();
+        let agent_did = self.agent_did.clone();
 
         let respond = async move {
             let started = std::time::Instant::now();
@@ -560,6 +565,42 @@ impl AgentExecutor for AgentBridgeExecutor {
                 }
             };
             let elapsed_ms = started.elapsed().as_millis();
+
+            let mut response = Message {
+                message_id: new_message_id(),
+                context_id: Some(context_id.clone()),
+                task_id: Some(task_id.clone()),
+                role: Role::Agent,
+                parts: vec![Part::text(response_text.clone())],
+                metadata: None,
+                extensions: None,
+                reference_task_ids: None,
+            };
+            if let Some(did) = sender_did.as_deref() {
+                response = shadi_a2a::insert_dest_did(response, did);
+            }
+            // Checked before anything prints it or forwards it, so a reply the
+            // policy withholds reaches neither the log nor another peer.
+            if let Some(policy) = egress_policy.as_deref() {
+                let mut session = SessionContext::new(&agent_id, &context_id);
+                if let Some(did) = agent_did.as_deref() {
+                    session = session.with_did(did);
+                }
+                if let Err(reason) = egress::check(policy, &session, &response) {
+                    return vec![Ok(StreamResponse::Task(Task {
+                        id: task_id,
+                        context_id,
+                        status: TaskStatus {
+                            state: TaskState::Rejected,
+                            message: Some(Message::new(Role::Agent, vec![Part::text(reason)])),
+                            timestamp: None,
+                        },
+                        artifacts: None,
+                        history,
+                        metadata: None,
+                    }))];
+                }
+            }
 
             println!("\n┌─ A2A send [{agent_id}] ({} ms)", elapsed_ms);
             print_body(&response_text, 120, verbose);
@@ -587,17 +628,6 @@ impl AgentExecutor for AgentBridgeExecutor {
                     ),
                 }
             }
-
-            let response = Message {
-                message_id: new_message_id(),
-                context_id: Some(context_id.clone()),
-                task_id: Some(task_id.clone()),
-                role: Role::Agent,
-                parts: vec![Part::text(response_text)],
-                metadata: None,
-                extensions: None,
-                reference_task_ids: None,
-            };
 
             vec![
                 Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
@@ -668,6 +698,7 @@ impl AgentBridgeRequestHandler {
         a2a_binding: A2ABinding,
         ready: Arc<Notify>,
         verbose: bool,
+        egress: Option<Arc<dyn AgentVerifier>>,
     ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
@@ -678,6 +709,7 @@ impl AgentBridgeRequestHandler {
                         .map(str::to_string),
                     slim_endpoint: slim_endpoint.map(str::to_string),
                     verbose,
+                    egress,
                 },
                 InMemoryTaskStore::new(),
             ),
@@ -1009,6 +1041,7 @@ fn run_slim_listener(
         a2a_binding,
         ready,
         verbose,
+        egress::policy(),
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
@@ -1485,6 +1518,7 @@ fn run_unicast_listener(
         a2a_binding,
         ready,
         verbose,
+        egress::policy(),
     ));
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -2067,6 +2101,7 @@ test push ... FAILED
             A2ABinding::Jsonrpc,
             Arc::new(Notify::new()),
             false,
+            None,
         )
     }
 
@@ -2139,6 +2174,105 @@ test push ... FAILED
             .await
             .expect("a rejected task must be fetchable");
         assert_eq!(fetched.status.state, TaskState::Rejected);
+    }
+
+    /// Answers every prompt with the same reply.
+    struct ReplyAdapter(shadi_mas::AgentId);
+
+    impl CliAdapter for ReplyAdapter {
+        fn agent_id(&self) -> &shadi_mas::AgentId {
+            &self.0
+        }
+        fn snapshot_context(
+            &self,
+        ) -> Result<agentbridge::ContextPacket, agentbridge::CliAdapterError> {
+            Err(agentbridge::CliAdapterError::Subprocess("not used".into()))
+        }
+        fn inject_context(
+            &self,
+            _: &agentbridge::ContextPacket,
+        ) -> Result<(), agentbridge::CliAdapterError> {
+            Ok(())
+        }
+        fn execute_prompt(&self, _: &str) -> Result<String, agentbridge::CliAdapterError> {
+            Ok("the reply".to_string())
+        }
+    }
+
+    /// Reads the reply text and keeps the last request it was shown.
+    struct EgressPolicy {
+        allow: bool,
+        seen: std::sync::Mutex<Option<agent_secrets::RequestContext>>,
+    }
+
+    impl AgentVerifier for EgressPolicy {
+        fn verify(&self, _session: &SessionContext) -> agent_secrets::SecretResult<()> {
+            Ok(())
+        }
+
+        fn verify_request(
+            &self,
+            _session: &SessionContext,
+            request: &agent_secrets::RequestContext,
+        ) -> agent_secrets::SecretResult<()> {
+            *self.seen.lock().unwrap() = Some(request.clone());
+            if self.allow {
+                Ok(())
+            } else {
+                Err(agent_secrets::SecretError::NotAuthorized)
+            }
+        }
+
+        fn wants_content(&self) -> bool {
+            true
+        }
+    }
+
+    async fn reply_through(allow: bool) -> (Task, Arc<EgressPolicy>, String) {
+        let sender = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&sender, b"hello").unwrap();
+        let policy = Arc::new(EgressPolicy {
+            allow,
+            seen: std::sync::Mutex::new(None),
+        });
+        let handler = AgentBridgeRequestHandler::new(
+            Arc::new(ReplyAdapter(shadi_mas::AgentId("claude-code".to_string()))),
+            "claude-code",
+            None,
+            None,
+            Some("127.0.0.1:4312"),
+            A2ABinding::Jsonrpc,
+            Arc::new(Notify::new()),
+            false,
+            Some(policy.clone()),
+        );
+        let request = sample_request(String::from_utf8(envelope).unwrap());
+        let response = handler
+            .send_message(&A2AServiceParams::default(), request)
+            .await
+            .expect("a refusal is a task state, not a transport error");
+        match response {
+            SendMessageResponse::Task(task) => (task, policy, sender.did().to_string()),
+            SendMessageResponse::Message(m) => panic!("expected a task, got {m:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_the_egress_policy_refuses_is_withheld() {
+        let (task, _, _) = reply_through(false).await;
+        assert_eq!(task.status.state, TaskState::Rejected);
+        let text = extract_text(task.status.message.as_ref().expect("a reason"));
+        assert!(text.contains("withheld by egress policy"), "{text}");
+        assert!(!text.contains("the reply"), "leaked: {text}");
+    }
+
+    #[tokio::test]
+    async fn the_egress_policy_sees_the_reply_and_where_it_goes() {
+        let (task, policy, sender_did) = reply_through(true).await;
+        assert_eq!(task.status.state, TaskState::Completed);
+        let seen = policy.seen.lock().unwrap().clone().expect("checked");
+        assert_eq!(seen.destination_did, Some(sender_did));
+        assert_eq!(seen.content.as_deref(), Some("the reply"));
     }
 
     #[tokio::test]
