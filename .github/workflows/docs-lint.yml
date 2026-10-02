@@ -71,6 +71,12 @@ jobs:
         with:
           tool: lychee@0.24.2
       - name: Check links
-        run: lychee --include-fragments 'docs/content/**/*.md'
+        # Links into this repo are checked as files in the checkout: lychee's
+        # token only confirms a repo exists, so these went to github.com
+        # anonymously and failed on its 503s.
+        run: >-
+          lychee --include-fragments
+          --remap "https://github\.com/agntcy/shadi/(?:blob|tree)/main/(.*) file://$PWD/\$1"
+          'docs/content/**/*.md'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

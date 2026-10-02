@@ -104,7 +104,7 @@ docs-lint-markdown:
 [group('docs')]
 [doc('Check published Markdown links with lychee.')]
 docs-lint-links:
-  lychee --include-fragments 'docs/content/**/*.md'
+  lychee --include-fragments --remap "https://github\.com/agntcy/shadi/(?:blob|tree)/main/(.*) file://$PWD/\$1" 'docs/content/**/*.md'
 
 [group('docs')]
 [doc('Check Docs lint workflow path filters against GitHub glob rules.')]
