@@ -670,7 +670,7 @@ impl ToolAdapter for SlimToolAdapter {
         let elapsed_ms = started.elapsed().as_millis();
 
         let dispatches = self.inner.dispatches()?;
-        let record = dispatches.get(idx);
+        let record = dispatches.last();
         let response_str = record.map(|r| r.response.as_str()).unwrap_or("");
 
         println!("\n┌─ A2A ←─ {} ({} ms)", self.agent_id, elapsed_ms);
