@@ -172,22 +172,33 @@ impl LiveA2ATaskAdapter {
         task: &TaskEnvelope,
         signed_text: &str,
     ) -> Result<SendMessageResponse, String> {
+        let message = self.task_message(signed_text);
         if let Some(a2a_url) = self.config.a2a_url.as_deref() {
             let locator = A2ALocator::new(
                 self.config.a2a_binding.unwrap_or(A2ABinding::Grpc),
                 a2a_url,
             );
             if locator.binding.is_unicast() {
-                return self.send_signed_task_unicast(task, signed_text, &locator);
+                return self.send_signed_task_unicast(task, &message, &locator);
             }
         }
-        self.send_signed_task_slim(task, signed_text)
+        self.send_signed_task_slim(task, &message)
+    }
+
+    /// Both transports send this, so the receiver can check the destination
+    /// DID whichever way the task arrives.
+    fn task_message(&self, signed_text: &str) -> Message {
+        let message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
+        match self.config.peer_did.as_deref() {
+            Some(peer_did) => insert_dest_did(message, peer_did),
+            None => message,
+        }
     }
 
     fn send_signed_task_unicast(
         &self,
         task: &TaskEnvelope,
-        signed_text: &str,
+        message: &Message,
         locator: &A2ALocator,
     ) -> Result<SendMessageResponse, String> {
         let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
@@ -217,12 +228,8 @@ impl LiveA2ATaskAdapter {
                 .await
                 .map_err(|err| format!("A2A connect {via}: {err}"))?;
             let client = A2AClient::new(Box::new(channel));
-            let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
-            if let Some(peer_did) = self.config.peer_did.as_deref() {
-                message = insert_dest_did(message, peer_did);
-            }
             let request = SendMessageRequest {
-                message,
+                message: message.clone(),
                 configuration: None,
                 metadata: None,
                 tenant: None,
@@ -239,7 +246,7 @@ impl LiveA2ATaskAdapter {
     fn send_signed_task_slim(
         &self,
         task: &TaskEnvelope,
-        signed_text: &str,
+        message: &Message,
     ) -> Result<SendMessageResponse, String> {
         let tls = resolve_client_tls_material_for_agent(Some(&self.config.agent_id))?;
         let local_name = self
@@ -321,7 +328,7 @@ impl LiveA2ATaskAdapter {
                 };
                 let client = A2AClient::new(Box::new(channel));
                 let request = SendMessageRequest {
-                    message: Message::new(Role::User, vec![Part::text(signed_text.to_string())]),
+                    message: message.clone(),
                     configuration: None,
                     metadata: None,
                     tenant: None,
@@ -835,6 +842,30 @@ mod transport_tests {
             peer_did: None,
         });
         assert!(adapter.dispatches().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn task_message_carries_the_peer_did() {
+        let adapter = |peer_did: Option<&str>| {
+            LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+                endpoint: "node:47357".to_string(),
+                agent_id: "avatar".to_string(),
+                local_name: None,
+                peer_agent_id: "peer".to_string(),
+                destination: None,
+                a2a_url: None,
+                a2a_binding: None,
+                peer_did: peer_did.map(str::to_string),
+            })
+        };
+        let tagged = adapter(Some("did:key:zPeer")).task_message("signed");
+        assert_eq!(
+            shadi_a2a::dest_did_from_message(&tagged),
+            Some("did:key:zPeer")
+        );
+        assert_eq!(readable_message_text(&tagged), "signed");
+        let untagged = adapter(None).task_message("signed");
+        assert_eq!(shadi_a2a::dest_did_from_message(&untagged), None);
     }
 
     #[test]
