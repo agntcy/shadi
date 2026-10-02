@@ -401,8 +401,9 @@ Controls:
 
 - **Enforced**: `register --slim-endpoint` refuses to start unless the process is
   running under a SHADI sandbox with network blocked by default
-  (`shadi_sandbox::sandbox_enforced_from_env`). Seatbelt (macOS), Landlock
-  (Linux), and AppContainer + Job Objects (Windows) sandboxes are all
+  (`shadi_sandbox::sandbox_enforced`, which checks that the kernel refuses
+  outbound connections rather than trusting environment variables).
+  Seatbelt (macOS), Landlock (Linux), and AppContainer + Job Objects (Windows) sandboxes are all
   kernel-enforced and inherited by child processes, so wrapping `agentbridge
   register` in [`shadictl`](sandbox.md) — `shadictl --net-block --net-allow
   <slim-endpoint> --read <mtls-cert-dir> -- agentbridge register ...` — is

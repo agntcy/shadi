@@ -6,11 +6,16 @@ mod macos_integration {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use shadi_sandbox::{spawn_sandboxed, SandboxPolicy};
 
     fn unique_test_root() -> PathBuf {
+        // The tests run in parallel and the clock can read the same for both
+        // (macOS ticks in microseconds), so a counter keeps each root apart.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time went backwards")
@@ -18,13 +23,14 @@ mod macos_integration {
         std::env::current_dir()
             .expect("current dir")
             .join(".tmp")
-            .join(format!("macos-sandbox-test-{}-{}", std::process::id(), suffix))
+            .join(format!("macos-sandbox-test-{}-{suffix}-{n}", std::process::id()))
     }
 
-    fn compile_read_stdout_helper(dir: &Path) -> PathBuf {
+    fn compile_helper(dir: &Path, name: &str) -> PathBuf {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/test_support/read_stdout_helper.rs");
-        let binary = dir.join("read-stdout-helper");
+            .join("tests/test_support")
+            .join(format!("{name}.rs"));
+        let binary = dir.join(name);
 
         let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
         let output = Command::new(rustc)
@@ -34,10 +40,10 @@ mod macos_integration {
             .arg(&binary)
             .stderr(Stdio::piped())
             .output()
-            .expect("compile checked-in stdout helper");
+            .expect("compile checked-in helper");
         assert!(
             output.status.success(),
-            "failed to compile stdout helper {}: {}",
+            "failed to compile helper {}: {}",
             source.display(),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -59,7 +65,7 @@ mod macos_integration {
 
         let disallowed_file = disallowed_dir.join("secret.txt");
         fs::write(&disallowed_file, b"top-secret").expect("write disallowed file");
-        let helper = compile_read_stdout_helper(&allowed_dir);
+        let helper = compile_helper(&allowed_dir, "read_stdout_helper");
 
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &synthetic_home);
@@ -103,5 +109,33 @@ mod macos_integration {
         assert!(fs::read(&minimal_output).expect("read minimal output").is_empty());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_network_blocking_sandbox_refuses_the_confinement_probe() {
+        let root = unique_test_root();
+        fs::create_dir_all(&root).expect("create test root");
+        let probe = compile_helper(&root, "confinement_probe_helper");
+
+        let outside = Command::new(&probe)
+            .status()
+            .expect("run probe outside the sandbox");
+
+        let policy = SandboxPolicy::new()
+            .allow_read_path(&root)
+            .block_network(true);
+        let mut command = Command::new(&probe);
+        let mut child = spawn_sandboxed(&mut command, &policy).expect("spawn probe");
+        let inside = child.wait().expect("wait for probe");
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            !outside.success(),
+            "outside a sandbox the kernel should not refuse the probe"
+        );
+        assert!(
+            inside.success(),
+            "a network-blocking sandbox must refuse the probe with a permission error"
+        );
     }
 }

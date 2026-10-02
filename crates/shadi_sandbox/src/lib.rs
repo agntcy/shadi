@@ -31,6 +31,8 @@ pub use policy_patch::{
 };
 use std::process::{Command, ExitStatus};
 use std::io;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+use std::time::Duration;
 use tracing::{field, info_span};
 
 /// Set on a sandboxed child's environment by [`spawn_sandboxed`], `"1"` iff
@@ -39,7 +41,7 @@ use tracing::{field, info_span};
 /// Env vars are inherited by descendants automatically, so a grandchild
 /// spawned by the sandboxed process (e.g. a coding-tool subprocess launched
 /// by an agentbridge adapter) can observe this too — but it does not, on its
-/// own, mean anything is actually restricted. Use [`sandbox_enforced_from_env`]
+/// own, mean anything is actually restricted. Use [`sandbox_enforced`]
 /// to check for a *meaningfully* restrictive policy, not just an active one.
 pub const SANDBOX_ACTIVE_ENV: &str = "SHADI_SANDBOX_ACTIVE";
 
@@ -59,9 +61,41 @@ pub const SANDBOX_NET_BLOCKED_ENV: &str = "SHADI_SANDBOX_NET_BLOCKED";
 /// operation that executes attacker-influenceable input) should call this
 /// before starting and refuse to run if it returns `false`, rather than
 /// re-implementing policy enforcement itself.
-pub fn sandbox_enforced_from_env() -> bool {
+///
+/// The environment flags say SHADI launched this process; the kernel probe
+/// ([`network_blocked_by_kernel`]) proves the network really is confined, so
+/// exporting the flags by hand is not enough.
+pub fn sandbox_enforced() -> bool {
     std::env::var(SANDBOX_ACTIVE_ENV).as_deref() == Ok("1")
         && std::env::var(SANDBOX_NET_BLOCKED_ENV).as_deref() == Ok("1")
+        && network_blocked_by_kernel()
+}
+
+#[deprecated(note = "use `sandbox_enforced`, which also checks the kernel")]
+pub fn sandbox_enforced_from_env() -> bool {
+    sandbox_enforced()
+}
+
+/// TEST-NET-1 (RFC 5737) on the discard port: never a real peer, and never on
+/// an allow-list.
+const CONFINEMENT_PROBE: SocketAddr =
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 9));
+
+/// Whether the kernel refuses a connection to an address no policy allows.
+///
+/// A sandbox that blocks network by default fails `connect` with a permission
+/// error (`EPERM` under Seatbelt, `EACCES` under Landlock, `WSAEACCES` in an
+/// AppContainer). A timeout, an unreachable route or a connection all mean the
+/// network is open.
+pub fn network_blocked_by_kernel() -> bool {
+    confinement_denied(&TcpStream::connect_timeout(
+        &CONFINEMENT_PROBE,
+        Duration::from_millis(300),
+    ))
+}
+
+fn confinement_denied<T>(result: &std::io::Result<T>) -> bool {
+    matches!(result, Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
@@ -303,33 +337,57 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_enforced_from_env_requires_both_active_and_net_blocked() {
+    fn sandbox_enforced_needs_both_flags() {
         // These env vars are touched by no other test in this crate, so a single
-        // sequential test needs no cross-test lock.
+        // sequential test needs no cross-test lock. Every case lacks a flag, so
+        // the kernel probe is never reached and in-process sandboxing by other
+        // tests cannot change the answer.
         std::env::remove_var(SANDBOX_ACTIVE_ENV);
         std::env::remove_var(SANDBOX_NET_BLOCKED_ENV);
-        assert!(!sandbox_enforced_from_env(), "no sandbox env vars set");
+        assert!(!sandbox_enforced(), "no sandbox env vars set");
 
         std::env::set_var(SANDBOX_ACTIVE_ENV, "1");
         assert!(
-            !sandbox_enforced_from_env(),
+            !sandbox_enforced(),
             "active but permissive (network not blocked) must not count as enforced"
         );
 
         std::env::set_var(SANDBOX_NET_BLOCKED_ENV, "0");
-        assert!(!sandbox_enforced_from_env());
-
-        std::env::set_var(SANDBOX_NET_BLOCKED_ENV, "1");
-        assert!(sandbox_enforced_from_env());
+        assert!(!sandbox_enforced());
 
         std::env::remove_var(SANDBOX_ACTIVE_ENV);
+        std::env::set_var(SANDBOX_NET_BLOCKED_ENV, "1");
         assert!(
-            !sandbox_enforced_from_env(),
+            !sandbox_enforced(),
             "net-blocked flag alone without the active flag must not count as enforced"
         );
 
-        std::env::remove_var(SANDBOX_ACTIVE_ENV);
         std::env::remove_var(SANDBOX_NET_BLOCKED_ENV);
+    }
+
+    #[test]
+    fn only_a_permission_error_counts_as_confinement() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(confinement_denied::<()>(&Err(Error::from(
+            ErrorKind::PermissionDenied
+        ))));
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::NetworkUnreachable,
+            ErrorKind::HostUnreachable,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                !confinement_denied::<()>(&Err(Error::from(kind))),
+                "{kind:?}"
+            );
+        }
+        assert!(
+            !confinement_denied(&Ok(())),
+            "a connection means the network is open"
+        );
     }
 
     #[cfg(unix)]
