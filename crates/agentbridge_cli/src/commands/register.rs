@@ -1674,6 +1674,9 @@ mod tests {
             require_sandbox_enforced("copilot", "127.0.0.1:47357").is_err(),
             "exporting both flags without a sandbox must not pass the gate"
         );
+        #[allow(deprecated)]
+        let legacy = shadi_sandbox::sandbox_enforced_from_env();
+        assert!(!legacy, "the deprecated name must not be spoofable either");
 
         std::env::remove_var(shadi_sandbox::SANDBOX_ACTIVE_ENV);
         std::env::remove_var(shadi_sandbox::SANDBOX_NET_BLOCKED_ENV);
