@@ -9,7 +9,10 @@ use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
+use tracing::Subscriber;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::Layer;
 
 static INIT: Once = Once::new();
 static PROVIDER: OnceLock<trace::SdkTracerProvider> = OnceLock::new();
@@ -27,57 +30,78 @@ pub fn init(service_name: &str) {
             return;
         }
 
-        let resource = Resource::builder()
-            .with_attributes([
-                KeyValue::new("service.name", config.service_name),
-                KeyValue::new("service.namespace", "shadi"),
-                KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                KeyValue::new("telemetry.sdk.language", "rust"),
-            ])
-            .build();
-
-        let otel_layer = if !config.otlp_endpoint.is_empty() {
-            build_provider(&config.otlp_endpoint, resource).map(|provider| {
-                let _ = PROVIDER.set(provider);
-                let tracer = PROVIDER
-                    .get()
-                    .expect("telemetry provider")
-                    .tracer("shadi.telemetry");
-                tracing_opentelemetry::layer().with_tracer(tracer)
-            })
-        } else {
-            None
-        };
-
-        let file_layer = config.file_path.as_ref().and_then(|path| {
-            let (dir, file_name) = resolve_trace_path(path)?;
-            if std::fs::create_dir_all(&dir).is_err() {
-                return None;
-            }
-
-            let appender = tracing_appender::rolling::never(dir, file_name);
-            let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-            let _ = FILE_GUARD.set(guard);
-
-            Some(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_current_span(true)
-                    .with_span_list(true)
-                    .with_ansi(false)
-                    .with_writer(non_blocking),
-            )
-        });
-
         let fmt_layer = config.console_enabled.then(tracing_subscriber::fmt::layer);
 
         let subscriber = tracing_subscriber::registry()
-            .with(otel_layer)
-            .with(fmt_layer)
-            .with(file_layer);
+            .with(export_layers(&config))
+            .with(fmt_layer);
 
         let _ = tracing::subscriber::set_global_default(subscriber);
     });
+}
+
+/// What [`init`] installs apart from console output, for a binary that builds
+/// its own subscriber: OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set,
+/// and the JSON trace file when `SHADI_OTEL_FILE` is. `None` when neither is.
+///
+/// Call this or [`init`], once per process, and [`shutdown`] on the way out.
+pub fn layers<S>(service_name: &str) -> Option<Box<dyn Layer<S> + Send + Sync>>
+where
+    S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync,
+{
+    export_layers(&load_config(service_name))
+}
+
+fn export_layers<S>(config: &TelemetryConfig) -> Option<Box<dyn Layer<S> + Send + Sync>>
+where
+    S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync,
+{
+    let resource = Resource::builder()
+        .with_attributes([
+            KeyValue::new("service.name", config.service_name.clone()),
+            KeyValue::new("service.namespace", "shadi"),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            KeyValue::new("telemetry.sdk.language", "rust"),
+        ])
+        .build();
+
+    let otel_layer = if !config.otlp_endpoint.is_empty() {
+        build_provider(&config.otlp_endpoint, resource).map(|provider| {
+            let _ = PROVIDER.set(provider);
+            let tracer = PROVIDER
+                .get()
+                .expect("telemetry provider")
+                .tracer("shadi.telemetry");
+            tracing_opentelemetry::layer().with_tracer(tracer)
+        })
+    } else {
+        None
+    };
+
+    let file_layer = config.file_path.as_ref().and_then(|path| {
+        let (dir, file_name) = resolve_trace_path(path)?;
+        if std::fs::create_dir_all(&dir).is_err() {
+            return None;
+        }
+
+        let appender = tracing_appender::rolling::never(dir, file_name);
+        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+        let _ = FILE_GUARD.set(guard);
+
+        Some(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        )
+    });
+
+    if otel_layer.is_none() && file_layer.is_none() {
+        return None;
+    }
+    Some(Box::new(Layer::and_then(otel_layer, file_layer)))
 }
 
 /// OTEL_EXPORTER_OTLP_ENDPOINT is a base URL per the OpenTelemetry spec, and
@@ -284,6 +308,22 @@ mod tests {
         std::env::remove_var("SHADI_OTEL_CONSOLE");
         std::env::remove_var("SHADI_OTEL_FILE");
         std::env::remove_var("OTEL_SERVICE_NAME");
+    }
+
+    /// Console output is the caller's own, so only a real sink yields layers.
+    #[test]
+    fn layers_need_an_export_sink() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::remove_var("SHADI_OTEL_FILE");
+        std::env::set_var("SHADI_OTEL_CONSOLE", "true");
+        assert!(layers::<tracing_subscriber::Registry>("svc").is_none());
+
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9");
+        assert!(layers::<tracing_subscriber::Registry>("svc").is_some());
+
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::remove_var("SHADI_OTEL_CONSOLE");
     }
 
     /// A base endpoint has to gain the signal path, or 0.32 exports nowhere.

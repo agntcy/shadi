@@ -215,6 +215,7 @@ dependencies = [
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",
  "agntcy-shadi-sandbox",
+ "agntcy-shadi-telemetry",
  "agntcy-slim-bindings",
  "agntcy-slim-config",
  "agntcy-slim-persistence",

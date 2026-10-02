@@ -1,4 +1,8 @@
 use clap::{Parser, Subcommand};
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 mod commands;
 
@@ -193,13 +197,21 @@ enum Cmd {
     },
 }
 
-fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::WARN.into()),
+/// The console keeps RUST_LOG, warn by default. Traces go to the collector
+/// from info up, so dependencies' debug spans stay out of it.
+fn subscriber() -> impl tracing::Subscriber + Send + Sync {
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::WARN.into()),
+            ),
         )
-        .init();
+        .with(shadi_telemetry::layers("agentbridge").with_filter(LevelFilter::INFO))
+}
+
+fn main() {
+    subscriber().init();
     // Same as shadictl: a2a-grpc enables rustls `ring` beside SLIM aws-lc-rs.
     slim_config::tls::provider::initialize_crypto_provider();
 
@@ -293,6 +305,8 @@ fn main() {
         }),
     };
 
+    // Export is batched, so queued spans need flushing before we exit.
+    shadi_telemetry::shutdown();
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -303,6 +317,32 @@ fn main() {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// Each layer has its own filter: an info event the console drops at its
+    /// default of warn still reaches the trace sink.
+    #[test]
+    fn info_events_reach_the_trace_sink_but_not_the_console_filter() {
+        let path =
+            std::env::temp_dir().join(format!("agentbridge-traces-{}.jsonl", std::process::id()));
+        std::env::remove_var("RUST_LOG");
+        std::env::set_var("SHADI_OTEL_FILE", &path);
+        tracing::subscriber::with_default(subscriber(), || {
+            tracing::info!("bound for the trace sink");
+        });
+        std::env::remove_var("SHADI_OTEL_FILE");
+
+        // The file writer runs on its own thread.
+        let mut written = String::new();
+        for _ in 0..100 {
+            written = std::fs::read_to_string(&path).unwrap_or_default();
+            if written.contains("bound for the trace sink") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(written.contains("bound for the trace sink"), "{written:?}");
+    }
 
     #[test]
     fn cli_definition_is_valid() {
