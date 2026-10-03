@@ -2,10 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{SecretError, SecretResult};
+use crate::request::RequestContext;
 use crate::session::SessionContext;
 
 pub trait AgentVerifier: Send + Sync {
     fn verify(&self, session: &SessionContext) -> SecretResult<()>;
+
+    /// Check one request before it is sent. Defaults to [`Self::verify`], so a
+    /// verifier that only judges the session keeps working unchanged.
+    fn verify_request(
+        &self,
+        session: &SessionContext,
+        _request: &RequestContext,
+    ) -> SecretResult<()> {
+        self.verify(session)
+    }
+
+    /// Whether [`RequestContext::content`] is filled in for this verifier. Off
+    /// unless asked for, so message text is not copied into checks that never
+    /// read it.
+    fn wants_content(&self) -> bool {
+        false
+    }
 }
 
 pub struct NoopVerifier;

@@ -10,7 +10,7 @@ use a2a_client::rest::RestTransport;
 use a2a_client::transport::{ServiceParams, Transport};
 use a2a_grpc::GrpcTransport;
 use a2a_slimrpc::SlimRpcTransport;
-use agent_secrets::{AgentVerifier, SecretError, SessionContext};
+use agent_secrets::{AgentVerifier, RequestContext, SecretError, SessionContext};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use slim_bindings::{App, Name};
@@ -59,6 +59,19 @@ pub fn dest_did_from_message(message: &Message) -> Option<&str> {
         .filter(|did| !did.is_empty())
 }
 
+/// What a verifier sees of an outbound message. The text is copied only for a
+/// verifier that asks for it.
+fn request_context(message: &Message, with_content: bool) -> RequestContext {
+    let mut request = RequestContext::new();
+    request.message_id = Some(message.message_id.clone());
+    request.destination_did = dest_did_from_message(message).map(str::to_string);
+    if with_content {
+        let text = message.parts.iter().filter_map(Part::as_text);
+        request.content = Some(text.collect::<Vec<_>>().join("\n"));
+    }
+    request
+}
+
 fn response_to_message(response: SendMessageResponse) -> Message {
     match response {
         SendMessageResponse::Message(message) => message,
@@ -87,6 +100,13 @@ pub struct A2AChannel {
 impl A2AChannel {
     fn check_auth(&self) -> Result<(), A2AError> {
         self.verifier.verify(&self.ctx).map_err(secret_err_to_a2a)
+    }
+
+    fn check_request(&self, req: &SendMessageRequest) -> Result<(), A2AError> {
+        let request = request_context(&req.message, self.verifier.wants_content());
+        self.verifier
+            .verify_request(&self.ctx, &request)
+            .map_err(secret_err_to_a2a)
     }
 
     /// Wrap an already-connected A2A [`Transport`] (SLIMRPC, gRPC, or a test stub).
@@ -394,7 +414,7 @@ impl Transport for A2AChannel {
         params: &ServiceParams,
         req: &SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
-        self.check_auth()?;
+        self.check_request(req)?;
         self.transport.send_message(params, req).await
     }
 
@@ -403,7 +423,7 @@ impl Transport for A2AChannel {
         params: &ServiceParams,
         req: &SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        self.check_auth()?;
+        self.check_request(req)?;
         self.transport.send_streaming_message(params, req).await
     }
 
@@ -662,6 +682,135 @@ mod tests {
         // the auth gate was passed and the call reached the transport layer.
         let err = channel.send_message(&params, &req).await.unwrap_err();
         assert_eq!(err.message, "stub");
+    }
+
+    /// Allows everything and keeps the last request it was shown.
+    struct RecordingVerifier {
+        content: bool,
+        seen: std::sync::Mutex<Option<RequestContext>>,
+    }
+
+    impl AgentVerifier for RecordingVerifier {
+        fn verify(&self, _session: &SessionContext) -> SecretResult<()> {
+            Ok(())
+        }
+
+        fn verify_request(
+            &self,
+            _session: &SessionContext,
+            request: &RequestContext,
+        ) -> SecretResult<()> {
+            *self.seen.lock().unwrap() = Some(request.clone());
+            Ok(())
+        }
+
+        fn wants_content(&self) -> bool {
+            self.content
+        }
+    }
+
+    impl RecordingVerifier {
+        fn last(&self) -> RequestContext {
+            self.seen.lock().unwrap().clone().expect("no request")
+        }
+    }
+
+    fn recording(content: bool) -> Arc<RecordingVerifier> {
+        Arc::new(RecordingVerifier {
+            content,
+            seen: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Passes `verify` and refuses `verify_request`, so a send that only ran
+    /// the session check would get through.
+    struct RequestDenyVerifier;
+
+    impl AgentVerifier for RequestDenyVerifier {
+        fn verify(&self, _session: &SessionContext) -> SecretResult<()> {
+            Ok(())
+        }
+
+        fn verify_request(
+            &self,
+            _session: &SessionContext,
+            _request: &RequestContext,
+        ) -> SecretResult<()> {
+            Err(SecretError::NotAuthorized)
+        }
+    }
+
+    fn addressed_request() -> SendMessageRequest {
+        let mut message = insert_dest_did(
+            Message::new(Role::User, vec![Part::text("hello")]),
+            "did:key:zPeer",
+        );
+        message.message_id = "peer-chosen-id".to_string();
+        SendMessageRequest {
+            message,
+            configuration: None,
+            metadata: None,
+            tenant: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_shows_the_verifier_the_request() {
+        let verifier = recording(false);
+        let channel = make_channel(verifier.clone());
+        let _ = channel
+            .send_message(&ServiceParams::new(), &addressed_request())
+            .await;
+        let seen = verifier.last();
+        assert_eq!(seen.message_id.as_deref(), Some("peer-chosen-id"));
+        assert_eq!(seen.destination_did.as_deref(), Some("did:key:zPeer"));
+        assert_ne!(seen.evaluation_id(), "peer-chosen-id");
+        assert_eq!(seen.content, None, "content is opt-in");
+    }
+
+    #[tokio::test]
+    async fn streaming_send_carries_content_when_asked() {
+        let verifier = recording(true);
+        let channel = make_channel(verifier.clone());
+        let _ = channel
+            .send_streaming_message(&ServiceParams::new(), &addressed_request())
+            .await;
+        let seen = verifier.last();
+        assert_eq!(seen.content.as_deref(), Some("hello"));
+    }
+
+    /// Only sends carry a request to check; other calls check the session.
+    #[tokio::test]
+    async fn calls_other_than_sends_check_only_the_session() {
+        let verifier = recording(true);
+        let channel = make_channel(verifier.clone());
+        let request = GetTaskRequest {
+            id: "task-1".to_string(),
+            history_length: None,
+            tenant: None,
+        };
+        let err = channel
+            .get_task(&ServiceParams::new(), &request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "stub", "the session check passed");
+        assert!(verifier.seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_request_level_refusal_blocks_both_sends() {
+        let channel = make_channel(Arc::new(RequestDenyVerifier));
+        assert!(channel.check_auth().is_ok(), "session check passes");
+        let params = ServiceParams::new();
+        let err = channel
+            .send_message(&params, &addressed_request())
+            .await
+            .unwrap_err();
+        assert_ne!(err.message, "stub", "the transport must not be reached");
+        assert!(channel
+            .send_streaming_message(&params, &addressed_request())
+            .await
+            .is_err());
     }
 
     #[tokio::test]
