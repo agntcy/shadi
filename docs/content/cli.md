@@ -455,6 +455,10 @@ cargo run -p agntcy-shadi-cli -- \
   --in /path/to/human-secret.asc
 ```
 
+`get-secret --key <key>` reads a secret back. It prints to a pipe or file, but
+to a terminal only with `--reveal`, and it refuses to run inside a SHADI
+sandbox, so a confined agent cannot read raw secrets through it.
+
 Derive an agent DID and keypair from a human OpenPGP secret key:
 
 ```bash
