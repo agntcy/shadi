@@ -2035,6 +2035,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_get_secret_command_reads_store() {
+        let _guard = lock_test_env();
         let key = unique_key("secret/key");
         test_store_put(&key, b"value");
 
@@ -2051,6 +2052,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_get_secret_missing_key_returns_error() {
+        let _guard = lock_test_env();
         let key = unique_key("missing/key");
 
         let mut cli = build_cli();
@@ -2066,6 +2068,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_get_secret_invalid_utf8_returns_error() {
+        let _guard = lock_test_env();
         let key = unique_key("secret/invalid-utf8");
         test_store_put(&key, &[0xFF, 0xFE, 0xFD]);
 
@@ -2077,6 +2080,32 @@ members = [{ did = "did:key:zA", role = "human" }]
         ];
 
         assert_eq!(run_cli(cli), ExitCode::from(2));
+    }
+
+    #[test]
+    fn get_secret_needs_reveal_for_a_terminal_and_no_sandbox() {
+        let unprobed = || -> bool { panic!("a refused terminal must not probe the network") };
+        let refusal = get_secret_refusal(false, true, unprobed).expect("refused");
+        assert!(refusal.contains("--reveal"), "{refusal}");
+        assert_eq!(get_secret_refusal(true, true, || false), None);
+        assert_eq!(get_secret_refusal(false, false, || false), None);
+        let refusal = get_secret_refusal(true, false, || true).expect("refused");
+        assert!(refusal.contains("sandbox"), "{refusal}");
+    }
+
+    #[test]
+    fn run_cli_get_secret_is_refused_inside_a_sandbox() {
+        let _guard = lock_test_env();
+        let key = unique_key("secret/sandboxed");
+        test_store_put(&key, b"value");
+        std::env::set_var(shadi_sandbox::SANDBOX_ACTIVE_ENV, "1");
+
+        let mut cli = build_cli();
+        cli.run_command = vec!["get-secret".to_string(), "--key".to_string(), key];
+        let code = run_cli(cli);
+
+        std::env::remove_var(shadi_sandbox::SANDBOX_ACTIVE_ENV);
+        assert_eq!(code, ExitCode::from(2));
     }
 
     #[test]
