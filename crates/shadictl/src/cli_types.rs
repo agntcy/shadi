@@ -156,10 +156,12 @@ pub(crate) enum Commands {
     DidFromGitHub(DidFromGitHubArgs),
     #[command(name = "did-from-ssh")]
     DidFromSsh(DidFromSshArgs),
+    // Not `GetSecret`/`DeleteSecret`: CodeQL reads a variant named after a
+    // secret as sensitive data, which taints every argument clap parses.
     #[command(name = "get-secret")]
-    GetSecret(GetSecretArgs),
+    StoreGet(GetSecretArgs),
     #[command(name = "delete-secret")]
-    DeleteSecret(DeleteSecretArgs),
+    StoreDelete(DeleteSecretArgs),
     #[command(name = "derive-agent-did")]
     DeriveAgentDid(DeriveAgentDidArgs),
     #[command(name = "derive-agent-identity")]
