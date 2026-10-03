@@ -1622,7 +1622,7 @@
         test_store_clear_failures();
         test_store_put("secops/dispatch", b"value");
 
-        let code = run_named_command(Commands::DeleteSecret(DeleteSecretArgs {
+        let code = run_named_command(Commands::StoreDelete(DeleteSecretArgs {
             key: "secops/dispatch".to_string(),
         }));
 
