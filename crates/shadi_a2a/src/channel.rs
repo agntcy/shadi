@@ -16,6 +16,7 @@ use futures::stream::BoxStream;
 use slim_bindings::{App, Name};
 
 use crate::locator::{A2ABinding, A2ALocator};
+use crate::trace_context::with_trace_context;
 
 /// `Message.metadata` key the A2A group API sets to the proven sender DID.
 /// SLIM still also sets [`a2a_slimrpc::SLIM_SRC_METADATA_KEY`] on the wire.
@@ -415,7 +416,9 @@ impl Transport for A2AChannel {
         req: &SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
         self.check_request(req)?;
-        self.transport.send_message(params, req).await
+        self.transport
+            .send_message(params, &with_trace_context(req))
+            .await
     }
 
     async fn send_streaming_message(
@@ -424,7 +427,9 @@ impl Transport for A2AChannel {
         req: &SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.check_request(req)?;
-        self.transport.send_streaming_message(params, req).await
+        self.transport
+            .send_streaming_message(params, &with_trace_context(req))
+            .await
     }
 
     async fn get_task(
@@ -1072,9 +1077,16 @@ mod tests {
                         .join(" ")
                 })
                 .unwrap_or_default();
+            // Echo a trace context too, so a test can see it crossed the wire.
+            let traceparent = ctx
+                .message
+                .as_ref()
+                .and_then(|message| message.metadata.as_ref()?.get("traceparent")?.as_str())
+                .map(|value| format!(" traceparent:{value}"))
+                .unwrap_or_default();
             let reply = Message::new(
                 Role::Agent,
-                vec![Part::text(format!("echo:{text}"))],
+                vec![Part::text(format!("echo:{text}{traceparent}"))],
             );
             Box::pin(futures::stream::once(async move { Ok(StreamResponse::Message(reply)) }))
         }
@@ -1148,6 +1160,63 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(text.contains("echo:ping"), "{text}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_traced_send_carries_its_trace_over_the_wire() {
+        use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+        use tracing::Instrument;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+        let _traced = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+
+        let (url, server) = serve_loopback_grpc().await;
+        let channel = A2AChannel::grpc(
+            url,
+            Arc::new(AllowVerifier),
+            SessionContext::new("client", "loopback"),
+        )
+        .await
+        .expect("connect gRPC");
+        let req = SendMessageRequest {
+            message: Message::new(Role::User, vec![Part::text("ping".to_string())]),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+        };
+        let span = tracing::info_span!("send");
+        let trace = span.context().span().span_context().trace_id();
+        let expected = format!("traceparent:00-{trace}-");
+        fn text(message: &Message) -> String {
+            message.parts.iter().filter_map(Part::as_text).collect()
+        }
+        let params = ServiceParams::new();
+        async {
+            let response = channel
+                .send_message(&params, &req)
+                .await
+                .expect("send_message");
+            let sent = text(&response_to_message(response));
+            assert!(sent.contains(&expected), "{sent}");
+
+            let mut stream = channel
+                .send_streaming_message(&params, &req)
+                .await
+                .expect("send_streaming_message");
+            let mut streamed = String::new();
+            while let Some(item) = stream.next().await {
+                if let StreamResponse::Message(message) = item.expect("stream item") {
+                    streamed.push_str(&text(&message));
+                }
+            }
+            assert!(streamed.contains(&expected), "{streamed}");
+        }
+        .instrument(span)
+        .await;
         server.abort();
     }
 

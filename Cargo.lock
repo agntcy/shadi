@@ -224,6 +224,8 @@ dependencies = [
  "axum",
  "clap",
  "futures",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "rustls-pki-types",
  "serde_json",
  "thiserror 2.0.21",
@@ -232,6 +234,7 @@ dependencies = [
  "tonic-tls",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
 ]
@@ -253,10 +256,15 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "serde",
  "serde_json",
  "tokio",
  "tonic",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -339,7 +339,9 @@ caused it. Both carry `a2a.task_id`, `peer.did` and `a2a.outcome`. A receive
 ends `completed`, `rejected`, `auth_required` or `withheld`; a send records the
 peer's reply state, or `error` when it never got one. Admission and egress
 policy decisions are events on the span, the policy ones with their local
-`evaluation_id`. [Telemetry](telemetry.md) covers exporting them.
+`evaluation_id`. A send carries its W3C `traceparent` in the message metadata,
+so the receive span joins the sender's trace. Nothing signs that value: it only
+links traces. [Telemetry](telemetry.md) covers exporting them.
 
 ### TLS certificate resolution
 
