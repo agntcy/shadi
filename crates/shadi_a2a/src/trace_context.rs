@@ -106,6 +106,22 @@ mod tests {
         assert!(matches!(with_trace_context(&req), Cow::Borrowed(_)));
     }
 
+    /// The W3C propagator only reads two keys; others list them all.
+    #[test]
+    fn the_carrier_reads_and_lists_message_metadata() {
+        let metadata = HashMap::from([
+            ("traceparent".to_string(), serde_json::Value::from("tp")),
+            ("a2a-dst-did".to_string(), serde_json::Value::from("did")),
+            ("count".to_string(), serde_json::Value::from(3)),
+        ]);
+        let carrier = MetadataCarrier(&metadata);
+        assert_eq!(carrier.get("traceparent"), Some("tp"));
+        assert_eq!(carrier.get("count"), None, "only string values are read");
+        let mut keys = carrier.keys();
+        keys.sort_unstable();
+        assert_eq!(keys, ["a2a-dst-did", "count", "traceparent"]);
+    }
+
     /// Only a valid remote trace replaces the local parent.
     #[test]
     fn a_missing_or_malformed_traceparent_keeps_the_local_parent() {
