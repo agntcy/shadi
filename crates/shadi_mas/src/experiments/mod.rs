@@ -803,14 +803,21 @@ mod transport_tests {
         })
     }
 
+    thread_local! {
+        static CAPTURING: std::cell::RefCell<Option<Vec<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     /// The span fields and events `run` leaves, as `span field=value` and
     /// `span: message` lines.
+    ///
+    /// Recorded by one subscriber the whole test binary shares, into a buffer
+    /// for this thread. A per-thread subscriber is not enough: a callsite
+    /// another thread reaches first can cache "no subscriber" and drop the
+    /// event here.
     fn trace_of(run: impl FnOnce()) -> Vec<String> {
         use tracing_subscriber::layer::{Context, SubscriberExt};
         use tracing_subscriber::registry::LookupSpan;
-
-        #[derive(Clone, Default)]
-        struct Lines(Arc<Mutex<Vec<String>>>);
 
         struct Fields(Vec<(String, String)>);
 
@@ -825,7 +832,17 @@ mod transport_tests {
             }
         }
 
-        impl<S> tracing_subscriber::Layer<S> for Lines
+        fn push(lines: impl IntoIterator<Item = String>) {
+            CAPTURING.with(|current| {
+                if let Some(recorded) = current.borrow_mut().as_mut() {
+                    recorded.extend(lines);
+                }
+            });
+        }
+
+        struct Capture;
+
+        impl<S> tracing_subscriber::Layer<S> for Capture
         where
             S: tracing::Subscriber + for<'a> LookupSpan<'a>,
         {
@@ -838,8 +855,7 @@ mod transport_tests {
                 let span = ctx.span(id).map_or("-", |span| span.name());
                 let mut fields = Fields(Vec::new());
                 values.record(&mut fields);
-                let mut lines = self.0.lock().unwrap();
-                lines.extend(fields.0.into_iter().map(|(k, v)| format!("{span} {k}={v}")));
+                push(fields.0.into_iter().map(|(k, v)| format!("{span} {k}={v}")));
             }
 
             fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
@@ -848,14 +864,20 @@ mod transport_tests {
                 event.record(&mut fields);
                 let message = fields.0.into_iter().find(|(k, _)| k == "message");
                 let message = message.map(|(_, v)| v).unwrap_or_default();
-                self.0.lock().unwrap().push(format!("{span}: {message}"));
+                push([format!("{span}: {message}")]);
             }
         }
 
-        let lines = Lines::default();
-        tracing::subscriber::with_default(tracing_subscriber::registry().with(lines.clone()), run);
-        let recorded = lines.0.lock().unwrap().clone();
-        recorded
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            let subscriber = tracing_subscriber::registry().with(Capture);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+        tracing::callsite::rebuild_interest_cache();
+
+        CAPTURING.with(|current| *current.borrow_mut() = Some(Vec::new()));
+        run();
+        CAPTURING.with(|current| current.borrow_mut().take().unwrap_or_default())
     }
 
     #[test]

@@ -2326,6 +2326,11 @@ test push ... FAILED
     #[derive(Clone, Default)]
     struct Trace(Arc<std::sync::Mutex<Vec<String>>>);
 
+    thread_local! {
+        static CAPTURING: std::cell::RefCell<Option<Trace>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     struct Fields(Vec<(String, String)>);
 
     impl tracing::field::Visit for Fields {
@@ -2339,7 +2344,23 @@ test push ... FAILED
         }
     }
 
-    impl<S> tracing_subscriber::Layer<S> for Trace
+    /// The one subscriber every test thread shares, recording into the
+    /// `Trace` the thread installed. A per-thread subscriber is not enough:
+    /// a callsite another thread reaches first can cache "no subscriber" and
+    /// drop the event here.
+    struct Capture;
+
+    impl Capture {
+        fn push(lines: impl IntoIterator<Item = String>) {
+            CAPTURING.with(|current| {
+                if let Some(trace) = current.borrow().as_ref() {
+                    trace.0.lock().unwrap().extend(lines);
+                }
+            });
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for Capture
     where
         S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     {
@@ -2352,8 +2373,7 @@ test push ... FAILED
             let span = ctx.span(id).map_or("-", |span| span.name());
             let mut fields = Fields(Vec::new());
             values.record(&mut fields);
-            let mut lines = self.0.lock().unwrap();
-            lines.extend(fields.0.into_iter().map(|(k, v)| format!("{span} {k}={v}")));
+            Capture::push(fields.0.into_iter().map(|(k, v)| format!("{span} {k}={v}")));
         }
 
         fn on_event(
@@ -2366,14 +2386,36 @@ test push ... FAILED
             event.record(&mut fields);
             let message = fields.0.into_iter().find(|(k, _)| k == "message");
             let message = message.map(|(_, v)| v).unwrap_or_default();
-            self.0.lock().unwrap().push(format!("{span}: {message}"));
+            Capture::push([format!("{span}: {message}")]);
+        }
+    }
+
+    /// Install [`Capture`] for the whole test binary, once, and drop any
+    /// interest cached before it was there.
+    fn install_capture() {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            use tracing_subscriber::layer::SubscriberExt;
+            let subscriber = tracing_subscriber::registry().with(Capture);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+        tracing::callsite::rebuild_interest_cache();
+    }
+
+    /// Stops the thread recording when a test ends.
+    struct Recording;
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            CAPTURING.with(|current| current.borrow_mut().take());
         }
     }
 
     impl Trace {
-        fn install(&self) -> tracing::subscriber::DefaultGuard {
-            use tracing_subscriber::layer::SubscriberExt;
-            tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+        fn install(&self) -> Recording {
+            install_capture();
+            CAPTURING.with(|current| *current.borrow_mut() = Some(self.clone()));
+            Recording
         }
 
         fn assert_has(&self, expected: &[&str]) {
