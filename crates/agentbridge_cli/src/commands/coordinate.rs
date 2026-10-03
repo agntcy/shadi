@@ -747,7 +747,7 @@ fn build_agents(
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
                 agent_id: agent_id.clone(),
-                inner: LiveA2ATaskAdapter::new(config),
+                inner: super::egress::live_adapter(config),
                 dispatch_count: Mutex::new(0),
             });
             (agent_id, slim_adapter as Arc<dyn ToolAdapter>)

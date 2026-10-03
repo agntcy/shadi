@@ -59,9 +59,9 @@ pub fn dest_did_from_message(message: &Message) -> Option<&str> {
         .filter(|did| !did.is_empty())
 }
 
-/// What a verifier sees of an outbound message. The text is copied only for a
-/// verifier that asks for it.
-fn request_context(message: &Message, with_content: bool) -> RequestContext {
+/// What a verifier sees of an outbound message, on an [`A2AChannel`] or in a
+/// listener's reply. The text is copied only for a verifier that asks for it.
+pub fn request_context(message: &Message, with_content: bool) -> RequestContext {
     let mut request = RequestContext::new();
     request.message_id = Some(message.message_id.clone());
     request.destination_did = dest_did_from_message(message).map(str::to_string);

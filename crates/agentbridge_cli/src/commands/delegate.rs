@@ -4,8 +4,7 @@ use agentbridge::member_source::{
 };
 use shadi_a2a::{A2ABinding, A2ALocator};
 use shadi_mas::{
-    experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
-    Epoch, PatternKind, TaskAdapter, TaskEnvelope,
+    experiments::LiveA2ATaskAdapterConfig, Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
 
 /// Delegate a single task to a remote agentbridge adapter over A2A.
@@ -55,7 +54,7 @@ pub fn run(
         a2a_binding: unicast.as_ref().map(|l| l.binding),
         peer_did: Some(peer.did.clone()),
     };
-    let adapter = LiveA2ATaskAdapter::new(config);
+    let adapter = super::egress::live_adapter(config);
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let via = match locator.as_ref() {
