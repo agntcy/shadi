@@ -403,6 +403,8 @@ mod tests {
         assert_eq!(eval("-a - -b"), Ok(1.0));
         assert_eq!(eval("a / b / 2"), Ok(1.0 / 3.0));
         assert_eq!(eval("1.5e1 + .5"), Ok(15.5));
+        assert_eq!(eval("2e-1 + 1E+1"), Ok(10.2));
+        assert_eq!(eval("+a"), Ok(2.0));
     }
 
     #[test]
@@ -426,6 +428,9 @@ mod tests {
         assert!(eval("(a + b").is_err());
         assert!(eval("a ^ b").is_err());
         assert!(eval("a / (b - 3)").unwrap_err().contains("finite"));
+        assert!(eval("* a").unwrap_err().contains("unexpected"));
+        assert!(eval("a +").unwrap_err().contains("ends early"));
+        assert!(eval("max(a, b").unwrap_err().contains("missing )"));
     }
 
     #[test]
@@ -435,6 +440,7 @@ mod tests {
         assert_eq!(update_line("UPDATE a == b"), Some("a == b"));
         assert_eq!(update_line("UPDATES a\nno rule here"), None);
         assert_eq!(update_line("UPDATE   \nUPDATE a"), Some("a"));
+        assert_eq!(update_line("UPDATE :\nUPDATE = b"), Some("b"));
     }
 
     #[test]
@@ -452,6 +458,12 @@ mod tests {
             derive::<PreferenceEngine>("CLASS preference").1,
             Derivation::Missing
         );
+        // A rule that cannot be evaluated somewhere does not match there.
+        let undefined = "UPDATE target / (degree - degree)";
+        assert!(matches!(
+            derive::<PreferenceEngine>(undefined).1,
+            Derivation::Differs { worst_gap } if worst_gap.is_infinite()
+        ));
         let (rule, verdict) = derive::<PreferenceEngine>("UPDATE z_i + 1");
         assert!(rule.is_none());
         assert!(matches!(verdict, Derivation::Invalid(err) if err.contains("z_i")));

@@ -127,9 +127,10 @@ pub fn parse_announce(text: &str) -> Option<f64> {
         else {
             continue;
         };
-        let Some(token) = rest.split(|c: char| c.is_whitespace() || c == ',').next() else {
-            continue;
-        };
+        let token = rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .next()
+            .unwrap_or_default();
         if let Ok(value) = token.parse::<f64>() {
             if value.is_finite() {
                 return Some(value);
