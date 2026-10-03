@@ -330,6 +330,17 @@ above. The executor streams two events: a `Working` status update followed by a
 `Completed` task carrying the adapter's response text as a `text/plain` part.
 Task history (the original prompt message) is included in the completed task.
 
+### Tracing
+
+Each task a listener receives runs in a `shadi.a2a.receive` span, and each task
+sent by `delegate`, `handoff`, `coordinate` or a `NEXT` handoff runs in a
+`shadi.a2a.send` span; a `NEXT` send shows up inside the receive span that
+caused it. Both carry `a2a.task_id`, `peer.did` and `a2a.outcome`. A receive
+ends `completed`, `rejected`, `auth_required` or `withheld`; a send records the
+peer's reply state, or `error` when it never got one. Admission and egress
+policy decisions are events on the span, the policy ones with their local
+`evaluation_id`. [Telemetry](telemetry.md) covers exporting them.
+
 ### TLS certificate resolution
 
 The listener needs a client-side mTLS certificate to authenticate with the
