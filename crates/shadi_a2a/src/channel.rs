@@ -800,7 +800,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_level_refusal_blocks_both_sends() {
         let channel = make_channel(Arc::new(RequestDenyVerifier));
-        assert!(channel.check_auth().is_ok(), "the session check alone passes");
+        assert!(channel.check_auth().is_ok(), "session check passes");
         let params = ServiceParams::new();
         let err = channel
             .send_message(&params, &addressed_request())
