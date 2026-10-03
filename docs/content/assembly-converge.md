@@ -2,8 +2,9 @@
 
 ASSEMBLY and CONVERGE are the two **group** phases in
 [SHADI MAS](shadi-mas.md) (`shadi_mas`). A team first builds a shared
-model of a problem, then exchanges local state while a class engine
-applies the update and the team decides whether to stop.
+model of a problem and derives the update rule it will run, then each
+agent applies that rule to its local state while a class engine applies
+what the agents announce, and the team decides whether to stop.
 
 The protocol is not limited to numbers. A class may use scores, orders,
 stock, code artifacts, or another local state the engine understands.
@@ -17,15 +18,15 @@ The names must read as group work.
 | Name | What the team does | Why not a shorter word |
 |------|--------------------|------------------------|
 | **ASSEMBLY** | Jointly understand the problem and propose a system model | *Model* can be one agent writing a formalization alone |
-| **CONVERGE** | Announce local state together, accept the engine update, and halt together | *Solve* can be one agent producing the next state alone |
+| **CONVERGE** | Apply the derived rule to local state, announce the result together, and halt together | *Solve* can be one agent producing the next state alone |
 
 A single agent can model or solve. ASSEMBLY and CONVERGE require peers.
 
 ## What this is not
 
-- Not hop-local `COMMIT proposal=`. CONVERGE announces current local
-  state in the form the class requires; the **engine** applies the class
-  update after a full epoch.
+- Not hop-local `COMMIT proposal=`. CONVERGE announces each agent's
+  next state, computed with its own rule, in the form the class
+  requires; the engine applies those values after a full epoch.
 - Not a closed taxonomy. Preference, cascade, resource, and development
   are **implemented examples**. ASSEMBLY may name another class.
 - Not “numeric MAS.” Scalar announce is how some example engines speak.
@@ -42,9 +43,9 @@ A single agent can model or solve. ASSEMBLY and CONVERGE require peers.
 
 ```mermaid
 flowchart TD
-  start[Goal plus roster] --> assembly["ASSEMBLY\njoint model · CLASS line"]
+  start[Goal plus roster] --> assembly["ASSEMBLY\njoint model · CLASS and UPDATE lines"]
   assembly --> mapped{Implemented class?}
-  mapped -->|yes| converge["CONVERGE\nannounce · engine epoch · halt"]
+  mapped -->|yes| converge["CONVERGE\napply own rule · announce · halt"]
   mapped -->|Unmapped| stopUnmapped[Halt: no solver]
   converge --> halt{Halt?}
   halt -->|continue| converge
@@ -53,33 +54,54 @@ flowchart TD
 
 | Phase | Who speaks | Who computes the next state | Exit |
 |-------|------------|-----------------------------|------|
-| ASSEMBLY | Every peer | Nobody. `AssemblySession` only infers a class | A `PatternKind`, or `Unmapped` |
-| CONVERGE | Every peer announces local state and may vote | The class engine, after a full epoch | That engine’s halt |
+| ASSEMBLY | Every peer | Nobody. Each peer derives a rule; `AssemblySession` infers a class | A `PatternKind` and one rule per peer, or `Unmapped` |
+| CONVERGE | Every peer announces its next state and may vote | Each peer, with its own rule; the engine applies what is announced | That engine’s halt |
 
 A class is implemented when SHADI has an engine for it. Today that is
 `development` (code artifacts) and the three paper examples
 (`preference`, `cascade`, `resource`). Any other `CLASS` token is
 `Unmapped`. CONVERGE must not start on `Unmapped`.
 
-`--assembly` runs ASSEMBLY first. `--pattern` selects or seeds the
-class. After ASSEMBLY, `coordinate` starts the matching CONVERGE engine
-or refuses if the class is unmapped.
+`--pattern` selects or seeds the class. ASSEMBLY always runs before a
+paper CONVERGE, since that is where each peer's rule comes from;
+`--assembly` also runs it before `development`. After ASSEMBLY,
+`coordinate` starts the matching CONVERGE engine or refuses if the class
+is unmapped.
 
 ## ASSEMBLY
 
 ASSEMBLY is joint modeling. Peers debate in natural language: who the
-agents are, what they exchange, and what “better” means. They may offer
-a formalization. They **may** name a class that SHADI does not implement.
+agents are, what they exchange, and what “better” means. Each derives
+the update rule it will apply in CONVERGE. They **may** name a class
+that SHADI does not implement.
 
 ### Line protocol
 
-Each peer ends with exactly one line:
+Each peer ends with exactly two lines:
 
 ```text
 CLASS <name>
+UPDATE <expression>
 ```
 
 Then `NEXT <peer>` or `DONE`. No other protocol text.
+
+`<expression>` gives the agent's next value over its class's named local
+quantities, with numbers, `+ - * /`, parentheses, `max`, `min`, `abs`
+and `clamp(x, low, high)`:
+
+| Class | Quantities |
+|-------|------------|
+| `preference` | `state`, `target`, `beta`, `degree`, `neighbour_sum` |
+| `cascade` | `inventory`, `pipeline`, `last_order`, `demand`, `previous_demand`, `target_inventory`, `lead`, `rho`, `gamma` |
+| `resource` | `extraction`, `desired`, `price`, `stock`, `eta` |
+
+`coordinate` scores each rule by probing: it evaluates the rule and the
+class's reference rule on 64 random points, so a correct rule written
+another way still matches. The verdict is `matches`, `differs` (with
+the worst gap), `invalid` (it does not parse over those names), or
+`missing`. A peer without a usable rule cannot take part, and CONVERGE
+does not start.
 
 `<name>` is an implemented token (`development`, `preference`,
 `cascade`, `resource`) or another short token (`matching-markets`, …).
@@ -100,26 +122,29 @@ inferred.
 
 Do not leak a global optimum or a full instance during ASSEMBLY. For the
 paper examples that means no `z*`, full demand path, bullwhip, or
-terminal stock forecast.
+terminal stock forecast. Deriving the rule is not computing the answer.
 
 ## CONVERGE
 
 CONVERGE is a group solve. Each epoch:
 
-1. Every peer sees a **local** view and announces its current state in
-   the form the class requires.
-2. The matching engine applies the class update once the epoch is full.
+1. Every peer sees its rule and its **local** quantities by name,
+   applies the rule, and announces the next state it computed.
+2. The matching engine applies the announced values once the epoch is
+   full.
 3. The team records progress (an improvement signal, a quorum, or
    another class-specific check).
 4. Peers vote whether to continue, when the class uses ballots.
 5. The team halts together.
 
-The agent does **not** invent the next state. The engine does.
+The engine never computes a peer's next state. A wrong rule, or a
+wrong application of a right one, shows up in the trajectory.
 
 ### Class-specific announce
 
-The hop prints `phase=CONVERGE` and the local view. The announce *form*
-belongs to the class.
+The hop prints `phase=CONVERGE`, the peer's rule and its named
+quantities, with no next value suggested. The announce *form* belongs
+to the class.
 
 **Scalar paper examples** (preference, cascade, resource):
 
@@ -128,9 +153,10 @@ ANNOUNCE value=<f64> agent=<id> epoch=<k>
 VOTE CONTINUE
 ```
 
-or `VOTE STOP`. Then `NEXT <peer>` or `DONE`. A missed parse falls back
-to the engine’s current local value. A skill miss is announce versus
-**current** engine state, not versus the formula result.
+or `VOTE STOP`. Then `NEXT <peer>` or `DONE`. A reply with no readable
+`ANNOUNCE` line, or a failed call, is asked once more with the reason;
+if that also fails the run halts with `unreadable-announcement`. No
+value is ever substituted.
 
 `COMMIT proposal=` is still parsed as an announce alias so older
 transcripts do not break. New hops should use `ANNOUNCE`.
@@ -156,6 +182,13 @@ of:
 | `PaperHorizon` | Epochs reached the class horizon |
 | `Unmapped` | ASSEMBLY named a class with no engine |
 
+`coordinate` adds two halts of its own: `missing-update-rule` (a peer
+gave no usable rule, so CONVERGE never starts) and
+`unreadable-announcement` (a peer's reply could not be read twice).
+With `--report`, the run records derivation (each peer's rule and its
+verdict) apart from execution (how far each announcement was from the
+peer's own rule, and from the reference).
+
 Preference treats lower metric as better (`‖z − z*‖₂`). Cascade uses
 accumulated cost (lower is better). Resource uses remaining stock
 (higher is better). Other classes may halt on a different signal.
@@ -166,12 +199,12 @@ These are examples, not a closed set. ASSEMBLY may name something else;
 that is a successful modeling outcome and an `Unmapped` CONVERGE
 refusal.
 
-| Class | `PatternKind` | Local state | Engine update | Default horizon in `coordinate` |
-|-------|---------------|-------------|---------------|----------------------------------|
+| Class | `PatternKind` | Announced | Reference rule (scoring only) | Default horizon in `coordinate` |
+|-------|---------------|-----------|-------------------------------|----------------------------------|
 | Development | `Development` | code artifact | Endorse proposals; most votes wins | `--max-rounds` |
-| Preference aggregation | `Preference` | current `z_i` | Synchronous Jacobi on the neighbor inbox | `--max-rounds` |
-| Supply-chain cascades | `Cascade` | last order | Order-up-to + smoothing on engine-owned plant | `min(--max-rounds, demand length)` (paper demand is 8) |
-| Sustainable resource | `Resource` | last extraction `e_i` | Dual step (`λ`, clip `e_i`) and stock update | `min(--max-rounds, 12)` |
+| Preference aggregation | `Preference` | next `z_i` | Synchronous Jacobi on the neighbor values | `--max-rounds` |
+| Supply-chain cascades | `Cascade` | next order | Order-up-to + smoothing; the engine owns the plant | `min(--max-rounds, demand length)` (paper demand is 8) |
+| Sustainable resource | `Resource` | next extraction `e_i` | Dual step on `e_i`; the engine owns `λ` and the stock | `min(--max-rounds, 12)` |
 
 ### Development (`DevelopmentEngine`)
 
@@ -183,8 +216,9 @@ quorum is met.
 ### Preference (`PreferenceEngine`)
 
 Line graph, private scores `c`, coupling `β` (default `0.75`). Each
-epoch every node announces `z_i`. When the inbox is complete the engine
-sets, simultaneously (Jacobi, not Gauss–Seidel):
+epoch every node announces its next `z_i`, and the engine applies the
+announced values together. The reference a node's rule is scored
+against is the simultaneous (Jacobi, not Gauss–Seidel) step:
 
 ```text
 z_i ← (c_i + 2β Σ_{j∈N_i} z_j) / (1 + 2β d_i)
@@ -197,15 +231,17 @@ median vote (that is a different object in the paper).
 
 Stages in a chain. Downstream orders become upstream demand. Paper
 constants: lead `L = 2`, target inventory `I = 8`, demand
-`[4, 4, 4, 8, 8, 8, 4, 4]`, smoothing `0.5`. Agents announce
-`last_order`. The engine owns inventory and pipeline.
+`[4, 4, 4, 8, 8, 8, 4, 4]`, smoothing `0.5`. Agents announce their
+next order. The engine places it and owns inventory and pipeline.
 
 ### Resource (`ResourceEngine`)
 
 Peers share a renewable stock. Paper constants: `R⁰ = 24`, capacity 30,
 regen `0.2`, quota fraction `0.25`, `α = 0.35`, `η = 0.4`, 12 rounds.
-Agents announce last extraction. Coordinated `α > 0` retains more stock
-than uncontrolled greedy on the paper instance.
+Agents announce their next extraction. The engine applies the price
+step and the stock's regrowth. With every agent on the reference rule,
+coordinated `α > 0` retains more stock than uncontrolled greedy on the
+paper instance.
 
 ## Agent Skills
 
@@ -219,8 +255,10 @@ into `--text`.
 | ASSEMBLY | [`skills/assembly/`](../../skills/assembly/SKILL.md) | Hop prints `phase=ASSEMBLY` |
 | CONVERGE | [`skills/converge/`](../../skills/converge/SKILL.md) | Hop prints `phase=CONVERGE` and the class uses a printed local view |
 
-`skills/converge` as shipped teaches the scalar announce / `VOTE`
-form. A class with a different state type (including development)
+The skills carry the instructions, including the table of quantity
+names; a test keeps that table equal to the names each engine accepts.
+`skills/converge` as shipped teaches applying the rule and the scalar
+announce / `VOTE` form. A class with a different state type (including development)
 keeps the same phase name and uses that class’s announce form.
 
 | Host | Destination |
@@ -250,7 +288,7 @@ agentbridge coordinate \
   --quorum 2 \
   --max-rounds 5
 
-# Skip ASSEMBLY when the class is already chosen
+# Seed the class; ASSEMBLY still runs, for each peer's rule
 agentbridge coordinate \
   --goal "stages in a chain order from inventory" \
   --agents slim:goose-0,slim:goose-1,slim:goose-2,slim:goose-3 \
@@ -264,7 +302,7 @@ agentbridge coordinate \
 | `--pattern development` | Default. CONVERGE on `DevelopmentEngine` |
 | `--pattern preference\|cascade\|resource` | CONVERGE on that paper engine |
 | `--pattern unmapped` | Force ASSEMBLY; CONVERGE starts only if an implemented class is inferred |
-| `--assembly` | Run ASSEMBLY first even when `--pattern` already names a class |
+| `--assembly` | Run ASSEMBLY before `development` too (it always runs before a paper class) |
 | `--max-rounds` | CONVERGE horizon cap |
 | `--quorum` | Endorsement quorum for `DevelopmentEngine` |
 
@@ -281,7 +319,8 @@ uses the artifact driver.
 
 | Claim | Holds when | Does not mean |
 |-------|------------|---------------|
-| Hold equals Ideal | A paper CONVERGE engine applies the published update on the intended class, for that class horizon | The LLM discovered the formula; every class has an Ideal |
+| A peer derived the rule | Its `UPDATE` verdict is `matches` | It derived rather than recalled it: these are textbook problems |
+| Hold equals Ideal | Every peer's rule matches and its execution gap is zero, on the intended class, for that class horizon | Every class has an Ideal |
 | ASSEMBLY mapped the intended class | `CLASS` / keywords inferred the intended label | The class set is closed, or the map is a proof |
 | Unmapped is success for modeling | The team named a class SHADI does not solve | A solver ran |
 | Mesh is live | Peers admitted, every peer recvs, NEXT/HANDOFF on the ring, hops use `slim://` | Hold vs Ideal |

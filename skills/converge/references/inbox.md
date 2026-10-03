@@ -1,15 +1,7 @@
 # Example inboxes
 
-The hop prints the local view. Announce that printed value.
+The hop prints your update rule and your local quantities, one
+`name=value` per line, with no next value suggested. Apply the rule to
+those values and announce the result.
 
-## preference
-
-`z_i`, `c_i`, `beta`, `d_i`, inbound neighbor scores. Announce `z_i`.
-
-## cascade
-
-`I_i`, `pipeline_sum`, `last_order`, `observed_demand`. Announce `last_order`.
-
-## resource
-
-`last_e_i`, `R`, `lambda`, `C_R`. Announce `last_e_i`.
+The names each class prints are in the `assembly` skill's table.

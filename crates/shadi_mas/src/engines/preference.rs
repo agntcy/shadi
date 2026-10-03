@@ -1,26 +1,29 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Synchronous Jacobi preference engine (theorem preference-linear).
+//! Synchronous preference engine (theorem preference-linear).
 //!
-//! Each epoch, every participant announces its current `z_i` as a
+//! Each epoch, every participant announces its *next* `z_i`, computed with the
+//! update rule its team derived, as a
 //! [`ScalarProposal`](crate::types::ScalarProposal). When the full round set
-//! is present, the engine applies
+//! is present the engine takes those values as given and finalizes the epoch.
+//! The Jacobi step
 //!
 //! `z_i ← (c_i + 2β Σ_{j∈N_i} z_j) / (1 + 2β d_i)`
 //!
-//! simultaneously (Jacobi, not Gauss–Seidel) and finalizes the epoch.
-//! Untagged / wrong-epoch / replayed / unknown announcements are rejected.
-//! This is not a median vote.
+//! is only the reference a rule is scored against, so a wrong rule shows as a
+//! wrong trajectory. Untagged / wrong-epoch / replayed / unknown announcements
+//! are rejected. This is not a median vote.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::engines::converge::{scalar_announce, ConvergeSurface};
+use crate::engines::converge::{scalar_announce, ConvergeSurface, UpdateClass};
 use crate::runtime::CoordinationEngine;
 use crate::types::{
     AgentId, Epoch, EventId, EventOutcome, EventSource, FinalizationSummary, PatternKind,
     RejectReason, RuntimeCounters, ScalarProposal, SemanticEvent, SemanticPayload,
 };
+use crate::update_rule::{Probe, Quantities};
 
 const SINGULAR: f64 = 1e-15;
 
@@ -110,19 +113,6 @@ impl PreferenceEngineConfig {
         self.neighbors[i].len()
     }
 
-    /// Local Jacobi step from a neighbor inbox (values at the *previous* iterate).
-    pub fn jacobi(&self, node: usize, inbox: &BTreeMap<usize, f64>) -> Result<f64, String> {
-        let mut total = 0.0;
-        for &j in &self.neighbors[node] {
-            let Some(value) = inbox.get(&j) else {
-                return Err(format!("missing neighbor {j} for node {node}"));
-            };
-            total += *value;
-        }
-        let d = self.degree(node) as f64;
-        Ok((self.preferences[node] + 2.0 * self.beta * total) / (1.0 + 2.0 * self.beta * d))
-    }
-
     pub fn corollary_bound(&self, victim: usize, neighbor_delta: f64) -> f64 {
         let d = self.degree(victim) as f64;
         (2.0 * self.beta / (1.0 + 2.0 * self.beta * d)) * neighbor_delta.abs()
@@ -136,8 +126,6 @@ pub struct PreferenceEngine {
     config: PreferenceEngineConfig,
     z: Vec<f64>,
     announced: BTreeMap<usize, f64>,
-    /// Test helper: replace one announced value before the Jacobi sweep.
-    stale_overrides: BTreeMap<usize, f64>,
     seen_events: BTreeSet<EventId>,
     counters: RuntimeCounters,
 }
@@ -156,7 +144,6 @@ impl PreferenceEngine {
             config,
             z,
             announced: BTreeMap::new(),
-            stale_overrides: BTreeMap::new(),
             seen_events: BTreeSet::new(),
             counters: RuntimeCounters::default(),
         }
@@ -182,11 +169,6 @@ impl PreferenceEngine {
         l2_to(&self.z, &self.config.z_star)
     }
 
-    /// Force a neighbor's announced value for the current epoch (violate cell).
-    pub fn inject_stale(&mut self, neighbor: usize, value: f64) {
-        self.stale_overrides.insert(neighbor, value);
-    }
-
     fn participant_from_event(
         &self,
         event: &SemanticEvent,
@@ -204,30 +186,15 @@ impl PreferenceEngine {
         }
     }
 
-    fn inbox(&self) -> BTreeMap<usize, f64> {
-        let mut inbox = self.announced.clone();
-        for (&j, value) in &self.stale_overrides {
-            inbox.insert(j, *value);
-        }
-        inbox
-    }
-
     fn try_finalize(&mut self) -> Option<FinalizationSummary> {
         let n = self.config.participants.len();
         if self.announced.len() < n {
             return None;
         }
-        let inbox = self.inbox();
-        let mut nxt = vec![0.0; n];
-        for i in 0..n {
-            nxt[i] = self
-                .config
-                .jacobi(i, &inbox)
-                .expect("full announcement set implies a complete inbox");
+        for (&i, &value) in &self.announced {
+            self.z[i] = value;
         }
-        self.z = nxt;
         self.announced.clear();
-        self.stale_overrides.clear();
         let summary = FinalizationSummary {
             epoch: self.active_epoch,
             participants: n,
@@ -319,29 +286,16 @@ impl ConvergeSurface for PreferenceEngine {
         true
     }
 
-    fn local_view(&self, id: &AgentId) -> String {
-        let Some(i) = self.config.index_of(id) else {
-            return String::new();
-        };
-        let inbound: Vec<String> = self.config.neighbors[i]
-            .iter()
-            .filter_map(|&j| {
-                Some(format!(
-                    "{}={:.6}",
-                    self.config.participants.get(j)?.0,
-                    self.z.get(j)?
-                ))
-            })
-            .collect();
-        format!(
-            "agent={}\nz_i={:.6}\nc_i={:.6}\nbeta={:.6}\nd_i={}\ninbound={}",
-            id.0,
-            self.z[i],
-            self.config.preferences[i],
-            self.config.beta,
-            self.config.degree(i),
-            inbound.join(",")
-        )
+    fn quantities(&self, id: &AgentId) -> Option<Quantities> {
+        let i = self.config.index_of(id)?;
+        let neighbour_sum = self.config.neighbors[i].iter().map(|&j| self.z[j]).sum();
+        Some(Quantities::from([
+            ("state", self.z[i]),
+            ("target", self.config.preferences[i]),
+            ("beta", self.config.beta),
+            ("degree", self.config.degree(i) as f64),
+            ("neighbour_sum", neighbour_sum),
+        ]))
     }
 
     fn announce_event(
@@ -352,6 +306,25 @@ impl ConvergeSurface for PreferenceEngine {
         event_id: &str,
     ) -> SemanticEvent {
         scalar_announce(PatternKind::Preference, id, epoch, value, event_id)
+    }
+}
+
+impl UpdateClass for PreferenceEngine {
+    const QUANTITIES: &'static [&'static str] =
+        &["state", "target", "beta", "degree", "neighbour_sum"];
+
+    fn reference(q: &Quantities) -> f64 {
+        (q["target"] + 2.0 * q["beta"] * q["neighbour_sum"]) / (1.0 + 2.0 * q["beta"] * q["degree"])
+    }
+
+    fn probe(draw: &mut Probe) -> Quantities {
+        Quantities::from([
+            ("state", draw.uniform(0.0, 10.0)),
+            ("target", draw.uniform(0.0, 10.0)),
+            ("beta", draw.uniform(0.1, 2.0)),
+            ("degree", draw.whole(1, 4)),
+            ("neighbour_sum", draw.uniform(0.0, 40.0)),
+        ])
     }
 }
 
@@ -445,15 +418,24 @@ mod tests {
         }
     }
 
+    /// Every agent announces what the reference rule gives it: a team that
+    /// derived the rule correctly.
     fn announce_all(
         rt: &mut MasRuntime<PreferenceEngine>,
         epoch: u64,
         prefix: &str,
     ) -> EventOutcome {
-        let z = rt.engine().z().to_vec();
+        let n = rt.engine().z().len();
+        let next: Vec<f64> = (0..n)
+            .map(|i| {
+                rt.engine()
+                    .reference_value(&AgentId::from(i.to_string().as_str()))
+                    .unwrap()
+            })
+            .collect();
         let mut last = EventOutcome::Applied;
-        for i in 0..z.len() {
-            last = rt.apply(announce(&format!("{prefix}-{i}"), epoch, i, z[i]));
+        for (i, value) in next.into_iter().enumerate() {
+            last = rt.apply(announce(&format!("{prefix}-{i}"), epoch, i, value));
         }
         last
     }
@@ -560,32 +542,29 @@ mod tests {
     }
 
     #[test]
-    fn stale_inject_obeys_corollary_bound() {
+    fn a_stale_neighbour_obeys_corollary_bound() {
         let cfg = paper_line();
-        let z = vec![1.0, 3.0, 7.0];
-        let mut hold_inbox = BTreeMap::new();
-        hold_inbox.insert(0, z[0]);
-        hold_inbox.insert(2, z[2]);
-        let hold = cfg.jacobi(1, &hold_inbox).unwrap();
-        let mut stale_inbox = hold_inbox;
-        let stale_neighbor = 0.0;
-        stale_inbox.insert(0, stale_neighbor);
-        let stale = cfg.jacobi(1, &stale_inbox).unwrap();
+        let engine = PreferenceEngine::with_state(Epoch(0), cfg.clone(), vec![1.0, 3.0, 7.0]);
+        let mut q = engine.quantities(&AgentId::from("1")).unwrap();
+        let hold = PreferenceEngine::reference(&q);
+        // Neighbour 0 reports 0.0 instead of its current 1.0.
+        let stale_neighbour = 0.0;
+        *q.get_mut("neighbour_sum").unwrap() += stale_neighbour - 1.0;
+        let stale = PreferenceEngine::reference(&q);
         let delta = (stale - hold).abs();
-        let bound = cfg.corollary_bound(1, stale_neighbor - z[0]);
+        let bound = cfg.corollary_bound(1, stale_neighbour - 1.0);
         assert!(delta <= bound + 1e-12, "{delta} > {bound}");
         assert!(delta > 0.0);
+    }
 
-        let mut engine = PreferenceEngine::with_state(Epoch(0), cfg, z.clone());
-        engine.inject_stale(0, stale_neighbor);
-        let mut rt = MasRuntime::new(engine);
-        assert!(matches!(
-            announce_all(&mut rt, 0, "inj"),
-            EventOutcome::Finalized(_)
-        ));
-        let moved = (rt.engine().z()[1] - hold).abs();
-        assert!((moved - delta).abs() < 1e-12);
-        assert!(moved <= bound + 1e-12);
+    /// The engine takes announced values as given, right or wrong.
+    #[test]
+    fn announced_values_are_applied_unmodified() {
+        let mut rt = engine_from(vec![0.0, 4.0, 8.0]);
+        for (i, value) in [1.5, -2.0, 30.0].into_iter().enumerate() {
+            rt.apply(announce(&format!("a{i}"), 0, i, value));
+        }
+        assert_eq!(rt.engine().z(), &[1.5, -2.0, 30.0]);
     }
 
     #[test]
@@ -638,10 +617,6 @@ mod tests {
         assert!(
             PreferenceEngineConfig::new(ids, vec![vec![5], vec![0]], vec![0.0, 1.0], BETA).is_err()
         );
-        let mut inbox = BTreeMap::new();
-        inbox.insert(0, 1.0);
-        let cfg = paper_line();
-        assert!(cfg.jacobi(1, &inbox).is_err());
     }
 
     #[test]
@@ -683,8 +658,13 @@ mod tests {
         assert!(engine.lower_is_better());
         assert_eq!(engine.current_value(&id), Some(0.0));
         assert_eq!(engine.current_value(&unknown), None);
-        assert!(engine.local_view(&id).contains("z_i="));
+        let view = engine.local_view(&id);
+        for name in PreferenceEngine::QUANTITIES {
+            assert!(view.contains(&format!("\n{name}=")), "{view}");
+        }
+        assert_eq!(view.lines().count(), 1 + PreferenceEngine::QUANTITIES.len());
         assert!(engine.local_view(&unknown).is_empty());
+        assert_eq!(engine.reference_value(&unknown), None);
         assert_eq!(engine.z_star().len(), 3);
         assert_eq!(engine.config().participants.len(), 3);
         assert_eq!(engine.counters().applied, 0);

@@ -1,17 +1,21 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Resource CONVERGE engine. Agents announce last extraction; the engine
-//! applies the paper dual step and plant update.
+//! Resource CONVERGE engine. Each agent announces its next extraction, computed
+//! with the rule its team derived; the engine takes those as given and applies
+//! the shared dynamics: the price (dual) step and the stock's regrowth. The
+//! paper's extraction step is only the reference a team's rule is scored
+//! against.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::engines::converge::{scalar_announce, ConvergeSurface};
+use crate::engines::converge::{scalar_announce, ConvergeSurface, UpdateClass};
 use crate::runtime::CoordinationEngine;
 use crate::types::{
     AgentId, Epoch, EventId, EventOutcome, EventSource, FinalizationSummary, PatternKind,
     RejectReason, RuntimeCounters, ScalarProposal, SemanticEvent, SemanticPayload,
 };
+use crate::update_rule::{Probe, Quantities};
 
 pub const R0: f64 = 24.0;
 pub const CAPACITY: f64 = 30.0;
@@ -115,12 +119,6 @@ impl ResourceEngine {
         QUOTA_FRAC * self.r
     }
 
-    pub fn formula_value(&self, index: usize) -> f64 {
-        let raw = self.e[index]
-            + self.config.eta * ((self.config.desired[index] - self.e[index]) - self.lam);
-        raw.clamp(0.0, self.r.max(0.0))
-    }
-
     fn apply_extractions(&mut self, extracted: Vec<f64>) {
         self.e = extracted;
         let total: f64 = self.e.iter().sum();
@@ -154,7 +152,7 @@ impl ResourceEngine {
         if self.announced.len() < n {
             return None;
         }
-        let next: Vec<f64> = (0..n).map(|i| self.formula_value(i)).collect();
+        let next: Vec<f64> = (0..n).map(|i| self.announced[&i]).collect();
         self.apply_extractions(next);
         self.announced.clear();
         let summary = FinalizationSummary {
@@ -165,6 +163,25 @@ impl ResourceEngine {
         self.active_epoch = Epoch(self.active_epoch.0 + 1);
         self.counters.finalized += 1;
         Some(summary)
+    }
+}
+
+impl UpdateClass for ResourceEngine {
+    const QUANTITIES: &'static [&'static str] = &["extraction", "desired", "price", "stock", "eta"];
+
+    fn reference(q: &Quantities) -> f64 {
+        let step = q["eta"] * ((q["desired"] - q["extraction"]) - q["price"]);
+        (q["extraction"] + step).clamp(0.0, q["stock"].max(0.0))
+    }
+
+    fn probe(draw: &mut Probe) -> Quantities {
+        Quantities::from([
+            ("extraction", draw.uniform(0.0, 10.0)),
+            ("desired", draw.uniform(0.0, 10.0)),
+            ("price", draw.uniform(0.0, 5.0)),
+            ("stock", draw.uniform(0.0, 30.0)),
+            ("eta", draw.uniform(0.05, 1.0)),
+        ])
     }
 }
 
@@ -239,18 +256,15 @@ impl ConvergeSurface for ResourceEngine {
         false
     }
 
-    fn local_view(&self, id: &AgentId) -> String {
-        let Some(i) = self.config.index_of(id) else {
-            return String::new();
-        };
-        format!(
-            "agent={}\nlast_e_i={:.6}\nR={:.6}\nlambda={:.6}\nC_R={:.6}",
-            id.0,
-            self.e[i],
-            self.r,
-            self.lam,
-            self.cap()
-        )
+    fn quantities(&self, id: &AgentId) -> Option<Quantities> {
+        let i = self.config.index_of(id)?;
+        Some(Quantities::from([
+            ("extraction", self.e[i]),
+            ("desired", self.config.desired[i]),
+            ("price", self.lam),
+            ("stock", self.r),
+            ("eta", self.config.eta),
+        ]))
     }
 
     fn announce_event(
@@ -280,7 +294,7 @@ mod tests {
         let mut last = EventOutcome::Applied;
         for i in 0..n {
             let id = rt.engine().config().participants[i].clone();
-            let value = rt.engine().extractions()[i];
+            let value = rt.engine().reference_value(&id).unwrap();
             last =
                 rt.apply(
                     rt.engine()
@@ -421,14 +435,29 @@ mod tests {
         assert!(!engine.lower_is_better());
         assert_eq!(engine.current_value(&id), Some(2.0));
         assert_eq!(engine.current_value(&unknown), None);
-        assert!(engine.local_view(&id).contains("last_e_i="));
+        let view = engine.local_view(&id);
+        for name in ResourceEngine::QUANTITIES {
+            assert!(view.contains(&format!("\n{name}=")), "{view}");
+        }
         assert!(engine.local_view(&unknown).is_empty());
         assert_eq!(engine.stock(), R0);
         assert_eq!(engine.lambda(), 0.0);
         assert_eq!(engine.breaches(), 0);
         assert_eq!(engine.extractions().len(), 3);
-        assert!(engine.formula_value(0) >= 0.0);
+        assert!(engine.reference_value(&id).unwrap() >= 0.0);
         assert_eq!(engine.config().paper_horizon, PAPER_ROUNDS);
         assert_eq!(engine.counters().applied, 0);
+    }
+
+    /// The engine takes each agent's announced extraction as given.
+    #[test]
+    fn announced_extractions_are_taken_unmodified() {
+        let cfg = ResourceEngineConfig::scaled(ids(3)).expect("cfg");
+        let mut rt = MasRuntime::new(ResourceEngine::new(Epoch(0), cfg));
+        for (i, take) in [0.5, 7.0, 0.0].into_iter().enumerate() {
+            let id = rt.engine().config().participants[i].clone();
+            rt.apply(rt.engine().announce_event(&id, 0, take, &format!("x{i}")));
+        }
+        assert_eq!(rt.engine().extractions(), &[0.5, 7.0, 0.0]);
     }
 }

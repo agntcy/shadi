@@ -35,15 +35,16 @@ pub use subprocess::TrackedSubprocess;
 /// agentbridge so callers have a single dependency.
 pub mod mas {
     pub use shadi_mas::{
+        derive,
         engines::cascade::{CascadeEngine, CascadeEngineConfig},
         engines::development::{DevelopmentEngine, DevelopmentEngineConfig},
         engines::preference::{PreferenceEngine, PreferenceEngineConfig},
         engines::resource::{ResourceEngine, ResourceEngineConfig},
         infer_pattern, parse_announce, parse_converge_vote, AgentId, AssemblySession,
         ConvergeBallot, ConvergeController, ConvergeDecision, ConvergeHalt, ConvergeSignal,
-        ConvergeSurface, CoordinationEngine, Epoch, EventId, EventMetadata, EventOutcome,
-        EventSource, MasRuntime, PatternKind, ProtocolPhase, ScalarProposal, SemanticEvent,
-        SemanticPayload,
+        ConvergeSurface, CoordinationEngine, Derivation, Epoch, EventId, EventMetadata,
+        EventOutcome, EventSource, MasRuntime, PatternKind, ProtocolPhase, Quantities,
+        ScalarProposal, SemanticEvent, SemanticPayload, UpdateClass, UpdateRule,
     };
 }
 
