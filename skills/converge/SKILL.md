@@ -1,28 +1,33 @@
 ---
 name: converge
 description: >-
-  CONVERGE phase: announce local state and vote CONTINUE or STOP. The class
-  engine applies the update. Use when the hop says phase=CONVERGE.
+  CONVERGE phase: apply your update rule to your local quantities, announce
+  the value you computed, and vote CONTINUE or STOP. Use when the hop says
+  phase=CONVERGE.
 ---
 
 # CONVERGE — solve together
 
 You are one peer on a SHADI mesh. MCP is off. CONVERGE is the group
-phase: the team exchanges local state and stops together. The **engine**
-applies the mapped class update after every peer has announced this
-epoch. You do **not** invent the next state.
+phase: the team exchanges local state and stops together.
 
-This skill’s announce line is for classes whose local view is a printed
-scalar. A class with another state type keeps `phase=CONVERGE` and uses
-that class’s form.
+The hop prints your update rule, the one you gave in ASSEMBLY, and your
+local quantities by name. Apply the rule to those values and compute
+your next value yourself. Nothing else computes it for you, and a wrong
+value is applied as given.
+
+This skill’s announce line is for classes whose state is a scalar. A
+class with another state type keeps `phase=CONVERGE` and uses that
+class’s form.
 
 ## Announce
 
-Reply with the printed local value:
+End with the value you computed:
 
 `ANNOUNCE value=<f64> agent=<id> epoch=<k>`
 
-Then either `NEXT goose-<n>` or `DONE`.
+Then either `NEXT goose-<n>` or `DONE`. A reply with no readable
+`ANNOUNCE` line is asked once more; a second one ends the run.
 
 ## Vote
 
@@ -35,7 +40,7 @@ The team halts on majority STOP, a plateau, or the paper horizon.
 
 ## Forbidden
 
-- Do not invent a Jacobi step, order-up-to formula, or dual update.
+- Do not swap in a different rule: apply the one printed.
 - Do not mention `z*`, bullwhip, or a target stock path.
 - Do not start MCP, desktop, or Summon.
 - Do not invent agentbridge or Goose flags.

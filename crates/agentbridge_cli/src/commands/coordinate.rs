@@ -2,12 +2,12 @@ use agentbridge::{
     adapter::CliToolAdapter,
     adapters::generic_stdio::GenericStdioAdapter,
     mas::{
-        infer_pattern, parse_announce, parse_converge_vote, AgentId, AssemblySession,
+        derive, infer_pattern, parse_announce, parse_converge_vote, AgentId, AssemblySession,
         CascadeEngine, CascadeEngineConfig, ConvergeBallot, ConvergeController, ConvergeHalt,
-        ConvergeSurface, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch,
-        EventId, EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind,
-        PreferenceEngine, PreferenceEngineConfig, ResourceEngine, ResourceEngineConfig,
-        SemanticEvent, SemanticPayload,
+        ConvergeSurface, CoordinationEngine, Derivation, DevelopmentEngine,
+        DevelopmentEngineConfig, Epoch, EventId, EventMetadata, EventOutcome, EventSource,
+        MasRuntime, PatternKind, PreferenceEngine, PreferenceEngineConfig, ResourceEngine,
+        ResourceEngineConfig, SemanticEvent, SemanticPayload, UpdateRule,
     },
     open_profile_adapter,
 };
@@ -25,11 +25,50 @@ struct EpochRecord {
     improved: bool,
 }
 
+/// One agent's ASSEMBLY rule, scored against its class's reference.
+struct DerivationRecord {
+    agent: String,
+    rule: Option<String>,
+    derivation: Derivation,
+}
+
+/// How faithfully one agent applied its own rule in CONVERGE: the gap between
+/// what it announced and what its rule gives, and the gap to the reference.
+#[derive(Default)]
+struct ExecutionRecord {
+    announcements: usize,
+    max_rule_gap: f64,
+    rule_gap_sum: f64,
+    reference_gap_sum: f64,
+}
+
+impl ExecutionRecord {
+    fn record(&mut self, announced: f64, own_rule: Option<f64>, reference: Option<f64>) {
+        self.announcements += 1;
+        if let Some(expected) = own_rule {
+            let gap = (announced - expected).abs();
+            self.max_rule_gap = self.max_rule_gap.max(gap);
+            self.rule_gap_sum += gap;
+        }
+        if let Some(reference) = reference {
+            self.reference_gap_sum += (announced - reference).abs();
+        }
+    }
+
+    fn mean(&self, sum: f64) -> f64 {
+        if self.announcements == 0 {
+            0.0
+        } else {
+            sum / self.announcements as f64
+        }
+    }
+}
+
 /// What a coordination run produced, for `--report`.
 ///
-/// `unparsed_announcements` and `failed_announcements` are reported because the
-/// loop substitutes the agent's previous value when it cannot read a reply; an
-/// uncounted substitution is indistinguishable from a deliberate hold.
+/// Derivation (did the agent find the rule?) and execution (did it apply its
+/// own rule?) are reported apart, so a wrong rule applied faithfully is not
+/// mistaken for a right rule applied badly.
 #[derive(Default)]
 struct RunSummary {
     halt: String,
@@ -41,8 +80,10 @@ struct RunSummary {
     finalized: usize,
     rejected: usize,
     deferred: usize,
-    unparsed_announcements: usize,
-    failed_announcements: usize,
+    reprompted: usize,
+    unreadable_announcements: usize,
+    derivations: Vec<DerivationRecord>,
+    execution: Vec<(String, ExecutionRecord)>,
 }
 
 impl RunSummary {
@@ -77,6 +118,37 @@ fn write_report(
         .iter()
         .map(|(id, v)| (id.clone(), serde_json::json!(v)))
         .collect();
+    let derivation: serde_json::Map<String, serde_json::Value> = summary
+        .derivations
+        .iter()
+        .map(|d| {
+            let (worst_gap, error) = match &d.derivation {
+                Derivation::Differs { worst_gap } => (Some(*worst_gap), None),
+                Derivation::Invalid(err) => (None, Some(err.clone())),
+                _ => (None, None),
+            };
+            let entry = serde_json::json!({
+                "rule": d.rule,
+                "verdict": d.derivation.as_str(),
+                "worst_gap": worst_gap,
+                "error": error,
+            });
+            (d.agent.clone(), entry)
+        })
+        .collect();
+    let execution: serde_json::Map<String, serde_json::Value> = summary
+        .execution
+        .iter()
+        .map(|(agent, e)| {
+            let entry = serde_json::json!({
+                "announcements": e.announcements,
+                "max_rule_gap": e.max_rule_gap,
+                "mean_rule_gap": e.mean(e.rule_gap_sum),
+                "mean_reference_gap": e.mean(e.reference_gap_sum),
+            });
+            (agent.clone(), entry)
+        })
+        .collect();
     let doc = serde_json::json!({
         "session": session,
         "pattern": pattern.as_str(),
@@ -85,13 +157,15 @@ fn write_report(
         "terminal_metric": summary.terminal_metric,
         "lower_is_better": summary.lower_is_better,
         "agent_values": agent_values,
+        "derivation": derivation,
+        "execution": execution,
         "counters": {
             "applied": summary.applied,
             "finalized": summary.finalized,
             "rejected": summary.rejected,
             "deferred": summary.deferred,
-            "unparsed_announcements": summary.unparsed_announcements,
-            "failed_announcements": summary.failed_announcements,
+            "reprompted": summary.reprompted,
+            "unreadable_announcements": summary.unreadable_announcements,
         },
     });
     std::fs::write(path, serde_json::to_string_pretty(&doc)? + "\n")
@@ -157,11 +231,14 @@ pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
     }
 
     let mut pattern = pattern;
-    if assembly || pattern == PatternKind::Unmapped {
-        pattern = run_assembly(goal, &agents, pattern)?;
+    // CONVERGE runs on the rules agents derive here, so it never starts
+    // without an ASSEMBLY.
+    let mut replies = Vec::new();
+    if assembly || pattern == PatternKind::Unmapped || pattern.is_converge_class() {
+        (pattern, replies) = run_assembly(goal, &agents, pattern)?;
     }
     if pattern.is_converge_class() {
-        let summary = run_converge(goal, &agents, max_rounds, pattern)?;
+        let summary = run_converge(goal, &agents, max_rounds, pattern, &replies)?;
         if let Some(path) = report {
             write_report(path, &session, pattern, &summary)?;
         }
@@ -285,34 +362,40 @@ fn run_assembly(
     goal: &str,
     agents: &[AgentEntry],
     seed: PatternKind,
-) -> anyhow::Result<PatternKind> {
+) -> anyhow::Result<(PatternKind, Vec<String>)> {
     let mut session = AssemblySession::default();
     if seed.is_converge_class() {
         session.inferred = Some(seed);
     }
     println!("─── ASSEMBLY: model the problem ───");
     println!("Goal: {goal}\n");
+    let mut replies = Vec::with_capacity(agents.len());
     for agent in agents {
-        let prompt = format!(
-            "phase=ASSEMBLY\nGoal: {goal}\n\
-             Understand this problem with your peers. Propose a system model.\n\
-             You may name a class beyond Preference, Cascade, or Resource.\n\
-             End with one line: CLASS <name>\nNo other protocol."
-        );
-        match invoke_tool(&agent.tool, &prompt, &agent.id.0, "assembly", 0) {
+        let reply = match invoke_tool(
+            &agent.tool,
+            &assembly_prompt(goal),
+            &agent.id.0,
+            "assembly",
+            0,
+        ) {
             Ok(text) => {
                 println!("  [{}] {}", agent.id.0, truncate(&text, 160));
-                session.ingest(text);
+                session.ingest(text.clone());
+                text
             }
-            Err(e) => println!("  [{}] ASSEMBLY failed: {e}", agent.id.0),
-        }
+            Err(e) => {
+                println!("  [{}] ASSEMBLY failed: {e}", agent.id.0);
+                String::new()
+            }
+        };
+        replies.push(reply);
     }
     let inferred = session
         .inferred
         .or_else(|| infer_pattern(goal))
         .unwrap_or(PatternKind::Unmapped);
     println!("ASSEMBLY inferred {}\n", inferred.as_str());
-    Ok(inferred)
+    Ok((inferred, replies))
 }
 
 fn run_converge(
@@ -320,6 +403,7 @@ fn run_converge(
     agents: &[AgentEntry],
     max_rounds: u64,
     pattern: PatternKind,
+    replies: &[String],
 ) -> anyhow::Result<RunSummary> {
     let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
     match pattern {
@@ -327,22 +411,47 @@ fn run_converge(
             let cfg = PreferenceEngineConfig::line_with_participants(ids.clone(), 8.0, 0.75)
                 .map_err(anyhow::Error::msg)?;
             let engine = PreferenceEngine::new(Epoch(0), cfg);
-            drive_converge(goal, agents, engine, max_rounds.max(1))
+            drive_converge(goal, agents, engine, max_rounds.max(1), replies)
         }
         PatternKind::Cascade => {
             let cfg = CascadeEngineConfig::scaled(ids.clone()).map_err(anyhow::Error::msg)?;
             let horizon = max_rounds.min(cfg.paper_horizon()).max(1);
             let engine = CascadeEngine::new(Epoch(0), cfg);
-            drive_converge(goal, agents, engine, horizon)
+            drive_converge(goal, agents, engine, horizon, replies)
         }
         PatternKind::Resource => {
             let cfg = ResourceEngineConfig::scaled(ids.clone()).map_err(anyhow::Error::msg)?;
             let horizon = max_rounds.min(cfg.paper_horizon).max(1);
             let engine = ResourceEngine::new(Epoch(0), cfg);
-            drive_converge(goal, agents, engine, horizon)
+            drive_converge(goal, agents, engine, horizon, replies)
         }
         _ => anyhow::bail!("CONVERGE requires preference, cascade, or resource"),
     }
+}
+
+/// Each agent's own rule for class `E`, from its ASSEMBLY reply.
+fn derive_rules<E: ConvergeSurface>(
+    agents: &[AgentEntry],
+    replies: &[String],
+) -> (Vec<Option<UpdateRule>>, Vec<DerivationRecord>) {
+    let mut rules = Vec::with_capacity(agents.len());
+    let mut records = Vec::with_capacity(agents.len());
+    for (i, agent) in agents.iter().enumerate() {
+        let (rule, derivation) = derive::<E>(replies.get(i).map_or("", String::as_str));
+        println!(
+            "  [{}] rule {}: {}",
+            agent.id.0,
+            derivation.as_str(),
+            rule.as_ref().map_or("-", UpdateRule::source)
+        );
+        records.push(DerivationRecord {
+            agent: agent.id.0.clone(),
+            rule: rule.as_ref().map(|r| r.source().to_string()),
+            derivation,
+        });
+        rules.push(rule);
+    }
+    (rules, records)
 }
 
 fn drive_converge<E: ConvergeSurface>(
@@ -350,6 +459,7 @@ fn drive_converge<E: ConvergeSurface>(
     agents: &[AgentEntry],
     engine: E,
     horizon: u64,
+    replies: &[String],
 ) -> anyhow::Result<RunSummary> {
     let mut summary = RunSummary::default();
     let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
@@ -362,48 +472,49 @@ fn drive_converge<E: ConvergeSurface>(
     );
     println!("Goal: {goal}\n");
 
-    for epoch in 0..horizon {
-        if ctl.halt().is_some() {
+    let (rules, derivations) = derive_rules::<E>(agents, replies);
+    summary.derivations = derivations;
+    summary.execution = agents
+        .iter()
+        .map(|a| (a.id.0.clone(), ExecutionRecord::default()))
+        .collect();
+    // Each agent applies the rule it derived, so one without a rule cannot
+    // take part, and the framework will not supply one.
+    let mut halt_override = rules
+        .iter()
+        .any(Option::is_none)
+        .then_some("missing-update-rule");
+
+    'epochs: for epoch in 0..horizon {
+        if halt_override.is_some() || ctl.halt().is_some() {
             break;
         }
         println!("─── CONVERGE epoch {epoch}: announce ───");
         ctl.begin_epoch();
         let mut last = EventOutcome::Applied;
-        for agent in agents {
+        for (i, agent) in agents.iter().enumerate() {
+            let Some(rule) = &rules[i] else { continue };
+            let quantities = runtime.engine().quantities(&agent.id).unwrap_or_default();
+            let own_rule = rule.eval(&quantities).ok();
+            // Scoring only: what the reference rule gives this agent now.
+            let reference = runtime.engine().reference_value(&agent.id);
             let view = runtime.engine().local_view(&agent.id);
-            let fallback = runtime.engine().current_value(&agent.id).unwrap_or(0.0);
-            let prompt = format!(
-                "phase=CONVERGE\nGoal: {goal}\nepoch={epoch}\n{view}\n\
-                 Announce the printed local value. Do not compute the next number.\n\
-                 ANNOUNCE value=<f64> agent={} epoch={epoch}\nThen VOTE CONTINUE or VOTE STOP.\n",
-                agent.id.0
-            );
-            let announced = match invoke_tool(&agent.tool, &prompt, &agent.id.0, "converge", epoch)
-            {
-                Ok(text) => {
-                    println!("  [{}] {}", agent.id.0, truncate(&text, 120));
-                    if let Some(decision) = parse_converge_vote(&text) {
-                        ctl.vote(ConvergeBallot {
-                            participant: agent.id.clone(),
-                            decision,
-                        });
-                    }
-                    match parse_announce(&text) {
-                        Some(value) => value,
-                        None => {
-                            // A substituted value is indistinguishable from a
-                            // deliberate hold unless it is counted.
-                            summary.unparsed_announcements += 1;
-                            fallback
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("  [{}] announce failed: {e}", agent.id.0);
-                    summary.failed_announcements += 1;
-                    fallback
-                }
+            let prompt = converge_prompt(goal, epoch, &view, rule.source(), &agent.id.0);
+            let Some((announced, reply)) = ask_for_announce(agent, &prompt, epoch, &mut summary)
+            else {
+                summary.unreadable_announcements += 1;
+                halt_override = Some("unreadable-announcement");
+                break 'epochs;
             };
+            if let Some(decision) = parse_converge_vote(&reply) {
+                ctl.vote(ConvergeBallot {
+                    participant: agent.id.clone(),
+                    decision,
+                });
+            }
+            summary.execution[i]
+                .1
+                .record(announced, own_rule, reference);
             let ev = runtime.engine().announce_event(
                 &agent.id,
                 epoch,
@@ -431,14 +542,14 @@ fn drive_converge<E: ConvergeSurface>(
         }
     }
 
-    let halt = match ctl.halt() {
+    let halt = halt_override.unwrap_or(match ctl.halt() {
         Some(ConvergeHalt::MajorityStop) => "majority-stop",
         Some(ConvergeHalt::Plateau) => "plateau",
         Some(ConvergeHalt::PaperHorizon) => "paper-horizon",
         Some(ConvergeHalt::NoSolution) => "no-solution",
         Some(ConvergeHalt::Unmapped) => "unmapped",
         None => "max-rounds",
-    };
+    });
     println!("CONVERGE halt: {halt}");
     summary.halt = halt.to_string();
     summary.terminal_metric = Some(runtime.engine().metric());
@@ -464,7 +575,65 @@ fn drive_converge<E: ConvergeSurface>(
     Ok(summary)
 }
 
+/// Ask for an announcement, and once more, quoting what was wrong, if the
+/// first reply has none. Nothing is substituted: `None` means both failed.
+fn ask_for_announce(
+    agent: &AgentEntry,
+    prompt: &str,
+    epoch: u64,
+    summary: &mut RunSummary,
+) -> Option<(f64, String)> {
+    let mut problem: Option<String> = None;
+    for _ in 0..2 {
+        let asked = match &problem {
+            None => prompt.to_string(),
+            Some(problem) => {
+                summary.reprompted += 1;
+                format!(
+                    "{prompt}\nYour last reply could not be used: {problem}. \
+                     Reply again, ending with the ANNOUNCE line."
+                )
+            }
+        };
+        match invoke_tool(&agent.tool, &asked, &agent.id.0, "converge", epoch) {
+            Ok(text) => {
+                println!("  [{}] {}", agent.id.0, truncate(&text, 120));
+                if let Some(value) = parse_announce(&text) {
+                    return Some((value, text));
+                }
+                problem = Some("it had no ANNOUNCE line with a finite value".to_string());
+            }
+            Err(e) => {
+                println!("  [{}] announce failed: {e}", agent.id.0);
+                problem = Some(format!("it failed ({e})"));
+            }
+        }
+    }
+    None
+}
+
 // ─── Prompt builders ─────────────────────────────────────────────────────────
+
+// The instructions live in the `assembly` and `converge` skills, which the
+// agent's host loads; these carry only what changes per call and the lines
+// this command parses.
+
+fn assembly_prompt(goal: &str) -> String {
+    format!(
+        "phase=ASSEMBLY\nGoal: {goal}\n\
+         Follow the assembly skill. End with two lines:\n\
+         CLASS <name>\nUPDATE <expression>\n"
+    )
+}
+
+fn converge_prompt(goal: &str, epoch: u64, view: &str, rule: &str, agent: &str) -> String {
+    format!(
+        "phase=CONVERGE\nGoal: {goal}\nepoch={epoch}\n\
+         Follow the converge skill.\nYour update rule: {rule}\n{view}\n\
+         ANNOUNCE value=<f64> agent={agent} epoch={epoch}\n\
+         Then VOTE CONTINUE or VOTE STOP.\n"
+    )
+}
 
 fn proposal_prompt(goal: &str, epoch: u64, prior: &[(AgentId, String)]) -> String {
     if prior.is_empty() {
@@ -769,6 +938,7 @@ fn build_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentbridge::mas::UpdateClass;
     use shadi_mas::{SemanticPayload, ToolResult};
 
     struct MockTool;
@@ -886,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn report_records_substituted_announcements_and_epochs() {
+    fn report_keeps_derivation_and_execution_apart() {
         let dir = std::env::temp_dir().join(format!("ab-report-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let path = dir.join("report.json");
@@ -906,8 +1076,22 @@ mod tests {
             finalized: 1,
             rejected: 0,
             deferred: 0,
-            unparsed_announcements: 2,
-            failed_announcements: 1,
+            reprompted: 2,
+            unreadable_announcements: 1,
+            derivations: vec![DerivationRecord {
+                agent: "goose-0".to_string(),
+                rule: Some("state".to_string()),
+                derivation: Derivation::Differs { worst_gap: 3.5 },
+            }],
+            execution: vec![(
+                "goose-0".to_string(),
+                ExecutionRecord {
+                    announcements: 2,
+                    max_rule_gap: 0.5,
+                    rule_gap_sum: 0.5,
+                    reference_gap_sum: 4.0,
+                },
+            )],
         };
         write_report(
             path.to_str().expect("utf8 path"),
@@ -923,9 +1107,14 @@ mod tests {
         assert_eq!(doc["halt"], "plateau");
         assert_eq!(doc["epochs"][0]["improved"], true);
         assert_eq!(doc["agent_values"]["goose-0"], 1.25);
-        // A substituted announcement must stay visible in the report.
-        assert_eq!(doc["counters"]["unparsed_announcements"], 2);
-        assert_eq!(doc["counters"]["failed_announcements"], 1);
+        assert_eq!(doc["counters"]["reprompted"], 2);
+        assert_eq!(doc["counters"]["unreadable_announcements"], 1);
+        let derived = &doc["derivation"]["goose-0"];
+        assert_eq!(derived["verdict"], "differs");
+        assert_eq!(derived["worst_gap"], 3.5);
+        let executed = &doc["execution"]["goose-0"];
+        assert_eq!(executed["mean_rule_gap"], 0.25);
+        assert_eq!(executed["mean_reference_gap"], 2.0);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -971,7 +1160,8 @@ mod tests {
             &mock_agents("CLASS preference\nNEXT 1", 2),
             PatternKind::Unmapped,
         )
-        .expect("assembly");
+        .expect("assembly")
+        .0;
         assert_eq!(inferred, PatternKind::Preference);
     }
 
@@ -982,7 +1172,8 @@ mod tests {
             &mock_agents("CLASS matching-markets\nDONE", 2),
             PatternKind::Unmapped,
         )
-        .expect("assembly");
+        .expect("assembly")
+        .0;
         assert_eq!(inferred, PatternKind::Unmapped);
     }
 
@@ -993,7 +1184,8 @@ mod tests {
             &mock_agents("CLASS matching-markets", 2),
             PatternKind::Unmapped,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(inferred, PatternKind::Unmapped);
         assert!(!inferred.is_converge_class());
     }
@@ -1004,6 +1196,217 @@ mod tests {
         let ids: Vec<AgentId> = agents.iter().map(|a| a.id.clone()).collect();
         let cfg = PreferenceEngineConfig::line_with_participants(ids, 8.0, 0.75).expect("cfg");
         let engine = PreferenceEngine::new(Epoch(0), cfg);
-        drive_converge("share scores", &agents, engine, 8).expect("converge");
+        let replies = vec!["UPDATE target".to_string(); 2];
+        let summary = drive_converge("share scores", &agents, engine, 8, &replies).expect("run");
+        assert_eq!(summary.halt, "majority-stop");
+    }
+
+    /// Does what the skills ask: in ASSEMBLY it states `rule`; in CONVERGE it
+    /// applies the rule printed in its prompt to the quantities printed there.
+    /// It first answers `garbled` times with no ANNOUNCE line.
+    struct RuleAgent {
+        rule: &'static str,
+        garbled: Mutex<usize>,
+    }
+
+    impl RuleAgent {
+        fn reply(&self, prompt: &str) -> String {
+            if prompt.starts_with("phase=ASSEMBLY") {
+                return format!("A line of peers.\nCLASS preference\nUPDATE {}", self.rule);
+            }
+            let mut garbled = self.garbled.lock().unwrap();
+            if *garbled > 0 {
+                *garbled -= 1;
+                return "I need to think about this.".to_string();
+            }
+            let field = |key: &str| {
+                prompt
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .expect(key)
+                    .trim()
+            };
+            let rule = UpdateRule::parse(field("Your update rule:"), PreferenceEngine::QUANTITIES)
+                .expect("the printed rule parses");
+            let quantities = PreferenceEngine::QUANTITIES
+                .iter()
+                .map(|name| (*name, field(&format!("{name}=")).parse().expect("number")))
+                .collect();
+            let next = rule.eval(&quantities).expect("rule evaluates");
+            format!(
+                "Applying the rule: {next}\nANNOUNCE value={next} agent={} epoch={}\nVOTE CONTINUE",
+                field("agent="),
+                field("epoch=")
+            )
+        }
+    }
+
+    impl ToolAdapter for RuleAgent {
+        fn provider(&self) -> ToolProvider {
+            ToolProvider::AgentSkills
+        }
+
+        fn call(&self, request: ToolCall) -> Result<ToolResult, String> {
+            let reply = self.reply(&String::from_utf8_lossy(&request.arguments));
+            Ok(ToolResult {
+                provider: ToolProvider::AgentSkills,
+                tool_name: request.tool_name,
+                payload: reply.into_bytes(),
+                target: request.target,
+                correlation_id: request.correlation_id,
+                epoch: request.epoch,
+            })
+        }
+    }
+
+    const REFERENCE_RULE: &str = "(target + 2*beta*neighbour_sum) / (1 + 2*beta*degree)";
+    const KEEPS_STATE: &str = "(state + 2*beta*neighbour_sum) / (1 + 2*beta*degree)";
+
+    fn team(rules: &[&'static str], garbled: &[usize]) -> Vec<AgentEntry> {
+        rules
+            .iter()
+            .zip(garbled)
+            .enumerate()
+            .map(|(i, (rule, garbled))| AgentEntry {
+                id: AgentId::from(format!("goose-{i}").as_str()),
+                tool: Arc::new(RuleAgent {
+                    rule,
+                    garbled: Mutex::new(*garbled),
+                }),
+            })
+            .collect()
+    }
+
+    fn run_team(agents: &[AgentEntry], rounds: u64) -> RunSummary {
+        let (pattern, replies) =
+            run_assembly("share scores", agents, PatternKind::Unmapped).expect("assembly");
+        assert_eq!(pattern, PatternKind::Preference);
+        run_converge("share scores", agents, rounds, pattern, &replies).expect("converge")
+    }
+
+    #[test]
+    fn a_team_with_the_right_rule_converges_on_its_own_values() {
+        let summary = run_team(&team(&[REFERENCE_RULE; 3], &[0; 3]), 30);
+        assert!(summary
+            .derivations
+            .iter()
+            .all(|d| d.derivation == Derivation::Matches));
+        for (_, execution) in &summary.execution {
+            assert!(execution.announcements > 0);
+            assert!(execution.max_rule_gap < 1e-9);
+            assert!(execution.mean(execution.reference_gap_sum) < 1e-9);
+        }
+        assert!(
+            summary.terminal_metric.unwrap() < 1e-3,
+            "{:?}",
+            summary.terminal_metric
+        );
+    }
+
+    /// A wrong rule applied faithfully moves the run off the reference, and
+    /// the report says the derivation was wrong, not the execution.
+    #[test]
+    fn a_wrong_rule_shows_as_a_wrong_trajectory() {
+        let right = run_team(&team(&[REFERENCE_RULE; 3], &[0; 3]), 6);
+        // The end of the line: its state leaves its target after one epoch, so
+        // keeping `state` in place of `target` starts to matter there.
+        let wrong = run_team(
+            &team(&[KEEPS_STATE, REFERENCE_RULE, REFERENCE_RULE], &[0; 3]),
+            6,
+        );
+        assert!(matches!(
+            wrong.derivations[0].derivation,
+            Derivation::Differs { .. }
+        ));
+        let (_, faithful) = &wrong.execution[0];
+        assert!(
+            faithful.max_rule_gap < 1e-9,
+            "the agent applied its own rule"
+        );
+        assert!(
+            faithful.mean(faithful.reference_gap_sum) > 1e-6,
+            "but not the reference"
+        );
+        // The others ran their own, right rule on values the wrong one moved.
+        for (_, other) in &wrong.execution[1..] {
+            assert!(other.mean(other.reference_gap_sum) < 1e-9);
+        }
+        assert_ne!(right.agent_values, wrong.agent_values);
+    }
+
+    #[test]
+    fn an_unreadable_reply_is_asked_again_once() {
+        let summary = run_team(&team(&[REFERENCE_RULE; 2], &[1, 0]), 3);
+        assert_eq!(summary.reprompted, 1);
+        assert_eq!(summary.unreadable_announcements, 0);
+        assert_ne!(summary.halt, "unreadable-announcement");
+    }
+
+    #[test]
+    fn a_second_unreadable_reply_halts_without_substituting() {
+        let summary = run_team(&team(&[REFERENCE_RULE; 2], &[2, 0]), 3);
+        assert_eq!(summary.halt, "unreadable-announcement");
+        assert_eq!(summary.unreadable_announcements, 1);
+        assert!(
+            summary.epochs.is_empty(),
+            "no epoch finalizes on a held value"
+        );
+        assert_eq!(summary.applied, 0);
+    }
+
+    #[test]
+    fn an_agent_without_a_rule_stops_converge_before_it_starts() {
+        let agents = vec![
+            AgentEntry {
+                id: AgentId::from("goose-0"),
+                tool: Arc::new(ReplyTool("CLASS preference")),
+            },
+            AgentEntry {
+                id: AgentId::from("goose-1"),
+                tool: Arc::new(RuleAgent {
+                    rule: REFERENCE_RULE,
+                    garbled: Mutex::new(0),
+                }),
+            },
+        ];
+        let summary = run_team(&agents, 3);
+        assert_eq!(summary.halt, "missing-update-rule");
+        assert_eq!(summary.derivations[0].derivation, Derivation::Missing);
+        assert!(summary.epochs.is_empty());
+    }
+
+    /// The agent learns the names from the installed skill and this command
+    /// parses them from the engine, so the two must not drift apart.
+    #[test]
+    fn the_assembly_skill_names_each_engines_quantities() {
+        let skill =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/assembly/SKILL.md");
+        let skill = std::fs::read_to_string(skill).expect("assembly skill");
+        let row = |class: &str| -> Vec<String> {
+            let line = skill
+                .lines()
+                .find(|line| line.starts_with(&format!("| `{class}` |")))
+                .unwrap_or_else(|| panic!("no row for {class}"));
+            let cell = line.split('|').nth(2).expect("quantities cell");
+            cell.split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(row("preference"), PreferenceEngine::QUANTITIES);
+        assert_eq!(row("cascade"), CascadeEngine::QUANTITIES);
+        assert_eq!(row("resource"), ResourceEngine::QUANTITIES);
+    }
+
+    #[test]
+    fn prompts_carry_the_parsed_lines_and_not_a_next_value() {
+        let assembly = assembly_prompt("share scores");
+        assert!(assembly.starts_with("phase=ASSEMBLY"));
+        assert!(assembly.contains("CLASS <name>\nUPDATE <expression>"));
+        let converge = converge_prompt("g", 2, "agent=a\nstate=1.000000", "state", "a");
+        assert!(converge.starts_with("phase=CONVERGE"));
+        assert!(converge.contains("Your update rule: state\n"));
+        assert!(converge.contains("ANNOUNCE value=<f64> agent=a epoch=2"));
     }
 }
