@@ -2495,6 +2495,8 @@ test push ... FAILED
         use tracing_opentelemetry::OpenTelemetrySpanExt;
         use tracing_subscriber::layer::SubscriberExt;
 
+        // The receive span's callsite is shared with tests that run untraced.
+        install_capture();
         let exporter = opentelemetry_sdk::trace::InMemorySpanExporterBuilder::new().build();
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
