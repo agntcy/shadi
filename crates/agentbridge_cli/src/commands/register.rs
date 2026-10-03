@@ -497,6 +497,8 @@ impl AgentExecutor for AgentBridgeExecutor {
             a2a.context_id = %context_id,
             peer.did = tracing::field::Empty,
             a2a.outcome = tracing::field::Empty,
+            gen_ai.input.messages = tracing::field::Empty,
+            gen_ai.output.messages = tracing::field::Empty,
         );
         if let Some(message) = ctx.message.as_ref() {
             shadi_a2a::set_remote_parent(&span, message);
@@ -546,6 +548,9 @@ impl AgentExecutor for AgentBridgeExecutor {
             .map(|(_, body)| body)
             .unwrap_or(&raw)
             .to_string();
+
+        // Only an admitted prompt gets this far.
+        shadi_a2a::message_content::record_input(&span, &prompt);
 
         let agent_id = self.adapter.agent_id().0.clone();
         println!("\n┌─ A2A recv [{agent_id}] task {}", ctx.task_id);
@@ -620,6 +625,8 @@ impl AgentExecutor for AgentBridgeExecutor {
                     metadata: None,
                 }))];
             }
+
+            shadi_a2a::message_content::record_output(&tracing::Span::current(), &response_text);
 
             println!("\n┌─ A2A send [{agent_id}] ({} ms)", elapsed_ms);
             print_body(&response_text, 120, verbose);
@@ -2444,6 +2451,55 @@ test push ... FAILED
             "shadi.a2a.receive: egress policy allowed a message",
             "shadi.a2a.receive a2a.outcome=completed",
         ]);
+    }
+
+    /// Serialises the tests that switch content capture, a process-wide
+    /// environment variable.
+    static CAPTURE_SWITCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn traced_reply(capture: bool, policy: Arc<dyn AgentVerifier>) -> Trace {
+        let _switch = CAPTURE_SWITCH.lock().await;
+        let variable = shadi_a2a::message_content::CAPTURE_CONTENT_ENV;
+        if capture {
+            std::env::set_var(variable, "true");
+        } else {
+            std::env::remove_var(variable);
+        }
+        let trace = Trace::default();
+        let _installed = trace.install();
+        let _ = reply_through(policy).await;
+        std::env::remove_var(variable);
+        trace
+    }
+
+    fn content_lines(trace: &Trace) -> Vec<String> {
+        let lines = trace.0.lock().unwrap();
+        let content = |line: &&String| line.contains(" gen_ai.");
+        lines.iter().filter(content).cloned().collect()
+    }
+
+    fn has(lines: &[String], field: &str, text: &str) -> bool {
+        lines.iter().any(|l| l.contains(field) && l.contains(text))
+    }
+
+    #[tokio::test]
+    async fn content_reaches_the_receive_span_only_when_captured() {
+        let captured = traced_reply(true, egress::policy()).await;
+        let lines = content_lines(&captured);
+        assert!(has(&lines, "input.messages=", "hello"), "{lines:#?}");
+        assert!(has(&lines, "output.messages=", "the reply"), "{lines:#?}");
+
+        let quiet = traced_reply(false, egress::policy()).await;
+        assert!(content_lines(&quiet).is_empty());
+    }
+
+    /// A reply the egress policy withholds never reaches a trace.
+    #[tokio::test]
+    async fn a_withheld_reply_is_not_captured() {
+        let trace = traced_reply(true, egress_policy(false)).await;
+        let lines = content_lines(&trace);
+        assert!(has(&lines, "input.messages=", ""), "{lines:#?}");
+        assert!(!has(&lines, "output.messages=", ""), "{lines:#?}");
     }
 
     #[tokio::test]
