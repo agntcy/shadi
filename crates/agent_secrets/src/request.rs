@@ -71,8 +71,10 @@ mod tests {
         let mut first = RequestContext::new();
         first.message_id = Some("peer-chosen".to_string());
         let second = RequestContext::new();
+        let third = RequestContext::default();
         assert!(!first.evaluation_id().is_empty());
         assert_ne!(first.evaluation_id(), second.evaluation_id());
+        assert_ne!(second.evaluation_id(), third.evaluation_id());
         assert_ne!(first.evaluation_id(), "peer-chosen");
     }
 }

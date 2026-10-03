@@ -779,9 +779,28 @@ mod tests {
         assert_eq!(seen.content.as_deref(), Some("hello"));
     }
 
+    /// Only sends carry a request to check; other calls check the session.
+    #[tokio::test]
+    async fn calls_other_than_sends_check_only_the_session() {
+        let verifier = recording(true);
+        let channel = make_channel(verifier.clone());
+        let request = GetTaskRequest {
+            id: "task-1".to_string(),
+            history_length: None,
+            tenant: None,
+        };
+        let err = channel
+            .get_task(&ServiceParams::new(), &request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "stub", "the session check passed");
+        assert!(verifier.seen.lock().unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn a_request_level_refusal_blocks_both_sends() {
         let channel = make_channel(Arc::new(RequestDenyVerifier));
+        assert!(channel.check_auth().is_ok(), "the session check alone passes");
         let params = ServiceParams::new();
         let err = channel
             .send_message(&params, &addressed_request())
