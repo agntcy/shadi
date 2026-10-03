@@ -326,6 +326,23 @@ mod tests {
         std::env::remove_var("SHADI_OTEL_CONSOLE");
     }
 
+    /// A trace file that cannot be written leaves telemetry off rather than
+    /// failing startup.
+    #[test]
+    fn an_unwritable_trace_file_yields_no_layer() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let name = format!("shadi-not-a-dir-{}", std::process::id());
+        let not_a_dir = std::env::temp_dir().join(name);
+        std::fs::write(&not_a_dir, b"").expect("write placeholder file");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::set_var("SHADI_OTEL_FILE", not_a_dir.join("traces.jsonl"));
+
+        assert!(layers::<tracing_subscriber::Registry>("svc").is_none());
+
+        std::env::remove_var("SHADI_OTEL_FILE");
+        let _ = std::fs::remove_file(&not_a_dir);
+    }
+
     /// A base endpoint has to gain the signal path, or 0.32 exports nowhere.
     #[test]
     fn traces_endpoint_completes_a_base_url() {
