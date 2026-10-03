@@ -3,6 +3,7 @@
 
 mod channel;
 mod locator;
+pub mod message_content;
 mod trace_context;
 
 pub use channel::{

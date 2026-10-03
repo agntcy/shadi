@@ -16,7 +16,9 @@ pub use auth_required::{
     AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
 };
 use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
-use shadi_a2a::{insert_dest_did, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator};
+use shadi_a2a::{
+    insert_dest_did, message_content, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator,
+};
 use slim_bindings::{
     BackoffConfig, CaSource, ClientConfig, ExponentialBackoff, Name, Service, TlsClientConfig,
     TlsSource,
@@ -165,6 +167,8 @@ impl LiveA2ATaskAdapter {
             peer.agent_id = %self.config.peer_agent_id,
             peer.did = tracing::field::Empty,
             a2a.outcome = tracing::field::Empty,
+            gen_ai.input.messages = tracing::field::Empty,
+            gen_ai.output.messages = tracing::field::Empty,
         );
         if let Some(did) = self.config.peer_did.as_deref() {
             span.record("peer.did", did);
@@ -201,9 +205,16 @@ impl LiveA2ATaskAdapter {
             tracing::warn!(%error, "A2A send failed");
         })?;
         span.record("a2a.outcome", reply_outcome(&response));
-        a2a_reply(&response).inspect_err(|reason| {
+        // Recorded only once the send passed its checks, so a refused task
+        // never reaches a trace.
+        message_content::record_input(&span, &String::from_utf8_lossy(&task.body));
+        let reply = a2a_reply(&response).inspect_err(|reason| {
             tracing::warn!(%reason, "the peer did not complete the task");
-        })
+        });
+        if let Ok(text) = &reply {
+            message_content::record_output(&span, text);
+        }
+        reply
     }
 
     fn send_signed_task(
@@ -899,6 +910,19 @@ mod transport_tests {
         assert!(has("shadi.a2a.send peer.did=did:key:zPeer"), "{lines:#?}");
         assert!(has("shadi.a2a.send a2a.outcome=error"), "{lines:#?}");
         assert!(has("shadi.a2a.send: A2A send failed"), "{lines:#?}");
+    }
+
+    /// A send that never passed its checks leaves no content in a trace.
+    #[test]
+    fn a_failed_send_captures_no_content() {
+        std::env::set_var(message_content::CAPTURE_CONTENT_ENV, "true");
+        let lines = trace_of(|| {
+            assert!(sample_adapter().dispatch(sample_task()).is_err());
+        });
+        std::env::remove_var(message_content::CAPTURE_CONTENT_ENV);
+        let has = |line: &str| lines.iter().any(|l| l == line);
+        assert!(has("shadi.a2a.send a2a.outcome=error"), "{lines:#?}");
+        assert!(!lines.iter().any(|l| l.contains("gen_ai.")), "{lines:#?}");
     }
 
     #[test]
