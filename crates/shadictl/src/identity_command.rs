@@ -141,7 +141,7 @@ pub(crate) fn run_did_from_github(args: DidFromGitHubArgs) -> Result<(), String>
 
 pub(crate) fn run_get_secret(args: GetSecretArgs) -> Result<(), String> {
     let to_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    if let Some(refusal) = get_secret_refusal(args.reveal, to_terminal, inside_a_sandbox) {
+    if let Some(refusal) = store_get_refusal(args.reveal, to_terminal, inside_a_sandbox) {
         return Err(refusal);
     }
     let store = default_secret_store();
@@ -157,7 +157,7 @@ pub(crate) fn run_get_secret(args: GetSecretArgs) -> Result<(), String> {
 /// Why `get-secret` will not print, if it will not. A confined agent must not
 /// read raw secrets, so `confined` is only asked once the terminal check
 /// passes, since it may probe the network.
-pub(crate) fn get_secret_refusal(
+pub(crate) fn store_get_refusal(
     reveal: bool,
     to_terminal: bool,
     confined: impl FnOnce() -> bool,

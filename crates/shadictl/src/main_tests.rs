@@ -2085,11 +2085,11 @@ members = [{ did = "did:key:zA", role = "human" }]
     #[test]
     fn get_secret_needs_reveal_for_a_terminal_and_no_sandbox() {
         let unprobed = || -> bool { panic!("a refused terminal must not probe the network") };
-        let refusal = get_secret_refusal(false, true, unprobed).expect("refused");
+        let refusal = store_get_refusal(false, true, unprobed).expect("refused");
         assert!(refusal.contains("--reveal"), "{refusal}");
-        assert_eq!(get_secret_refusal(true, true, || false), None);
-        assert_eq!(get_secret_refusal(false, false, || false), None);
-        let refusal = get_secret_refusal(true, false, || true).expect("refused");
+        assert_eq!(store_get_refusal(true, true, || false), None);
+        assert_eq!(store_get_refusal(false, false, || false), None);
+        let refusal = store_get_refusal(true, false, || true).expect("refused");
         assert!(refusal.contains("sandbox"), "{refusal}");
     }
 
