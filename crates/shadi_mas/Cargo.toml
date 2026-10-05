@@ -13,7 +13,7 @@ name = "shadi_mas"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-a2a = { package = "a2a-lf", version = "0.3.0" }
+a2a = { package = "a2a-lf", version = "0.4.0" }
 a2a-client = { package = "a2a-client-lf", version = "0.2.1" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.0", path = "../agent_secrets" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.2", path = "../shadi_identity" }
