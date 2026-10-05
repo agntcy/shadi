@@ -22,6 +22,7 @@ use landlock::{
 };
 use tracing::{debug, info, warn};
 
+use crate::policy::KernelNetPort;
 use crate::{PlatformSandboxProfile, SandboxError, SandboxPolicy, SandboxedChild};
 
 /// System paths that all sandboxed processes need to read for basic operation.
@@ -107,15 +108,16 @@ struct LandlockConfig {
     read_paths: Vec<std::path::PathBuf>,
     write_paths: Vec<std::path::PathBuf>,
     net_block: bool,
-    /// When set, restrict ALL outbound TCP to this port only (proxy mode).
-    /// `net_block` is ignored when this is `Some` — the proxy enforces the
-    /// domain-level allowlist; Landlock just funnels all TCP to it.
+    /// When set, outbound TCP goes to this port (proxy mode), which enforces
+    /// the domain-level allowlist; only loopback `net_ports` bypass it.
     net_proxy_port: Option<u16>,
+    /// Ports `net_allow` opens while the network is restricted.
+    net_ports: Vec<KernelNetPort>,
 }
 
 impl LandlockConfig {
     /// Collect paths from the policy *before* forking.
-    fn from_policy(policy: &SandboxPolicy, abi: ABI) -> Self {
+    fn from_policy(policy: &SandboxPolicy, abi: ABI) -> Result<Self, SandboxError> {
         let mut read_paths: Vec<std::path::PathBuf> = Vec::new();
         let mut write_paths: Vec<std::path::PathBuf> = Vec::new();
 
@@ -153,18 +155,34 @@ impl LandlockConfig {
             }
         }
 
-        Self {
+        let net_ports = if policy.net_blocked() || policy.net_proxy_port().is_some() {
+            policy
+                .kernel_net_ports()
+                .map_err(SandboxError::ApplyFailed)?
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self {
             abi,
             read_paths,
             write_paths,
             net_block: policy.net_blocked(),
             net_proxy_port: policy.net_proxy_port(),
-        }
+            net_ports,
+        })
     }
 
     /// Apply the Landlock sandbox.
     fn apply(&self) -> Result<(), SandboxError> {
-        apply_landlock(self.abi, &self.read_paths, &self.write_paths, self.net_block, self.net_proxy_port)
+        apply_landlock(
+            self.abi,
+            &self.read_paths,
+            &self.write_paths,
+            self.net_block,
+            self.net_proxy_port,
+            &self.net_ports,
+        )
     }
 }
 
@@ -174,7 +192,7 @@ pub fn spawn_sandboxed(
     policy: &SandboxPolicy,
 ) -> Result<SandboxedChild, SandboxError> {
     let abi = detect_abi()?;
-    let config = LandlockConfig::from_policy(policy, abi);
+    let config = LandlockConfig::from_policy(policy, abi)?;
 
     unsafe {
         command.pre_exec(move || {
@@ -201,7 +219,7 @@ pub fn spawn_sandboxed(
     policy: &SandboxPolicy,
 ) -> Result<SandboxedChild, SandboxError> {
     let abi = detect_abi()?;
-    let config = LandlockConfig::from_policy(policy, abi);
+    let config = LandlockConfig::from_policy(policy, abi)?;
     config.apply()?;
 
     let child = command
@@ -255,6 +273,7 @@ fn apply_landlock(
     write_paths: &[std::path::PathBuf],
     net_block: bool,
     net_proxy_port: Option<u16>,
+    net_ports: &[KernelNetPort],
 ) -> Result<(), SandboxError> {
     info!("Applying Landlock sandbox (ABI {})", abi_label(abi));
 
@@ -264,6 +283,12 @@ fn apply_landlock(
     // 2. Build the ruleset (factored out so we can test this without
     //    the irreversible restrict_self call).
     let ruleset = build_landlock_ruleset(abi, read_paths, write_paths, net_block, net_proxy_port)?;
+    let ruleset = add_net_allow_rules(
+        ruleset,
+        abi,
+        net_block || net_proxy_port.is_some(),
+        net_ports,
+    )?;
 
     // 3. restrict_self() — irreversible.
     let status = ruleset.restrict_self().map_err(|e| {
@@ -285,6 +310,37 @@ fn apply_landlock(
     }
 
     Ok(())
+}
+
+/// Open the `net_allow` ports (see `SandboxPolicy::kernel_net_ports`): bind on
+/// every listed port, connect where the entry allows a direct connection.
+/// Landlock matches the port alone, so a loopback entry opens it for any host.
+fn add_net_allow_rules(
+    mut ruleset: landlock::RulesetCreated,
+    abi: ABI,
+    net_restricted: bool,
+    net_ports: &[KernelNetPort],
+) -> Result<landlock::RulesetCreated, SandboxError> {
+    let available = AccessNet::from_all(abi);
+    if !net_restricted || available.is_empty() {
+        return Ok(ruleset);
+    }
+    for allowed in net_ports {
+        let mut access = BitFlags::from(AccessNet::BindTcp);
+        if allowed.any_host || allowed.loopback {
+            access |= AccessNet::ConnectTcp;
+        }
+        let access = access & available;
+        if access.is_empty() {
+            continue;
+        }
+        ruleset = ruleset
+            .add_rule(NetPort::new(allowed.port, access))
+            .map_err(|e| {
+                SandboxError::ApplyFailed(format!("failed to allow port {}: {e}", allowed.port))
+            })?;
+    }
+    Ok(ruleset)
 }
 
 /// Build a Landlock `RulesetCreated` from the given paths and flags.
@@ -596,7 +652,7 @@ mod tests {
     fn landlock_config_from_default_policy() {
         let policy = SandboxPolicy::new();
         let abi = detect_abi().expect("Landlock available");
-        let config = LandlockConfig::from_policy(&policy, abi);
+        let config = LandlockConfig::from_policy(&policy, abi).unwrap();
         // Default policy uses Compatibility profile, so paths should include
         // both default system paths and compatibility extras.
         assert!(!config.read_paths.is_empty());
@@ -605,12 +661,40 @@ mod tests {
     }
 
     #[test]
+    fn landlock_config_rejects_a_port_less_net_allow_entry() {
+        let policy = SandboxPolicy::new()
+            .block_network(true)
+            .allow_network_destination("api.github.com");
+        let abi = detect_abi().expect("Landlock available");
+        let err = LandlockConfig::from_policy(&policy, abi)
+            .err()
+            .expect("a port-less entry has no kernel form");
+        assert!(err.to_string().contains("has no port"), "{err}");
+    }
+
+    #[test]
+    fn landlock_config_opens_the_listed_ports() {
+        let policy = SandboxPolicy::new()
+            .block_network(true)
+            .allow_network_destination("127.0.0.1:47357")
+            .allow_network_destination("api.github.com:443");
+        let abi = detect_abi().expect("Landlock available");
+        let config = LandlockConfig::from_policy(&policy, abi).unwrap();
+        assert_eq!(
+            config.net_ports.iter().map(|p| p.port).collect::<Vec<_>>(),
+            [47357, 443]
+        );
+        let ruleset = build_landlock_ruleset(abi, &[], &[], true, None).expect("ruleset");
+        assert!(add_net_allow_rules(ruleset, abi, true, &config.net_ports).is_ok());
+    }
+
+    #[test]
     fn landlock_config_includes_user_paths() {
         let policy = SandboxPolicy::new()
             .allow_read_path("/usr")
             .allow_write_path("/tmp");
         let abi = detect_abi().expect("Landlock available");
-        let config = LandlockConfig::from_policy(&policy, abi);
+        let config = LandlockConfig::from_policy(&policy, abi).unwrap();
         assert!(config.read_paths.iter().any(|p| p == Path::new("/usr")));
         assert!(config.write_paths.iter().any(|p| p == Path::new("/tmp")));
     }
@@ -619,7 +703,7 @@ mod tests {
     fn landlock_config_minimal_profile_skips_compatibility_paths() {
         let policy = SandboxPolicy::new().use_minimal_platform_profile();
         let abi = detect_abi().expect("Landlock available");
-        let config = LandlockConfig::from_policy(&policy, abi);
+        let config = LandlockConfig::from_policy(&policy, abi).unwrap();
         // Minimal profile should NOT include /run (a compatibility-only path).
         assert!(
             !config.read_paths.iter().any(|p| p == Path::new("/run")),
@@ -631,7 +715,7 @@ mod tests {
     fn landlock_config_compatibility_profile_includes_extra_paths() {
         let policy = SandboxPolicy::new(); // default is Compatibility
         let abi = detect_abi().expect("Landlock available");
-        let config = LandlockConfig::from_policy(&policy, abi);
+        let config = LandlockConfig::from_policy(&policy, abi).unwrap();
         // Compatibility should include /tmp if it exists.
         if Path::new("/tmp").exists() {
             assert!(
@@ -645,11 +729,11 @@ mod tests {
     fn landlock_config_net_block_flag() {
         let policy = SandboxPolicy::new().block_network(true);
         let abi = detect_abi().expect("Landlock available");
-        let config = LandlockConfig::from_policy(&policy, abi);
+        let config = LandlockConfig::from_policy(&policy, abi).unwrap();
         assert!(config.net_block, "net_block should be true when policy blocks network");
 
         let policy_no_block = SandboxPolicy::new().block_network(false);
-        let config_no_block = LandlockConfig::from_policy(&policy_no_block, abi);
+        let config_no_block = LandlockConfig::from_policy(&policy_no_block, abi).unwrap();
         assert!(!config_no_block.net_block, "net_block should be false");
     }
 
@@ -657,7 +741,7 @@ mod tests {
     fn landlock_config_preserves_abi() {
         let policy = SandboxPolicy::new();
         let abi = detect_abi().expect("Landlock available");
-        let config = LandlockConfig::from_policy(&policy, abi);
+        let config = LandlockConfig::from_policy(&policy, abi).unwrap();
         assert_eq!(config.abi, abi, "config should preserve the detected ABI");
     }
 

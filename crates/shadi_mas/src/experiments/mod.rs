@@ -15,7 +15,10 @@ pub use auth_required::{
 };
 use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 use shadi_a2a::{insert_dest_did, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator};
-use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
+use slim_bindings::{
+    BackoffConfig, CaSource, ClientConfig, ExponentialBackoff, Name, Service, TlsClientConfig,
+    TlsSource,
+};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 const DEFAULT_LOCAL_ORG: &str = "agntcy";
@@ -161,7 +164,7 @@ impl LiveA2ATaskAdapter {
                 Ok(note)
             },
         )?;
-        Ok(describe_a2a_response(&response))
+        a2a_reply(&response)
     }
 
     fn send_signed_task(
@@ -169,22 +172,33 @@ impl LiveA2ATaskAdapter {
         task: &TaskEnvelope,
         signed_text: &str,
     ) -> Result<SendMessageResponse, String> {
+        let message = self.task_message(signed_text);
         if let Some(a2a_url) = self.config.a2a_url.as_deref() {
             let locator = A2ALocator::new(
                 self.config.a2a_binding.unwrap_or(A2ABinding::Grpc),
                 a2a_url,
             );
             if locator.binding.is_unicast() {
-                return self.send_signed_task_unicast(task, signed_text, &locator);
+                return self.send_signed_task_unicast(task, &message, &locator);
             }
         }
-        self.send_signed_task_slim(task, signed_text)
+        self.send_signed_task_slim(task, &message)
+    }
+
+    /// Both transports send this, so the receiver can check the destination
+    /// DID whichever way the task arrives.
+    fn task_message(&self, signed_text: &str) -> Message {
+        let message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
+        match self.config.peer_did.as_deref() {
+            Some(peer_did) => insert_dest_did(message, peer_did),
+            None => message,
+        }
     }
 
     fn send_signed_task_unicast(
         &self,
         task: &TaskEnvelope,
-        signed_text: &str,
+        message: &Message,
         locator: &A2ALocator,
     ) -> Result<SendMessageResponse, String> {
         let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
@@ -214,12 +228,8 @@ impl LiveA2ATaskAdapter {
                 .await
                 .map_err(|err| format!("A2A connect {via}: {err}"))?;
             let client = A2AClient::new(Box::new(channel));
-            let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
-            if let Some(peer_did) = self.config.peer_did.as_deref() {
-                message = insert_dest_did(message, peer_did);
-            }
             let request = SendMessageRequest {
-                message,
+                message: message.clone(),
                 configuration: None,
                 metadata: None,
                 tenant: None,
@@ -236,7 +246,7 @@ impl LiveA2ATaskAdapter {
     fn send_signed_task_slim(
         &self,
         task: &TaskEnvelope,
-        signed_text: &str,
+        message: &Message,
     ) -> Result<SendMessageResponse, String> {
         let tls = resolve_client_tls_material_for_agent(Some(&self.config.agent_id))?;
         let local_name = self
@@ -318,7 +328,7 @@ impl LiveA2ATaskAdapter {
                 };
                 let client = A2AClient::new(Box::new(channel));
                 let request = SendMessageRequest {
-                    message: Message::new(Role::User, vec![Part::text(signed_text.to_string())]),
+                    message: message.clone(),
                     configuration: None,
                     metadata: None,
                     tenant: None,
@@ -415,6 +425,26 @@ fn describe_a2a_response(response: &SendMessageResponse) -> String {
     }
 }
 
+/// A peer's `Rejected` or `Failed` task is an error, so callers never mistake
+/// its reason for a result.
+fn a2a_reply(response: &SendMessageResponse) -> Result<String, String> {
+    let SendMessageResponse::Task(task) = response else {
+        return Ok(describe_a2a_response(response));
+    };
+    let outcome = match task.status.state {
+        TaskState::Rejected => "rejected by the peer",
+        TaskState::Failed => "failed on the peer",
+        _ => return Ok(describe_a2a_response(response)),
+    };
+    let reason = task
+        .status
+        .message
+        .as_ref()
+        .map(readable_message_text)
+        .unwrap_or_else(|| "no reason given".to_string());
+    Err(format!("A2A task {} {outcome}: {reason}", task.id))
+}
+
 fn readable_message_text(message: &Message) -> String {
     let text = message
         .parts
@@ -432,6 +462,14 @@ fn readable_message_text(message: &Message) -> String {
 fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
     let mut config = ClientConfig::default();
     config.endpoint = resolve_client_endpoint_value(endpoint);
+    // The adapter owns retries; SLIM's default connection retry loop is unbounded.
+    config.connect_timeout = Some(Duration::from_secs(5));
+    config.backoff = Some(BackoffConfig::Exponential {
+        config: ExponentialBackoff {
+            max_attempts: 1,
+            ..Default::default()
+        },
+    });
     config.tls = TlsClientConfig {
         insecure: false,
         insecure_skip_verify: false,
@@ -670,6 +708,47 @@ mod transport_tests {
         );
     }
 
+    fn task_reply(state: TaskState, reason: Option<&str>) -> SendMessageResponse {
+        SendMessageResponse::Task(Task {
+            id: "task-9".to_string(),
+            context_id: "ctx-9".to_string(),
+            status: TaskStatus {
+                state,
+                message: reason
+                    .map(|text| Message::new(Role::Agent, vec![Part::text(text.to_string())])),
+                timestamp: None,
+            },
+            artifacts: None,
+            history: None,
+            metadata: None,
+        })
+    }
+
+    #[test]
+    fn a2a_reply_turns_rejected_and_failed_tasks_into_errors() {
+        assert_eq!(
+            a2a_reply(&task_reply(TaskState::Rejected, Some("unsigned request"))),
+            Err("A2A task task-9 rejected by the peer: unsigned request".to_string())
+        );
+        assert_eq!(
+            a2a_reply(&task_reply(TaskState::Failed, None)),
+            Err("A2A task task-9 failed on the peer: no reason given".to_string())
+        );
+    }
+
+    #[test]
+    fn a2a_reply_passes_other_replies_through() {
+        assert_eq!(
+            a2a_reply(&task_reply(TaskState::Completed, Some("done"))),
+            Ok("done".to_string())
+        );
+        let message = SendMessageResponse::Message(Message::new(
+            Role::Agent,
+            vec![Part::text("hi".to_string())],
+        ));
+        assert_eq!(a2a_reply(&message), Ok("hi".to_string()));
+    }
+
     #[test]
     fn ensure_file_exists_reports_missing_paths() {
         let err = ensure_file_exists(Path::new("/no/such/shadi/file"), "test file")
@@ -736,6 +815,9 @@ mod transport_tests {
         };
         let config = build_client_config_for_endpoint("node:47357", &tls);
         assert_eq!(config.endpoint, "https://node:47357");
+        assert_eq!(config.connect_timeout, Some(Duration::from_secs(5)));
+        assert!(matches!(config.backoff,
+            Some(BackoffConfig::Exponential { config }) if config.max_attempts == 1));
         assert!(!config.tls.insecure);
         assert_eq!(config.tls.tls_version, "tls1.3");
         match config.tls.source {
@@ -760,6 +842,30 @@ mod transport_tests {
             peer_did: None,
         });
         assert!(adapter.dispatches().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn task_message_carries_the_peer_did() {
+        let adapter = |peer_did: Option<&str>| {
+            LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+                endpoint: "node:47357".to_string(),
+                agent_id: "avatar".to_string(),
+                local_name: None,
+                peer_agent_id: "peer".to_string(),
+                destination: None,
+                a2a_url: None,
+                a2a_binding: None,
+                peer_did: peer_did.map(str::to_string),
+            })
+        };
+        let tagged = adapter(Some("did:key:zPeer")).task_message("signed");
+        assert_eq!(
+            shadi_a2a::dest_did_from_message(&tagged),
+            Some("did:key:zPeer")
+        );
+        assert_eq!(readable_message_text(&tagged), "signed");
+        let untagged = adapter(None).task_message("signed");
+        assert_eq!(shadi_a2a::dest_did_from_message(&untagged), None);
     }
 
     #[test]

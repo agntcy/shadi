@@ -105,6 +105,24 @@ pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, I
     )))
 }
 
+/// Every `ssh-ed25519` key in an `authorized_keys`-style listing.
+///
+/// All of them, because an account publishes several and a binding does not say
+/// which key signed it. Unparseable lines are skipped so one corrupt entry
+/// cannot deny a user whose other keys are fine.
+pub fn all_ed25519_in_authorized_keys(listing: &str) -> Vec<VerifyingKey> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(SSH_ED25519))
+        .filter_map(|line| verifying_key_from_openssh_public_key(line).ok())
+        // Capped after parsing: before it, malformed lines could hide valid keys.
+        .take(MAX_KEYS_PER_LISTING)
+        .collect()
+}
+
+const MAX_KEYS_PER_LISTING: usize = 32;
+
 /// A fresh Ed25519 key as `(private OpenSSH PEM, public line)`.
 ///
 /// For onboarding a machine that has no key yet. An empty passphrase writes the
@@ -230,6 +248,55 @@ mod tests {
         let expected =
             verifying_key_from_openssh_private_key(plain_key().as_bytes(), None).unwrap();
         assert_eq!(vk.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn all_ed25519_collects_every_usable_key_and_skips_the_rest() {
+        let other = {
+            let keypair = ssh_key::private::Ed25519Keypair::from_seed(&[3u8; 32]);
+            PrivateKey::from(keypair).public_key().to_openssh().unwrap()
+        };
+        let listing = format!(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAA notreal\n{}\nssh-ed25519 corrupt!!\n\n{}\n",
+            plain_public_line(),
+            other
+        );
+
+        let keys = all_ed25519_in_authorized_keys(&listing);
+        assert_eq!(keys.len(), 2, "both valid ed25519 keys, neither other line");
+        let expected =
+            verifying_key_from_openssh_private_key(plain_key().as_bytes(), None).unwrap();
+        assert!(keys.iter().any(|k| k.as_bytes() == expected.as_bytes()));
+        assert!(all_ed25519_in_authorized_keys("ssh-rsa AAAA x\n").is_empty());
+    }
+
+    /// The cap applies after parsing, so a run of malformed lines cannot push a
+    /// valid key out of the result.
+    #[test]
+    fn malformed_lines_do_not_crowd_out_a_valid_key() {
+        let mut listing = String::new();
+        for i in 0..MAX_KEYS_PER_LISTING * 2 {
+            listing.push_str(&format!("{SSH_ED25519} corrupt{i}!!\n"));
+        }
+        listing.push_str(&plain_public_line());
+        listing.push('\n');
+
+        let keys = all_ed25519_in_authorized_keys(&listing);
+        assert_eq!(keys.len(), 1, "the valid key must survive the malformed run");
+    }
+
+    #[test]
+    fn the_key_cap_bounds_what_is_returned() {
+        let mut listing = String::new();
+        for seed in 0..(MAX_KEYS_PER_LISTING + 5) as u8 {
+            let keypair = ssh_key::private::Ed25519Keypair::from_seed(&[seed + 1; 32]);
+            listing.push_str(&PrivateKey::from(keypair).public_key().to_openssh().unwrap());
+            listing.push('\n');
+        }
+        assert_eq!(
+            all_ed25519_in_authorized_keys(&listing).len(),
+            MAX_KEYS_PER_LISTING
+        );
     }
 
     /// Naming the algorithm that *is* published is what makes the refusal
