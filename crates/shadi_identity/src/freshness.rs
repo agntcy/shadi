@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How far `iat` may sit from local time, in either direction. Wide enough to
 /// absorb ordinary clock skew between hosts, so no separate skew knob.
@@ -99,7 +99,7 @@ impl Sealed {
         }
 
         // Last, so a stale or misaddressed message does not consume a jti slot.
-        if !replay.insert(&sealed.jti) {
+        if !replay.insert(&sealed.jti, sealed.iat) {
             return Err("replayed message (jti already seen)".to_string());
         }
 
@@ -110,12 +110,16 @@ impl Sealed {
 /// Seen-`jti` set with time-based eviction.
 ///
 /// A `HashMap` pruned on insert rather than an `lru` dependency: entries are
-/// only useful for [`FRESHNESS_WINDOW`], so bounded growth comes for free and
-/// no new crate enters the trust path.
+/// only useful until `iat + FRESHNESS_WINDOW`, so bounded growth comes for
+/// free and no new crate enters the trust path.
+///
+/// Expiry runs off `iat`, not receipt: `open` accepts `iat` a whole
+/// [`FRESHNESS_WINDOW`] ahead of local time, so a jti pruned a window after
+/// receipt would be forgotten while its message was still fresh.
 ///
 /// Per-process, so a restart reopens one [`FRESHNESS_WINDOW`] of replay.
 pub struct ReplayCache {
-    seen: Mutex<HashMap<String, Instant>>,
+    seen: Mutex<HashMap<String, u64>>,
     capacity: usize,
     /// Reject payloads that carry no freshness fields at all. Off by default
     /// so a receiver can be upgraded before its senders.
@@ -132,10 +136,12 @@ impl ReplayCache {
     }
 
     /// `true` if this `jti` had not been seen.
-    fn insert(&self, jti: &str) -> bool {
+    fn insert(&self, jti: &str, iat: u64) -> bool {
+        let expires = iat.saturating_add(FRESHNESS_WINDOW.as_secs());
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         if seen.len() >= self.capacity {
-            seen.retain(|_, at| at.elapsed() < FRESHNESS_WINDOW);
+            let now = now_secs();
+            seen.retain(|_, at| *at > now);
         }
         // Still full after pruning: every entry is live, so refuse rather than
         // grow without bound or evict a jti that could then be replayed.
@@ -146,7 +152,7 @@ impl ReplayCache {
             );
             return false;
         }
-        seen.insert(jti.to_string(), Instant::now()).is_none()
+        seen.insert(jti.to_string(), expires).is_none()
     }
 }
 
@@ -324,9 +330,25 @@ mod tests {
     #[test]
     fn a_full_cache_of_live_entries_rejects_rather_than_evicting() {
         let replay = ReplayCache::new(2, true);
-        assert!(replay.insert("a"));
-        assert!(replay.insert("b"));
-        assert!(!replay.insert("c"), "must not evict a live jti");
-        assert!(!replay.insert("a"), "known jti stays known");
+        assert!(replay.insert("a", now_secs()));
+        assert!(replay.insert("b", now_secs()));
+        assert!(!replay.insert("c", now_secs()), "must not evict a live jti");
+        assert!(!replay.insert("a", now_secs()), "known jti stays known");
+    }
+
+    /// `open` accepts an `iat` a window ahead of local time, so a jti must
+    /// outlive its message, not a window from receipt.
+    #[test]
+    fn entries_expire_on_iat_not_on_receipt() {
+        let replay = ReplayCache::new(2, true);
+        let window = FRESHNESS_WINDOW.as_secs();
+        assert!(replay.insert("skewed", now_secs() + window));
+        assert!(replay.insert("stale", now_secs() - window));
+        // Pruning here must drop "stale" and spare "skewed".
+        assert!(replay.insert("fresh", now_secs()), "stale jti was kept");
+        assert!(
+            !replay.insert("skewed", now_secs() + window),
+            "live jti was forgotten"
+        );
     }
 }
