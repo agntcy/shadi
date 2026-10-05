@@ -217,7 +217,7 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
         };
         return Ok(HandoffPeer::Slim {
             agent_id,
-            adapter: LiveA2ATaskAdapter::new(config),
+            adapter: super::egress::live_adapter(config),
         });
     }
     spawn_stdio(spec, spec)
