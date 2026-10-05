@@ -6,6 +6,7 @@ pub mod auth;
 pub mod mapping;
 pub mod memory;
 pub mod platform;
+pub mod request;
 pub mod session;
 
 use std::fmt;
@@ -14,6 +15,7 @@ pub use agent::AgentSecretAccess;
 pub use auth::{AgentVerifier, DidProofVerifier, NoopVerifier};
 pub use mapping::{parse_key_name, parse_name_mappings};
 pub use memory::SecretBytes;
+pub use request::RequestContext;
 pub use session::SessionContext;
 
 #[cfg(feature = "onepassword")]
@@ -171,5 +173,14 @@ mod tests {
         keys.sort();
 
         assert_eq!(keys, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn verify_request_defaults_to_verify() {
+        let session = SessionContext::new("agent", "session");
+        let request = RequestContext::new();
+        assert!(AllowVerifier.verify_request(&session, &request).is_ok());
+        assert!(DenyVerifier.verify_request(&session, &request).is_err());
+        assert!(!AllowVerifier.wants_content());
     }
 }
