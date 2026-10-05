@@ -36,9 +36,17 @@ pub(crate) fn check(
     message: &Message,
 ) -> Result<(), String> {
     let request = shadi_a2a::request_context(message, policy.wants_content());
-    policy.verify_request(session, &request).map_err(|err| {
-        let evaluation_id = request.evaluation_id();
-        tracing::warn!(evaluation_id, %err, "egress policy refused a message");
-        format!("withheld by egress policy ({evaluation_id}): {err}")
-    })
+    let evaluation_id = request.evaluation_id();
+    match policy.verify_request(session, &request) {
+        Ok(()) => {
+            tracing::info!(evaluation_id, "egress policy allowed a message");
+            Ok(())
+        }
+        Err(err) => {
+            tracing::warn!(evaluation_id, %err, "egress policy refused a message");
+            Err(format!(
+                "withheld by egress policy ({evaluation_id}): {err}"
+            ))
+        }
+    }
 }
