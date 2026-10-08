@@ -140,6 +140,10 @@ pub(crate) fn run_did_from_github(args: DidFromGitHubArgs) -> Result<(), String>
 }
 
 pub(crate) fn run_get_secret(args: GetSecretArgs) -> Result<(), String> {
+    let to_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if let Some(refusal) = store_get_refusal(args.reveal, to_terminal, inside_a_sandbox) {
+        return Err(refusal);
+    }
     let store = default_secret_store();
     let secret = store
         .get(&args.key)
@@ -148,6 +152,30 @@ pub(crate) fn run_get_secret(args: GetSecretArgs) -> Result<(), String> {
     let value = secret_bytes_to_utf8(&value)?;
     println!("{}", value);
     Ok(())
+}
+
+/// Why `get-secret` will not print, if it will not. A confined agent must not
+/// read raw secrets, so `confined` is only asked once the terminal check
+/// passes, since it may probe the network.
+pub(crate) fn store_get_refusal(
+    reveal: bool,
+    to_terminal: bool,
+    confined: impl FnOnce() -> bool,
+) -> Option<String> {
+    if to_terminal && !reveal {
+        return Some("refusing to print a secret to a terminal; pass --reveal to show it".into());
+    }
+    if confined() {
+        return Some("get-secret is refused inside a SHADI sandbox".to_string());
+    }
+    None
+}
+
+/// Any sign of a sandbox counts: the environment flag, which an agent could
+/// strip, or the kernel refusing a connection, which it cannot.
+fn inside_a_sandbox() -> bool {
+    std::env::var(shadi_sandbox::SANDBOX_ACTIVE_ENV).as_deref() == Ok("1")
+        || shadi_sandbox::network_blocked_by_kernel()
 }
 
 /// Delete through the store so the keychain registry is updated.

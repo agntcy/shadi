@@ -903,6 +903,9 @@ pub(crate) struct DidFromSshArgs {
 pub(crate) struct GetSecretArgs {
     #[arg(long = "key", value_name = "KEY")]
     pub(crate) key: String,
+    /// Print the secret even when stdout is a terminal.
+    #[arg(long)]
+    pub(crate) reveal: bool,
 }
 
 #[derive(Parser, Debug)]
