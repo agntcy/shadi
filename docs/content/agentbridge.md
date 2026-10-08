@@ -337,8 +337,10 @@ sent by `delegate`, `handoff`, `coordinate` or a `NEXT` handoff runs in a
 `shadi.a2a.send` span; a `NEXT` send shows up inside the receive span that
 caused it. Both carry `a2a.task_id`, `peer.did` and `a2a.outcome`. A receive
 ends `completed`, `rejected`, `auth_required` or `withheld`; a send records the
-peer's reply state, or `error` when it never got one. Admission and egress
-policy decisions are events on the span, the policy ones with their local
+peer's reply state, or `error` when it never got one. The peer can choose the
+task, context and message ids, so a receive span also records a local
+`evaluation_id`, which every refusal quotes back to the sender. Admission and
+egress policy decisions are events on the span, the egress ones with their own
 `evaluation_id`. A send carries its W3C `traceparent` in the message metadata,
 so the receive span joins the sender's trace. Nothing signs that value: it only
 links traces. Prompts and replies are recorded only when
