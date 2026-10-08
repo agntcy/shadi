@@ -48,9 +48,12 @@ pattern or payload, unknown participant).
 ## ASSEMBLY and CONVERGE
 
 - **ASSEMBLY** — `AssemblySession` infers a class from `CLASS <name>`
-  or keywords. An unimplemented token is `PatternKind::Unmapped`.
-- **CONVERGE** — peers announce local state in the form the class
-  requires; the engine applies the update after a full epoch.
+  or keywords, and each agent gives an `UPDATE <expression>` over the
+  class's named quantities. An unimplemented token is
+  `PatternKind::Unmapped`.
+- **CONVERGE** — each agent applies its own rule and announces the
+  result; the engine applies the announced values after a full epoch.
+  `update_rule` scores a rule against the class reference by probing.
 
 The protocol is not limited to numbers. `DevelopmentEngine` is CONVERGE
 for a code artifact. The paper examples use `ConvergeController`.
@@ -59,14 +62,15 @@ theorem (`proves_llm_mas` is not a runtime flag).
 
 ## Engines
 
-| Engine | Local state | Finalization |
-|--------|-------------|--------------|
+| Engine | Announced | Finalization |
+|--------|-----------|--------------|
 | `DevelopmentEngine` | `ExternalBytes` artifact | Quorum of `ToolResult` endorsements |
-| `PreferenceEngine` | `ScalarProposal` (`z_i`) | Jacobi step on a full inbox |
-| `CascadeEngine` | last order | Order-up-to + smoothing |
-| `ResourceEngine` | last extraction | Dual step and stock |
+| `PreferenceEngine` | next `z_i` (`ScalarProposal`) | Applies the announced values |
+| `CascadeEngine` | next order | Places the announced orders, advances the chain |
+| `ResourceEngine` | next extraction | Takes the announced extractions, advances price and stock |
 
-`PreferenceEngine` is not a median vote. After a full epoch it sets
+`PreferenceEngine` is not a median vote. Its reference rule, which a
+team's rule is scored against, is
 
 ```text
 z_i ← (c_i + 2β Σ_{j∈N_i} z_j) / (1 + 2β d_i)

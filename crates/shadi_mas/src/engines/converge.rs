@@ -10,6 +10,7 @@ use crate::types::{
     AgentId, ConvergeBallot, ConvergeDecision, ConvergeHalt, ConvergeSignal, Epoch, PatternKind,
     ScalarProposal, SemanticEvent,
 };
+use crate::update_rule::{Probe, Quantities};
 
 const IMPROVE_EPS: f64 = 1e-9;
 
@@ -115,14 +116,21 @@ impl ConvergeController {
     }
 }
 
+/// The value of the first `ANNOUNCE` line, wherever it sits in the reply.
 pub fn parse_announce(text: &str) -> Option<f64> {
     for line in text.lines() {
         let trimmed = line.trim();
-        let rest = trimmed
+        let Some(rest) = trimmed
             .strip_prefix("ANNOUNCE value=")
             .or_else(|| trimmed.strip_prefix("ANNOUNCE "))
-            .or_else(|| trimmed.strip_prefix("COMMIT proposal="))?;
-        let token = rest.split(|c: char| c.is_whitespace() || c == ',').next()?;
+            .or_else(|| trimmed.strip_prefix("COMMIT proposal="))
+        else {
+            continue;
+        };
+        let token = rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .next()
+            .unwrap_or_default();
         if let Ok(value) = token.parse::<f64>() {
             if value.is_finite() {
                 return Some(value);
@@ -145,14 +153,53 @@ pub fn parse_converge_vote(text: &str) -> Option<ConvergeDecision> {
     None
 }
 
+/// What a class's update rule may read, and the closed form it is scored
+/// against.
+pub trait UpdateClass {
+    /// The named local quantities, as [`ConvergeSurface::quantities`] gives
+    /// them.
+    const QUANTITIES: &'static [&'static str];
+
+    /// The reference rule. Scoring only: no engine applies it.
+    fn reference(quantities: &Quantities) -> f64;
+
+    /// A point in the quantities' plausible range, to probe a rule at.
+    fn probe(draw: &mut Probe) -> Quantities;
+}
+
 /// Surface a CONVERGE engine exposes to `coordinate` / tests.
-pub trait ConvergeSurface: CoordinationEngine {
+///
+/// The engine advances on the values agents announce, as given. It never
+/// computes an agent's next value; [`ConvergeSurface::reference_value`] exists
+/// for scoring.
+pub trait ConvergeSurface: CoordinationEngine + UpdateClass {
     fn current_value(&self, id: &AgentId) -> Option<f64>;
     fn metric(&self) -> f64;
     fn lower_is_better(&self) -> bool;
-    fn local_view(&self, id: &AgentId) -> String;
+
+    /// What agent `id`'s update rule reads this epoch.
+    fn quantities(&self, id: &AgentId) -> Option<Quantities>;
+
     fn announce_event(&self, id: &AgentId, epoch: u64, value: f64, event_id: &str)
         -> SemanticEvent;
+
+    /// The quantities as the agent sees them, with no next value suggested.
+    fn local_view(&self, id: &AgentId) -> String {
+        let Some(quantities) = self.quantities(id) else {
+            return String::new();
+        };
+        let mut view = format!("agent={}", id.0);
+        for (name, value) in &quantities {
+            view.push_str(&format!("\n{name}={value:.6}"));
+        }
+        view
+    }
+
+    /// What the reference rule gives agent `id` now. Scoring only.
+    fn reference_value(&self, id: &AgentId) -> Option<f64> {
+        self.quantities(id)
+            .map(|quantities| Self::reference(&quantities))
+    }
 }
 
 pub fn scalar_announce(
@@ -232,6 +279,15 @@ mod tests {
         );
         assert_eq!(parse_announce("COMMIT proposal=2.25 agent=a"), Some(2.25));
         assert_eq!(parse_announce("ANNOUNCE nan"), None);
+        // The rule is applied in prose first, so the line is rarely the first.
+        assert_eq!(
+            parse_announce("next = 4.0 + 1.5\nANNOUNCE value=5.5 agent=a epoch=0"),
+            Some(5.5)
+        );
+        assert_eq!(
+            parse_announce("ANNOUNCE value=x\nANNOUNCE value=2"),
+            Some(2.0)
+        );
         assert_eq!(
             parse_converge_vote("VOTE CONTINUE\nNEXT goose-1"),
             Some(ConvergeDecision::Continue)

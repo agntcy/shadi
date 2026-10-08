@@ -6,6 +6,7 @@ mod assembly;
 pub mod experiments;
 mod runtime;
 mod types;
+pub mod update_rule;
 
 pub mod engines;
 
@@ -14,7 +15,7 @@ pub use adapters::{
 };
 pub use assembly::{infer_pattern, AssemblySession};
 pub use engines::converge::{
-    parse_announce, parse_converge_vote, ConvergeController, ConvergeSurface,
+    parse_announce, parse_converge_vote, ConvergeController, ConvergeSurface, UpdateClass,
 };
 pub use runtime::{AppliedTransition, CoordinationEngine, MasRuntime};
 pub use types::{
@@ -22,6 +23,7 @@ pub use types::{
     EventMetadata, EventOutcome, EventSource, FinalizationSummary, PatternKind, ProtocolPhase,
     RejectReason, RuntimeCounters, ScalarProposal, SemanticEvent, SemanticPayload,
 };
+pub use update_rule::{derive, update_line, Derivation, Quantities, UpdateRule};
 
 pub mod integrations {
     pub use agent_transport_slim;

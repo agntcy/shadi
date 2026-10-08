@@ -1,17 +1,20 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Supply-chain CONVERGE engine. Agents announce last order; the engine
-//! applies the paper order-up-to + smoothing update.
+//! Supply-chain CONVERGE engine. Each stage announces its next order, computed
+//! with the rule its team derived; the engine places those orders as given and
+//! advances inventory, pipelines and cost. The paper order-up-to + smoothing
+//! rule is only the reference a team's rule is scored against.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::engines::converge::{scalar_announce, ConvergeSurface};
+use crate::engines::converge::{scalar_announce, ConvergeSurface, UpdateClass};
 use crate::runtime::CoordinationEngine;
 use crate::types::{
     AgentId, Epoch, EventId, EventOutcome, EventSource, FinalizationSummary, PatternKind,
     RejectReason, RuntimeCounters, ScalarProposal, SemanticEvent, SemanticPayload,
 };
+use crate::update_rule::{Probe, Quantities};
 
 pub const LEAD: usize = 2;
 pub const TARGET_I: f64 = 8.0;
@@ -21,11 +24,11 @@ pub const BACKLOG_COST: f64 = 2.0;
 pub const SMOOTH: f64 = 0.5;
 pub const RHO: f64 = 1.0;
 pub const PAPER_DEMAND: [f64; 8] = [4.0, 4.0, 4.0, 8.0, 8.0, 8.0, 4.0, 4.0];
-/// Weight on the previous order in [`CascadeEngine::formula_value`].
+/// Weight on the previous order in the reference rule.
 ///
 /// Zero reproduces the behaviour this engine has always had, where the order
 /// ignores the smoothing penalty that `apply_orders` charges against it. Set it
-/// above zero to make the recommended order account for that penalty; the
+/// above zero to make the reference order account for that penalty; the
 /// paper's appendix sensitivity `rho/(gamma+rho)` is this term, and `gamma =
 /// rho` is an older fork variant.
 pub const GAMMA: f64 = 0.0;
@@ -182,17 +185,6 @@ impl CascadeEngine {
         }
     }
 
-    pub fn formula_value(&self, index: usize) -> f64 {
-        let dhat = self.observed_demand(index);
-        let q_hat = (self.config.target_i + self.config.lead as f64 * dhat
-            - self.inventory[index]
-            - self.pipeline_sum(index))
-        .max(0.0);
-        let gamma = self.config.gamma;
-        (q_hat + gamma * self.last_q[index] + self.config.rho * self.qbar(index))
-            / (1.0 + gamma + self.config.rho)
-    }
-
     fn apply_orders(&mut self, orders: Vec<f64>) {
         let n = self.config.participants.len();
         let customer = self.config.demand[self.t.min(self.config.demand.len().saturating_sub(1))];
@@ -233,7 +225,7 @@ impl CascadeEngine {
         if self.announced.len() < n {
             return None;
         }
-        let orders: Vec<f64> = (0..n).map(|i| self.formula_value(i)).collect();
+        let orders: Vec<f64> = (0..n).map(|i| self.announced[&i]).collect();
         self.apply_orders(orders);
         self.announced.clear();
         let summary = FinalizationSummary {
@@ -244,6 +236,42 @@ impl CascadeEngine {
         self.active_epoch = Epoch(self.active_epoch.0 + 1);
         self.counters.finalized += 1;
         Some(summary)
+    }
+}
+
+impl UpdateClass for CascadeEngine {
+    const QUANTITIES: &'static [&'static str] = &[
+        "inventory",
+        "pipeline",
+        "last_order",
+        "demand",
+        "previous_demand",
+        "target_inventory",
+        "lead",
+        "rho",
+        "gamma",
+    ];
+
+    fn reference(q: &Quantities) -> f64 {
+        let order_up_to =
+            (q["target_inventory"] + q["lead"] * q["demand"] - q["inventory"] - q["pipeline"])
+                .max(0.0);
+        (order_up_to + q["gamma"] * q["last_order"] + q["rho"] * q["previous_demand"])
+            / (1.0 + q["gamma"] + q["rho"])
+    }
+
+    fn probe(draw: &mut Probe) -> Quantities {
+        Quantities::from([
+            ("inventory", draw.uniform(-10.0, 20.0)),
+            ("pipeline", draw.uniform(0.0, 30.0)),
+            ("last_order", draw.uniform(0.0, 15.0)),
+            ("demand", draw.uniform(0.0, 15.0)),
+            ("previous_demand", draw.uniform(0.0, 15.0)),
+            ("target_inventory", draw.uniform(0.0, 15.0)),
+            ("lead", draw.whole(1, 3)),
+            ("rho", draw.uniform(0.0, 2.0)),
+            ("gamma", draw.uniform(0.0, 2.0)),
+        ])
     }
 }
 
@@ -318,18 +346,19 @@ impl ConvergeSurface for CascadeEngine {
         true
     }
 
-    fn local_view(&self, id: &AgentId) -> String {
-        let Some(i) = self.config.index_of(id) else {
-            return String::new();
-        };
-        format!(
-            "agent={}\nI_i={:.6}\npipeline_sum={:.6}\nlast_order={:.6}\nobserved_demand={:.6}",
-            id.0,
-            self.inventory[i],
-            self.pipeline_sum(i),
-            self.last_q[i],
-            self.observed_demand(i)
-        )
+    fn quantities(&self, id: &AgentId) -> Option<Quantities> {
+        let i = self.config.index_of(id)?;
+        Some(Quantities::from([
+            ("inventory", self.inventory[i]),
+            ("pipeline", self.pipeline_sum(i)),
+            ("last_order", self.last_q[i]),
+            ("demand", self.observed_demand(i)),
+            ("previous_demand", self.qbar(i)),
+            ("target_inventory", self.config.target_i),
+            ("lead", self.config.lead as f64),
+            ("rho", self.config.rho),
+            ("gamma", self.config.gamma),
+        ]))
     }
 
     fn announce_event(
@@ -359,7 +388,7 @@ mod tests {
         let mut last = EventOutcome::Applied;
         for i in 0..n {
             let id = rt.engine().config().participants[i].clone();
-            let value = rt.engine().last_q()[i];
+            let value = rt.engine().reference_value(&id).unwrap();
             last =
                 rt.apply(
                     rt.engine()
@@ -467,9 +496,10 @@ mod tests {
 
         let mut differed = false;
         for i in 0..4 {
+            let id = plain.config().participants[i].clone();
             let previous = plain.last_q()[i];
-            let without = plain.formula_value(i);
-            let with = smooth.formula_value(i);
+            let without = plain.reference_value(&id).unwrap();
+            let with = smooth.reference_value(&id).unwrap();
             if (without - with).abs() > 1e-12 {
                 differed = true;
                 assert!(
@@ -627,13 +657,29 @@ mod tests {
         assert!(engine.lower_is_better());
         assert_eq!(engine.current_value(&id), Some(4.0));
         assert_eq!(engine.current_value(&unknown), None);
-        assert!(engine.local_view(&id).contains("last_order="));
+        let view = engine.local_view(&id);
+        for name in CascadeEngine::QUANTITIES {
+            assert!(view.contains(&format!("\n{name}=")), "{view}");
+        }
         assert!(engine.local_view(&unknown).is_empty());
         assert_eq!(engine.inventory().len(), 3);
         assert_eq!(engine.last_q().len(), 3);
-        assert!(engine.formula_value(0) >= 0.0);
-        assert!(engine.formula_value(2) >= 0.0);
+        let last = engine.config().participants[2].clone();
+        assert!(engine.reference_value(&id).unwrap() >= 0.0);
+        assert!(engine.reference_value(&last).unwrap() >= 0.0);
         assert_eq!(engine.config().paper_horizon(), 8);
         assert_eq!(engine.counters().applied, 0);
+    }
+
+    /// The engine places each stage's announced order as given, right or wrong.
+    #[test]
+    fn announced_orders_are_placed_unmodified() {
+        let cfg = CascadeEngineConfig::scaled(ids(3)).expect("cfg");
+        let mut rt = MasRuntime::new(CascadeEngine::new(Epoch(0), cfg));
+        for (i, order) in [1.5, 0.0, 30.0].into_iter().enumerate() {
+            let id = rt.engine().config().participants[i].clone();
+            rt.apply(rt.engine().announce_event(&id, 0, order, &format!("o{i}")));
+        }
+        assert_eq!(rt.engine().last_q(), &[1.5, 0.0, 30.0]);
     }
 }

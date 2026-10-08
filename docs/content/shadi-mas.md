@@ -82,8 +82,9 @@ and finalized events.
 ## Group protocol
 
 `ProtocolPhase` is `Assembly` or `Converge`. ASSEMBLY infers a class
-(`AssemblySession`, `CLASS <name>` or keywords). CONVERGE runs the
-engine for that class. A token SHADI does not implement is
+(`AssemblySession`, `CLASS <name>` or keywords) and collects each
+agent's `UPDATE` rule. In CONVERGE each agent applies its own rule, and
+the class engine applies what it announces. A token SHADI does not implement is
 `PatternKind::Unmapped` and must not start a solver.
 
 The protocol is not limited to numbers. A class may use a code artifact,
@@ -96,12 +97,16 @@ Details, skills, CLI flags, and honest claims are in
 Each implemented class is a `CoordinationEngine`. `coordinate --pattern`
 selects one.
 
-| Engine | `PatternKind` | Local state | When the epoch finalizes |
-|--------|---------------|-------------|--------------------------|
+| Engine | `PatternKind` | Announced | When the epoch finalizes |
+|--------|---------------|-----------|--------------------------|
 | `DevelopmentEngine` | `Development` | code artifact (`ExternalBytes`) | Quorum of endorsements (`ToolResult`) |
-| `PreferenceEngine` | `Preference` | `z_i` (`ScalarProposal`) | Full inbox; Jacobi step |
-| `CascadeEngine` | `Cascade` | last order | Full inbox; order-up-to + smoothing |
-| `ResourceEngine` | `Resource` | last extraction | Full inbox; dual step and stock |
+| `PreferenceEngine` | `Preference` | next `z_i` (`ScalarProposal`) | Full inbox; values applied as announced |
+| `CascadeEngine` | `Cascade` | next order | Full inbox; orders placed as announced, then the chain advances |
+| `ResourceEngine` | `Resource` | next extraction | Full inbox; extractions taken as announced, then price and stock advance |
+
+The paper engines never compute an agent's next value. Their published
+updates are only `UpdateClass::reference`, which scoring compares a
+team's rule against.
 
 `Development` is the `coordinate` default. The three paper engines share
 `ConvergeController` (improvement signal, `VOTE CONTINUE` / `VOTE STOP`,
