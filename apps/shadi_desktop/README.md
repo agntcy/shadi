@@ -10,12 +10,13 @@ a React/Vite/TypeScript frontend, following
 
 ## What is implemented
 
-Five tabs are wired today:
+Six tabs are wired today:
 
 - **Identity** — SSH / 1Password onboarding, GitHub handle cross-check, derived agent DIDs ([#123](https://github.com/agntcy/shadi/issues/123)). The remaining identity/secrets IPC from [#117](https://github.com/agntcy/shadi/issues/117) is still stubbed.
 - **Sandbox** — list, launch, attach, and kill sessions via `shadi_sandbox` ([#115](https://github.com/agntcy/shadi/issues/115)).
 - **Policy** — live query/patch plus explain/diff against `shadi_sandbox` ([#116](https://github.com/agntcy/shadi/issues/116)).
 - **Rooms** — SLIM node, groups, roster, and persistence ([#118](https://github.com/agntcy/shadi/issues/118), [#138](https://github.com/agntcy/shadi/issues/138)).
+- **Owner** — the rooms you moderate are yours. Agents ask over A2A to let someone in. Standing rules decide most requests, and the rest wait in an inbox until you allow or deny them or they time out. Every decision goes to an audit trail ([#421](https://github.com/agntcy/shadi/issues/421)).
 - **agentbridge** — list, handoff, delegate, and coordinate with live round events ([#120](https://github.com/agntcy/shadi/issues/120)).
 
 Agent Directory and trace/memory backends still return `not_implemented`

@@ -8432,7 +8432,9 @@ dependencies = [
 name = "shadi_desktop"
 version = "0.1.0"
 dependencies = [
+ "a2a-server-lf",
  "agntcy-agentbridge",
+ "agntcy-shadi-a2a",
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",

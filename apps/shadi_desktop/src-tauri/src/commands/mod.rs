@@ -12,6 +12,7 @@ pub mod agentbridge;
 pub mod bootstrap;
 pub mod dir;
 pub mod identity;
+pub mod owner;
 pub mod policy;
 pub mod sandbox;
 pub mod slim;
