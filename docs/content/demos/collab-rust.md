@@ -78,7 +78,8 @@ checked against the system roots. To use a CA file instead, set
 `SLIM_TLS_KEY`. Run the cheap `fifo` smoke test above first, then drop
 `COLLAB_AGENTS` and `PROBLEM` for the full five-agent LRU run. Each new
 connection presents the token, so log in again before a run that could
-outlast it.
+outlast it. An expired token shows up as a `link negotiation error` right
+after connecting.
 
 The agent names (`agntcy/shadi/<tool>-a2a`) and the DID seed in
 `demo-env.sh` are fixed and public. On a node shared with others, run one
