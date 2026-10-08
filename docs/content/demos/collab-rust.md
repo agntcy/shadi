@@ -59,6 +59,32 @@ fifo/lru finishing condition. A no-CLI loopback run that reproduces that
 fifo `cargo test` outcome is [A2A unicast](a2a-grpc.md)
 ([sample run](a2a-grpc-sample.md)).
 
+## Against a remote SLIM node
+
+If `SLIM_ENDPOINT` names a host other than loopback, the script starts no
+local node and generates no certificates. If the node checks a bearer token
+on the connection, give the token file. For example, `slimctl login` writes
+`~/.slimctl/token`:
+
+```bash
+SLIM_ENDPOINT=node.example.com:443 SLIM_AUTH_TOKEN_FILE=~/.slimctl/token \
+  COLLAB_AGENTS=goose,claude-code PROBLEM=fifo MAX_CYCLES=6 \
+  bash docs/content/demos/run-collab-demo.sh
+```
+
+With a token, no client certificate is sent, and the node's certificate is
+checked against the system roots. To use a CA file instead, set
+`SLIM_TLS_CA`; to also send a certificate, set `SLIM_TLS_CERT` and
+`SLIM_TLS_KEY`. Run the cheap `fifo` smoke test above first, then drop
+`COLLAB_AGENTS` and `PROBLEM` for the full five-agent LRU run. Each new
+connection presents the token, so log in again before a run that could
+outlast it.
+
+The agent names (`agntcy/shadi/<tool>-a2a`) and the DID seed in
+`demo-env.sh` are fixed and public. On a node shared with others, run one
+demo at a time, and expect that anyone else who can connect can also reach
+your listeners.
+
 ## What this shows
 
 - **Token-passing collaboration** — the same listeners as the

@@ -213,6 +213,7 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 | `SHADI_AUTH_REQUIRED_POLICY` | `reprove` | `reprove` / `ask` / `deny` when a remote task parks |
 | `SLIM_TLS_CERT` / `SLIM_TLS_KEY` | — | SLIM mTLS client certificate paths (not used for gRPC) |
 | `SLIM_TLS_CA` | — | CA certificate for SLIM server verification |
+| `SLIM_AUTH_TOKEN_FILE` | — | Bearer token file sent on the SLIM connection (e.g. from `slimctl login`). Without `SLIM_TLS_CA`, the node is checked against the system roots |
 | `A2A_TLS_CERT` / `A2A_TLS_KEY` | `$SHADI_TMP_DIR/shadi-a2a-tls/server.{crt,key}` | TLS 1.3 for non-loopback `--a2a-listen`. Do not reuse `SLIM_TLS_*`. Verify with `openssl x509 -text -noout`. |
 
 > ⚠️ **Security:** `register`, `delegate`, and `coordinate` (for `slim:` agent

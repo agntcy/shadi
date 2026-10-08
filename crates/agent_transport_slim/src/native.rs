@@ -2,17 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_secrets::{SecretError, SecretResult};
 use slim_bindings::{
-    App, CaSource, ClientConfig, MlsSettings, Name, Service, Session, SessionConfig, SessionType,
-    SlimError,
-    TlsClientConfig, TlsSource,
+    App, MlsSettings, Name, Service, Session, SessionConfig, SessionType, SlimError,
 };
 
+use crate::client_access::ClientAccess;
 use crate::SlimSession;
 
 const DEFAULT_SLIM_ENDPOINT: &str = "127.0.0.1:47357";
@@ -56,7 +54,7 @@ impl NativeSlimSession {
         let local_name_ref = Arc::new(parse_name(&local_name)?);
         // DID derivation uses the app (last) component of the local name.
         let agent_id = local_name.rsplit('/').next().unwrap_or(&local_name).to_string();
-        let client_config = build_client_config()?;
+        let client_config = ClientAccess::from_env(None)?.client_config(&resolve_endpoint());
         let service = Service::new(client_service_name());
 
         let mut connection_id = None;
@@ -216,13 +214,6 @@ impl Drop for NativeSlimSession {
     }
 }
 
-#[derive(Clone)]
-struct TlsMaterial {
-    cert: PathBuf,
-    key: PathBuf,
-    ca: PathBuf,
-}
-
 fn client_service_name() -> String {
     format!("shadi-slim-bridge-{}", std::process::id())
 }
@@ -237,97 +228,8 @@ fn point_to_point_session_config() -> SessionConfig {
     }
 }
 
-fn build_client_config() -> Result<ClientConfig, String> {
-    let tls = resolve_client_tls_material()?;
-    Ok(build_client_config_for_endpoint(&resolve_endpoint(), &tls))
-}
-
-fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
-    ClientConfig {
-        endpoint: resolve_client_endpoint_value(endpoint),
-        tls: TlsClientConfig {
-            insecure: false,
-            insecure_skip_verify: false,
-            source: TlsSource::File {
-                cert: tls.cert.display().to_string(),
-                key: tls.key.display().to_string(),
-            },
-            ca_source: CaSource::File {
-                path: tls.ca.display().to_string(),
-            },
-            include_system_ca_certs_pool: false,
-            tls_version: "tls1.3".to_string(),
-        },
-        ..ClientConfig::default()
-    }
-}
-
-fn resolve_client_tls_material() -> Result<TlsMaterial, String> {
-    let cert_override = std::env::var_os("SLIM_TLS_CERT").map(PathBuf::from);
-    let key_override = std::env::var_os("SLIM_TLS_KEY").map(PathBuf::from);
-    let ca = std::env::var_os("SLIM_TLS_CA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| slim_tls_dir().join("ca.crt"));
-
-    let (cert, key) = match (cert_override, key_override) {
-        (Some(cert), Some(key)) => (cert, key),
-        (Some(_), None) | (None, Some(_)) => {
-            return Err("SLIM_TLS_CERT and SLIM_TLS_KEY must be set together".to_string())
-        }
-        (None, None) => {
-            let base_dir = slim_tls_dir();
-            let agent_id = std::env::var("SHADI_AGENT_ID")
-                .ok()
-                .filter(|value| !value.trim().is_empty());
-            client_identity_candidates(&base_dir, agent_id.as_deref())
-                .into_iter()
-                .find(|(cert, key)| cert.is_file() && key.is_file())
-                .ok_or_else(|| {
-                    let candidates = client_identity_candidates(&base_dir, agent_id.as_deref())
-                        .into_iter()
-                        .map(|(cert, key)| format!("{} + {}", cert.display(), key.display()))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!(
-                        "no SLIM client certificate found; checked {}. Set SHADI_AGENT_ID or SLIM_TLS_CERT/SLIM_TLS_KEY explicitly",
-                        candidates
-                    )
-                })?
-        }
-    };
-
-    ensure_file_exists(&cert, "SLIM client certificate")?;
-    ensure_file_exists(&key, "SLIM client key")?;
-    ensure_file_exists(&ca, "SLIM client CA")?;
-
-    Ok(TlsMaterial { cert, key, ca })
-}
-
-fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(PathBuf, PathBuf)> {
-    let mut candidates = Vec::new();
-
-    if let Some(agent_id) = agent_id {
-        let stem = format!("client-{}", agent_id);
-        candidates.push((
-            base_dir.join(format!("{}.crt", stem)),
-            base_dir.join(format!("{}.key", stem)),
-        ));
-    }
-
-    candidates.push((base_dir.join("client.crt"), base_dir.join("client.key")));
-    candidates
-}
-
 fn resolve_endpoint() -> String {
     std::env::var("SLIM_ENDPOINT").unwrap_or_else(|_| DEFAULT_SLIM_ENDPOINT.to_string())
-}
-
-fn resolve_client_endpoint_value(endpoint: &str) -> String {
-    if endpoint.contains("://") {
-        endpoint.to_string()
-    } else {
-        format!("https://{}", endpoint)
-    }
 }
 
 fn resolve_local_name() -> Result<String, String> {
@@ -387,27 +289,6 @@ fn parse_name(raw: &str) -> Result<Name, String> {
     })
 }
 
-fn slim_tls_dir() -> PathBuf {
-    std::env::var_os("SHADI_TMP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_tmp_dir)
-        .join("shadi-slim-mtls")
-}
-
-fn default_tmp_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(".tmp")
-}
-
-fn ensure_file_exists(path: &Path, label: &str) -> Result<(), String> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(format!("{} not found at {}", label, path.display()))
-    }
-}
-
 fn format_slim_error(err: slim_bindings::SlimError) -> String {
     err.to_string()
 }
@@ -418,6 +299,7 @@ mod tests {
     use std::fs;
     #[cfg(not(windows))]
     use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
     #[cfg(not(windows))]
     use std::process::Command;
     #[cfg(not(windows))]
@@ -498,13 +380,6 @@ mod tests {
         }
     }
 
-    fn write_test_file(path: &Path) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, b"test").expect("write test file");
-    }
-
     #[cfg(not(windows))]
     fn generate_test_tls_dir(base_dir: &Path) -> PathBuf {
         let tls_dir = base_dir.join("shadi-slim-mtls");
@@ -529,17 +404,19 @@ mod tests {
     }
 
     #[cfg(not(windows))]
-    fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> TlsMaterial {
-        let (cert, key) = client_identity_candidates(base_dir, Some(agent_id))
-            .into_iter()
-            .find(|(cert, key)| cert.is_file() && key.is_file())
-            .unwrap_or_else(|| panic!("missing client TLS material for {}", agent_id));
+    struct TlsMaterial {
+        cert: PathBuf,
+        key: PathBuf,
+        ca: PathBuf,
+    }
 
-        TlsMaterial {
-            cert,
-            key,
-            ca: base_dir.join("ca.crt"),
-        }
+    #[cfg(not(windows))]
+    fn test_client_tls_material(base_dir: &Path, agent_id: &str) -> ClientAccess {
+        ClientAccess::mtls(
+            base_dir.join(format!("client-{agent_id}.crt")),
+            base_dir.join(format!("client-{agent_id}.key")),
+            base_dir.join("ca.crt"),
+        )
     }
 
     #[cfg(not(windows))]
@@ -557,11 +434,11 @@ mod tests {
             endpoint: endpoint.to_string(),
             tls: slim_bindings::TlsServerConfig {
                 insecure: false,
-                source: TlsSource::File {
+                source: slim_bindings::TlsSource::File {
                     cert: tls.cert.display().to_string(),
                     key: tls.key.display().to_string(),
                 },
-                client_ca: CaSource::File {
+                client_ca: slim_bindings::CaSource::File {
                     path: tls.ca.display().to_string(),
                 },
                 include_system_ca_certs_pool: Some(false),
@@ -600,41 +477,6 @@ mod tests {
         let resolved = resolve_local_name_value(None, None).expect("local name");
 
         assert_eq!(resolved, "agntcy/shadi/agent");
-    }
-
-    #[test]
-    fn given_bare_endpoint_when_resolving_client_endpoint_then_https_is_added() {
-        let endpoint = resolve_client_endpoint_value("127.0.0.1:47357");
-
-        assert_eq!(endpoint, "https://127.0.0.1:47357");
-    }
-
-    #[test]
-    fn given_url_endpoint_when_resolving_client_endpoint_then_it_is_preserved() {
-        let endpoint = resolve_client_endpoint_value("https://127.0.0.1:47357");
-
-        assert_eq!(endpoint, "https://127.0.0.1:47357");
-    }
-
-    #[test]
-    fn given_agent_id_when_building_client_identity_candidates_then_agent_pair_is_first() {
-        let base = Path::new("/tmp/shadi-slim-mtls");
-        let candidates = client_identity_candidates(base, Some("avatar"));
-
-        assert_eq!(
-            candidates[0],
-            (
-                PathBuf::from("/tmp/shadi-slim-mtls/client-avatar.crt"),
-                PathBuf::from("/tmp/shadi-slim-mtls/client-avatar.key")
-            )
-        );
-        assert_eq!(
-            candidates[1],
-            (
-                PathBuf::from("/tmp/shadi-slim-mtls/client.crt"),
-                PathBuf::from("/tmp/shadi-slim-mtls/client.key")
-            )
-        );
     }
 
     #[test]
@@ -696,32 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn given_endpoint_and_tls_when_building_client_config_then_paths_are_embedded() {
-        let tls = TlsMaterial {
-            cert: PathBuf::from("/tmp/client.crt"),
-            key: PathBuf::from("/tmp/client.key"),
-            ca: PathBuf::from("/tmp/ca.crt"),
-        };
-
-        let config = build_client_config_for_endpoint("127.0.0.1:47357", &tls);
-
-        assert_eq!(config.endpoint, "https://127.0.0.1:47357");
-        match config.tls.source {
-            TlsSource::File { cert, key } => {
-                assert_eq!(cert, "/tmp/client.crt");
-                assert_eq!(key, "/tmp/client.key");
-            }
-            other => panic!("unexpected TLS source: {:?}", other),
-        }
-        match config.tls.ca_source {
-            CaSource::File { path } => assert_eq!(path, "/tmp/ca.crt"),
-            other => panic!("unexpected CA source: {:?}", other),
-        }
-        assert!(!config.tls.include_system_ca_certs_pool);
-        assert_eq!(config.tls.tls_version, "tls1.3");
-    }
-
-    #[test]
     fn given_endpoint_env_when_resolving_then_override_is_used() {
         let _guard = lock_env();
         let _endpoint = ScopedEnvVar::set("SLIM_ENDPOINT", "10.0.0.8:7744");
@@ -735,108 +551,6 @@ mod tests {
         let _secret = ScopedEnvVar::set("SLIM_SHARED_SECRET", "shared-secret");
 
         assert_eq!(resolve_shared_secret().expect("shared secret"), "shared-secret");
-    }
-
-    #[test]
-    fn given_tmp_dir_override_when_resolving_tls_dir_then_custom_base_is_used() {
-        let _guard = lock_env();
-        let dir = TestDir::new("native-tmp-dir");
-        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
-
-        assert_eq!(slim_tls_dir(), dir.path().join("shadi-slim-mtls"));
-    }
-
-    #[test]
-    fn given_present_file_when_ensuring_then_it_succeeds() {
-        let dir = TestDir::new("native-existing-file");
-        let file = dir.path().join("present.txt");
-        write_test_file(&file);
-
-        ensure_file_exists(&file, "present file").expect("existing file");
-    }
-
-    #[test]
-    fn given_missing_file_when_ensuring_then_error_mentions_label_and_path() {
-        let dir = TestDir::new("native-missing-file");
-        let file = dir.path().join("missing.txt");
-
-        let err = ensure_file_exists(&file, "missing file").expect_err("missing file");
-
-        assert!(err.contains("missing file"));
-        assert!(err.contains(&file.display().to_string()));
-    }
-
-    #[test]
-    fn given_only_cert_override_when_resolving_tls_then_it_is_rejected() {
-        let _guard = lock_env();
-        let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", "/tmp/client.crt");
-        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
-
-        let err = match resolve_client_tls_material() {
-            Ok(_) => panic!("expected missing key override to fail"),
-            Err(err) => err,
-        };
-
-        assert!(err.contains("must be set together"));
-    }
-
-    #[test]
-    fn given_only_key_override_when_resolving_tls_then_it_is_rejected() {
-        let _guard = lock_env();
-        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
-        let _key = ScopedEnvVar::set("SLIM_TLS_KEY", "/tmp/client.key");
-
-        let err = match resolve_client_tls_material() {
-            Ok(_) => panic!("expected missing cert override to fail"),
-            Err(err) => err,
-        };
-
-        assert!(err.contains("must be set together"));
-    }
-
-    #[test]
-    fn given_explicit_tls_overrides_when_resolving_then_they_are_used() {
-        let _guard = lock_env();
-        let dir = TestDir::new("native-explicit-tls");
-        let cert = dir.path().join("client.crt");
-        let key = dir.path().join("client.key");
-        let ca = dir.path().join("ca.crt");
-        write_test_file(&cert);
-        write_test_file(&key);
-        write_test_file(&ca);
-
-        let _cert = ScopedEnvVar::set("SLIM_TLS_CERT", cert.as_os_str());
-        let _key = ScopedEnvVar::set("SLIM_TLS_KEY", key.as_os_str());
-        let _ca = ScopedEnvVar::set("SLIM_TLS_CA", ca.as_os_str());
-        let _tmp_dir = ScopedEnvVar::unset("SHADI_TMP_DIR");
-        let _agent_id = ScopedEnvVar::unset("SHADI_AGENT_ID");
-
-        let tls = resolve_client_tls_material().expect("tls material");
-
-        assert_eq!(tls.cert, cert);
-        assert_eq!(tls.key, key);
-        assert_eq!(tls.ca, ca);
-    }
-
-    #[test]
-    fn given_missing_tls_material_when_resolving_then_candidates_are_reported() {
-        let _guard = lock_env();
-        let dir = TestDir::new("native-missing-tls");
-        fs::create_dir_all(dir.path().join("shadi-slim-mtls")).expect("create tls dir");
-
-        let _tmp_dir = ScopedEnvVar::set("SHADI_TMP_DIR", dir.path().as_os_str());
-        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
-        let _cert = ScopedEnvVar::unset("SLIM_TLS_CERT");
-        let _key = ScopedEnvVar::unset("SLIM_TLS_KEY");
-        let _ca = ScopedEnvVar::unset("SLIM_TLS_CA");
-
-        let err = match resolve_client_tls_material() {
-            Ok(_) => panic!("expected missing tls material to fail"),
-            Err(err) => err,
-        };
-
-        assert!(err.contains("no SLIM client certificate found"));
-        assert!(err.contains("client-avatar.crt"));
     }
 
     #[test]
@@ -863,10 +577,7 @@ mod tests {
             let participant_service =
                 Service::new(format!("agent-transport-native-participant-{}", std::process::id()));
             let connection_id = participant_service
-                .connect(build_client_config_for_endpoint(
-                    &endpoint_for_participant,
-                    &participant_tls,
-                ))
+                .connect(participant_tls.client_config(&endpoint_for_participant))
                 .map_err(format_slim_error)?;
             let participant_app = participant_service
                 .create_app_with_secret(

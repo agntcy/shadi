@@ -19,6 +19,9 @@
 # Same fifo/lru outcome over official A2A unicast (no SLIM node):
 #   TRANSPORT=grpc PROBLEM=fifo bash docs/content/demos/run-collab-demo.sh
 #   TRANSPORT=jsonrpc PROBLEM=fifo bash docs/content/demos/run-collab-demo.sh
+# Against a remote SLIM node that takes a bearer token (no local node):
+#   SLIM_ENDPOINT=node.example.com:443 SLIM_AUTH_TOKEN_FILE=~/.slimctl/token \
+#     bash docs/content/demos/run-collab-demo.sh
 set -uo pipefail
 cd "$(dirname "$0")/../../.."   # repo root
 
@@ -47,11 +50,27 @@ else
 fi
 export SLIM_ENDPOINT="${SLIM_ENDPOINT:-127.0.0.1:47591}"
 A2A_BASE_PORT="${A2A_BASE_PORT:-50151}"
+remote_slim() {
+  ! unicast_transport || return 1
+  case "${SLIM_ENDPOINT%:*}" in
+    127.0.0.1|localhost|"[::1]") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+# demo-env.sh points the client at the local node's certificates.
+USER_TLS_CERT="${SLIM_TLS_CERT:-}"
+USER_TLS_KEY="${SLIM_TLS_KEY:-}"
 # shellcheck source=/dev/null
 source docs/content/demos/demo-env.sh
 if unicast_transport; then
   # clap register --slim-endpoint reads SLIM_ENDPOINT. Unicast-only must not dual-listen.
   unset SLIM_ENDPOINT
+elif remote_slim; then
+  export SLIM_TLS_CERT="$USER_TLS_CERT" SLIM_TLS_KEY="$USER_TLS_KEY"
+  if [ -z "${SLIM_AUTH_TOKEN_FILE:-}" ] && [ -z "$SLIM_TLS_CERT" ]; then
+    echo "remote SLIM node $SLIM_ENDPOINT: set SLIM_AUTH_TOKEN_FILE (or SLIM_TLS_CERT/SLIM_TLS_KEY)"
+    exit 1
+  fi
 else
   bash tools/generate_slim_mtls_certs.sh "$SHADI_TMP_DIR/shadi-slim-mtls" >/dev/null 2>&1 \
     || { echo "mTLS generation failed"; exit 1; }
@@ -75,7 +94,9 @@ step "watch live:  bash docs/content/demos/watch-collab-demo.sh"
 step "transport: $TRANSPORT"
 
 NODE_PID=""
-if ! unicast_transport; then
+if remote_slim; then
+  step "remote SLIM node: $SLIM_ENDPOINT"
+elif ! unicast_transport; then
   step "starting SLIM node..."
   "$BIN" slim start-node >"$LOG/node.log" 2>&1 &
   NODE_PID=$!
@@ -134,6 +155,9 @@ fi
 EXTRA_READ=()
 if [ -n "${AGENTBRIDGE_PROFILES_DIR:-}" ]; then
   EXTRA_READ+=(--read "$AGENTBRIDGE_PROFILES_DIR" --read "$PWD")
+fi
+if [ -n "${SLIM_AUTH_TOKEN_FILE:-}" ]; then
+  EXTRA_READ+=(--read "$(dirname "$SLIM_AUTH_TOKEN_FILE")")
 fi
 
 i=0

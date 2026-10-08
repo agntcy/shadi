@@ -7,18 +7,17 @@
 //! introspect what's already configured.
 //!
 //! This is local-operator infrastructure, not a coding-agent identity: only
-//! mTLS is used here (the same cert conventions as everywhere else in
-//! shadictl), no DID/JWT `auth_provider` — the DID-only policy governs agent
+//! node access is used here (mTLS or a bearer token, the same conventions as
+//! everywhere else in shadictl), no DID/JWT `auth_provider` — the DID-only policy governs agent
 //! identities (claude-code/codex/copilot/cursor-agent), not this channel.
 //!
 //! "Routes" and "subscriptions" are the same concept at two layers: setting a
 //! `Route{name, link_id}` here causes the target node's controller to
 //! translate it into a real `Subscribe` message on its datapath.
 
+use agent_transport_slim::client_access::ClientAccess;
 use slim_config::client::ClientConfig as CoreClientConfig;
 use slim_config::grpc::client::TransportChannel;
-use slim_config::tls::client::TlsClientConfig as CoreTlsClientConfig;
-use slim_config::tls::common::{CaSource, Config as CoreTlsConfig, TlsSource};
 use slim_proto::controller::proto::v1::{
     control_message, controller_service_client::ControllerServiceClient, Connection,
     ConnectionDirection, ConnectionListRequest, ConnectionListResponse, ConfigurationCommand,
@@ -28,7 +27,6 @@ use slim_proto::dataplane::proto::v1::{Name as ProtoName, NameId};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 use crate::cli_types::{SlimControllerConnectArgs, SlimControllerListArgs};
-use crate::slim_shell::resolve_client_tls_material_for_agent;
 
 pub(crate) fn run_controller_connect(args: SlimControllerConnectArgs) -> Result<(), String> {
     let output = run_controller_connect_once(&args)?;
@@ -181,31 +179,7 @@ fn send_and_await(
 }
 
 fn build_core_client_config(endpoint: &str) -> Result<CoreClientConfig, String> {
-    let tls = resolve_client_tls_material_for_agent(None)?;
-    let endpoint = if endpoint.contains("://") {
-        endpoint.to_string()
-    } else {
-        format!("https://{endpoint}")
-    };
-    Ok(CoreClientConfig::with_endpoint(&endpoint).with_tls_setting(CoreTlsClientConfig {
-        config: CoreTlsConfig {
-            source: TlsSource::File {
-                cert: tls.cert.display().to_string(),
-                key: tls.key.display().to_string(),
-            },
-            ca_source: CaSource::File {
-                path: tls.ca.display().to_string(),
-            },
-            include_system_ca_certs_pool: false,
-            tls_version: "tls1.3".to_string(),
-            reload_interval: None,
-            // slim-config 0.16 added this; upstream defaults it off and drives
-            // it from dataplane.enforce_pqc rather than the tls settings.
-            enforce_pqc: false,
-        },
-        insecure: false,
-        insecure_skip_verify: false,
-    }))
+    Ok(ClientAccess::from_env(None)?.client_config(endpoint).into())
 }
 
 fn split_pair(entry: &str, flag: &str, shape: &str) -> Result<(String, String), String> {

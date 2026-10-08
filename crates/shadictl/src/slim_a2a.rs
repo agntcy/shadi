@@ -12,6 +12,7 @@ use a2a_server::{
     ServiceParams as A2AServiceParams,
 };
 use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretResult, SessionContext};
+use agent_transport_slim::client_access::ClientAccess;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use shadi_a2a::{A2AChannelBuilder, A2AGroupChannelBuilder, SLIM_SRC_METADATA_KEY, SlimRpcHandler};
@@ -22,8 +23,7 @@ use tokio::sync::Notify;
 
 use crate::cli_types::{SlimA2ACollaborateArgs, SlimA2AEchoPeerArgs, SlimA2ASendArgs};
 use crate::slim_shell::{
-    build_client_config_for_endpoint, build_server_config_for_endpoint, format_slim_error,
-    parse_name, resolve_client_tls_material_for_agent, resolve_server_tls_material,
+    build_server_config_for_endpoint, format_slim_error, parse_name, resolve_server_tls_material,
     resolve_slim_auth,
 };
 
@@ -242,7 +242,7 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
     let auth = resolve_slim_auth(&args.agent_id)?;
     let peer_name = slim_name(&args.agent_id);
-    let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
+    let client_access = ClientAccess::from_env(Some(&args.agent_id))?;
     let server_tls = resolve_server_tls_material()?;
 
     let node_service = if args.start_local_node {
@@ -258,7 +258,7 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
 
     let service = Service::new(format!("shadictl-a2a-peer-{}", std::process::id()));
     let connection_id = service
-        .connect(build_client_config_for_endpoint(&endpoint, &client_tls))
+        .connect(client_access.client_config(&endpoint))
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
     let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
@@ -509,7 +509,7 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
     slim_config::tls::provider::initialize_crypto_provider();
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
     let auth = resolve_slim_auth(&args.agent_id)?;
-    let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
+    let client_access = ClientAccess::from_env(Some(&args.agent_id))?;
     let local_name = slim_name(&args.agent_id);
     let destination = args
         .destination
@@ -518,7 +518,7 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
 
     let service = Service::new(format!("shadictl-a2a-client-{}", std::process::id()));
     let connection_id = service
-        .connect(build_client_config_for_endpoint(&endpoint, &client_tls))
+        .connect(client_access.client_config(&endpoint))
         .map_err(format_slim_error)?;
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let remote_name_ref = Arc::new(parse_name(&destination)?);
@@ -599,7 +599,7 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
     slim_config::tls::provider::initialize_crypto_provider();
     let endpoint = resolve_endpoint(args.endpoint.as_deref());
     let auth = resolve_slim_auth(&args.agent_id)?;
-    let client_tls = resolve_client_tls_material_for_agent(Some(&args.agent_id))?;
+    let client_access = ClientAccess::from_env(Some(&args.agent_id))?;
     let local_name = slim_name(&args.agent_id);
 
     let peer_names: Vec<Arc<Name>> = args
@@ -615,7 +615,7 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
 
     let service = Service::new(format!("shadictl-a2a-collab-{}", std::process::id()));
     let connection_id = service
-        .connect(build_client_config_for_endpoint(&endpoint, &client_tls))
+        .connect(client_access.client_config(&endpoint))
         .map_err(format_slim_error)?;
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)

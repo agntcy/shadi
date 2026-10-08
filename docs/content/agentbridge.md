@@ -349,8 +349,8 @@ covers exporting them.
 
 ### TLS certificate resolution
 
-The listener needs a client-side mTLS certificate to authenticate with the
-SLIM node. Resolution order:
+Without a bearer token (below), the listener needs a client-side mTLS
+certificate to authenticate with the SLIM node. Resolution order:
 
 1. **Explicit env vars** — `SLIM_TLS_CERT` + `SLIM_TLS_KEY` + `SLIM_TLS_CA`
 2. **Agent-specific fallback** — `.tmp/shadi-slim-mtls/client-<agent_id>.crt` / `.key`
@@ -358,6 +358,14 @@ SLIM node. Resolution order:
 
 `SLIM_TLS_CA` defaults to `.tmp/shadi-slim-mtls/ca.crt`. Generate the
 certificate bundle once with `tools/generate_slim_mtls_certs.sh`.
+
+A remote node that authenticates the connection with a bearer token instead
+takes `SLIM_AUTH_TOKEN_FILE`: a file holding only the token, such as the one
+`slimctl login` writes. The token goes on every connection and is re-read when
+the file changes. With a token the fallbacks above aren't used: no client
+certificate is sent unless `SLIM_TLS_CERT` and `SLIM_TLS_KEY` are set, and the
+node's certificate is checked against the system roots unless `SLIM_TLS_CA` is
+set.
 
 ### Lifecycle
 
@@ -457,8 +465,8 @@ allow-list.
 
 ### Transport authentication
 
-SLIMRPC peer-to-peer A2A uses mutual TLS to the SLIM node. The listener
-resolves a client certificate from `SLIM_TLS_CERT` / `SLIM_TLS_KEY` /
+SLIMRPC peer-to-peer A2A authenticates to the SLIM node with mutual TLS, or
+with a bearer token from `SLIM_AUTH_TOKEN_FILE`. The listener resolves a client certificate from `SLIM_TLS_CERT` / `SLIM_TLS_KEY` /
 `SLIM_TLS_CA`, an agent-specific fallback, or a generic fallback (see
 [TLS certificate resolution](#tls-certificate-resolution)). Generate the bundle
 with `tools/generate_slim_mtls_certs.sh` and keep the CA private to the peers you
