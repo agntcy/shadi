@@ -17,17 +17,17 @@ agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version 
 shadi_mas = { package = "agntcy-shadi-mas", version = "0.4.0", path = "../shadi_mas" }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.2.0", path = "../shadi_a2a" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.2", path = "../shadi_telemetry" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "3.0.1" }
 # Not used directly: holds the transitive mls-rs line together. slim-persistence
 # 0.1.1 moved to mls-rs 0.56 in a patch release while slim-mls 0.3.10 is on 0.54,
 # so an unpinned resolve links both (agntcy/shadi#338, agntcy/slim#2142).
-slim_persistence = { package = "agntcy-slim-persistence", version = "=0.1.0" }
-slim_config = { package = "agntcy-slim-config", version = "0.16.0" }
-slim_rpc = { package = "agntcy-slim-rpc", version = "2.3.0" }
-a2a = { package = "a2a-lf", version = "0.3.0" }
-a2a-server = { package = "a2a-server-lf", version = "0.4.1" }
-a2a-grpc = { version = "0.3.5" }
-a2a-pb = { version = "0.2.0" }
+slim_persistence = { package = "agntcy-slim-persistence", version = "=0.2.0" }
+slim_config = { package = "agntcy-slim-config", version = "0.16.5" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "3.0.1" }
+a2a = { package = "a2a-lf", version = "0.4.1" }
+a2a-server = { package = "a2a-server-lf", version = "0.5.1" }
+a2a-grpc = { version = "0.3.9" }
+a2a-pb = { version = "0.3.1" }
 tonic = { version = "0.14", features = ["transport"] }
 tonic-tls = { version = "0.7", default-features = false, features = ["rustls"] }
 rustls-pki-types = "1.9"
