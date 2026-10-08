@@ -108,7 +108,7 @@ pub fn first_ed25519_in_authorized_keys(listing: &str) -> Result<VerifyingKey, I
 /// Every `ssh-ed25519` key in an `authorized_keys`-style listing.
 ///
 /// All of them, because an account publishes several and a binding does not say
-/// which key signed it. Unparseable lines are skipped so one corrupt entry
+/// which key signed it. Unparsable lines are skipped so one corrupt entry
 /// cannot deny a user whose other keys are fine.
 pub fn all_ed25519_in_authorized_keys(listing: &str) -> Vec<VerifyingKey> {
     listing
