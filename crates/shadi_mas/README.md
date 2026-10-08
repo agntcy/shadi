@@ -110,7 +110,8 @@ AgentBridge supplies `CliToolAdapter`.
 
 `LiveA2ATaskAdapter` uses TLS 1.3 and SLIM client certificates from
 `SLIM_TLS_CERT` / `SLIM_TLS_KEY` / `SLIM_TLS_CA` or
-`$SHADI_TMP_DIR/shadi-slim-mtls/`. Verify those files
+`$SHADI_TMP_DIR/shadi-slim-mtls/`, or a bearer token from
+`SLIM_AUTH_TOKEN_FILE`. Verify those files
 (`openssl x509 -text -noout -in <cert>`): not expired; RSA ≥ 2048 or
 P-256+; SHA-2 signatures; self-signed only for lab. Do not hardcode
 certificates or keys.

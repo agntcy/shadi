@@ -13,6 +13,7 @@ use a2a_server::{
     ServiceParams as A2AServiceParams,
 };
 use agent_secrets::{AgentVerifier, SessionContext};
+use agent_transport_slim::client_access::ClientAccess;
 use agentbridge::{
     adapters::{
         generic_stdio::GenericStdioAdapter,
@@ -31,7 +32,7 @@ use super::egress;
 use shadi_mas::{
     experiments::LiveA2ATaskAdapterConfig, Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
-use slim_bindings::{CaSource, ClientConfig, Name, Service, TlsClientConfig, TlsSource};
+use slim_bindings::{Name, Service};
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
@@ -1005,7 +1006,7 @@ fn run_slim_listener(
          CLI tool. Only expose this listener to trusted SLIM peers."
     );
 
-    let tls = resolve_client_tls(Some(agent_id))?;
+    let access = ClientAccess::from_env(Some(agent_id))?;
 
     let service = Service::new(format!(
         "agentbridge-listener-{}-{}",
@@ -1013,7 +1014,7 @@ fn run_slim_listener(
         std::process::id()
     ));
     let connection_id = service
-        .connect(build_client_config(endpoint, &tls))
+        .connect(access.client_config(endpoint))
         .map_err(|e| format!("SLIM connect failed: {e:?}"))?;
 
     let name_ref = Arc::new(parse_name(&agent_name)?);
@@ -1127,85 +1128,6 @@ fn run_slim_listener(
 }
 
 // ─── SLIM helper fns (mirrors shadi_mas::experiments internals) ───────────────
-
-struct TlsMaterial {
-    cert: PathBuf,
-    key: PathBuf,
-    ca: PathBuf,
-}
-
-fn resolve_client_tls(agent_id: Option<&str>) -> Result<TlsMaterial, String> {
-    let cert_override = std::env::var_os("SLIM_TLS_CERT").map(PathBuf::from);
-    let key_override = std::env::var_os("SLIM_TLS_KEY").map(PathBuf::from);
-    let ca = std::env::var_os("SLIM_TLS_CA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| slim_tls_dir().join("ca.crt"));
-
-    let (cert, key) = match (cert_override, key_override) {
-        (Some(cert), Some(key)) => (cert, key),
-        (Some(_), None) | (None, Some(_)) => {
-            return Err("SLIM_TLS_CERT and SLIM_TLS_KEY must both be set".to_string());
-        }
-        (None, None) => {
-            let base = slim_tls_dir();
-            let candidates = if let Some(id) = agent_id {
-                vec![
-                    (
-                        base.join(format!("client-{id}.crt")),
-                        base.join(format!("client-{id}.key")),
-                    ),
-                    (base.join("client.crt"), base.join("client.key")),
-                ]
-            } else {
-                vec![(base.join("client.crt"), base.join("client.key"))]
-            };
-            candidates
-                .into_iter()
-                .find(|(c, k)| c.is_file() && k.is_file())
-                .ok_or_else(|| {
-                    "no SLIM client certificate found; set SLIM_TLS_CERT and SLIM_TLS_KEY"
-                        .to_string()
-                })?
-        }
-    };
-
-    Ok(TlsMaterial { cert, key, ca })
-}
-
-fn slim_tls_dir() -> PathBuf {
-    std::env::var_os("SHADI_TMP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.tmp"))
-        .join("shadi-slim-mtls")
-}
-
-fn slim_client_endpoint(endpoint: &str) -> String {
-    if endpoint.contains("://") {
-        endpoint.to_string()
-    } else {
-        format!("https://{endpoint}")
-    }
-}
-
-fn build_client_config(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
-    let endpoint_url = slim_client_endpoint(endpoint);
-    let mut config = ClientConfig::default();
-    config.endpoint = endpoint_url;
-    config.tls = TlsClientConfig {
-        insecure: false,
-        insecure_skip_verify: false,
-        source: TlsSource::File {
-            cert: tls.cert.display().to_string(),
-            key: tls.key.display().to_string(),
-        },
-        ca_source: CaSource::File {
-            path: tls.ca.display().to_string(),
-        },
-        include_system_ca_certs_pool: false,
-        tls_version: "tls1.3".to_string(),
-    };
-    config
-}
 
 fn parse_name(name: &str) -> Result<Name, String> {
     Name::from_string(name.to_string())
@@ -2838,27 +2760,5 @@ test push ... FAILED
             None => std::env::remove_var("A2A_TLS_KEY"),
         }
         let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn slim_tls_dir_ends_with_mtls_subdir() {
-        assert!(slim_tls_dir().ends_with("shadi-slim-mtls"));
-    }
-
-    #[test]
-    fn build_client_config_prefixes_https_and_sets_tls() {
-        let tls = TlsMaterial {
-            cert: PathBuf::from("/c"),
-            key: PathBuf::from("/k"),
-            ca: PathBuf::from("/a"),
-        };
-        let cfg = build_client_config("node:1", &tls);
-        assert_eq!(cfg.endpoint, "https://node:1");
-        assert_eq!(cfg.tls.tls_version, "tls1.3");
-        assert!(!cfg.tls.insecure);
-        assert_eq!(
-            build_client_config("https://node:1", &tls).endpoint,
-            "https://node:1"
-        );
     }
 }

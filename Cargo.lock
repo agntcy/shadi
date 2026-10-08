@@ -212,6 +212,7 @@ dependencies = [
  "agntcy-agentbridge",
  "agntcy-shadi-a2a",
  "agntcy-shadi-agent-secrets",
+ "agntcy-shadi-agent-transport-slim",
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",
  "agntcy-shadi-sandbox",

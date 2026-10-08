@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -9,6 +8,7 @@ use a2a_client::A2AClient;
 use agent_secrets::{
     AgentVerifier, DidProofVerifier, RequestContext, SecretResult, SessionContext,
 };
+use agent_transport_slim::client_access::ClientAccess;
 
 pub mod auth_required;
 pub use auth_required::{
@@ -19,10 +19,7 @@ use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 use shadi_a2a::{
     insert_dest_did, message_content, A2ABinding, A2AChannel, A2AChannelBuilder, A2ALocator,
 };
-use slim_bindings::{
-    BackoffConfig, CaSource, ClientConfig, ExponentialBackoff, Name, Service, TlsClientConfig,
-    TlsSource,
-};
+use slim_bindings::{BackoffConfig, ClientConfig, ExponentialBackoff, Name, Service};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 const DEFAULT_LOCAL_ORG: &str = "agntcy";
@@ -298,7 +295,7 @@ impl LiveA2ATaskAdapter {
         task: &TaskEnvelope,
         message: &Message,
     ) -> Result<SendMessageResponse, String> {
-        let tls = resolve_client_tls_material_for_agent(Some(&self.config.agent_id))?;
+        let access = ClientAccess::from_env(Some(&self.config.agent_id))?;
         let local_name = self
             .config
             .local_name
@@ -330,7 +327,7 @@ impl LiveA2ATaskAdapter {
             ));
             let attempt_result = (|| -> Result<SendMessageResponse, String> {
                 let connection_id = service
-                    .connect(build_client_config_for_endpoint(&self.config.endpoint, &tls))
+                    .connect(build_client_config_for_endpoint(&self.config.endpoint, &access))
                     .map_err(format_slim_error)?;
                 let local_name_ref = Arc::new(parse_slim_name(&local_name)?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
@@ -469,13 +466,6 @@ impl AgentVerifier for DidProofThen {
     }
 }
 
-#[derive(Clone)]
-struct TlsMaterial {
-    cert: PathBuf,
-    key: PathBuf,
-    ca: PathBuf,
-}
-
 fn render_task_message(task: &TaskEnvelope) -> String {
     format!(
         "task_id: {}\npattern: {:?}\nepoch: {}\nbody:\n{}",
@@ -549,9 +539,8 @@ fn readable_message_text(message: &Message) -> String {
     }
 }
 
-fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> ClientConfig {
-    let mut config = ClientConfig::default();
-    config.endpoint = resolve_client_endpoint_value(endpoint);
+fn build_client_config_for_endpoint(endpoint: &str, access: &ClientAccess) -> ClientConfig {
+    let mut config = access.client_config(endpoint);
     // The adapter owns retries; SLIM's default connection retry loop is unbounded.
     config.connect_timeout = Some(Duration::from_secs(5));
     config.backoff = Some(BackoffConfig::Exponential {
@@ -560,111 +549,7 @@ fn build_client_config_for_endpoint(endpoint: &str, tls: &TlsMaterial) -> Client
             ..Default::default()
         },
     });
-    config.tls = TlsClientConfig {
-        insecure: false,
-        insecure_skip_verify: false,
-        source: TlsSource::File {
-            cert: tls.cert.display().to_string(),
-            key: tls.key.display().to_string(),
-        },
-        ca_source: CaSource::File {
-            path: tls.ca.display().to_string(),
-        },
-        include_system_ca_certs_pool: false,
-        tls_version: "tls1.3".to_string(),
-    };
     config
-}
-
-fn resolve_client_tls_material_for_agent(agent_id_override: Option<&str>) -> Result<TlsMaterial, String> {
-    let cert_override = std::env::var_os("SLIM_TLS_CERT").map(PathBuf::from);
-    let key_override = std::env::var_os("SLIM_TLS_KEY").map(PathBuf::from);
-    let ca = std::env::var_os("SLIM_TLS_CA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| slim_tls_dir().join("ca.crt"));
-    let agent_id = agent_id_override
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            std::env::var("SHADI_AGENT_ID")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        });
-
-    let (cert, key) = match (cert_override, key_override) {
-        (Some(cert), Some(key)) => (cert, key),
-        (Some(_), None) | (None, Some(_)) => {
-            return Err("SLIM_TLS_CERT and SLIM_TLS_KEY must be set together".to_string())
-        }
-        (None, None) => {
-            let base_dir = slim_tls_dir();
-            client_identity_candidates(&base_dir, agent_id.as_deref())
-                .into_iter()
-                .find(|(cert, key)| cert.is_file() && key.is_file())
-                .ok_or_else(|| {
-                    let candidates = client_identity_candidates(&base_dir, agent_id.as_deref())
-                        .into_iter()
-                        .map(|(cert, key)| format!("{} + {}", cert.display(), key.display()))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!(
-                        "no SLIM client certificate found; checked {}. Set SHADI_AGENT_ID or SLIM_TLS_CERT/SLIM_TLS_KEY explicitly",
-                        candidates
-                    )
-                })?
-        }
-    };
-
-    ensure_file_exists(&cert, "SLIM client certificate")?;
-    ensure_file_exists(&key, "SLIM client key")?;
-    ensure_file_exists(&ca, "SLIM client CA")?;
-
-    Ok(TlsMaterial { cert, key, ca })
-}
-
-fn client_identity_candidates(base_dir: &Path, agent_id: Option<&str>) -> Vec<(PathBuf, PathBuf)> {
-    let mut candidates = Vec::new();
-
-    if let Some(agent_id) = agent_id {
-        let stem = format!("client-{}", agent_id);
-        candidates.push((
-            base_dir.join(format!("{}.crt", stem)),
-            base_dir.join(format!("{}.key", stem)),
-        ));
-    }
-
-    candidates.push((base_dir.join("client.crt"), base_dir.join("client.key")));
-    candidates
-}
-
-fn slim_tls_dir() -> PathBuf {
-    std::env::var_os("SHADI_TMP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_tmp_dir)
-        .join("shadi-slim-mtls")
-}
-
-fn default_tmp_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(".tmp")
-}
-
-fn ensure_file_exists(path: &Path, label: &str) -> Result<(), String> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(format!("{} not found at {}", label, path.display()))
-    }
-}
-
-fn resolve_client_endpoint_value(endpoint: &str) -> String {
-    if endpoint.contains("://") {
-        endpoint.to_string()
-    } else {
-        format!("https://{}", endpoint)
-    }
 }
 
 fn parse_slim_name(raw: &str) -> Result<Name, String> {
@@ -727,22 +612,6 @@ mod transport_tests {
     #[test]
     fn parse_slim_name_rejects_malformed_names() {
         assert!(parse_slim_name("not-a-valid-name").is_err());
-    }
-
-    #[test]
-    fn resolve_client_endpoint_value_defaults_to_https() {
-        assert_eq!(
-            resolve_client_endpoint_value("127.0.0.1:47357"),
-            "https://127.0.0.1:47357"
-        );
-    }
-
-    #[test]
-    fn resolve_client_endpoint_value_preserves_explicit_scheme() {
-        assert_eq!(
-            resolve_client_endpoint_value("http://node:1234"),
-            "http://node:1234"
-        );
     }
 
     #[test]
@@ -981,50 +850,6 @@ mod transport_tests {
     }
 
     #[test]
-    fn ensure_file_exists_reports_missing_paths() {
-        let err = ensure_file_exists(Path::new("/no/such/shadi/file"), "test file")
-            .expect_err("missing file must error");
-        assert!(err.contains("test file not found"));
-    }
-
-    #[test]
-    fn ensure_file_exists_accepts_present_files() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("shadi-ensure-{}.tmp", std::process::id()));
-        std::fs::write(&path, b"x").expect("write temp file");
-        assert!(ensure_file_exists(&path, "temp file").is_ok());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn client_identity_candidates_prefers_agent_scoped_certs() {
-        let base = Path::new("/tls");
-        let candidates = client_identity_candidates(base, Some("avatar"));
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].0, base.join("client-avatar.crt"));
-        assert_eq!(candidates[0].1, base.join("client-avatar.key"));
-        assert_eq!(candidates[1].0, base.join("client.crt"));
-    }
-
-    #[test]
-    fn client_identity_candidates_without_agent_only_uses_default() {
-        let base = Path::new("/tls");
-        let candidates = client_identity_candidates(base, None);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].0, base.join("client.crt"));
-    }
-
-    #[test]
-    fn slim_tls_dir_ends_with_mtls_subdir() {
-        assert!(slim_tls_dir().ends_with("shadi-slim-mtls"));
-    }
-
-    #[test]
-    fn default_tmp_dir_targets_workspace_tmp() {
-        assert!(default_tmp_dir().ends_with(".tmp"));
-    }
-
-    #[test]
     fn transient_dispatch_errors_are_classified() {
         assert!(LiveA2ATaskAdapter::is_transient_dispatch_error(
             "Session closed by peer"
@@ -1038,26 +863,19 @@ mod transport_tests {
     }
 
     #[test]
-    fn build_client_config_for_endpoint_sets_mtls_material() {
-        let tls = TlsMaterial {
-            cert: PathBuf::from("/tls/client.crt"),
-            key: PathBuf::from("/tls/client.key"),
-            ca: PathBuf::from("/tls/ca.crt"),
+    fn build_client_config_for_endpoint_bounds_retries_and_keeps_access() {
+        let access = ClientAccess {
+            identity: None,
+            ca: None,
+            token_file: Some("/run/token".into()),
         };
-        let config = build_client_config_for_endpoint("node:47357", &tls);
+        let config = build_client_config_for_endpoint("node:47357", &access);
         assert_eq!(config.endpoint, "https://node:47357");
         assert_eq!(config.connect_timeout, Some(Duration::from_secs(5)));
         assert!(matches!(config.backoff,
             Some(BackoffConfig::Exponential { config }) if config.max_attempts == 1));
-        assert!(!config.tls.insecure);
-        assert_eq!(config.tls.tls_version, "tls1.3");
-        match config.tls.source {
-            TlsSource::File { cert, key } => {
-                assert_eq!(cert, "/tls/client.crt");
-                assert_eq!(key, "/tls/client.key");
-            }
-            _ => panic!("expected file-based TLS source"),
-        }
+        assert_eq!(config.tls, access.tls());
+        assert_eq!(config.auth, access.auth());
     }
 
     #[test]

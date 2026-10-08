@@ -143,7 +143,7 @@ rejected.
     the same client material as AgentBridge: `SLIM_TLS_CERT` /
     `SLIM_TLS_KEY` / `SLIM_TLS_CA`, or
     `$SHADI_TMP_DIR/shadi-slim-mtls/client[-<agent>].crt|.key` and
-    `ca.crt`. Verify those files before use:
+    `ca.crt`, or a bearer token from `SLIM_AUTH_TOKEN_FILE`. Verify those files before use:
 
     ```bash
     openssl x509 -text -noout -in <certificate_file>
