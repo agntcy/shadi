@@ -188,6 +188,7 @@ name = "agntcy-agentbridge"
 version = "0.3.0"
 dependencies = [
  "agntcy-shadi-a2a",
+ "agntcy-shadi-identity",
  "agntcy-shadi-mas",
  "libc",
  "serde",
