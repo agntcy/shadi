@@ -142,6 +142,33 @@ enum Cmd {
         a2a_binding: Option<shadi_a2a::A2ABinding>,
     },
 
+    /// Ask a channel's owner over A2A to let someone into the channel.
+    RequestInvite {
+        /// The owner's SLIM name; the request goes to `<owner>-owner`.
+        #[arg(long)]
+        owner: String,
+
+        /// The channel's SLIM name, `org/namespace/channel`.
+        #[arg(long)]
+        channel: String,
+
+        /// The SLIM name the invite goes to.
+        #[arg(long)]
+        invitee_name: String,
+
+        /// The DID the room admits under that name.
+        #[arg(long)]
+        invitee_did: String,
+
+        /// Your local agent ID, whose DID signs the request.
+        #[arg(long, env = "SHADI_AGENT_ID", default_value = "avatar")]
+        agent_id: String,
+
+        /// SLIM node endpoint.
+        #[arg(long, env = "SLIM_ENDPOINT", default_value = "127.0.0.1:47357")]
+        endpoint: String,
+    },
+
     /// Run autonomous multi-round coordination toward a programming goal.
     Coordinate {
         /// The goal to achieve, e.g. "implement a JSON parser in Rust".
@@ -277,6 +304,21 @@ fn main() {
             &endpoint,
             a2a_url.as_deref(),
             a2a_binding,
+        ),
+        Cmd::RequestInvite {
+            owner,
+            channel,
+            invitee_name,
+            invitee_did,
+            agent_id,
+            endpoint,
+        } => commands::request_invite::run(
+            &owner,
+            &channel,
+            &invitee_name,
+            &invitee_did,
+            &agent_id,
+            &endpoint,
         ),
         Cmd::Coordinate {
             goal,
@@ -511,6 +553,38 @@ mod tests {
                 assert_eq!(a2a_url.as_deref(), Some("http://127.0.0.1:50051"));
             }
             _ => panic!("expected delegate subcommand"),
+        }
+
+        let request = Cli::try_parse_from([
+            "agentbridge",
+            "request-invite",
+            "--owner",
+            "agntcy/shadi/avatar",
+            "--channel",
+            "agntcy/shadi/review-room",
+            "--invitee-name",
+            "agntcy/shadi/copilot",
+            "--invitee-did",
+            "did:key:zPeer",
+        ])
+        .expect("parse request-invite");
+        match request.command {
+            Cmd::RequestInvite {
+                owner,
+                channel,
+                invitee_name,
+                invitee_did,
+                ..
+            } => assert_eq!(
+                [owner, channel, invitee_name, invitee_did],
+                [
+                    "agntcy/shadi/avatar",
+                    "agntcy/shadi/review-room",
+                    "agntcy/shadi/copilot",
+                    "did:key:zPeer"
+                ]
+            ),
+            _ => panic!("expected request-invite subcommand"),
         }
     }
 }
