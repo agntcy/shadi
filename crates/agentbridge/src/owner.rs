@@ -554,6 +554,16 @@ mod tests {
     }
 
     #[test]
+    fn a_deadline_leaves_a_decided_request_alone() {
+        let cast = cast();
+        let mut allowing = owner(&cast, r#"{"default": "allow"}"#);
+        assert!(matches!(
+            allowing.request_until(request(&cast, ROOM, None), NOW, NOW + 55),
+            Ok(Outcome::Granted(_))
+        ));
+    }
+
+    #[test]
     fn a_rule_without_an_action_decides_only_additions() {
         let cast = cast();
         let removal = InviteRequest {
