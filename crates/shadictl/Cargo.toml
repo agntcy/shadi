@@ -13,9 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }
-a2a = { package = "a2a-lf", version = "0.3.0" }
-a2a-client = { package = "a2a-client-lf", version = "0.2.1" }
-a2a-server = { package = "a2a-server-lf", version = "0.4.1" }
+a2a = { package = "a2a-lf", version = "0.4.1" }
+a2a-client = { package = "a2a-client-lf", version = "0.2.7" }
+a2a-server = { package = "a2a-server-lf", version = "0.5.1" }
 async-trait = "0.1"
 futures = "0.3"
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.2.1", path = "../shadi_sandbox" }
@@ -26,14 +26,14 @@ shadi_memory = { package = "agntcy-shadi-memory", version = "0.2.0", path = "../
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.2", path = "../shadi_telemetry" }
 slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.5", path = "../slim_mas" }
 agentbridge = { package = "agntcy-agentbridge", version = "0.3.0", path = "../agentbridge" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "3.0.1" }
 # Not used directly: holds the transitive mls-rs line together. slim-persistence
 # 0.1.1 moved to mls-rs 0.56 in a patch release while slim-mls 0.3.10 is on 0.54,
 # so an unpinned resolve links both (agntcy/shadi#338, agntcy/slim#2142).
-slim_persistence = { package = "agntcy-slim-persistence", version = "=0.1.0" }
-slim_rpc = { package = "agntcy-slim-rpc", version = "2.3.0" }
-slim_proto = { package = "agntcy-slim-proto", version = "0.6.0" }
-slim_config = { package = "agntcy-slim-config", version = "0.16.0" }
+slim_persistence = { package = "agntcy-slim-persistence", version = "=0.2.0" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "3.0.1" }
+slim_proto = { package = "agntcy-slim-proto", version = "0.6.5" }
+slim_config = { package = "agntcy-slim-config", version = "0.16.5" }
 tonic = { version = "0.14" }
 uuid = { version = "1", features = ["v4"] }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.2", path = "../shadi_identity" }

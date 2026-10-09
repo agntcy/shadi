@@ -16,8 +16,8 @@ slim = []
 [dependencies]
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.0", path = "../agent_secrets" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.2", path = "../shadi_identity" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "2.3.0" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "3.0.1" }
 # Not used directly: holds the transitive mls-rs line together. slim-persistence
 # 0.1.1 moved to mls-rs 0.56 in a patch release while slim-mls 0.3.10 is on 0.54,
 # so an unpinned resolve links both (agntcy/shadi#338, agntcy/slim#2142).
-slim_persistence = { package = "agntcy-slim-persistence", version = "=0.1.0" }
+slim_persistence = { package = "agntcy-slim-persistence", version = "=0.2.0" }

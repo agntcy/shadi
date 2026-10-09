@@ -1,6 +1,7 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use a2a::event::StreamResponse;
@@ -408,6 +409,23 @@ impl A2AGroupChannelBuilder {
     }
 }
 
+/// The SDK's `Client` sends `A2A-Version` on every call, but a bare transport
+/// doesn't, and a JSON-RPC server reads a missing header as 0.3 and refuses it.
+fn with_version(params: &ServiceParams) -> Cow<'_, ServiceParams> {
+    if params
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(a2a::SVC_PARAM_VERSION))
+    {
+        return Cow::Borrowed(params);
+    }
+    let mut params = params.clone();
+    params.insert(
+        a2a::SVC_PARAM_VERSION.to_string(),
+        vec![a2a::VERSION.to_string()],
+    );
+    Cow::Owned(params)
+}
+
 #[async_trait]
 impl Transport for A2AChannel {
     async fn send_message(
@@ -417,7 +435,7 @@ impl Transport for A2AChannel {
     ) -> Result<SendMessageResponse, A2AError> {
         self.check_request(req)?;
         self.transport
-            .send_message(params, &with_trace_context(req))
+            .send_message(&with_version(params), &with_trace_context(req))
             .await
     }
 
@@ -428,7 +446,7 @@ impl Transport for A2AChannel {
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.check_request(req)?;
         self.transport
-            .send_streaming_message(params, &with_trace_context(req))
+            .send_streaming_message(&with_version(params), &with_trace_context(req))
             .await
     }
 
@@ -438,7 +456,7 @@ impl Transport for A2AChannel {
         req: &GetTaskRequest,
     ) -> Result<Task, A2AError> {
         self.check_auth()?;
-        self.transport.get_task(params, req).await
+        self.transport.get_task(&with_version(params), req).await
     }
 
     async fn list_tasks(
@@ -447,7 +465,7 @@ impl Transport for A2AChannel {
         req: &ListTasksRequest,
     ) -> Result<ListTasksResponse, A2AError> {
         self.check_auth()?;
-        self.transport.list_tasks(params, req).await
+        self.transport.list_tasks(&with_version(params), req).await
     }
 
     async fn cancel_task(
@@ -456,7 +474,7 @@ impl Transport for A2AChannel {
         req: &CancelTaskRequest,
     ) -> Result<Task, A2AError> {
         self.check_auth()?;
-        self.transport.cancel_task(params, req).await
+        self.transport.cancel_task(&with_version(params), req).await
     }
 
     async fn subscribe_to_task(
@@ -465,7 +483,9 @@ impl Transport for A2AChannel {
         req: &SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.check_auth()?;
-        self.transport.subscribe_to_task(params, req).await
+        self.transport
+            .subscribe_to_task(&with_version(params), req)
+            .await
     }
 
     async fn create_push_config(
@@ -474,7 +494,9 @@ impl Transport for A2AChannel {
         req: &TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.check_auth()?;
-        self.transport.create_push_config(params, req).await
+        self.transport
+            .create_push_config(&with_version(params), req)
+            .await
     }
 
     async fn get_push_config(
@@ -483,7 +505,9 @@ impl Transport for A2AChannel {
         req: &GetTaskPushNotificationConfigRequest,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.check_auth()?;
-        self.transport.get_push_config(params, req).await
+        self.transport
+            .get_push_config(&with_version(params), req)
+            .await
     }
 
     async fn list_push_configs(
@@ -492,7 +516,9 @@ impl Transport for A2AChannel {
         req: &ListTaskPushNotificationConfigsRequest,
     ) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
         self.check_auth()?;
-        self.transport.list_push_configs(params, req).await
+        self.transport
+            .list_push_configs(&with_version(params), req)
+            .await
     }
 
     async fn delete_push_config(
@@ -501,7 +527,9 @@ impl Transport for A2AChannel {
         req: &DeleteTaskPushNotificationConfigRequest,
     ) -> Result<(), A2AError> {
         self.check_auth()?;
-        self.transport.delete_push_config(params, req).await
+        self.transport
+            .delete_push_config(&with_version(params), req)
+            .await
     }
 
     async fn get_extended_agent_card(
@@ -510,7 +538,9 @@ impl Transport for A2AChannel {
         req: &GetExtendedAgentCardRequest,
     ) -> Result<AgentCard, A2AError> {
         self.check_auth()?;
-        self.transport.get_extended_agent_card(params, req).await
+        self.transport
+            .get_extended_agent_card(&with_version(params), req)
+            .await
     }
 
     async fn destroy(&self) -> Result<(), A2AError> {
@@ -1343,6 +1373,20 @@ mod tests {
             }
             other => panic!("expected canceled task, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn calls_carry_the_a2a_version_unless_the_caller_set_one() {
+        let none = ServiceParams::new();
+        let added = with_version(&none);
+        assert_eq!(
+            added.get(a2a::SVC_PARAM_VERSION),
+            Some(&vec![a2a::VERSION.to_string()])
+        );
+
+        let mut own = ServiceParams::new();
+        own.insert("a2a-version".to_string(), vec!["1.1".to_string()]);
+        assert!(matches!(with_version(&own), Cow::Borrowed(kept) if *kept == own));
     }
 
     #[tokio::test]

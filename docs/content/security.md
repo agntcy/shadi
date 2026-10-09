@@ -94,8 +94,8 @@ Two different things are called authentication on the SLIM path. Mixing them
 is how a mesh member can present another agent's DID. Tracked in
 agntcy/shadi#182; the handoff proof is agntcy/shadi#183.
 
-**Node auth** answers: may this process join the mesh? SLIM 2.3 provides
-that — `slim login` (OIDC device flow), SPIRE workload identity, or a
+**Node auth** answers: may this process join the mesh? SLIM 2.3 and later
+provide that — `slim login` (OIDC device flow), SPIRE workload identity, or a
 legacy shared secret. A node credential says the process is allowed on the
 wire. It does not say which agent sent a message.
 
