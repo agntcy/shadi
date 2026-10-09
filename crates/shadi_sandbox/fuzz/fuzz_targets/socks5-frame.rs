@@ -34,19 +34,19 @@ fuzz_target!(|data: &[u8]| {
             );
         }
         assert!(
-            !empty.is_allowed(&request.host),
+            !empty.is_allowed(&request.host, request.port),
             "empty allowlist accepted {}",
             request.host
         );
-        let _ = allowlist.is_allowed(&request.host);
+        let _ = allowlist.is_allowed(&request.host, request.port);
     }
 
     for host in patterns.iter().chain(std::iter::once(&"evil.example".to_string())) {
         assert!(
-            !empty.is_allowed(host),
+            !empty.is_allowed(host, 443),
             "empty allowlist accepted {host}"
         );
-        let _ = allowlist.is_allowed(host);
+        let _ = allowlist.is_allowed(host, 443);
 
         // Matching is documented as case-insensitive, so the same host in a
         // different case cannot produce a different verdict. Both the host and
@@ -62,8 +62,8 @@ fuzz_target!(|data: &[u8]| {
             })
             .collect();
         assert_eq!(
-            allowlist.is_allowed(host),
-            allowlist.is_allowed(&flipped),
+            allowlist.is_allowed(host, 443),
+            allowlist.is_allowed(&flipped, 443),
             "case changed the verdict for {host:?} vs {flipped:?}"
         );
     }
@@ -86,10 +86,10 @@ fuzz_target!(|data: &[u8]| {
 
     for candidate in ["127.0.0.1", "::1", "10.0.0.1", "not-an-ip"] {
         assert!(
-            !empty.is_ip_allowed(candidate),
+            !empty.is_ip_allowed(candidate, 443),
             "empty allowlist accepted ip {candidate}"
         );
-        let verdict = ip_list.is_ip_allowed(candidate);
+        let verdict = ip_list.is_ip_allowed(candidate, 443);
         if wide_open {
             // `*` short-circuits before the IP is parsed, so even a
             // non-address is allowed by it.
