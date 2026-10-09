@@ -4,8 +4,8 @@
 //! The Tauri IPC command contract — see ../../docs/ipc-contract.md.
 //!
 //! `agentbridge`, `slim`, `sandbox`, policy query/patch/explain/diff, and
-//! identity and secrets are implemented. DIR and trace/memory still return
-//! [`not_implemented`] (agntcy/shadi#119, #121).
+//! identity, secrets and DIR are implemented. Trace/memory still return
+//! [`not_implemented`] (agntcy/shadi#121).
 
 pub mod agentbridge;
 pub mod bootstrap;
