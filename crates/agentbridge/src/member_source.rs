@@ -346,7 +346,8 @@ fn resolve_via_dirctl_query(
     Ok(members)
 }
 
-fn search_cids(query_args: &[&str], dir: &DirLookupOptions) -> Result<Vec<String>, String> {
+/// The CIDs `dirctl search <query_args>` finds.
+pub fn search_cids(query_args: &[&str], dir: &DirLookupOptions) -> Result<Vec<String>, String> {
     let mut cmd = Command::new(dirctl_binary());
     cmd.arg("search");
     for arg in query_args {
@@ -379,7 +380,8 @@ fn search_cids(query_args: &[&str], dir: &DirLookupOptions) -> Result<Vec<String
         .collect())
 }
 
-fn pull_record_json(cid: &str, dir: &DirLookupOptions) -> Result<Value, String> {
+/// The OASF record `dirctl pull` returns for `cid`.
+pub fn pull_record_json(cid: &str, dir: &DirLookupOptions) -> Result<Value, String> {
     let mut cmd = Command::new(dirctl_binary());
     cmd.arg("pull")
         .arg(cid)

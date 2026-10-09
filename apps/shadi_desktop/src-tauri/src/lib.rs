@@ -97,7 +97,6 @@ pub fn run() {
             commands::slim::slim_controller_list_routes,
             commands::dir::dir_search,
             commands::dir::dir_pull,
-            commands::dir::dir_info,
             commands::dir::dir_register,
             commands::agentbridge::agentbridge_list_adapters,
             commands::agentbridge::agentbridge_handoff,

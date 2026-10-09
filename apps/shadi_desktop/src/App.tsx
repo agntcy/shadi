@@ -7,6 +7,7 @@ import { SandboxPanel } from "./panels/SandboxPanel";
 import { PolicyPanel } from "./panels/PolicyPanel";
 import { OwnerPanel } from "./panels/OwnerPanel";
 import { KeysPanel } from "./panels/KeysPanel";
+import { DirPanel } from "./panels/DirPanel";
 import { RoomsProvider } from "./shared/rooms";
 
 // Identity first: nothing else works until onboarding has run.
@@ -16,6 +17,7 @@ const TABS = [
   { id: "sandbox", label: "Sandbox", render: () => <SandboxPanel /> },
   { id: "policy", label: "Policy", render: () => <PolicyPanel /> },
   { id: "rooms", label: "Rooms", render: () => <SlimRoomsPanel /> },
+  { id: "directory", label: "Directory", render: () => <DirPanel /> },
   { id: "owner", label: "Owner", render: () => <OwnerPanel /> },
   { id: "agentbridge", label: "agentbridge", render: () => <AgentBridgePanel /> },
 ] as const;
