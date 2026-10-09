@@ -19,12 +19,13 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::{
     DeriveCapabilitySidsFromName, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, NO_INHERITANCE,
 };
-use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
-};
 use windows_sys::Win32::Security::Authorization::{
-    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, TRUSTEE_IS_SID,
-    TRUSTEE_W, GRANT_ACCESS, SE_FILE_OBJECT,
+    ConvertSidToStringSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW,
+    SetNamedSecurityInfoW, ACCESS_MODE, EXPLICIT_ACCESS_W, GRANT_ACCESS, REVOKE_ACCESS,
+    SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_W,
+};
+use windows_sys::Win32::Security::Isolation::{
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::ACL;
 use windows_sys::Win32::System::JobObjects::{
@@ -92,11 +93,16 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
         "starting Windows AppContainer sandbox"
     );
 
-    let appcontainer = AppContainer::new(&profile_name, policy.net_blocked())
-        .map_err(SandboxError::ApplyFailed)?;
+    let appcontainer = AppContainer::new(&profile_name, policy.net_blocked()).map_err(|err| {
+        delete_appcontainer_profile(&profile_name);
+        SandboxError::ApplyFailed(err)
+    })?;
 
-    let mut rollbacks = apply_policy_acl_grants(appcontainer.sid(), policy)
-        .map_err(SandboxError::ApplyFailed)?;
+    let mut rollbacks =
+        apply_policy_acl_grants(&appcontainer, &profile_name, policy).map_err(|err| {
+            delete_appcontainer_profile(&profile_name);
+            SandboxError::ApplyFailed(err)
+        })?;
 
     let process_info = match spawn_appcontainer_process(
         &program,
@@ -114,6 +120,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
                 "AppContainer process spawn failed; rolling back ACL changes"
             );
             rollback_acl_changes(&mut rollbacks);
+            delete_appcontainer_profile(&profile_name);
             return Err(SandboxError::SpawnFailed(err));
         }
     };
@@ -123,24 +130,87 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
         process_info.hThread,
         process_info.dwProcessId,
         rollbacks,
-    );
+    )
+    .with_profile(profile_name);
 
     apply_job_object(child.process).map_err(SandboxError::ApplyFailed)?;
 
     Ok(SandboxedChild::from_windows(child))
 }
 
+/// A profile of its own for every sandbox, so each has its own SID: a grant to
+/// one sandbox is not a grant to another, and revoking it leaves the others
+/// alone (#335). `SHADI_APPCONTAINER_NAME` sets the prefix.
 fn sandbox_profile_name() -> String {
-    std::env::var("SHADI_APPCONTAINER_NAME").unwrap_or_else(|_| "shadi_sandbox".to_string())
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // AppContainer names are at most 64 characters.
+    const MAX_NAME: usize = 64;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let base =
+        std::env::var("SHADI_APPCONTAINER_NAME").unwrap_or_else(|_| "shadi_sandbox".to_string());
+    let nonce: u32 = rand::random();
+    let suffix = format!(
+        "_{}_{}_{nonce:08x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let base: String = base
+        .chars()
+        .take(MAX_NAME.saturating_sub(suffix.len()))
+        .collect();
+    format!("{base}{suffix}")
+}
+
+/// Delete a sandbox's profile once nothing uses it. Best effort: a leftover
+/// profile grants nothing, since its ACEs are revoked first.
+pub(crate) fn delete_appcontainer_profile(name: &str) {
+    let name_w = to_wide(name);
+    let rc = unsafe { DeleteAppContainerProfile(name_w.as_ptr()) };
+    if rc != 0 {
+        warn!(
+            target: "shadi.sandbox.windows",
+            profile = name,
+            error = %hresult_error_message("DeleteAppContainerProfile", rc),
+            "failed to delete AppContainer profile"
+        );
+    }
+}
+
+/// Whether the process that wrote a journal entry still runs, in which case
+/// its sandbox is live and recovery must leave the entry alone.
+pub(crate) fn owner_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == std::process::id() {
+        return true;
+    }
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            // It exists but isn't ours to open.
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code: u32 = 0;
+        let alive = GetExitCodeProcess(process, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        CloseHandle(process);
+        alive
+    }
 }
 
 fn apply_policy_acl_grants(
-    sid: *mut core::ffi::c_void,
+    appcontainer: &AppContainer,
+    profile: &str,
     policy: &SandboxPolicy,
 ) -> Result<Vec<WindowsAclRollback>, String> {
+    let sid = appcontainer.sid();
+    let sid_string = appcontainer.sid_string()?;
     let mut rollbacks = Vec::new();
     for path in policy.allow_read() {
-        match grant_path_access(sid, path, true, false) {
+        match grant_path_access(sid, &sid_string, profile, path, true, false) {
             Ok(rollback) => rollbacks.push(rollback),
             Err(err) => {
                 rollback_acl_changes(&mut rollbacks);
@@ -150,7 +220,7 @@ fn apply_policy_acl_grants(
     }
 
     for path in policy.allow_write() {
-        match grant_path_access(sid, path, true, true) {
+        match grant_path_access(sid, &sid_string, profile, path, true, true) {
             Ok(rollback) => rollbacks.push(rollback),
             Err(err) => {
                 rollback_acl_changes(&mut rollbacks);
@@ -216,6 +286,20 @@ impl AppContainer {
 
     fn sid(&self) -> *mut core::ffi::c_void {
         self.sid
+    }
+
+    fn sid_string(&self) -> Result<String, String> {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(self.sid, &mut text) } == 0 {
+            return Err(last_win32_error_message("ConvertSidToStringSidW"));
+        }
+        let value = unsafe {
+            let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+            let value = std::ffi::OsString::from_wide(std::slice::from_raw_parts(text, len));
+            LocalFree(text as *mut _);
+            value
+        };
+        Ok(value.to_string_lossy().into_owned())
     }
 }
 
@@ -586,6 +670,8 @@ fn extract_inherited_handles(command: &Command) -> Result<Vec<HANDLE>, String> {
 
 fn grant_path_access(
     sid: *mut core::ffi::c_void,
+    sid_string: &str,
+    profile: &str,
     path: &Path,
     read: bool,
     write: bool,
@@ -605,52 +691,109 @@ fn grant_path_access(
         return Err("no access requested".to_string());
     }
 
-    let mut rollback = capture_dacl(path)?;
-    persist_windows_acl_rollback(&mut rollback)?;
-
-    let trustee = TRUSTEE_W {
-        pMultipleTrustee: std::ptr::null_mut(),
-        MultipleTrusteeOperation: 0,
-        TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: 0,
-        ptstrName: sid as *mut u16,
-    };
-
-    let entry = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: access_mask,
-        grfAccessMode: GRANT_ACCESS,
-        grfInheritance: NO_INHERITANCE,
-        Trustee: trustee,
-    };
-
-    let mut acl: *mut ACL = std::ptr::null_mut();
-    let result = unsafe { SetEntriesInAclW(1, &entry, rollback.dacl as *mut ACL, &mut acl) };
-    if result != 0 {
-        return Err(win32_error_message("SetEntriesInAclW", result));
-    }
-
     let path_w = to_wide(&strip_extended_path_prefix(path));
+    let mut rollback = WindowsAclRollback {
+        path: path_w.clone(),
+        path_string: strip_extended_path_prefix(path).to_string(),
+        sid: sid_string.to_string(),
+        profile: profile.to_string(),
+        journal_path: None,
+    };
+    // Journaled before the change, so a crash in between leaves something to
+    // revoke rather than a grant nobody knows about.
+    persist_windows_acl_rollback(&mut rollback)?;
+    edit_dacl(&path_w, sid, GRANT_ACCESS, access_mask)?;
+    Ok(rollback)
+}
+
+/// Remove every ACE for `sid` from `path`, leaving all other ACEs as they are
+/// now, whoever added them.
+pub(crate) fn revoke_sid_access(path_w: &[u16], sid: &str) -> Result<(), String> {
+    let sid_w = to_wide(sid);
+    let mut sid_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(sid_w.as_ptr(), &mut sid_ptr) } == 0 {
+        return Err(last_win32_error_message("ConvertStringSidToSidW"));
+    }
+    let result = edit_dacl(path_w, sid_ptr, REVOKE_ACCESS, 0);
+    unsafe { LocalFree(sid_ptr) };
+    result
+}
+
+/// Read `path`'s DACL as it is now, apply one entry for `sid`, and write it
+/// back. Serialized, so two sandboxes in this process can't interleave a
+/// read and a write and lose one another's change.
+fn edit_dacl(
+    path_w: &[u16],
+    sid: *mut core::ffi::c_void,
+    mode: ACCESS_MODE,
+    access_mask: u32,
+) -> Result<(), String> {
+    static ACL_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = ACL_EDIT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut security_descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
     let result = unsafe {
-        SetNamedSecurityInfoW(
-            path_w.as_ptr() as *mut u16,
+        GetNamedSecurityInfoW(
+            path_w.as_ptr(),
             SE_FILE_OBJECT,
             windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            acl,
+            &mut dacl,
             std::ptr::null_mut(),
+            &mut security_descriptor,
         )
     };
-    unsafe {
-        if !acl.is_null() {
-            LocalFree(acl as *mut _);
-        }
-    }
     if result != 0 {
-        return Err(win32_error_message("SetNamedSecurityInfoW", result));
+        return Err(win32_error_message("GetNamedSecurityInfoW", result));
     }
 
-    Ok(rollback)
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: access_mask,
+        grfAccessMode: mode,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: 0,
+            ptstrName: sid as *mut u16,
+        },
+    };
+    let mut updated: *mut ACL = std::ptr::null_mut();
+    let result = unsafe { SetEntriesInAclW(1, &entry, dacl, &mut updated) };
+    let result = if result != 0 {
+        Err(win32_error_message("SetEntriesInAclW", result))
+    } else {
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                path_w.as_ptr() as *mut u16,
+                SE_FILE_OBJECT,
+                windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                updated,
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != 0 {
+            Err(win32_error_message("SetNamedSecurityInfoW", rc))
+        } else {
+            Ok(())
+        }
+    };
+    unsafe {
+        if !updated.is_null() {
+            LocalFree(updated as *mut _);
+        }
+        if !security_descriptor.is_null() {
+            LocalFree(security_descriptor);
+        }
+    }
+    result
 }
 
 fn is_reparse_point_attributes(attributes: u32) -> bool {
@@ -672,69 +815,6 @@ fn reject_reparse_points(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn capture_dacl(path: &Path) -> Result<WindowsAclRollback, String> {
-    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-
-    let mut dacl: *mut core::ffi::c_void = std::ptr::null_mut();
-    let mut security_descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
-    let path_w = to_wide(&strip_extended_path_prefix(path));
-    let result = unsafe {
-        GetNamedSecurityInfoW(
-            path_w.as_ptr() as *mut u16,
-            SE_FILE_OBJECT,
-            windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut dacl as *mut _ as *mut _,
-            std::ptr::null_mut(),
-            &mut security_descriptor as *mut _ as *mut _,
-        )
-    };
-    if result != 0 {
-        return Err(win32_error_message("GetNamedSecurityInfoW", result));
-    }
-
-    let mut sddl_ptr: *mut u16 = std::ptr::null_mut();
-    let mut sddl_len: u32 = 0;
-    let ok = unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            security_descriptor,
-            1, // SECURITY_DESCRIPTOR_REVISION
-            DACL_SECURITY_INFORMATION,
-            &mut sddl_ptr,
-            &mut sddl_len,
-        )
-    };
-    if ok == 0 {
-        unsafe {
-            if !security_descriptor.is_null() {
-                LocalFree(security_descriptor);
-            }
-        }
-        return Err(last_win32_error_message(
-            "ConvertSecurityDescriptorToStringSecurityDescriptorW",
-        ));
-    }
-
-    let dacl_sddl = unsafe {
-        let value = std::ffi::OsString::from_wide(
-            std::slice::from_raw_parts(sddl_ptr, sddl_len as usize),
-        );
-        LocalFree(sddl_ptr as *mut _);
-        value.to_string_lossy().to_string()
-    };
-
-    Ok(WindowsAclRollback {
-        path: path_w,
-        path_string: strip_extended_path_prefix(path).to_string(),
-        dacl,
-        security_descriptor,
-        dacl_sddl,
-        journal_path: None,
-    })
 }
 
 fn apply_job_object(process: HANDLE) -> Result<(), String> {
@@ -847,9 +927,25 @@ mod tests {
     #[test]
     fn grant_path_access_rejects_empty_access_request() {
         let path = PathBuf::from("C:\\temp");
-        let err = grant_path_access(std::ptr::null_mut(), &path, false, false)
+        let err = grant_path_access(std::ptr::null_mut(), "S-1-15-2-1", "p", &path, false, false)
             .expect_err("empty access mask should fail");
         assert_eq!(err, "no access requested");
+    }
+
+    #[test]
+    fn every_sandbox_gets_its_own_profile_name() {
+        let first = sandbox_profile_name();
+        let second = sandbox_profile_name();
+        assert_ne!(first, second);
+        for name in [&first, &second] {
+            assert!(name.len() <= 64, "{name}");
+            assert!(name.starts_with("shadi_sandbox_"), "{name}");
+        }
+    }
+
+    #[test]
+    fn this_process_counts_as_a_live_owner() {
+        assert!(owner_is_alive(std::process::id()));
     }
 
     #[test]

@@ -544,9 +544,8 @@ mod tests {
         let mut rollbacks = vec![WindowsAclRollback {
             path: to_wide(&path),
             path_string: path.display().to_string(),
-            dacl: std::ptr::null_mut(),
-            security_descriptor: std::ptr::null_mut(),
-            dacl_sddl: String::new(),
+            sid: "S-1-15-2-1".to_string(),
+            profile: "shadi_sandbox_test".to_string(),
             journal_path: None,
         }];
 
@@ -561,7 +560,9 @@ mod tests {
     fn windows_acl_journal_entry_round_trips() {
         let entry = WindowsAclRollbackJournalEntry {
             path: r"C:\temp\foo".to_string(),
-            dacl_sddl: "D:(A;;FA;;;SY)".to_string(),
+            sid: "S-1-15-2-1-2-3".to_string(),
+            profile: "shadi_sandbox_1_0_00000000".to_string(),
+            owner_pid: 42,
             hmac: "deadbeef".to_string(),
         };
 
@@ -569,8 +570,79 @@ mod tests {
         let restored: WindowsAclRollbackJournalEntry =
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.path, entry.path);
-        assert_eq!(restored.dacl_sddl, entry.dacl_sddl);
+        assert_eq!(restored.sid, entry.sid);
+        assert_eq!(restored.profile, entry.profile);
+        assert_eq!(restored.owner_pid, entry.owner_pid);
         assert_eq!(restored.hmac, entry.hmac);
+    }
+
+    /// Recovery tells the two formats apart by which one parses, so neither
+    /// may parse as the other.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_two_journal_formats_never_parse_as_each_other() {
+        let grant =
+            r#"{"path":"C:\\a","sid":"S-1-15-2-1","profile":"p","owner_pid":1,"hmac":"00"}"#;
+        let legacy = r#"{"path":"C:\\a","dacl_sddl":"D:(A;;FA;;;SY)","hmac":"00"}"#;
+        assert!(serde_json::from_str::<WindowsAclRollbackJournalEntry>(grant).is_ok());
+        assert!(serde_json::from_str::<LegacyAclJournalEntry>(grant).is_err());
+        assert!(serde_json::from_str::<LegacyAclJournalEntry>(legacy).is_ok());
+        assert!(serde_json::from_str::<WindowsAclRollbackJournalEntry>(legacy).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_grant_entry_is_trusted_only_when_signed_and_naming_an_appcontainer() {
+        let key = b"test-key-32-bytes-long-enough!!!";
+        let signed =
+            |path: &str, sid: &str, profile: &str, pid: u32| WindowsAclRollbackJournalEntry {
+                path: path.to_string(),
+                sid: sid.to_string(),
+                profile: profile.to_string(),
+                owner_pid: pid,
+                hmac: grant_journal_hmac(key, path, sid, profile, pid),
+            };
+        let good = signed(r"C:\temp\foo", "S-1-15-2-11-22", "shadi_sandbox_1_0_0a", 7);
+        assert!(journal_entry_is_trusted(key, &good).is_ok());
+
+        // Signed, but revoking a real account's SID could strip its access.
+        for sid in ["S-1-5-32-544", "S-1-15-2-", "S-1-15-2-1-x", "S-1-15-2-1--2"] {
+            let err =
+                journal_entry_is_trusted(key, &signed(r"C:\temp\foo", sid, "p", 7)).expect_err(sid);
+            assert!(err.contains("not an AppContainer SID"), "{sid}: {err}");
+        }
+
+        // Each field is under the tag.
+        let mut rewritten = Vec::new();
+        for (field, value) in [
+            ("path", "C:\\other"),
+            ("sid", "S-1-15-2-99"),
+            ("profile", "q"),
+        ] {
+            let mut entry = signed(r"C:\temp\foo", "S-1-15-2-11-22", "shadi_sandbox_1_0_0a", 7);
+            match field {
+                "path" => entry.path = value.to_string(),
+                "sid" => entry.sid = value.to_string(),
+                _ => entry.profile = value.to_string(),
+            }
+            rewritten.push(entry);
+        }
+        let mut other_owner = signed(r"C:\temp\foo", "S-1-15-2-11-22", "shadi_sandbox_1_0_0a", 7);
+        other_owner.owner_pid = 8;
+        rewritten.push(other_owner);
+        for entry in rewritten {
+            assert!(journal_entry_is_trusted(key, &entry).is_err(), "{entry:?}");
+        }
+
+        let mut forged = good;
+        forged.hmac = grant_journal_hmac(
+            b"a-different-key-of-the-same-size",
+            &forged.path,
+            &forged.sid,
+            &forged.profile,
+            forged.owner_pid,
+        );
+        assert!(journal_entry_is_trusted(key, &forged).is_err());
     }
 
     #[cfg(target_os = "windows")]
@@ -684,19 +756,19 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn journal_entry_is_trusted_only_when_signed_and_well_formed() {
+    fn a_legacy_entry_is_trusted_only_when_signed_and_well_formed() {
         let key = b"test-key-32-bytes-long-enough!!!";
-        let signed = |path: &str, sddl: &str| WindowsAclRollbackJournalEntry {
+        let signed = |path: &str, sddl: &str| LegacyAclJournalEntry {
             path: path.to_string(),
             dacl_sddl: sddl.to_string(),
             hmac: compute_journal_hmac(key, path, sddl),
         };
 
-        assert!(journal_entry_is_trusted(key, &signed(r"C:\temp\foo", "D:(A;;FA;;;SY)")).is_ok());
+        assert!(legacy_entry_is_trusted(key, &signed(r"C:\temp\foo", "D:(A;;FA;;;SY)")).is_ok());
 
         // Signed with this key, but the SDDL would still be handed to
         // ConvertStringSecurityDescriptorToSecurityDescriptorW.
-        let err = journal_entry_is_trusted(key, &signed(r"C:\temp\foo", "S:(ML;;;;;LW)"))
+        let err = legacy_entry_is_trusted(key, &signed(r"C:\temp\foo", "S:(ML;;;;;LW)"))
             .expect_err("a signed entry with a non-DACL string must be refused");
         assert!(err.contains("D:"), "{err}");
 
@@ -707,19 +779,19 @@ mod tests {
             &forged.path,
             &forged.dacl_sddl,
         );
-        assert!(journal_entry_is_trusted(key, &forged).is_err());
+        assert!(legacy_entry_is_trusted(key, &forged).is_err());
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn rewriting_any_journal_field_breaks_trust() {
+    fn rewriting_any_legacy_journal_field_breaks_trust() {
         let key = b"test-key-32-bytes-long-enough!!!";
         let mut rng = Rng(0x1234_5eed_fee1_dead);
 
         for _ in 0..2_000 {
             let path = format!(r"C:\temp\{}", rng.string(8));
             let sddl = format!("D:{}", rng.string(12));
-            let entry = WindowsAclRollbackJournalEntry {
+            let entry = LegacyAclJournalEntry {
                 path: path.clone(),
                 dacl_sddl: sddl.clone(),
                 hmac: compute_journal_hmac(key, &path, &sddl),
@@ -727,52 +799,70 @@ mod tests {
 
             // A round trip through the journal file format preserves trust.
             let json = serde_json::to_string(&entry).expect("serialize");
-            let reloaded: WindowsAclRollbackJournalEntry =
-                serde_json::from_str(&json).expect("deserialize");
+            let reloaded: LegacyAclJournalEntry = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(
-                journal_entry_is_trusted(key, &reloaded).is_ok(),
-                journal_entry_is_trusted(key, &entry).is_ok(),
+                legacy_entry_is_trusted(key, &reloaded).is_ok(),
+                legacy_entry_is_trusted(key, &entry).is_ok(),
                 "the journal format changed the verdict for {entry:?}"
             );
 
             // Rewriting the path or the SDDL without the key must not verify.
-            let repathed = WindowsAclRollbackJournalEntry {
+            let repathed = LegacyAclJournalEntry {
                 path: format!("{path}x"),
                 dacl_sddl: sddl.clone(),
                 hmac: entry.hmac.clone(),
             };
             assert!(
-                journal_entry_is_trusted(key, &repathed).is_err(),
+                legacy_entry_is_trusted(key, &repathed).is_err(),
                 "a rewritten path kept its tag: {repathed:?}"
             );
 
-            let resddled = WindowsAclRollbackJournalEntry {
+            let resddled = LegacyAclJournalEntry {
                 path: path.clone(),
                 dacl_sddl: format!("{sddl}(A;;FA;;;WD)"),
                 hmac: entry.hmac.clone(),
             };
             assert!(
-                journal_entry_is_trusted(key, &resddled).is_err(),
+                legacy_entry_is_trusted(key, &resddled).is_err(),
                 "a rewritten SDDL kept its tag: {resddled:?}"
             );
         }
     }
 }
 
+/// A grant to undo: revoke `sid`'s ACEs on `path`. Every other ACE is left as
+/// it is at that moment, so sandboxes sharing a path can exit in any order
+/// (#335).
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct WindowsAclRollback {
     path: Vec<u16>,
     path_string: String,
-    dacl: *mut core::ffi::c_void,
-    security_descriptor: *mut core::ffi::c_void,
-    dacl_sddl: String,
+    /// The sandbox's own AppContainer SID, in string form.
+    sid: String,
+    /// The sandbox's AppContainer profile, deleted with it.
+    profile: String,
     journal_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WindowsAclRollbackJournalEntry {
+    path: String,
+    sid: String,
+    profile: String,
+    /// Recovery leaves the entry alone while this process runs.
+    owner_pid: u32,
+    hmac: String,
+}
+
+/// A journal entry from before #335: a snapshot of the DACL to put back.
+/// Recovery still restores these, as the version that wrote them would have.
+#[cfg(target_os = "windows")]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyAclJournalEntry {
     path: String,
     dacl_sddl: String,
     hmac: String,
@@ -790,6 +880,8 @@ pub struct WindowsChild {
     thread: windows_sys::Win32::Foundation::HANDLE,
     pid: u32,
     rollbacks: Vec<WindowsAclRollback>,
+    /// The sandbox's own AppContainer profile, deleted at cleanup.
+    profile: Option<String>,
     cleaned: bool,
 }
 
@@ -806,8 +898,14 @@ impl WindowsChild {
             thread,
             pid,
             rollbacks,
+            profile: None,
             cleaned: false,
         }
+    }
+
+    pub(crate) fn with_profile(mut self, profile: String) -> Self {
+        self.profile = Some(profile);
+        self
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
@@ -876,6 +974,9 @@ impl WindowsChild {
 
         self.cleaned = true;
         restore_windows_acl_rollbacks(&mut self.rollbacks);
+        if let Some(profile) = self.profile.take() {
+            crate::platform::windows::delete_appcontainer_profile(&profile);
+        }
 
         unsafe {
             if !self.thread.is_null() {
@@ -1010,24 +1111,35 @@ fn load_or_create_hmac_key() -> Result<Vec<u8>, String> {
     }
 }
 
-/// Compute HMAC-SHA256 binding `path` to `dacl_sddl`.
+/// HMAC-SHA256 over `fields`.
 ///
 /// Each field is length-prefixed rather than separated by a byte: a plain
 /// separator leaves the tag covering one concatenated string, so the boundary
-/// between the two fields is not part of what is signed.
+/// between fields is not part of what is signed.
 #[cfg(target_os = "windows")]
-fn compute_journal_hmac(key: &[u8], path: &str, dacl_sddl: &str) -> String {
+fn journal_mac(key: &[u8], fields: &[&str]) -> String {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key)
         .expect("HMAC key length is always valid");
-    for field in [path, dacl_sddl] {
+    for field in fields {
         mac.update(&(field.len() as u64).to_le_bytes());
         mac.update(field.as_bytes());
     }
     hex::encode(mac.finalize().into_bytes())
+}
+
+/// The tag a legacy entry carries, binding `path` to `dacl_sddl`.
+#[cfg(target_os = "windows")]
+fn compute_journal_hmac(key: &[u8], path: &str, dacl_sddl: &str) -> String {
+    journal_mac(key, &[path, dacl_sddl])
+}
+
+#[cfg(target_os = "windows")]
+fn grant_journal_hmac(key: &[u8], path: &str, sid: &str, profile: &str, owner_pid: u32) -> String {
+    journal_mac(key, &[path, sid, profile, &owner_pid.to_string()])
 }
 
 /// Decide whether a journal entry read off disk may be applied.
@@ -1040,6 +1152,30 @@ fn journal_entry_is_trusted(
     key: &[u8],
     entry: &WindowsAclRollbackJournalEntry,
 ) -> Result<(), String> {
+    let expected = grant_journal_hmac(
+        key,
+        &entry.path,
+        &entry.sid,
+        &entry.profile,
+        entry.owner_pid,
+    );
+    if entry.hmac != expected {
+        return Err("HMAC mismatch".to_string());
+    }
+    // AppContainer SIDs are S-1-15-2-…; revoking anything else could strip a
+    // real account's access.
+    let well_formed = entry.sid.starts_with("S-1-15-2-")
+        && entry.sid["S-1-15-2-".len()..]
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    if !well_formed {
+        return Err(format!("{:?} is not an AppContainer SID", entry.sid));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn legacy_entry_is_trusted(key: &[u8], entry: &LegacyAclJournalEntry) -> Result<(), String> {
     let expected = compute_journal_hmac(key, &entry.path, &entry.dacl_sddl);
     if entry.hmac != expected {
         return Err("HMAC mismatch".to_string());
@@ -1073,11 +1209,19 @@ pub(crate) fn persist_windows_acl_rollback(rollback: &mut WindowsAclRollback) ->
     let key = load_or_create_hmac_key()?;
 
     let journal_path = windows_acl_journal_path();
-    let hmac_tag = compute_journal_hmac(&key, &rollback.path_string, &rollback.dacl_sddl);
+    let owner_pid = std::process::id();
     let entry = WindowsAclRollbackJournalEntry {
         path: rollback.path_string.clone(),
-        dacl_sddl: rollback.dacl_sddl.clone(),
-        hmac: hmac_tag,
+        sid: rollback.sid.clone(),
+        profile: rollback.profile.clone(),
+        owner_pid,
+        hmac: grant_journal_hmac(
+            &key,
+            &rollback.path_string,
+            &rollback.sid,
+            &rollback.profile,
+            owner_pid,
+        ),
     };
     let json = serde_json::to_vec_pretty(&entry).map_err(|err| err.to_string())?;
     std::fs::write(&journal_path, json).map_err(|err| err.to_string())?;
@@ -1086,7 +1230,7 @@ pub(crate) fn persist_windows_acl_rollback(rollback: &mut WindowsAclRollback) ->
 }
 
 #[cfg(target_os = "windows")]
-fn restore_windows_acl_journal_entry(entry: &WindowsAclRollbackJournalEntry) -> Result<(), String> {
+fn restore_legacy_journal_entry(entry: &LegacyAclJournalEntry) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
@@ -1163,6 +1307,7 @@ fn restore_windows_acl_journal_entry(entry: &WindowsAclRollbackJournalEntry) -> 
 
 #[cfg(target_os = "windows")]
 pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
+    use std::os::windows::ffi::OsStrExt;
     use tracing::{info, warn};
 
     let dir = windows_acl_journal_dir();
@@ -1181,27 +1326,42 @@ pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
         }
 
         let data = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-        let journal: WindowsAclRollbackJournalEntry =
-            serde_json::from_str(&data).map_err(|err| err.to_string())?;
+        let (target, outcome) = match serde_json::from_str::<WindowsAclRollbackJournalEntry>(&data)
+        {
+            Ok(journal) => {
+                // A sandbox that is still running owns this grant.
+                if crate::platform::windows::owner_is_alive(journal.owner_pid) {
+                    continue;
+                }
+                let outcome = journal_entry_is_trusted(&key, &journal).and_then(|()| {
+                    let path_w: Vec<u16> = std::ffi::OsStr::new(&journal.path)
+                        .encode_wide()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    crate::platform::windows::revoke_sid_access(&path_w, &journal.sid)?;
+                    crate::platform::windows::delete_appcontainer_profile(&journal.profile);
+                    Ok(())
+                });
+                (journal.path, outcome)
+            }
+            Err(_) => match serde_json::from_str::<LegacyAclJournalEntry>(&data) {
+                Ok(journal) => {
+                    let outcome = legacy_entry_is_trusted(&key, &journal)
+                        .and_then(|()| restore_legacy_journal_entry(&journal));
+                    (journal.path, outcome)
+                }
+                Err(err) => (String::new(), Err(format!("unreadable journal: {err}"))),
+            },
+        };
 
-        if let Err(err) = journal_entry_is_trusted(&key, &journal) {
-            warn!(
-                target: "shadi.sandbox.windows",
-                journal = %path.display(),
-                error = %err,
-                "rejecting untrusted ACL rollback journal"
-            );
-            continue;
-        }
-
-        match restore_windows_acl_journal_entry(&journal) {
+        match outcome {
             Ok(()) => {
                 let _ = std::fs::remove_file(&path);
                 restored += 1;
-                info!(target: "shadi.sandbox.windows", journal = %path.display(), target_path = %journal.path, "restored stale ACL rollback journal");
+                info!(target: "shadi.sandbox.windows", journal = %path.display(), target_path = %target, "restored stale ACL rollback journal");
             }
             Err(err) => {
-                warn!(target: "shadi.sandbox.windows", journal = %path.display(), error = %err, "failed to restore stale ACL rollback journal");
+                warn!(target: "shadi.sandbox.windows", journal = %path.display(), error = %err, "skipping ACL rollback journal");
             }
         }
     }
@@ -1212,36 +1372,17 @@ pub(crate) fn recover_windows_acl_rollbacks() -> Result<usize, String> {
 #[cfg(target_os = "windows")]
 pub(crate) fn restore_windows_acl_rollbacks(rollbacks: &mut Vec<WindowsAclRollback>) {
     use tracing::warn;
-    use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-    use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
-    use windows_sys::Win32::Foundation::LocalFree;
 
     for mut rollback in rollbacks.drain(..) {
-        let restored;
-        unsafe {
-            let rc = SetNamedSecurityInfoW(
-                rollback.path.as_ptr() as *mut u16,
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                rollback.dacl as *mut _,
-                std::ptr::null_mut(),
-            );
-            restored = rc == 0;
-
-            if !rollback.security_descriptor.is_null() {
-                LocalFree(rollback.security_descriptor);
+        match crate::platform::windows::revoke_sid_access(&rollback.path, &rollback.sid) {
+            Ok(()) => {
+                if let Some(journal_path) = rollback.journal_path.take() {
+                    let _ = std::fs::remove_file(journal_path);
+                }
             }
-        }
-
-        if restored {
-            if let Some(journal_path) = rollback.journal_path.take() {
-                let _ = std::fs::remove_file(journal_path);
+            Err(err) => {
+                warn!(target: "shadi.sandbox.windows", path = %rollback.path_string, error = %err, "failed to revoke a sandbox ACL grant; leaving journal for later recovery");
             }
-        } else {
-            warn!(target: "shadi.sandbox.windows", path = %rollback.path_string, "failed to restore ACL rollback in-memory; leaving journal for later recovery");
         }
     }
 }
