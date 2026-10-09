@@ -20,8 +20,11 @@ use pkcs8::LineEnding;
 pub mod auth;
 pub mod binding;
 pub mod config;
+pub mod did_document;
 pub mod did_proof;
 pub mod grant;
+#[cfg(feature = "openpgp")]
+pub mod openpgp;
 pub mod ssh;
 pub mod trust_anchor;
 

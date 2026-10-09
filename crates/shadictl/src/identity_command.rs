@@ -468,44 +468,7 @@ pub(crate) fn read_seed_input(
 }
 
 pub(crate) fn build_did_document(pkey: &[u8]) -> Result<(String, String, serde_json::Value), String> {
-    let pubkey = if pkey.len() == 33 && pkey[0] == 0x40 {
-        pkey[1..].to_vec()
-    } else if pkey.len() == 32 {
-        pkey.to_vec()
-    } else {
-        return Err(format!("unexpected Ed25519 key material length: {}", pkey.len()));
-    };
-
-    let mut multicodec = Vec::with_capacity(2 + pubkey.len());
-    multicodec.push(0xED);
-    multicodec.push(0x01);
-    multicodec.extend_from_slice(&pubkey);
-    let fingerprint = format!("z{}", bs58::encode(multicodec).into_string());
-
-    let did = format!("did:key:{}", fingerprint);
-    let vm_id = format!("{}#{}", did, fingerprint);
-
-    let doc = json!({
-        "@context": [
-            "https://www.w3.org/ns/did/v1",
-            "https://w3id.org/security/suites/ed25519-2020/v1"
-        ],
-        "id": did,
-        "verificationMethod": [
-            {
-                "id": vm_id,
-                "type": "Ed25519VerificationKey2020",
-                "controller": did,
-                "publicKeyMultibase": fingerprint
-            }
-        ],
-        "authentication": [vm_id],
-        "assertionMethod": [vm_id],
-        "capabilityDelegation": [vm_id],
-        "capabilityInvocation": [vm_id]
-    });
-
-    Ok((did, vm_id, doc))
+    shadi_identity::did_document::ed25519_did_document(pkey).map_err(|err| err.to_string())
 }
 
 pub(crate) fn run_put_key_command(parsed: PutKeyArgs) -> ExitCode {
@@ -664,32 +627,7 @@ pub(crate) fn derive_agent_keypair(secret_key: &[u8], agent_name: &str) -> Resul
 }
 
 pub(crate) fn extract_ed25519_public_key(openpgp_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    use openpgp::crypto::mpi::PublicKey as MpiPublicKey;
-    use openpgp::crypto::Curve;
-    use openpgp::parse::Parse;
-    use openpgp::policy::StandardPolicy;
-
-    let cert = openpgp::Cert::from_reader(openpgp_bytes)
-        .map_err(|err| format!("failed to parse OpenPGP certificate: {}", err))?;
-    let policy = &StandardPolicy::new();
-
-    for key in cert
-        .keys()
-        .with_policy(policy, None)
-        .supported()
-        .alive()
-        .revoked(false)
-    {
-        match key.key().mpis() {
-            MpiPublicKey::Ed25519 { a } => return Ok(a.to_vec()),
-            MpiPublicKey::EdDSA { curve, q } if *curve == Curve::Ed25519 => {
-                return Ok(q.value().to_vec());
-            }
-            _ => {}
-        }
-    }
-
-    Err("no Ed25519 public key found in OpenPGP certificate".to_string())
+    shadi_identity::openpgp::ed25519_public_key(openpgp_bytes).map_err(|err| err.to_string())
 }
 
 /// Never a CLI argument: that would be visible via `ps`.
