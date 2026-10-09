@@ -20,7 +20,7 @@ fuzzing for its own sake:
 
 - **`policy-patch`** — applies a deserialized `ControlMessage::Patch` to
   `apply_policy_patch` (the same path `handle_patch` uses after parse).
-  Asserts `extract_host` never leaks a `://` scheme and that filesystem
+  Asserts `normalize_net_allow` never leaks a `://` scheme and that filesystem
   staging lengths match the patch. The control socket also rejects any
   line larger than `CONTROL_LINE_MAX_BYTES` (64 KiB).
 
