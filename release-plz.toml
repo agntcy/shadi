@@ -48,3 +48,19 @@ changelog_include = [
 [[package]]
 name = "agntcy-agentbridge-cli"
 git_release_enable = true
+
+# cargo-semver-checks rebuilds each crate's crates.io baseline without a
+# lockfile, and these baselines no longer build: a2a-client-lf 0.2.6 moved to
+# a2a-lf 0.4, so a fresh resolve mixes A2A 0.3 and 0.4 types. Re-enable once a
+# version of each built on the 0.4 SDK is published (agntcy/shadi#434).
+[[package]]
+name = "agntcy-agentbridge"
+semver_check = false
+
+[[package]]
+name = "agntcy-shadi-a2a"
+semver_check = false
+
+[[package]]
+name = "agntcy-shadi-mas"
+semver_check = false
