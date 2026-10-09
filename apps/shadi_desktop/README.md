@@ -39,6 +39,21 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
+## Test
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+pnpm test:e2e
+```
+
+`cargo test` covers the Tauri commands against the linked SHADI crates.
+`pnpm test:e2e` drives the real frontend in Playwright with the backend
+replaced by canned answers (`e2e/tauri.ts`), so it needs no SLIM node or
+keychain. Run `pnpm exec playwright install chromium` once, or set
+`PW_CHANNEL=chrome` (or `msedge`) to use an installed browser. The live tier
+runs a real SLIM node: `docs/content/demos/desktop-room-e2e.sh` and
+`desktop-owner-e2e.sh` from the repository root.
+
 ## Recommended IDE Setup
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)

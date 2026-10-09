@@ -80,3 +80,48 @@ jobs:
       - name: Test src-tauri
         working-directory: apps/shadi_desktop/src-tauri
         run: cargo test --locked
+
+  # The mocked tier of agntcy/shadi#125: the real frontend against canned
+  # backend answers (apps/shadi_desktop/e2e/tauri.ts), so it needs no Rust
+  # build, SLIM node or keychain. The live tier is the desktop-*-e2e.sh
+  # scripts under docs/content/demos.
+  e2e:
+    name: E2E (mocked backend)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/shadi_desktop
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 11.28.0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: apps/shadi_desktop/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run the e2e suite
+        run: pnpm test:e2e
+
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-e2e-traces
+          path: apps/shadi_desktop/test-results/
+          if-no-files-found: ignore
