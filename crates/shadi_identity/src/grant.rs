@@ -33,7 +33,8 @@ const FIELDS: [&str; 7] = [
 ];
 
 /// What the grant lets happen to the invitee.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GrantAction {
     Add,
     Delete,

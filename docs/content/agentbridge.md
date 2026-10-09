@@ -297,13 +297,15 @@ standing rules (`agentbridge::owner`) decide it:
 
 The first rule that matches decides. If none matches, `default` decides.
 
-- `allow` signs a `SHADI-CHANNEL-GRANT/1`, and the owner invites the invitee.
+- `allow` signs a `SLIM-CHANNEL-GRANT/1`, and the owner invites the invitee.
 - `block` refuses the request.
 - `ask` holds the request for the owner. An ask nobody answers is denied when
   it times out.
 
 A rule can also match `requested_by_human`: the human named by the binding a
-sender attaches, if it attaches one. Every decision is appended to the owner's
+sender attaches, if it attaches one. A channel manager also asks the owner
+about removals; a rule decides those only if it says `"action": "delete"`, and
+a rule without an `action` decides only additions. Every decision is appended to the owner's
 audit log. The agent gets a one-line reply: `granted: ...`, `pending: ...` or
 `refused: ...`.
 
