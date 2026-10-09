@@ -33,6 +33,11 @@ fuzzing for its own sake:
   Domain allocations stay within the RFC 1928 255-byte prefix.
   `is_ip_allowed` is not called (it does real DNS).
 
+- **`http-proxy-request`** — parses an HTTP proxy request head
+  (`parse_http_proxy_request`). A parsed destination is a bare host the empty
+  allowlist denies, and a forwarded head is one request with
+  `Connection: close`, a single `Host` and no `Proxy-*` headers.
+
 - **`resolve-policy`** — layers `PolicyFileValues` over `PolicyOverrides` and
   calls `resolve_policy` / `describe_policy`. File-policy paths are lenient and
   must never fail; override paths name what the run asked for, so a missing one
@@ -56,6 +61,7 @@ cargo +nightly fuzz run session-name
 cargo +nightly fuzz run policy-patch
 cargo +nightly fuzz run seatbelt-profile
 cargo +nightly fuzz run socks5-frame
+cargo +nightly fuzz run http-proxy-request
 cargo +nightly fuzz run resolve-policy
 cargo +nightly fuzz run session-socket
 ```

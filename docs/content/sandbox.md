@@ -461,8 +461,11 @@ ports alone.
 Every listed port can also be bound, so `register --a2a-listen` can serve on it.
 With `--watch-policy`, outbound TCP goes through the proxy, which enforces names
 and wildcards: `HOST:PORT` allows only that port on that host, and a bare `HOST`
-allows any port. Loopback entries stay directly reachable so a local SLIM node
-still works. Kernel rules are fixed at launch, so a runtime `add_net_allow`
+allows any port. The child gets `ALL_PROXY=socks5h://127.0.0.1:<port>`, and
+`HTTP_PROXY`/`HTTPS_PROXY` name the same port as an `http://` proxy for
+clients without SOCKS5 support, such as Python's urllib; both forms are checked
+against the same list. Loopback entries stay directly reachable so a local
+SLIM node still works. Kernel rules are fixed at launch, so a runtime `add_net_allow`
 patch changes only what the proxy allows. On Windows, `net_block` removes the
 AppContainer's network capability entirely and `net_allow` is not applied.
 `net_blocked` disables all TCP/IP; Unix-domain sockets can still be selectively

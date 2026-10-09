@@ -63,4 +63,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "http-proxy-request"
+path = "fuzz_targets/http-proxy-request.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

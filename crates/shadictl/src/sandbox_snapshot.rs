@@ -113,22 +113,21 @@ fn prepare_sandbox_launch(
     #[cfg(test)]
     scrub_test_secret_backend_env(&mut command);
 
-    // Inject proxy environment variables so SOCKS5-aware clients in the child
-    // process route all TCP through the loopback proxy where the allowlist is
-    // enforced.  ALL_PROXY/all_proxy covers both HTTP and HTTPS (and any other
-    // TCP protocol); http_proxy/https_proxy are also set for older clients that
-    // don't honour ALL_PROXY.
+    // Inject proxy environment variables so clients in the child process route
+    // all TCP through the loopback proxy where the allowlist is enforced.
+    // ALL_PROXY/all_proxy is SOCKS5 and covers any TCP protocol; socks5h://
+    // forwards the hostname to the proxy (no local DNS), which hostname-based
+    // enforcement needs. http_proxy/https_proxy name the same listener as an
+    // HTTP proxy, which clients without SOCKS5 support can use (#431).
     if let Some(proxy) = net_proxy {
         let proxy_url = proxy.proxy_url(); // socks5h://127.0.0.1:<port>
         command.env("ALL_PROXY", &proxy_url);
         command.env("all_proxy", &proxy_url);
-        // Curl and many HTTP libraries also check these; socks5h:// forwards
-        // the hostname to the proxy (no local DNS), which is required for
-        // hostname-based allowlist enforcement.
-        command.env("http_proxy", &proxy_url);
-        command.env("https_proxy", &proxy_url);
-        command.env("HTTP_PROXY", &proxy_url);
-        command.env("HTTPS_PROXY", &proxy_url);
+        let http_proxy_url = proxy.http_proxy_url(); // http://127.0.0.1:<port>
+        command.env("http_proxy", &http_proxy_url);
+        command.env("https_proxy", &http_proxy_url);
+        command.env("HTTP_PROXY", &http_proxy_url);
+        command.env("HTTPS_PROXY", &http_proxy_url);
     }
 
     // Strip any env vars the preset has explicitly opted out of (e.g. a
@@ -1644,6 +1643,7 @@ mod tests {
         let dir = temp_dir();
         let proxy = NetProxy::start(NetAllowlist::new(vec![])).expect("start proxy");
         let expected_url = proxy.proxy_url();
+        let http_url = proxy.http_proxy_url();
 
         let (mut command, _, _, _, _) =
             prepare_sandbox_launch(&cli, &file_policy, dir.path(), &base_policy, Some(&proxy))
@@ -1652,10 +1652,10 @@ mod tests {
         let output = command.output().expect("run env");
         let env_output = String::from_utf8_lossy(&output.stdout);
         assert!(env_output.contains(&format!("ALL_PROXY={expected_url}")), "ALL_PROXY should be set");
-        assert!(env_output.contains(&format!("HTTPS_PROXY={expected_url}")), "HTTPS_PROXY should be set");
-        assert!(env_output.contains(&format!("HTTP_PROXY={expected_url}")), "HTTP_PROXY should be set");
-        assert!(env_output.contains(&format!("https_proxy={expected_url}")), "https_proxy should be set");
-        assert!(env_output.contains(&format!("http_proxy={expected_url}")), "http_proxy should be set");
+        assert!(env_output.contains(&format!("HTTPS_PROXY={http_url}")), "HTTPS_PROXY should be set");
+        assert!(env_output.contains(&format!("HTTP_PROXY={http_url}")), "HTTP_PROXY should be set");
+        assert!(env_output.contains(&format!("https_proxy={http_url}")), "https_proxy should be set");
+        assert!(env_output.contains(&format!("http_proxy={http_url}")), "http_proxy should be set");
     }
 
     #[cfg(unix)]
