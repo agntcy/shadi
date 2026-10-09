@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-agentbridge"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "a2a-lf",
  "a2a-server-lf",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-agentbridge-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "a2a-grpc",
  "a2a-lf",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-agent-transport-slim"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-identity"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-bindings",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "agntcy-shadi-mas"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
