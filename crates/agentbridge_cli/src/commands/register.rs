@@ -12,7 +12,7 @@ use a2a_server::{
     AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
     ServiceParams as A2AServiceParams,
 };
-use agent_secrets::{AgentVerifier, SessionContext};
+use agent_secrets::{AgentVerifier, RequestContext, SessionContext};
 use agent_transport_slim::client_access::ClientAccess;
 use agentbridge::{
     adapters::{
@@ -491,9 +491,14 @@ impl AgentExecutor for AgentBridgeExecutor {
         // can be fetched, cancelled and resumed like any other.
         let task_id = ctx.task_id.clone();
         let context_id = ctx.context_id.clone();
+        // The peer can choose the task, context and message ids, so the
+        // decisions below are keyed on this one instead.
+        let request = RequestContext::new();
+        let evaluation_id = request.evaluation_id();
         let span = tracing::info_span!(
             "shadi.a2a.receive",
             otel.kind = "server",
+            evaluation_id,
             a2a.task_id = %task_id,
             a2a.context_id = %context_id,
             peer.did = tracing::field::Empty,
@@ -505,11 +510,15 @@ impl AgentExecutor for AgentBridgeExecutor {
             shadi_a2a::set_remote_parent(&span, message);
         }
         let _guard = span.enter();
+        let refuse = |state, reason: String| {
+            let reason = format!("{reason} ({evaluation_id})");
+            terminal_task(task_id.clone(), context_id.clone(), state, reason)
+        };
         if let Some(message) = ctx.message.as_ref() {
             if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
                 span.record("a2a.outcome", "rejected");
                 tracing::warn!(%reason, "refused a task addressed to another agent");
-                return terminal_task(task_id, context_id, TaskState::Rejected, reason);
+                return refuse(TaskState::Rejected, reason);
             }
         }
         let (raw, sender_did) = match ctx.message.as_ref().map(admit_message) {
@@ -533,12 +542,12 @@ impl AgentExecutor for AgentBridgeExecutor {
                 // task id, and the stored task carries on from here.
                 span.record("a2a.outcome", "auth_required");
                 tracing::info!(%reason, "parked a task until the sender proves its DID");
-                return terminal_task(task_id, context_id, TaskState::AuthRequired, reason);
+                return refuse(TaskState::AuthRequired, reason);
             }
             Some(MessageAdmission::Forged { reason }) => {
                 span.record("a2a.outcome", "rejected");
                 tracing::warn!(%reason, "refused a task with a forged DID");
-                return terminal_task(task_id, context_id, TaskState::Rejected, reason);
+                return refuse(TaskState::Rejected, reason);
             }
             None => ("(no prompt)".to_string(), None),
         };
@@ -2296,6 +2305,18 @@ test push ... FAILED
     where
         S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let span = attrs.metadata().name();
+            let mut fields = Fields(Vec::new());
+            attrs.record(&mut fields);
+            Capture::push(fields.0.into_iter().map(|(k, v)| format!("{span} {k}={v}")));
+        }
+
         fn on_record(
             &self,
             id: &tracing::span::Id,
@@ -2465,6 +2486,56 @@ test push ... FAILED
             "shadi.a2a.receive: refused a task addressed to another agent",
             "shadi.a2a.receive a2a.outcome=rejected",
         ]);
+    }
+
+    /// A refusal quotes the id the receive span records, generated locally:
+    /// the peer chose the message id and can steer the task and context ids.
+    #[tokio::test]
+    async fn each_refusal_quotes_its_own_local_evaluation_id() {
+        let trace = Trace::default();
+        let _installed = trace.install();
+        let handler = silent_handler();
+        let params = A2AServiceParams::default();
+
+        let honest = shadi_identity::AgentIdentity::generate().unwrap();
+        let impostor = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = String::from_utf8(envelope).unwrap();
+        let signature = envelope.lines().nth(2).unwrap();
+        let forged = format!("SHADI-DID-PROOF/1\n{}\n{signature}\ntask", impostor.did());
+        let mut misaddressed = sample_request("task");
+        misaddressed.message =
+            shadi_a2a::insert_dest_did(misaddressed.message, "did:key:zSomeoneElse");
+
+        let mut seen = Vec::new();
+        for mut request in [
+            sample_request("plain task"),
+            sample_request(forged),
+            misaddressed,
+        ] {
+            request.message.message_id = "peer-chosen-id".to_string();
+            let response = handler.send_message(&params, request).await.unwrap();
+            let SendMessageResponse::Task(task) = response else {
+                panic!("expected a task, got {response:?}");
+            };
+            let reason = extract_text(task.status.message.as_ref().expect("a reason"));
+            let id = trace
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|l| l.strip_prefix("shadi.a2a.receive evaluation_id="))
+                .expect("the receive span records an evaluation id")
+                .to_string();
+            assert!(reason.ends_with(&format!(" ({id})")), "{reason}");
+            for peer_chosen in ["peer-chosen-id", task.id.as_str(), task.context_id.as_str()] {
+                assert_ne!(id, peer_chosen);
+            }
+            seen.push(id);
+        }
+        let distinct: std::collections::BTreeSet<_> = seen.iter().collect();
+        assert_eq!(distinct.len(), 3, "{seen:?}");
     }
 
     #[tokio::test]
