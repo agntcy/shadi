@@ -60,6 +60,9 @@ tokio = { version = "1", features = ["rt", "sync", "time"] }
 # Agent keys are stored base64, as `derive-agent-identity` stores them.
 base64 = "0.23"
 futures = "0.3"
+# The embedded terminal runs `shadictl shell` in a real PTY (ConPTY on
+# Windows) so its line editing works (agntcy/shadi#122).
+portable-pty = "0.9"
 tauri-plugin-dialog = "2.7.2"
 
 

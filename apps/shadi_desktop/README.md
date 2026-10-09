@@ -22,6 +22,8 @@ Nine tabs are wired today:
 - **agentbridge** — list, handoff, delegate, and coordinate with live round events ([#120](https://github.com/agntcy/shadi/issues/120)).
 - **Traces** — recent trace lines and a per-span summary, and a read-only view of SQLCipher memory that opens with the key in the secret store, as `shadictl memory` does ([#121](https://github.com/agntcy/shadi/issues/121)).
 
+The **Terminal** button opens `shadictl shell` in a real terminal at the bottom of the window, for anything the tabs don't cover yet ([#122](https://github.com/agntcy/shadi/issues/122)). It looks for `shadictl` on `PATH`, `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, or at `SHADI_SHADICTL`.
+
 There is no desktop release yet ([#124](https://github.com/agntcy/shadi/issues/124)).
 
 ## Develop
