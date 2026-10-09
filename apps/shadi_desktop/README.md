@@ -24,7 +24,7 @@ Nine tabs are wired today:
 
 The **Terminal** button opens `shadictl shell` in a real terminal at the bottom of the window, for anything the tabs don't cover yet ([#122](https://github.com/agntcy/shadi/issues/122)). It looks for `shadictl` on `PATH`, `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, or at `SHADI_SHADICTL`.
 
-There is no desktop release yet ([#124](https://github.com/agntcy/shadi/issues/124)).
+Releases are unsigned installers on GitHub Releases ([#124](https://github.com/agntcy/shadi/issues/124)); see Release below.
 
 ## Develop
 
@@ -38,6 +38,24 @@ pnpm tauri dev
 ```bash
 pnpm tauri build
 ```
+
+## Release
+
+The Desktop is versioned on its own, outside the workspace's release-plz
+cycle. Set the new version in `src-tauri/tauri.conf.json`,
+`src-tauri/Cargo.toml` and `package.json`, merge, then push a matching tag:
+
+```bash
+git tag -s shadi-desktop-v0.1.0 -m "SHADI Desktop 0.1.0"
+git push origin shadi-desktop-v0.1.0
+```
+
+`.github/workflows/desktop-release.yml` checks the tag against
+`tauri.conf.json`, creates a prerelease (never marked Latest, which stays the
+CLI's), and attaches the macOS `.dmg`s, the Linux `.deb`, `.rpm` and AppImage,
+and the Windows `.msi` and setup `.exe`. Each has a `.sha256`, a cosign
+`.sigstore.json` bundle and a build-provenance attestation. There is no Apple
+or Windows code-signing certificate yet, so the OS warns on first launch.
 
 ## Test
 
