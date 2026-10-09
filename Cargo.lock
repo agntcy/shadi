@@ -8439,6 +8439,7 @@ dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",
+ "agntcy-shadi-memory",
  "agntcy-shadi-sandbox",
  "agntcy-slim",
  "agntcy-slim-bindings",

@@ -49,6 +49,7 @@ slim_config = { package = "agntcy-slim-config", version = "0.16.5" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../../../crates/shadi_identity", features = ["openpgp"] }
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.3.0", path = "../../../crates/shadi_sandbox" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.1", path = "../../../crates/agent_secrets" }
+shadi_memory = { package = "agntcy-shadi-memory", version = "0.2.1", path = "../../../crates/shadi_memory" }
 # mTLS bootstrap without an openssl binary — the desktop app has to work on a
 # clean Windows install too (agntcy/shadi#123).
 rcgen = { version = "0.14", features = ["pem"] }
