@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.2.0...agntcy-shadi-a2a-v0.3.0) - 2026-10-09
+
+### Added
+
+- *(slim)* [**breaking**] move to SLIM 3.0.1 and the 0.4 A2A SDK ([#423](https://github.com/agntcy/shadi/pull/423))
+- *(a2a)* capture A2A prompts and replies in traces only on opt-in ([#411](https://github.com/agntcy/shadi/pull/411))
+- *(a2a)* carry W3C trace context in A2A message metadata ([#406](https://github.com/agntcy/shadi/pull/406))
+- *(agentbridge)* pass every outbound A2A message through one egress check ([#402](https://github.com/agntcy/shadi/pull/402))
+- *(a2a)* let verifiers check each request, and the live adapter take a policy ([#405](https://github.com/agntcy/shadi/pull/405))
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.1.6...agntcy-shadi-a2a-v0.2.0) - 2026-09-30
 
 ### Fixed

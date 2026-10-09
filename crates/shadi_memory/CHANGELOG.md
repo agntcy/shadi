@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-memory-v0.2.0...agntcy-shadi-memory-v0.2.1) - 2026-10-09
+
+### Other
+
+- updated the following local packages: agntcy-shadi-agent-secrets
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-memory-v0.1.5...agntcy-shadi-memory-v0.2.0) - 2026-09-30
 
 ### Other

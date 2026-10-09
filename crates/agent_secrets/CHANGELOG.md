@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-secrets-v0.4.0...agntcy-shadi-agent-secrets-v0.4.1) - 2026-10-09
+
+### Added
+
+- *(a2a)* let verifiers check each request, and the live adapter take a policy ([#405](https://github.com/agntcy/shadi/pull/405))
+
 ## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-secrets-v0.3.0...agntcy-shadi-agent-secrets-v0.4.0) - 2026-09-30
 
 ### Fixed

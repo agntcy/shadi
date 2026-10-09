@@ -7,6 +7,39 @@ workspace-wide view of each release.
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.11...agntcy-shadi-cli-v0.2.0) - 2026-10-09
+
+### Added
+
+- *(sandbox)* speak HTTP on the --watch-policy proxy port ([#439](https://github.com/agntcy/shadi/pull/439))
+- *(slim)* [**breaking**] move to SLIM 3.0.1 and the 0.4 A2A SDK ([#423](https://github.com/agntcy/shadi/pull/423))
+- *(slim)* connect to a remote node with a bearer token ([#418](https://github.com/agntcy/shadi/pull/418))
+- *(desktop)* own the rooms you moderate, and approve who joins ([#428](https://github.com/agntcy/shadi/pull/428))
+- *(agentbridge)* let agents ask a channel's owner over A2A ([#426](https://github.com/agntcy/shadi/pull/426))
+- *(agentbridge)* decide channel requests by the owner's standing rules ([#425](https://github.com/agntcy/shadi/pull/425))
+- *(mas)* [**breaking**] agents derive the update rule in ASSEMBLY and apply it themselves in CONVERGE ([#412](https://github.com/agntcy/shadi/pull/412))
+- *(a2a)* capture A2A prompts and replies in traces only on opt-in ([#411](https://github.com/agntcy/shadi/pull/411))
+- *(a2a)* carry W3C trace context in A2A message metadata ([#406](https://github.com/agntcy/shadi/pull/406))
+- *(agentbridge)* trace each A2A request, with its decisions as span events ([#404](https://github.com/agntcy/shadi/pull/404))
+- *(agentbridge)* pass every outbound A2A message through one egress check ([#402](https://github.com/agntcy/shadi/pull/402))
+- *(agentbridge)* export OpenTelemetry traces from every command ([#403](https://github.com/agntcy/shadi/pull/403))
+- *(a2a)* let verifiers check each request, and the live adapter take a policy ([#405](https://github.com/agntcy/shadi/pull/405))
+- *(identity)* sign and verify channel grants ([#424](https://github.com/agntcy/shadi/pull/424))
+- *(shadi-identity)* add trust anchors ([#389](https://github.com/agntcy/shadi/pull/389))
+
+### Fixed
+
+- *(sandbox)* [**breaking**] enforce the port in --watch-policy allow-list entries ([#438](https://github.com/agntcy/shadi/pull/438))
+- *(shadictl)* refuse get-secret inside a sandbox, and to a terminal without --reveal ([#410](https://github.com/agntcy/shadi/pull/410))
+- *(shadictl)* rename the secret-named CLI variants that CodeQL treats as secrets ([#409](https://github.com/agntcy/shadi/pull/409))
+- *(agentbridge)* key a listener's admission decisions on a local id ([#422](https://github.com/agntcy/shadi/pull/422))
+- *(mas)* return rejected and failed A2A replies as errors ([#394](https://github.com/agntcy/shadi/pull/394))
+- *(sandbox)* check the kernel, not env vars, before calling a sandbox enforced ([#392](https://github.com/agntcy/shadi/pull/392))
+- *(sandbox)* enforce --net-allow per port in the kernel ([#391](https://github.com/agntcy/shadi/pull/391))
+- *(mas)* send the destination DID over SLIM; listeners without a matching DID now reject ([#395](https://github.com/agntcy/shadi/pull/395))
+- *(mas)* bound SLIM connect attempts in the live A2A adapter ([#393](https://github.com/agntcy/shadi/pull/393))
+- *(sandbox)* give each Windows sandbox its own AppContainer and revoke only its grants ([#433](https://github.com/agntcy/shadi/pull/433))
+
 ## [0.1.11](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.10...agntcy-shadi-cli-v0.1.11) - 2026-09-30
 
 ### Added

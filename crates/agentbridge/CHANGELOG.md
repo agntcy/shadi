@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.3.0...agntcy-agentbridge-v0.4.0) - 2026-10-09
+
+### Added
+
+- *(desktop)* own the rooms you moderate, and approve who joins ([#428](https://github.com/agntcy/shadi/pull/428))
+- *(agentbridge)* let agents ask a channel's owner over A2A ([#426](https://github.com/agntcy/shadi/pull/426))
+- *(agentbridge)* decide channel requests by the owner's standing rules ([#425](https://github.com/agntcy/shadi/pull/425))
+- *(mas)* [**breaking**] agents derive the update rule in ASSEMBLY and apply it themselves in CONVERGE ([#412](https://github.com/agntcy/shadi/pull/412))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.2.1...agntcy-agentbridge-v0.3.0) - 2026-09-30
 
 ### Fixed

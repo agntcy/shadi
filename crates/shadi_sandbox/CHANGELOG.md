@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.2.1...agntcy-shadi-sandbox-v0.3.0) - 2026-10-09
+
+### Added
+
+- *(sandbox)* speak HTTP on the --watch-policy proxy port ([#439](https://github.com/agntcy/shadi/pull/439))
+
+### Fixed
+
+- *(sandbox)* [**breaking**] enforce the port in --watch-policy allow-list entries ([#438](https://github.com/agntcy/shadi/pull/438))
+- *(sandbox)* give each Windows sandbox its own AppContainer and revoke only its grants ([#433](https://github.com/agntcy/shadi/pull/433))
+- *(sandbox)* check the kernel, not env vars, before calling a sandbox enforced ([#392](https://github.com/agntcy/shadi/pull/392))
+- *(sandbox)* enforce --net-allow per port in the kernel ([#391](https://github.com/agntcy/shadi/pull/391))
+
 ## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.2.0...agntcy-shadi-sandbox-v0.2.1) - 2026-09-30
 
 ### Added
