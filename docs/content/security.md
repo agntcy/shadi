@@ -109,6 +109,7 @@ delegate, or coordinate task — not the node credential.
 | Node | May this process join the mesh? | `slim login` / SPIRE SVID / shared secret | SLIM |
 | Application | Which agent sent this message? | Agent `did:key` signed over the payload | SHADI / agentbridge |
 | Human binding | Which human does that agent belong to? | Attestation over the agent DID | Not on the wire yet (#141) |
+| Channel grant | May this participant join or leave that channel? | The channel owner's signature over the channel, participant, action, role, expiry and a nonce, in the SLIM channel manager's grant format | Whoever performs the change: the owner's moderator today, the channel manager later (#420) |
 
 Rules that must stay true when SLIM node auth is adopted:
 

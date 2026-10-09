@@ -21,6 +21,7 @@ pub mod auth;
 pub mod binding;
 pub mod config;
 pub mod did_proof;
+pub mod grant;
 pub mod ssh;
 pub mod trust_anchor;
 
@@ -32,6 +33,7 @@ pub use did_proof::{
     looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
+pub use grant::{issue_grant, verify_grant, ChannelGrant, GrantAction, GrantRole};
 pub use trust_anchor::{DeclaredKeysAnchor, KeyListFetcher, PublishedKeysAnchor, TrustAnchor};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
