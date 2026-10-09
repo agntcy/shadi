@@ -20,6 +20,7 @@ pub fn run() {
         .manage(commands::slim::SlimState::default())
         .manage(commands::sandbox::SandboxState::default())
         .manage(commands::owner::OwnerState::default())
+        .manage(commands::terminal::TerminalState::default())
         .setup(|app| {
             // Known rooms are persisted (agntcy/shadi#138); the app data dir is
             // only resolvable once the app exists. A failure here is reported
@@ -76,6 +77,10 @@ pub fn run() {
             commands::identity::secret_put_key,
             commands::identity::secret_list_keychain,
             commands::identity::secret_backend_status,
+            commands::terminal::terminal_open,
+            commands::terminal::terminal_write,
+            commands::terminal::terminal_resize,
+            commands::terminal::terminal_close,
             commands::owner::owner_start,
             commands::owner::owner_status,
             commands::owner::owner_pending,

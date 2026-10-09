@@ -10,6 +10,7 @@ import { KeysPanel } from "./panels/KeysPanel";
 import { DirPanel } from "./panels/DirPanel";
 import { TracePanel } from "./panels/TracePanel";
 import { RoomsProvider } from "./shared/rooms";
+import { TerminalPane } from "./panels/TerminalPane";
 
 // Identity first: nothing else works until onboarding has run.
 const TABS = [
@@ -26,6 +27,7 @@ const TABS = [
 
 function App() {
   const [active, setActive] = useState<string>(TABS[0].id);
+  const [terminal, setTerminal] = useState(false);
   const tab = TABS.find((t) => t.id === active) ?? TABS[0];
 
   return (
@@ -33,7 +35,7 @@ function App() {
     // and survives tab switches — a room admitted in one tab is immediately
     // visible in the other.
     <RoomsProvider>
-      <main className="container">
+      <main className="container" style={terminal ? { paddingBottom: "40vh" } : undefined}>
         <h1>SHADI Desktop</h1>
         <nav className="tabs">
           {TABS.map((t) => (
@@ -45,8 +47,16 @@ function App() {
               {t.label}
             </button>
           ))}
+          <button
+            className={terminal ? "tab tab-active" : "tab"}
+            onClick={() => setTerminal(!terminal)}
+            title="shadictl shell, for what the panels don't cover yet"
+          >
+            Terminal
+          </button>
         </nav>
         {tab.render()}
+        {terminal && <TerminalPane />}
       </main>
     </RoomsProvider>
   );

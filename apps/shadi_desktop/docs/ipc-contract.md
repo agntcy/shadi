@@ -94,6 +94,7 @@ than the other way round.
 | `owner.rs` | `owner_start`, `owner_status`, `owner_pending`, `owner_approve`, `owner_deny`, `owner_policy_get`, `owner_policy_set`, `owner_audit` | `agentbridge request-invite` is the agent's side; the owner's inbox, rules and audit trail have no CLI equivalent |
 | `dir.rs` | `dir_search`, `dir_pull`, `dir_register` | `shadictl dir search\|pull`, `agentbridge register --dir-publish`; `dir_search` searches by author when given a DID |
 | `agentbridge.rs` | `agentbridge_list_adapters`, `agentbridge_handoff`, `agentbridge_delegate`, `agentbridge_coordinate` | `agentbridge list\|handoff\|delegate\|coordinate` |
+| `terminal.rs` | `terminal_open`, `terminal_write`, `terminal_resize`, `terminal_close` | `shadictl shell` itself, in a pty; output streams over the `terminal_open` channel, and only `shadictl` is ever run |
 | `trace_memory.rs` | `trace_list`, `trace_summary`, `memory_get`, `memory_search`, `memory_list` | `shadictl trace list\|summary`, `shadictl memory get\|search\|list`; every memory command opens the database with the key `shadictl memory` reads |
 
 Full request/response types are in each module — they're the source of
