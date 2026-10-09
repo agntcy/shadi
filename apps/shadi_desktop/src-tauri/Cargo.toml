@@ -46,6 +46,10 @@ slim_rpc = { package = "agntcy-slim-rpc", version = "3.1.0" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "3.1.0" }
 slim_proto = { package = "agntcy-slim-proto", version = "0.7.0" }
 slim_config = { package = "agntcy-slim-config", version = "0.16.6" }
+slim_auth = { package = "agntcy-slim-auth", version = "0.16.4" }
+# The channel manager's gRPC client and messages (agntcy/shadi#442).
+prost = "0.14"
+tonic = "0.14"
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../../../crates/shadi_identity" }
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.3.0", path = "../../../crates/shadi_sandbox" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.1", path = "../../../crates/agent_secrets" }
@@ -67,3 +71,5 @@ base64 = "0.23"
 ed25519-dalek = "2.2"
 # Building OpenSSH key fixtures for the 1Password field tests.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519"] }
+# #[tokio::test] for the channel manager approvals.
+tokio = { version = "1", features = ["macros", "rt"] }
