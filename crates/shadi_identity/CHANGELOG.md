@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.2.2...agntcy-shadi-identity-v0.3.0) - 2026-10-09
+
+### Added
+
+- *(identity)* sign and verify channel grants ([#424](https://github.com/agntcy/shadi/pull/424))
+- *(slim)* [**breaking**] move to SLIM 3.0.1 and the 0.4 A2A SDK ([#423](https://github.com/agntcy/shadi/pull/423))
+- *(slim)* connect to a remote node with a bearer token ([#418](https://github.com/agntcy/shadi/pull/418))
+- *(shadi-identity)* add trust anchors ([#389](https://github.com/agntcy/shadi/pull/389))
+
 ## [0.2.2](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.2.1...agntcy-shadi-identity-v0.2.2) - 2026-09-30
 
 ### Added

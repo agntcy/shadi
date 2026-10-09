@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-mas-v0.4.0...agntcy-shadi-mas-v0.5.0) - 2026-10-09
+
+### Added
+
+- *(slim)* [**breaking**] move to SLIM 3.0.1 and the 0.4 A2A SDK ([#423](https://github.com/agntcy/shadi/pull/423))
+- *(mas)* [**breaking**] agents derive the update rule in ASSEMBLY and apply it themselves in CONVERGE ([#412](https://github.com/agntcy/shadi/pull/412))
+- *(slim)* connect to a remote node with a bearer token ([#418](https://github.com/agntcy/shadi/pull/418))
+- *(a2a)* capture A2A prompts and replies in traces only on opt-in ([#411](https://github.com/agntcy/shadi/pull/411))
+- *(agentbridge)* trace each A2A request, with its decisions as span events ([#404](https://github.com/agntcy/shadi/pull/404))
+- *(a2a)* let verifiers check each request, and the live adapter take a policy ([#405](https://github.com/agntcy/shadi/pull/405))
+
+### Fixed
+
+- *(mas)* send the destination DID over SLIM; listeners without a matching DID now reject ([#395](https://github.com/agntcy/shadi/pull/395))
+- *(mas)* return rejected and failed A2A replies as errors ([#394](https://github.com/agntcy/shadi/pull/394))
+- *(mas)* bound SLIM connect attempts in the live A2A adapter ([#393](https://github.com/agntcy/shadi/pull/393))
+
 ## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-mas-v0.3.0...agntcy-shadi-mas-v0.4.0) - 2026-09-30
 
 ### Fixed
