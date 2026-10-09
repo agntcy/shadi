@@ -36,8 +36,8 @@ than the other way round.
   panel can hold a list of sessions from `sandbox_list_sessions` and pass one
   straight back into `policy_query`/`sandbox_status` without a separate
   "open a handle" step.
-- **Secret values never round-trip further than they have to.** `secret_get`
-  returns the raw value (the panel needs it to display it), but
+- **Secret values never round-trip further than they have to.** No command
+  returns a secret-store value: `secret_exists` answers whether a key is stored,
   `secret_list_keychain` returns key names only, and `memory_search`/
   `memory_list` return entry metadata without `payload` — only `memory_get`
   populates that field. Panels must not log or persist values returned by
@@ -90,7 +90,7 @@ than the other way round.
 |---|---|---|
 | `sandbox.rs` | `sandbox_launch`, `sandbox_list_sessions`, `sandbox_attach`, `sandbox_detach`, `sandbox_kill`, `sandbox_status` | `shadictl <flags> -- <cmd>`, shell `/sessions` `/attach` `/detach` `/kill` `/status` |
 | `policy.rs` | `policy_query`, `policy_patch`, `policy_explain`, `policy_diff`, `policy_profiles` | shell `/policy query\|patch\|explain\|diff`, `--profile` |
-| `identity.rs` | `identity_discover_ssh_keys`, `identity_generate_ssh_key`, `identity_bootstrap`, `identity_status`, `identity_trust_github_handle`, `identity_untrust_github_handle`, `identity_did_from_gpg`, `identity_did_from_github`, `identity_derive_agent`, `identity_verify_agent`, `secret_get`, `secret_put_key`, `secret_list_keychain`, `secret_backend_status` | `shadictl did-from-gpg\|did-from-github\|derive-agent-identity\|verify-agent-identity\|get-secret\|put-key`, `--list-keychain` |
+| `identity.rs` | `identity_discover_ssh_keys`, `identity_generate_ssh_key`, `identity_bootstrap`, `identity_status`, `identity_trust_github_handle`, `identity_untrust_github_handle`, `identity_did_from_gpg`, `identity_did_from_github`, `identity_derive_agent`, `identity_verify_agent`, `secret_exists`, `secret_put_key`, `secret_list_keychain`, `secret_backend_status` | `shadictl did-from-gpg\|did-from-github\|derive-agent-identity\|verify-agent-identity\|put-key`, `--list-keychain`; `secret_exists` answers only whether a key is stored, never its value |
 | `slim.rs` | `slim_node_start`, `slim_node_status`, `slim_group_create`, `slim_group_invite`, `slim_group_join`, `slim_group_list`, `slim_group_roster`, `slim_group_remove_member`, `slim_group_forget`, `slim_controller_list_connections`, `slim_controller_list_routes` | shell `/slim start-node\|create-group\|invite\|join\|controller`; the room-list/roster/remove/forget commands have no CLI equivalent (see below) |
 | `owner.rs` | `owner_start`, `owner_status`, `owner_pending`, `owner_approve`, `owner_deny`, `owner_policy_get`, `owner_policy_set`, `owner_audit` | `agentbridge request-invite` is the agent's side; the owner's inbox, rules and audit trail have no CLI equivalent |
 | `dir.rs` | `dir_search`, `dir_pull`, `dir_info`, `dir_register` | `shadictl dir search\|pull\|info`, `agentbridge register --dir-publish` |
