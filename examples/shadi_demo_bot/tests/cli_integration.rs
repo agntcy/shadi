@@ -22,6 +22,17 @@ fn demo_bot_binary() -> PathBuf {
     path
 }
 
+/// Every feature-bot run sandboxes the repo root, and on Windows two
+/// sandboxes sharing a path can strip each other's ACL grant (#335), so these
+/// tests run one at a time.
+static FEATURE_BOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn one_feature_bot_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    FEATURE_BOT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn stdout_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -99,6 +110,7 @@ fn assert_feature_bot_runtime_expectations(output: &Output, expect_slim: bool) {
 
 #[test]
 fn feature_bot_no_slim_succeeds_with_existing_memory_db() {
+    let _serial = one_feature_bot_at_a_time();
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let work_dir = temp_dir.path().join("demo-work");
     fs::create_dir_all(&work_dir).expect("create work dir");
@@ -127,6 +139,7 @@ fn feature_bot_no_slim_succeeds_with_existing_memory_db() {
 #[cfg(unix)]
 #[test]
 fn default_command_runs_full_feature_bot_flow() {
+    let _serial = one_feature_bot_at_a_time();
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let work_dir = temp_dir.path().join("demo-work");
     fs::create_dir_all(&work_dir).expect("create work dir");
@@ -141,6 +154,7 @@ fn default_command_runs_full_feature_bot_flow() {
 
 #[test]
 fn feature_bot_surfaces_memory_path_errors() {
+    let _serial = one_feature_bot_at_a_time();
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let work_dir = temp_dir.path().join("demo-work");
     fs::create_dir_all(&work_dir).expect("create work dir");
