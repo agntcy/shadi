@@ -484,14 +484,24 @@ allowed.
 
 !!! note "Windows ACL journaling and crash recovery"
 
-    ACL allowlists are applied to the specified paths for the AppContainer SID
-    and automatically reverted when the sandboxed process exits. SHADI journals
-    the original DACLs to disk before mutation and replays any stale rollback
-    journals on the next Windows sandbox startup if a prior process crashed
-    before cleanup. Journal files are stored in a restricted directory (owner +
-    SYSTEM only) and each entry is HMAC-SHA256 authenticated with a per-session
-    key; tampered or unsigned journals are rejected on recovery. Network access
-    is controlled by AppContainer capabilities.
+    Each sandbox runs in an AppContainer profile of its own, so it has its own
+    SID. A grant to one sandbox is not a grant to another, and each profile is
+    deleted when its process exits. `SHADI_APPCONTAINER_NAME` sets the profile
+    name's prefix.
+
+    ACL allowlists are applied to the specified paths for the sandbox's SID.
+    When the process exits, only that SID's entries are removed, and every
+    other entry stays as it is at that moment. Sandboxes that share a path can
+    therefore start and exit in any order.
+
+    SHADI journals each grant to disk before applying it. On the next Windows
+    sandbox startup, it revokes grants whose owning process is no longer
+    running, which covers a process that crashed before cleanup. Grants of
+    sandboxes still running are left alone. Journal files are stored in a
+    restricted directory (owner + SYSTEM only), and each entry is HMAC-SHA256
+    authenticated with a per-session key; tampered or unsigned journals are
+    rejected on recovery. Network access is controlled by AppContainer
+    capabilities.
 
 !!! tip "Sandbox boundary guidance"
 
