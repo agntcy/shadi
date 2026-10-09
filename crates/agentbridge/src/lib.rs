@@ -8,6 +8,7 @@ pub mod dir_registry;
 pub mod local_registry;
 pub mod member_source;
 pub mod owner;
+pub mod owner_intake;
 pub mod subprocess;
 
 pub use shadi_mas;

@@ -268,6 +268,45 @@ agentbridge coordinate \
 5. When `accepted_votes ≥ quorum` → `EventOutcome::Finalized` → loop exits.
 6. The winning artifact is written to disk. Human approval is optional.
 
+## Asking a channel's owner
+
+A channel's owner is a human DID, and the owner's SHADI decides who may join
+(agntcy/shadi#420). An agent asks it over A2A:
+
+```bash
+agentbridge request-invite --owner agntcy/shadi/avatar \
+  --channel agntcy/shadi/review-room \
+  --invitee-name agntcy/shadi/copilot --invitee-did did:key:z6Mk...
+```
+
+The request is a `SHADI-CHANNEL-REQUEST/1` body, signed with the agent's DID
+like any task, and goes to the owner's `<owner>-owner` service. The owner's
+standing rules (`agentbridge::owner`) decide it:
+
+```json
+{
+  "default": "ask",
+  "ask_timeout_seconds": 300,
+  "grant_seconds": 3600,
+  "rules": [
+    { "channel": "*", "requested_by": "did:key:z6MkMyAgent", "decision": "allow" },
+    { "channel": "agntcy/shadi/review-room", "invitee": "did:key:z6MkStranger", "decision": "block" }
+  ]
+}
+```
+
+The first rule that matches decides. If none matches, `default` decides.
+
+- `allow` signs a `SHADI-CHANNEL-GRANT/1`, and the owner invites the invitee.
+- `block` refuses the request.
+- `ask` holds the request for the owner. An ask nobody answers is denied when
+  it times out.
+
+A rule can also match `requested_by_human`: the human named by the binding a
+sender attaches, if it attaches one. Every decision is appended to the owner's
+audit log. The agent gets a one-line reply: `granted: ...`, `pending: ...` or
+`refused: ...`.
+
 ## A2A server — how `register` exposes an adapter
 
 When `agentbridge register` is called with `--slim-endpoint` and/or

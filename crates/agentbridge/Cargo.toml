@@ -14,6 +14,9 @@ name = "agentbridge"
 shadi_mas = { package = "agntcy-shadi-mas", version = "0.4.0", path = "../shadi_mas" }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.2.0", path = "../shadi_a2a" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.2.2", path = "../shadi_identity" }
+a2a = { package = "a2a-lf", version = "0.4.1" }
+a2a-server = { package = "a2a-server-lf", version = "0.5.1" }
+futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["process", "io-util", "rt", "time"] }

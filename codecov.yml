@@ -28,6 +28,7 @@ ignore:
   - "crates/agentbridge_cli/src/commands/register.rs"
   - "crates/agentbridge_cli/src/commands/coordinate.rs"
   - "crates/agentbridge_cli/src/commands/delegate.rs"
+  - "crates/agentbridge_cli/src/commands/request_invite.rs"
   - "crates/agentbridge_cli/src/commands/handoff.rs"
   - "crates/agentbridge_cli/src/commands/list.rs"
   # Live A2A/SLIM transport task adapter — the send path needs a running node.
