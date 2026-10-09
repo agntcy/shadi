@@ -39,3 +39,43 @@ pub fn ed25519_public_key(certificate: &[u8]) -> Result<Vec<u8>, IdentityError> 
         "no Ed25519 public key found in OpenPGP certificate".to_string(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::did_document::ed25519_did_document;
+    use sequoia_openpgp::cert::prelude::*;
+    use sequoia_openpgp::serialize::Serialize;
+    use sequoia_openpgp::Profile;
+
+    fn exported(cert: &Cert) -> Vec<u8> {
+        let mut out = Vec::new();
+        cert.armored().export(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_legacy_and_an_rfc9580_ed25519_key_both_give_a_did() {
+        for profile in [Profile::RFC4880, Profile::RFC9580] {
+            let (cert, _) = CertBuilder::general_purpose(Some("alice@example.org"))
+                .set_profile(profile)
+                .unwrap()
+                .generate()
+                .unwrap();
+            let key = ed25519_public_key(&exported(&cert)).unwrap();
+            let (did, _, _) = ed25519_did_document(&key).unwrap();
+            assert!(did.starts_with("did:key:z6Mk"), "{profile:?}: {did}");
+        }
+    }
+
+    #[test]
+    fn a_certificate_without_an_ed25519_key_and_garbage_are_refused() {
+        let (cert, _) = CertBuilder::general_purpose(Some("bob@example.org"))
+            .set_cipher_suite(CipherSuite::P256)
+            .generate()
+            .unwrap();
+        let err = ed25519_public_key(&exported(&cert)).unwrap_err();
+        assert!(err.to_string().contains("no Ed25519"), "{err}");
+        assert!(ed25519_public_key(b"not a certificate").is_err());
+    }
+}
