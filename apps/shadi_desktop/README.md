@@ -10,19 +10,19 @@ a React/Vite/TypeScript frontend, following
 
 ## What is implemented
 
-Six tabs are wired today:
+Nine tabs are wired today:
 
-- **Identity** — SSH / 1Password onboarding, GitHub handle cross-check, derived agent DIDs ([#123](https://github.com/agntcy/shadi/issues/123)). The remaining identity/secrets IPC from [#117](https://github.com/agntcy/shadi/issues/117) is still stubbed.
+- **Identity** — SSH / 1Password onboarding, GitHub handle cross-check, derived agent DIDs ([#123](https://github.com/agntcy/shadi/issues/123)).
+- **Keys** — DIDs from a GPG or GitHub key, derived agent identities and their verification, and the secret store by key name; no secret value reaches the UI ([#117](https://github.com/agntcy/shadi/issues/117)).
 - **Sandbox** — list, launch, attach, and kill sessions via `shadi_sandbox` ([#115](https://github.com/agntcy/shadi/issues/115)).
 - **Policy** — live query/patch plus explain/diff against `shadi_sandbox` ([#116](https://github.com/agntcy/shadi/issues/116)).
 - **Rooms** — SLIM node, groups, roster, and persistence ([#118](https://github.com/agntcy/shadi/issues/118), [#138](https://github.com/agntcy/shadi/issues/138)).
+- **Directory** — search the Agent Directory by skill or DID, pull a record, publish an AgentCard, and invite what you find into a room, through `dirctl` ([#119](https://github.com/agntcy/shadi/issues/119)).
 - **Owner** — the rooms you moderate are yours. Agents ask over A2A to let someone in. Standing rules decide most requests, and the rest wait in an inbox until you allow or deny them or they time out. Every decision goes to an audit trail ([#421](https://github.com/agntcy/shadi/issues/421)).
 - **agentbridge** — list, handoff, delegate, and coordinate with live round events ([#120](https://github.com/agntcy/shadi/issues/120)).
+- **Traces** — recent trace lines and a per-span summary, and a read-only view of SQLCipher memory that opens with the key in the secret store, as `shadictl memory` does ([#121](https://github.com/agntcy/shadi/issues/121)).
 
-Agent Directory and trace/memory backends still return `not_implemented`
-([#119](https://github.com/agntcy/shadi/issues/119),
-[#121](https://github.com/agntcy/shadi/issues/121)). There is no signed
-desktop release yet ([#124](https://github.com/agntcy/shadi/issues/124)).
+There is no desktop release yet ([#124](https://github.com/agntcy/shadi/issues/124)).
 
 ## Develop
 

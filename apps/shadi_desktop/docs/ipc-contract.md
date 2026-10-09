@@ -9,8 +9,7 @@ when a panel replaces its module's stubs with real calls into the
 corresponding SHADI crate.
 
 **Scope**: signatures and types. Implementing them is each panel issue's job,
-not this one's — `agentbridge.rs` (#120) and `slim.rs` (#118) are real; the
-remaining modules still return `not_implemented(<panel-issue>)`. Where a panel's
+not this one's, and every module is now implemented. Where a panel's
 implementation had to extend its own signatures, this document follows it rather
 than the other way round.
 
@@ -95,7 +94,7 @@ than the other way round.
 | `owner.rs` | `owner_start`, `owner_status`, `owner_pending`, `owner_approve`, `owner_deny`, `owner_policy_get`, `owner_policy_set`, `owner_audit` | `agentbridge request-invite` is the agent's side; the owner's inbox, rules and audit trail have no CLI equivalent |
 | `dir.rs` | `dir_search`, `dir_pull`, `dir_register` | `shadictl dir search\|pull`, `agentbridge register --dir-publish`; `dir_search` searches by author when given a DID |
 | `agentbridge.rs` | `agentbridge_list_adapters`, `agentbridge_handoff`, `agentbridge_delegate`, `agentbridge_coordinate` | `agentbridge list\|handoff\|delegate\|coordinate` |
-| `trace_memory.rs` | `trace_list`, `trace_summary`, `memory_get`, `memory_search`, `memory_list` | `shadictl trace list\|summary`, `shadictl memory get\|search\|list` |
+| `trace_memory.rs` | `trace_list`, `trace_summary`, `memory_get`, `memory_search`, `memory_list` | `shadictl trace list\|summary`, `shadictl memory get\|search\|list`; every memory command opens the database with the key `shadictl memory` reads |
 
 Full request/response types are in each module — they're the source of
 truth; this table is a map, not a copy.

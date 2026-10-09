@@ -8,6 +8,7 @@ import { PolicyPanel } from "./panels/PolicyPanel";
 import { OwnerPanel } from "./panels/OwnerPanel";
 import { KeysPanel } from "./panels/KeysPanel";
 import { DirPanel } from "./panels/DirPanel";
+import { TracePanel } from "./panels/TracePanel";
 import { RoomsProvider } from "./shared/rooms";
 
 // Identity first: nothing else works until onboarding has run.
@@ -20,6 +21,7 @@ const TABS = [
   { id: "directory", label: "Directory", render: () => <DirPanel /> },
   { id: "owner", label: "Owner", render: () => <OwnerPanel /> },
   { id: "agentbridge", label: "agentbridge", render: () => <AgentBridgePanel /> },
+  { id: "traces", label: "Traces", render: () => <TracePanel /> },
 ] as const;
 
 function App() {
