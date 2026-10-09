@@ -12,6 +12,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::net_proxy::normalize_net_allow;
+
 /// An incremental patch to the effective sandbox policy.
 ///
 /// All fields are additive or subtractive lists.  Omitted (empty) fields leave
@@ -152,29 +154,6 @@ pub struct PatchState {
     pub has_live_proxy: bool,
 }
 
-/// Strip a URL scheme and path from a net-allow entry, returning just the host.
-///
-/// Users may write `http://httping.org/` but the proxy allowlist matches
-/// hostnames only.
-pub fn extract_host(dest: &str) -> String {
-    let after_scheme = if let Some(pos) = dest.find("://") {
-        &dest[pos + 3..]
-    } else {
-        dest
-    };
-    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = if host_port.starts_with('[') {
-        host_port
-            .trim_start_matches('[')
-            .split(']')
-            .next()
-            .unwrap_or(host_port)
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-    host.to_ascii_lowercase()
-}
-
 /// Apply a patch to [`PatchState`]. Command changes take effect immediately;
 /// filesystem paths are staged; network changes apply only when a live
 /// proxy allowlist is present.
@@ -221,14 +200,14 @@ pub fn apply_policy_patch(state: &mut PatchState, patch: &PolicyPatch) -> Policy
     if has_net_changes {
         if state.has_live_proxy {
             for dest in &patch.add_net_allow {
-                let host = extract_host(dest);
-                if !state.net_allow.contains(&host) {
-                    state.net_allow.push(host);
+                let entry = normalize_net_allow(dest);
+                if !state.net_allow.contains(&entry) {
+                    state.net_allow.push(entry);
                 }
             }
             for dest in &patch.remove_net_allow {
-                let host = extract_host(dest);
-                state.net_allow.retain(|d| d != &host);
+                let entry = normalize_net_allow(dest);
+                state.net_allow.retain(|d| d != &entry);
             }
             net_status = PatchAxisStatus::Applied;
         } else {
@@ -360,14 +339,25 @@ mod tests {
     }
 
     #[test]
-    fn extract_host_strips_scheme_port_and_path() {
-        assert_eq!(extract_host("httping.org"), "httping.org");
-        assert_eq!(extract_host("http://httping.org/"), "httping.org");
-        assert_eq!(extract_host("https://httping.org/ping?v=1"), "httping.org");
-        assert_eq!(extract_host("httping.org:80"), "httping.org");
-        assert_eq!(extract_host("192.0.2.1"), "192.0.2.1");
-        assert_eq!(extract_host("HTTPing.ORG"), "httping.org");
-        assert_eq!(extract_host("[::1]:443"), "::1");
+    fn a_runtime_net_allow_keeps_its_port() {
+        let mut state = PatchState {
+            has_live_proxy: true,
+            ..PatchState::default()
+        };
+        let add = PolicyPatch {
+            add_net_allow: vec!["https://Example.com:443/".into(), "example.org".into()],
+            ..PolicyPatch::default()
+        };
+        apply_policy_patch(&mut state, &add);
+        assert_eq!(state.net_allow, ["example.com:443", "example.org"]);
+
+        // Removal matches the entry as normalized, port included.
+        let remove = PolicyPatch {
+            remove_net_allow: vec!["example.com".into(), "EXAMPLE.org".into()],
+            ..PolicyPatch::default()
+        };
+        apply_policy_patch(&mut state, &remove);
+        assert_eq!(state.net_allow, ["example.com:443"]);
     }
 
     #[test]
@@ -399,7 +389,8 @@ mod tests {
         };
         let result = apply_policy_patch(&mut state, &patch);
         assert_eq!(result.network, PatchAxisStatus::Applied);
-        assert_eq!(state.net_allow, vec!["example.com".to_string()]);
+        // The port stays: the proxy enforces it (agntcy/shadi#430).
+        assert_eq!(state.net_allow, vec!["example.com:443".to_string()]);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use shadi_sandbox::{
-    apply_policy_patch, extract_host, ControlMessage, PatchAxisStatus, PatchState,
+    apply_policy_patch, normalize_net_allow, ControlMessage, PatchAxisStatus, PatchState,
     CONTROL_LINE_MAX_BYTES,
 };
 
@@ -21,10 +21,10 @@ fuzz_target!(|data: &[u8]| {
         if dest.is_empty() {
             continue;
         }
-        let host = extract_host(dest);
+        let host = normalize_net_allow(dest);
         assert!(
             !host.contains("://"),
-            "extract_host({dest:?}) = {host:?} still contains a scheme"
+            "normalize_net_allow({dest:?}) = {host:?} still contains a scheme"
         );
     }
 

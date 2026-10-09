@@ -460,7 +460,8 @@ ports alone.
 
 Every listed port can also be bound, so `register --a2a-listen` can serve on it.
 With `--watch-policy`, outbound TCP goes through the proxy, which enforces names
-and wildcards; loopback entries stay directly reachable so a local SLIM node
+and wildcards: `HOST:PORT` allows only that port on that host, and a bare `HOST`
+allows any port. Loopback entries stay directly reachable so a local SLIM node
 still works. Kernel rules are fixed at launch, so a runtime `add_net_allow`
 patch changes only what the proxy allows. On Windows, `net_block` removes the
 AppContainer's network capability entirely and `net_allow` is not applied.

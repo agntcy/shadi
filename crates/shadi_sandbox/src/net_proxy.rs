@@ -101,34 +101,90 @@ impl NetAllowlist {
         self.0.read().map(|g| g.clone()).unwrap_or_default()
     }
 
-    /// Check whether `host` (without port) is permitted by the current list.
+    /// Check whether `host:port` is permitted by the current list.
     ///
-    /// Matching is case-insensitive.  A single `*` entry allows everything.
-    pub fn is_allowed(&self, host: &str) -> bool {
+    /// An entry with a port (`example.com:443`, `[::1]:443`) allows only that
+    /// port; one without allows any. Matching is case-insensitive, and a
+    /// single `*` entry allows everything.
+    pub fn is_allowed(&self, host: &str, port: u16) -> bool {
         let guard = match self.0.read() {
             Ok(g) => g,
             Err(_) => return false,
         };
-        is_host_allowed(host, &guard)
+        is_host_allowed(host, port, &guard)
     }
 
     /// Check whether a literal `ip` is permitted by the current list.
     ///
     /// Unlike [`Self::is_allowed`] this also matches an allowlisted hostname
     /// that resolves to `ip`, so it can perform DNS lookups.
-    pub fn is_ip_allowed(&self, ip: &str) -> bool {
+    pub fn is_ip_allowed(&self, ip: &str, port: u16) -> bool {
         let guard = match self.0.read() {
             Ok(g) => g,
             Err(_) => return false,
         };
-        is_ip_allowed(ip, &guard)
+        is_ip_allowed(ip, port, &guard)
     }
 }
 
-fn is_host_allowed(host: &str, list: &[String]) -> bool {
+/// A net-allow entry as the proxy matches it: no scheme or path, lowercase,
+/// and its port if it names one. `http://httping.org/` becomes `httping.org`
+/// and `HTTPing.org:80` becomes `httping.org:80`.
+pub fn normalize_net_allow(dest: &str) -> String {
+    let after_scheme = dest.split_once("://").map_or(dest, |(_, rest)| rest);
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    host_port.trim().to_ascii_lowercase()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryPort {
+    Any,
+    Only(u16),
+    /// A port that doesn't parse: the entry matches nothing.
+    Invalid,
+}
+
+impl EntryPort {
+    fn admits(self, port: u16) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Only(only) => only == port,
+            Self::Invalid => false,
+        }
+    }
+}
+
+/// Split an allow-list entry into its host pattern and port.
+fn split_entry(entry: &str) -> (&str, EntryPort) {
+    let entry = entry.trim();
+    let port_of = |tail: &str| match tail.parse() {
+        Ok(port) => EntryPort::Only(port),
+        Err(_) => EntryPort::Invalid,
+    };
+    if let Some(rest) = entry.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            return match tail.strip_prefix(':') {
+                Some(port) => (host, port_of(port)),
+                None if tail.is_empty() => (host, EntryPort::Any),
+                None => (host, EntryPort::Invalid),
+            };
+        }
+    }
+    match entry.rsplit_once(':') {
+        // A bare IPv6 address has more than one colon and no port.
+        Some((host, port)) if !host.contains(':') => (host, port_of(port)),
+        _ => (entry, EntryPort::Any),
+    }
+}
+
+fn is_host_allowed(host: &str, port: u16, list: &[String]) -> bool {
     let host_lc = host.to_ascii_lowercase();
     for pattern in list {
-        let p = pattern.trim().to_ascii_lowercase();
+        let (p, entry_port) = split_entry(pattern);
+        if !entry_port.admits(port) {
+            continue;
+        }
+        let p = p.to_ascii_lowercase();
         if p == "*" {
             return true;
         }
@@ -158,11 +214,11 @@ fn is_host_allowed(host: &str, list: &[String]) -> bool {
 /// Note: the DNS lookups happen on the proxy thread serving this connection,
 /// so they add latency only when the client sent an IP.  They are not cached;
 /// TTL handling is left to the OS resolver.
-fn is_ip_allowed(ip_str: &str, list: &[String]) -> bool {
+fn is_ip_allowed(ip_str: &str, port: u16, list: &[String]) -> bool {
     use std::net::ToSocketAddrs;
 
     // Fast path: literal IP match.
-    if is_host_allowed(ip_str, list) {
+    if is_host_allowed(ip_str, port, list) {
         return true;
     }
 
@@ -174,7 +230,10 @@ fn is_ip_allowed(ip_str: &str, list: &[String]) -> bool {
 
     // For each hostname in the allowlist, resolve and compare.
     for pattern in list {
-        let p = pattern.trim();
+        let (p, entry_port) = split_entry(pattern);
+        if !entry_port.admits(port) {
+            continue;
+        }
         if p == "*" {
             return true;
         }
@@ -539,9 +598,9 @@ fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
     let (allowed, atyp_label) = {
         let guard = allowlist.0.read().unwrap_or_else(|e| e.into_inner());
         if is_resolved_ip {
-            (is_ip_allowed(&host, &guard), "ip")
+            (is_ip_allowed(&host, port, &guard), "ip")
         } else {
-            (is_host_allowed(&host, &guard), "hostname")
+            (is_host_allowed(&host, port, &guard), "hostname")
         }
     };
     if !allowed {
@@ -641,35 +700,43 @@ mod tests {
 
     #[test]
     fn is_host_allowed_exact() {
-        assert!(is_host_allowed("api.openai.com", &["api.openai.com".into()]));
-        assert!(!is_host_allowed("evil.com", &["api.openai.com".into()]));
+        assert!(is_host_allowed(
+            "api.openai.com",
+            443,
+            &["api.openai.com".into()]
+        ));
+        assert!(!is_host_allowed(
+            "evil.com",
+            443,
+            &["api.openai.com".into()]
+        ));
     }
 
     #[test]
     fn is_host_allowed_wildcard_prefix() {
         let list = vec!["*.openai.com".into()];
-        assert!(is_host_allowed("api.openai.com", &list));
-        assert!(is_host_allowed("chat.openai.com", &list));
-        assert!(!is_host_allowed("openai.com", &list));  // apex excluded
-        assert!(!is_host_allowed("evilopenai.com", &list));
+        assert!(is_host_allowed("api.openai.com", 443, &list));
+        assert!(is_host_allowed("chat.openai.com", 443, &list));
+        assert!(!is_host_allowed("openai.com", 443, &list)); // apex excluded
+        assert!(!is_host_allowed("evilopenai.com", 443, &list));
     }
 
     #[test]
     fn is_host_allowed_star_allows_all() {
         let list = vec!["*".into()];
-        assert!(is_host_allowed("anything.example.com", &list));
+        assert!(is_host_allowed("anything.example.com", 443, &list));
     }
 
     #[test]
     fn is_host_allowed_case_insensitive() {
         let list = vec!["API.OpenAI.com".into()];
-        assert!(is_host_allowed("api.openai.com", &list));
+        assert!(is_host_allowed("api.openai.com", 443, &list));
     }
 
     #[test]
     fn is_host_allowed_empty_list_blocks_all() {
-        assert!(!is_host_allowed("api.openai.com", &[]));
-        assert!(!NetAllowlist::new(vec![]).is_allowed("api.openai.com"));
+        assert!(!is_host_allowed("api.openai.com", 443, &[]));
+        assert!(!NetAllowlist::new(vec![]).is_allowed("api.openai.com", 443));
     }
 
     fn socks5_ipv4_frame(ip: [u8; 4], port: u16) -> Vec<u8> {
@@ -775,11 +842,11 @@ mod tests {
     #[test]
     fn net_allowlist_update_is_visible() {
         let al = NetAllowlist::new(vec!["a.example.com".into()]);
-        assert!(al.is_allowed("a.example.com"));
-        assert!(!al.is_allowed("b.example.com"));
+        assert!(al.is_allowed("a.example.com", 443));
+        assert!(!al.is_allowed("b.example.com", 443));
         al.update(vec!["b.example.com".into()]);
-        assert!(!al.is_allowed("a.example.com"));
-        assert!(al.is_allowed("b.example.com"));
+        assert!(!al.is_allowed("a.example.com", 443));
+        assert!(al.is_allowed("b.example.com", 443));
     }
 
     /// Do a SOCKS5 no-auth handshake + CONNECT to host:port.
@@ -861,29 +928,131 @@ mod tests {
         assert_eq!(&buf, b"hello");
     }
 
+    /// The exact case of agntcy/shadi#430: `--net-allow example.com:443` must
+    /// allow example.com on 443, and only there.
+    #[test]
+    fn a_port_in_an_entry_allows_only_that_port() {
+        let list: Vec<String> = vec![
+            "example.com:443".into(),
+            "*.api.example.com:8443".into(),
+            "[::1]:9000".into(),
+            "*:22".into(),
+        ];
+        assert!(is_host_allowed("example.com", 443, &list));
+        assert!(!is_host_allowed("example.com", 80, &list));
+        assert!(is_host_allowed("v1.api.example.com", 8443, &list));
+        assert!(!is_host_allowed("v1.api.example.com", 443, &list));
+        assert!(is_host_allowed("::1", 9000, &list));
+        assert!(!is_host_allowed("::1", 9001, &list));
+        assert!(is_host_allowed("anything.example.org", 22, &list));
+        assert!(!is_host_allowed("anything.example.org", 23, &list));
+
+        // Without a port, an entry allows every port.
+        let any: Vec<String> = vec!["example.com".into(), "::1".into(), "[2001:db8::1]".into()];
+        for port in [1, 443, 65535] {
+            assert!(is_host_allowed("example.com", port, &any));
+            assert!(is_host_allowed("::1", port, &any));
+            assert!(is_host_allowed("2001:db8::1", port, &any));
+        }
+    }
+
+    #[test]
+    fn an_entry_whose_port_does_not_parse_matches_nothing() {
+        let list: Vec<String> = vec![
+            "example.com:https".into(),
+            "example.com:70000".into(),
+            "[::1]:x".into(),
+            "[::1]junk".into(),
+        ];
+        for port in [80, 443] {
+            assert!(!is_host_allowed("example.com", port, &list));
+            assert!(!is_host_allowed("::1", port, &list));
+        }
+    }
+
+    #[test]
+    fn normalize_net_allow_keeps_the_port_and_drops_scheme_and_path() {
+        for (raw, normalized) in [
+            ("httping.org", "httping.org"),
+            ("http://httping.org/", "httping.org"),
+            ("https://httping.org/ping?v=1", "httping.org"),
+            ("HTTPing.ORG:80", "httping.org:80"),
+            ("https://example.com:8443/path", "example.com:8443"),
+            ("[::1]:443", "[::1]:443"),
+            (" 192.0.2.1 ", "192.0.2.1"),
+        ] {
+            assert_eq!(normalize_net_allow(raw), normalized, "{raw}");
+        }
+    }
+
+    fn socks5_reply_code(proxy_port: u16, host: &str, port: u16) -> u8 {
+        let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{proxy_port}")).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        s.write_all(&[5, 1, 0]).unwrap();
+        let mut auth = [0u8; 2];
+        s.read_exact(&mut auth).unwrap();
+        let mut req = vec![5u8, 1, 0, 3, host.len() as u8];
+        req.extend_from_slice(host.as_bytes());
+        req.extend_from_slice(&port.to_be_bytes());
+        s.write_all(&req).unwrap();
+        let mut reply = [0u8; 10];
+        s.read_exact(&mut reply).unwrap();
+        reply[1]
+    }
+
+    #[test]
+    fn the_proxy_enforces_the_port_in_an_entry() {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in upstream.incoming().flatten() {
+                drop(stream);
+            }
+        });
+
+        let _guard = lock_proxy_ports();
+        let other_port = upstream_port.wrapping_add(1).max(1);
+        let al = NetAllowlist::new(vec![format!("127.0.0.1:{upstream_port}")]);
+        let proxy = NetProxy::start(al).unwrap();
+
+        assert_eq!(
+            socks5_reply_code(proxy.port(), "127.0.0.1", upstream_port),
+            0
+        );
+        assert_eq!(
+            socks5_reply_code(proxy.port(), "127.0.0.1", other_port),
+            2,
+            "a port the entry doesn't name must be refused"
+        );
+    }
+
     #[test]
     fn is_ip_allowed_matches_literals_and_denies_by_default() {
         // Only literal IPs and `*` here: a hostname pattern would send
         // is_ip_allowed to the resolver, and a unit test must not do DNS.
         let empty = NetAllowlist::new(vec![]);
-        assert!(!empty.is_ip_allowed("127.0.0.1"), "empty list is deny-all");
-        assert!(!empty.is_ip_allowed("not-an-ip"));
+        assert!(
+            !empty.is_ip_allowed("127.0.0.1", 443),
+            "empty list is deny-all"
+        );
+        assert!(!empty.is_ip_allowed("not-an-ip", 443));
 
         let literal = NetAllowlist::new(vec!["127.0.0.1".into(), "10.0.0.7".into()]);
-        assert!(literal.is_ip_allowed("127.0.0.1"));
-        assert!(literal.is_ip_allowed("10.0.0.7"));
-        assert!(!literal.is_ip_allowed("10.0.0.8"));
+        assert!(literal.is_ip_allowed("127.0.0.1", 443));
+        assert!(literal.is_ip_allowed("10.0.0.7", 443));
+        assert!(!literal.is_ip_allowed("10.0.0.8", 443));
 
         // `*` short-circuits before the address is parsed, so it allows even
         // a value that is not an address.
         let open = NetAllowlist::new(vec!["*".into()]);
-        assert!(open.is_ip_allowed("127.0.0.1"));
-        assert!(open.is_ip_allowed("not-an-ip"));
+        assert!(open.is_ip_allowed("127.0.0.1", 443));
+        assert!(open.is_ip_allowed("not-an-ip", 443));
 
         // A `*.` pattern cannot be resolved to a fixed address, so it never
         // matches an IP on its own.
         let wildcard = NetAllowlist::new(vec!["*.example.com".into()]);
-        assert!(!wildcard.is_ip_allowed("127.0.0.1"));
+        assert!(!wildcard.is_ip_allowed("127.0.0.1", 443));
     }
 
     #[test]
@@ -891,7 +1060,10 @@ mod tests {
         // A poisoned allowlist must fail closed, like is_allowed does: a
         // panic while the list was held cannot become permission to connect.
         let list = NetAllowlist::new(vec!["127.0.0.1".into()]);
-        assert!(list.is_ip_allowed("127.0.0.1"), "sanity before poisoning");
+        assert!(
+            list.is_ip_allowed("127.0.0.1", 443),
+            "sanity before poisoning"
+        );
 
         let poisoner = list.clone();
         let _ = std::thread::spawn(move || {
@@ -905,7 +1077,7 @@ mod tests {
             "the lock should be poisoned for this test to mean anything"
         );
         assert!(
-            !list.is_ip_allowed("127.0.0.1"),
+            !list.is_ip_allowed("127.0.0.1", 443),
             "a poisoned allowlist allowed a connection"
         );
     }
@@ -913,8 +1085,8 @@ mod tests {
     #[test]
     fn is_ip_allowed_accepts_ipv6_literals() {
         let list = NetAllowlist::new(vec!["::1".into()]);
-        assert!(list.is_ip_allowed("::1"));
-        assert!(!list.is_ip_allowed("::2"));
+        assert!(list.is_ip_allowed("::1", 443));
+        assert!(!list.is_ip_allowed("::2", 443));
     }
 
     #[test]

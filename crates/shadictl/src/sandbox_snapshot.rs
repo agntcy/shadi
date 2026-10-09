@@ -222,7 +222,14 @@ pub(crate) fn run_sandboxed_command(
         // On Windows: kernel channel enforcement is not available without
         // elevated privileges; proxy env vars are set but can be bypassed.
         let (net_allowlist, proxy_opt) = {
-            let initial = resolved.policy.net_allow().to_vec();
+            // Normalized like a runtime --add-net-allow, so `host:443` at launch
+            // means what it means at runtime (agntcy/shadi#430).
+            let initial = resolved
+                .policy
+                .net_allow()
+                .iter()
+                .map(|dest| shadi_sandbox::normalize_net_allow(dest))
+                .collect();
             let al = NetAllowlist::new(initial);
             match NetProxy::start(al.clone()) {
                 Ok(proxy) => {

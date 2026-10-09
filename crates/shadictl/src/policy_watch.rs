@@ -468,39 +468,60 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn extract_host_handles_bare_hostname() {
-        assert_eq!(shadi_sandbox::extract_host("httping.org"), "httping.org");
+    fn normalize_net_allow_handles_bare_hostname() {
+        assert_eq!(
+            shadi_sandbox::normalize_net_allow("httping.org"),
+            "httping.org"
+        );
     }
 
     #[test]
-    fn extract_host_strips_http_scheme() {
-        assert_eq!(shadi_sandbox::extract_host("http://httping.org/"), "httping.org");
+    fn normalize_net_allow_strips_http_scheme() {
+        assert_eq!(
+            shadi_sandbox::normalize_net_allow("http://httping.org/"),
+            "httping.org"
+        );
     }
 
     #[test]
-    fn extract_host_strips_https_scheme_and_path() {
-        assert_eq!(shadi_sandbox::extract_host("https://httping.org/ping?v=1"), "httping.org");
+    fn normalize_net_allow_strips_https_scheme_and_path() {
+        assert_eq!(
+            shadi_sandbox::normalize_net_allow("https://httping.org/ping?v=1"),
+            "httping.org"
+        );
     }
 
     #[test]
-    fn extract_host_strips_port() {
-        assert_eq!(shadi_sandbox::extract_host("httping.org:80"), "httping.org");
+    fn normalize_net_allow_keeps_the_port() {
+        assert_eq!(
+            shadi_sandbox::normalize_net_allow("httping.org:80"),
+            "httping.org:80"
+        );
     }
 
     #[test]
-    fn extract_host_bare_ip() {
+    fn normalize_net_allow_bare_ip() {
         // 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — reserved for documentation.
-        assert_eq!(shadi_sandbox::extract_host("192.0.2.1"), "192.0.2.1");
+        assert_eq!(
+            shadi_sandbox::normalize_net_allow("192.0.2.1"),
+            "192.0.2.1"
+        );
     }
 
     #[test]
-    fn extract_host_ip_with_scheme_and_path() {
-        assert_eq!(shadi_sandbox::extract_host("http://192.0.2.1/"), "192.0.2.1");
+    fn normalize_net_allow_ip_with_scheme_and_path() {
+        assert_eq!(
+            shadi_sandbox::normalize_net_allow("http://192.0.2.1/"),
+            "192.0.2.1"
+        );
     }
 
     #[test]
-    fn extract_host_lowercases() {
-        assert_eq!(shadi_sandbox::extract_host("HTTPing.ORG"), "httping.org");
+    fn normalize_net_allow_lowercases() {
+        assert_eq!(
+            shadi_sandbox::normalize_net_allow("HTTPing.ORG"),
+            "httping.org"
+        );
     }
 
     fn wait_for_socket_ready_with_timeout(sock_path: &Path, timeout: std::time::Duration) {

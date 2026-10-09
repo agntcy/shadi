@@ -10,8 +10,8 @@ mod platform;
 
 pub use control::{read_control_line, ControlLine, CONTROL_LINE_MAX_BYTES};
 pub use net_proxy::{
-    parse_socks5_connect, parse_socks5_greeting, parse_socks5_request, NetAllowlist, NetProxy,
-    Socks5Connect, Socks5ParseError,
+    normalize_net_allow, parse_socks5_connect, parse_socks5_greeting, parse_socks5_request,
+    NetAllowlist, NetProxy, Socks5Connect, Socks5ParseError,
 };
 
 /// Render the Seatbelt profile text for `policy` without calling `sandbox_init`.
@@ -26,7 +26,7 @@ pub use resolve::{
     resolve_policy, PolicyDescription, PolicyFileValues, PolicyOverrides, ResolvedPolicy,
 };
 pub use policy_patch::{
-    apply_policy_patch, extract_host, ControlMessage, ControlResponse, PatchAxisStatus,
+    apply_policy_patch, ControlMessage, ControlResponse, PatchAxisStatus,
     PatchState, PolicyPatch, PolicyPatchResponse, ProcessResources,
 };
 use std::process::{Command, ExitStatus};
