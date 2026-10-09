@@ -1,7 +1,8 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Userspace SOCKS5 proxy for dynamic DNS-name-based network enforcement.
+//! Userspace SOCKS5 and HTTP proxy for dynamic DNS-name-based network
+//! enforcement.
 //!
 //! ## Role in the enforcement chain
 //!
@@ -30,6 +31,12 @@
 //! protocol-agnostic: it tunnels arbitrary TCP regardless of the application
 //! layer, making it the correct primitive for a universal enforcement gate.
 //!
+//! The same listener also speaks HTTP for `HTTP_PROXY`/`HTTPS_PROXY`, since
+//! some clients (Python's urllib, `requests` without extras) cannot use a
+//! SOCKS5 proxy. It handles `CONNECT` and absolute-URI requests, which both
+//! name the destination before DNS, and checks them against the same list.
+//! The first byte tells the protocols apart: SOCKS5 starts with `0x05`.
+//!
 //! 1. The proxy binds to `127.0.0.1:0` (OS picks a port).
 //! 2. The kernel sandbox allows outbound TCP solely to `127.0.0.1:<port>`.
 //!    Any direct `connect()` to any other address is rejected by the kernel —
@@ -57,7 +64,8 @@
 //!
 //! | Traffic type | Enforcement |
 //! |---|---|
-//! | TCP via SOCKS5-aware client (curl, reqwest, Python requests, …) | DNS-name allowlist ✓ |
+//! | TCP via SOCKS5-aware client (curl, reqwest, …) | DNS-name allowlist ✓ |
+//! | HTTP(S) via an `http://` proxy client (Python urllib, requests, …) | DNS-name allowlist ✓ |
 //! | TCP via raw `connect()` bypassing env vars | Kernel blocks it outright ✓ |
 //! | UDP (DNS over UDP, custom protocols) | **Not filtered** — Landlock ConnectTcp / Seatbelt `remote tcp` do not cover UDP |
 //!
@@ -358,6 +366,12 @@ impl NetProxy {
     pub fn proxy_url(&self) -> String {
         format!("socks5h://127.0.0.1:{}", self.port)
     }
+
+    /// Build the value to inject as `HTTP_PROXY` / `HTTPS_PROXY`: the same
+    /// listener, spoken to as an HTTP proxy.
+    pub fn http_proxy_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
 }
 
 impl Drop for NetProxy {
@@ -564,10 +578,44 @@ pub fn parse_socks5_connect<R: Read>(stream: &mut R) -> Result<Socks5Connect, So
     parse_socks5_request(stream)
 }
 
-fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(30))).ok();
+fn handle_connection(stream: TcpStream, allowlist: NetAllowlist) {
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)).ok();
 
+    // A SOCKS5 greeting starts with its version byte; an HTTP request with a
+    // method name.
+    let mut first = [0u8; 1];
+    match stream.peek(&mut first) {
+        Ok(1) if first[0] == 5 => handle_socks5(stream, allowlist),
+        Ok(1) => handle_http(stream, allowlist),
+        _ => {}
+    }
+}
+
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether `host:port` may be reached, logged either way.
+fn admit(allowlist: &NetAllowlist, host: &str, port: u16, is_resolved_ip: bool) -> bool {
+    let (allowed, atyp_label) = {
+        let guard = allowlist.0.read().unwrap_or_else(|e| e.into_inner());
+        if is_resolved_ip {
+            (is_ip_allowed(host, port, &guard), "ip")
+        } else {
+            (is_host_allowed(host, port, &guard), "hostname")
+        }
+    };
+    if allowed {
+        debug!("net proxy: ALLOWED {} {}:{}", atyp_label, host, port);
+    } else {
+        warn!(
+            "net proxy: BLOCKED {} {}:{} — not in allowlist",
+            atyp_label, host, port
+        );
+    }
+    allowed
+}
+
+fn handle_socks5(mut stream: TcpStream, allowlist: NetAllowlist) {
     match parse_socks5_greeting(&mut stream) {
         Ok(()) => {
             if stream.write_all(&[5, 0x00]).is_err() || stream.flush().is_err() {
@@ -595,21 +643,11 @@ fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
     let is_resolved_ip = request.is_resolved_ip;
 
     // --- Policy check ---
-    let (allowed, atyp_label) = {
-        let guard = allowlist.0.read().unwrap_or_else(|e| e.into_inner());
-        if is_resolved_ip {
-            (is_ip_allowed(&host, port, &guard), "ip")
-        } else {
-            (is_host_allowed(&host, port, &guard), "hostname")
-        }
-    };
-    if !allowed {
-        warn!("net proxy: BLOCKED {} {}:{} — not in allowlist", atyp_label, host, port);
+    if !admit(&allowlist, &host, port, is_resolved_ip) {
         // REP=0x02 (connection not allowed by ruleset)
         let _ = stream.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
         return;
     }
-    debug!("net proxy: ALLOWED {} {}:{}", atyp_label, host, port);
 
     // --- Connect upstream ---
     let upstream = match TcpStream::connect((&*host, port)) {
@@ -629,6 +667,221 @@ fn handle_connection(mut stream: TcpStream, allowlist: NetAllowlist) {
     }
 
     debug!("net proxy: tunnel open to {}:{}", host, port);
+    pipe_bidirectional(stream, upstream);
+}
+
+// ---------------------------------------------------------------------------
+// Per-connection handler (HTTP)
+// ---------------------------------------------------------------------------
+//
+// `HTTP_PROXY`/`HTTPS_PROXY` point here, because clients such as Python's
+// urllib speak `http://` proxies but not SOCKS5 (agntcy/shadi#431). Both forms
+// name the destination before DNS, so they are checked like a SOCKS5 request:
+//   CONNECT host:port HTTP/1.1      → tunnel, as SOCKS5 does
+//   GET http://host[:port]/path …   → forward that one request, then close
+
+/// Largest HTTP request head the proxy reads before refusing the request.
+pub const MAX_HTTP_HEAD: usize = 16 * 1024;
+
+/// A parsed HTTP proxy request head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpProxyRequest {
+    pub host: String,
+    pub port: u16,
+    /// The head to send upstream, rewritten to origin form with
+    /// `Connection: close`, or `None` for a `CONNECT` tunnel.
+    pub forward: Option<Vec<u8>>,
+}
+
+/// Why [`parse_http_proxy_request`] rejected a request head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpParseError {
+    Malformed,
+    UnsupportedScheme,
+}
+
+/// Headers that apply to the hop to the proxy and are not forwarded, along
+/// with every `Proxy-*` header.
+const HOP_HEADERS: &[&str] = &["host", "connection", "keep-alive"];
+
+/// Parse an HTTP proxy request head, up to and including its blank line.
+pub fn parse_http_proxy_request(head: &[u8]) -> Result<HttpProxyRequest, HttpParseError> {
+    let head = std::str::from_utf8(head).map_err(|_| HttpParseError::Malformed)?;
+    let head = head.strip_suffix("\r\n\r\n").unwrap_or(head);
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().ok_or(HttpParseError::Malformed)?;
+    let headers: Vec<&str> = lines.collect();
+    if [request_line]
+        .iter()
+        .chain(&headers)
+        .any(|l| l.is_empty() || l.contains(['\r', '\n', '\0']))
+    {
+        return Err(HttpParseError::Malformed);
+    }
+    let bad_name = |h: &&str| {
+        h.split_once(':')
+            .is_none_or(|(n, _)| n.is_empty() || n.contains([' ', '\t']))
+    };
+    if headers.iter().any(bad_name) {
+        return Err(HttpParseError::Malformed);
+    }
+
+    let mut parts = request_line.split(' ');
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(HttpParseError::Malformed);
+    };
+    if method.is_empty() || !version.starts_with("HTTP/1.") {
+        return Err(HttpParseError::Malformed);
+    }
+
+    if method == "CONNECT" {
+        let (host, port) = split_authority(target, None)?;
+        return Ok(HttpProxyRequest {
+            host,
+            port,
+            forward: None,
+        });
+    }
+
+    let Some((scheme, rest)) = target.split_once("://") else {
+        return Err(HttpParseError::Malformed);
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return Err(HttpParseError::UnsupportedScheme);
+    }
+    let path_at = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(path_at);
+    let (host, port) = split_authority(authority, Some(80))?;
+    let path = match path.split('#').next().unwrap_or("") {
+        "" => "/".to_string(),
+        p if p.starts_with('?') => format!("/{p}"),
+        p => p.to_string(),
+    };
+
+    let mut forward = format!("{method} {path} {version}\r\nHost: {authority}\r\n");
+    for header in headers {
+        let name = header.split(':').next().unwrap_or("").to_ascii_lowercase();
+        if !HOP_HEADERS.contains(&name.as_str()) && !name.starts_with("proxy-") {
+            forward.push_str(header);
+            forward.push_str("\r\n");
+        }
+    }
+    forward.push_str("Connection: close\r\n\r\n");
+    Ok(HttpProxyRequest {
+        host,
+        port,
+        forward: Some(forward.into_bytes()),
+    })
+}
+
+/// Split `host:port`, `[v6]:port` or, with a default port, a bare host.
+fn split_authority(
+    authority: &str,
+    default_port: Option<u16>,
+) -> Result<(String, u16), HttpParseError> {
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest.split_once(']').ok_or(HttpParseError::Malformed)?;
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(HttpParseError::Malformed);
+        }
+        let port = match after {
+            "" => None,
+            after => Some(after.strip_prefix(':').ok_or(HttpParseError::Malformed)?),
+        };
+        (host, port)
+    } else {
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let hostname_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_');
+        if host.is_empty() || !host.chars().all(hostname_char) {
+            return Err(HttpParseError::Malformed);
+        }
+        (host, port)
+    };
+    let port = match port {
+        Some(p) => p.parse::<u16>().map_err(|_| HttpParseError::Malformed)?,
+        None => default_port.ok_or(HttpParseError::Malformed)?,
+    };
+    Ok((host.to_string(), port))
+}
+
+/// Read up to the end of the request head; returns the head and any bytes
+/// the client sent after it.
+fn read_http_head(stream: &mut TcpStream) -> Option<(Vec<u8>, Vec<u8>)> {
+    let started = std::time::Instant::now();
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    while started.elapsed() < HANDSHAKE_TIMEOUT {
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        let searched = buf.len().saturating_sub(3);
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(i) = buf[searched..].windows(4).position(|w| w == b"\r\n\r\n") {
+            let rest = buf.split_off(searched + i + 4);
+            return Some((buf, rest));
+        }
+        if buf.len() > MAX_HTTP_HEAD {
+            return None;
+        }
+    }
+    None
+}
+
+fn http_reply(stream: &mut TcpStream, status: &str, body: &str) {
+    let reply = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(reply.as_bytes());
+}
+
+fn handle_http(mut stream: TcpStream, allowlist: NetAllowlist) {
+    let Some((head, rest)) = read_http_head(&mut stream) else {
+        http_reply(&mut stream, "400 Bad Request", "");
+        return;
+    };
+    let request = match parse_http_proxy_request(&head) {
+        Ok(request) => request,
+        Err(_) => {
+            http_reply(&mut stream, "400 Bad Request", "");
+            return;
+        }
+    };
+    let (host, port) = (request.host, request.port);
+
+    let is_resolved_ip = host.parse::<std::net::IpAddr>().is_ok();
+    if !admit(&allowlist, &host, port, is_resolved_ip) {
+        let body = format!("{host}:{port} is not in the sandbox's net_allow list\n");
+        http_reply(&mut stream, "403 Forbidden", &body);
+        return;
+    }
+
+    let mut upstream = match TcpStream::connect((&*host, port)) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "net proxy: upstream connect to {}:{} failed: {}",
+                host, port, e
+            );
+            http_reply(&mut stream, "502 Bad Gateway", "");
+            return;
+        }
+    };
+    let sent = match &request.forward {
+        Some(forward) => upstream.write_all(forward),
+        None => stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n"),
+    };
+    if sent.is_err() || upstream.write_all(&rest).is_err() {
+        return;
+    }
+
+    debug!("net proxy: http tunnel open to {}:{}", host, port);
     pipe_bidirectional(stream, upstream);
 }
 
@@ -1160,5 +1413,190 @@ mod tests {
         };
         assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
         drop(holder);
+    }
+
+    #[test]
+    fn parse_http_proxy_request_reads_connect() {
+        let request = parse_http_proxy_request(
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (request.host.as_str(), request.port, request.forward),
+            ("example.com", 443, None)
+        );
+
+        let request = parse_http_proxy_request(b"CONNECT [::1]:8443 HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!((request.host.as_str(), request.port), ("::1", 8443));
+
+        assert_eq!(
+            parse_http_proxy_request(b"CONNECT example.com HTTP/1.1\r\n\r\n"),
+            Err(HttpParseError::Malformed),
+            "CONNECT must name a port"
+        );
+    }
+
+    #[test]
+    fn parse_http_proxy_request_rewrites_an_absolute_uri() {
+        let head = b"GET http://Example.com:8080/a?b HTTP/1.1\r\n\
+            Host: evil.example\r\n\
+            Proxy-Connection: keep-alive\r\n\
+            Proxy-Authorization: Basic eDp5\r\n\
+            Connection: keep-alive\r\n\
+            Accept: */*\r\n\r\n";
+        let request = parse_http_proxy_request(head).unwrap();
+        assert_eq!((request.host.as_str(), request.port), ("Example.com", 8080));
+        assert_eq!(
+            String::from_utf8(request.forward.unwrap()).unwrap(),
+            "GET /a?b HTTP/1.1\r\nHost: Example.com:8080\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+
+        let forward_of = |head: &[u8]| {
+            String::from_utf8(parse_http_proxy_request(head).unwrap().forward.unwrap()).unwrap()
+        };
+        assert!(forward_of(b"GET http://example.com HTTP/1.1\r\n\r\n")
+            .starts_with("GET / HTTP/1.1\r\nHost: example.com\r\n"));
+        assert!(forward_of(b"HEAD http://example.com?q=1 HTTP/1.0\r\n\r\n")
+            .starts_with("HEAD /?q=1 HTTP/1.0\r\n"));
+        assert_eq!(
+            parse_http_proxy_request(b"GET http://example.com/ HTTP/1.1\r\n\r\n")
+                .unwrap()
+                .port,
+            80
+        );
+    }
+
+    #[test]
+    fn parse_http_proxy_request_rejects_bad_heads() {
+        for (head, want) in [
+            (&b"GET / HTTP/1.1\r\n\r\n"[..], HttpParseError::Malformed),
+            (
+                b"GET https://example.com/ HTTP/1.1\r\n\r\n",
+                HttpParseError::UnsupportedScheme,
+            ),
+            (
+                b"GET http://user@evil.example/ HTTP/1.1\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"GET http://example.com:http/ HTTP/1.1\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"GET http://example.com/ SPDY/3\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"GET http://example.com/ HTTP/1.1 extra\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"GET http://example.com/ HTTP/1.1\r\nno-colon\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"GET http://example.com/ HTTP/1.1\r\nHost : evil.example\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"GET http://example.com/ HTTP/1.1\r\nX: a\nHost: evil.example\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"CONNECT [not-v6]:443 HTTP/1.1\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (
+                b"CONNECT [::1]443 HTTP/1.1\r\n\r\n",
+                HttpParseError::Malformed,
+            ),
+            (b"\xff\xfe HTTP/1.1\r\n\r\n", HttpParseError::Malformed),
+        ] {
+            assert_eq!(
+                parse_http_proxy_request(head),
+                Err(want),
+                "{:?}",
+                String::from_utf8_lossy(head)
+            );
+        }
+    }
+
+    /// Answers each request with the request line it received as the body.
+    fn echo_request_line_server() -> u16 {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in upstream.incoming().flatten() {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head);
+                let line = head.lines().next().unwrap_or("");
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{line}",
+                    line.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        port
+    }
+
+    fn http_exchange(stream: &mut std::net::TcpStream, request: &str) -> String {
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut reply = Vec::new();
+        let _ = stream.read_to_end(&mut reply);
+        String::from_utf8_lossy(&reply).into_owned()
+    }
+
+    fn proxy_client(proxy_port: u16) -> std::net::TcpStream {
+        let s = std::net::TcpStream::connect(format!("127.0.0.1:{proxy_port}")).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        s
+    }
+
+    #[test]
+    fn the_http_proxy_tunnels_connect_and_forwards_absolute_uris() {
+        let upstream_port = echo_request_line_server();
+        let _guard = lock_proxy_ports();
+        let other_port = upstream_port.wrapping_add(1).max(1);
+        let proxy = NetProxy::start(NetAllowlist::new(vec![format!(
+            "127.0.0.1:{upstream_port}"
+        )]))
+        .unwrap();
+
+        let mut s = proxy_client(proxy.port());
+        s.write_all(format!("CONNECT 127.0.0.1:{upstream_port} HTTP/1.1\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut established = [0u8; 39];
+        s.read_exact(&mut established).unwrap();
+        assert_eq!(&established, b"HTTP/1.1 200 Connection Established\r\n\r\n");
+        let reply = http_exchange(&mut s, "GET /through-the-tunnel HTTP/1.1\r\n\r\n");
+        assert!(
+            reply.ends_with("GET /through-the-tunnel HTTP/1.1"),
+            "{reply}"
+        );
+
+        let reply = http_exchange(
+            &mut proxy_client(proxy.port()),
+            &format!("GET http://127.0.0.1:{upstream_port}/forwarded HTTP/1.1\r\nProxy-Connection: keep-alive\r\n\r\n"),
+        );
+        assert!(reply.ends_with("GET /forwarded HTTP/1.1"), "{reply}");
+
+        for request in [
+            format!("CONNECT 127.0.0.1:{other_port} HTTP/1.1\r\n\r\n"),
+            format!("GET http://127.0.0.1:{other_port}/ HTTP/1.1\r\n\r\n"),
+        ] {
+            let reply = http_exchange(&mut proxy_client(proxy.port()), &request);
+            assert!(
+                reply.starts_with("HTTP/1.1 403 "),
+                "{request:?} got {reply}"
+            );
+        }
+        let reply = http_exchange(&mut proxy_client(proxy.port()), "GET / HTTP/1.1\r\n\r\n");
+        assert!(reply.starts_with("HTTP/1.1 400 "), "{reply}");
     }
 }
