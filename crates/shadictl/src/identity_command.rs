@@ -282,15 +282,17 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
         let (did, vm_id, doc) = build_did_document(&public_key)?;
         let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
 
-        store_derived_agent_identity(
-            prefix,
-            agent_name,
-            &private_key,
-            &public_key,
-            &did,
-            &output,
-            human_did.as_deref(),
-        )?;
+        if !args.no_store {
+            store_derived_agent_identity(
+                prefix,
+                agent_name,
+                &private_key,
+                &public_key,
+                &did,
+                &output,
+                human_did.as_deref(),
+            )?;
+        }
 
         if let Some(out_dir) = args.out_dir.as_ref() {
             let out_file = out_dir.join(format!("{}.did.json", agent_name));
@@ -302,6 +304,9 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
         println!("Agent: {}", agent_name);
         println!("DID: {}", did);
         println!("Verification Method ID: {}", vm_id);
+        if args.no_store {
+            continue;
+        }
         println!("Stored private key: {}/{}/private", prefix, agent_name);
         println!("Stored public key: {}/{}/public", prefix, agent_name);
         println!("Stored DID: {}/{}/did", prefix, agent_name);
