@@ -7,6 +7,20 @@ workspace-wide view of each release.
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.2.0...agntcy-shadi-cli-v0.2.1) - 2026-10-09
+
+### Added
+
+- *(desktop)* add the Agent Directory panel ([#453](https://github.com/agntcy/shadi/pull/453))
+
+### Fixed
+
+- *(shadictl)* let derive-agent-identity skip the secret store ([#445](https://github.com/agntcy/shadi/pull/445))
+
+### Other
+
+- *(identity)* move the did:key document and OpenPGP key helpers into shadi_identity ([#450](https://github.com/agntcy/shadi/pull/450))
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.11...agntcy-shadi-cli-v0.2.0) - 2026-10-09
 
 ### Added

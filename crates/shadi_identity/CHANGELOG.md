@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.3.0...agntcy-shadi-identity-v0.3.1) - 2026-10-09
+
+### Other
+
+- *(identity)* move the did:key document and OpenPGP key helpers into shadi_identity ([#450](https://github.com/agntcy/shadi/pull/450))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.2.2...agntcy-shadi-identity-v0.3.0) - 2026-10-09
 
 ### Added
