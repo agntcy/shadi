@@ -19,6 +19,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::slim::SlimState::default())
         .manage(commands::sandbox::SandboxState::default())
+        .manage(commands::owner::OwnerState::default())
         .setup(|app| {
             // Known rooms are persisted (agntcy/shadi#138); the app data dir is
             // only resolvable once the app exists. A failure here is reported
@@ -75,6 +76,14 @@ pub fn run() {
             commands::identity::secret_put_key,
             commands::identity::secret_list_keychain,
             commands::identity::secret_backend_status,
+            commands::owner::owner_start,
+            commands::owner::owner_status,
+            commands::owner::owner_pending,
+            commands::owner::owner_approve,
+            commands::owner::owner_deny,
+            commands::owner::owner_policy_get,
+            commands::owner::owner_policy_set,
+            commands::owner::owner_audit,
             commands::slim::slim_node_start,
             commands::slim::slim_node_status,
             commands::slim::slim_group_create,

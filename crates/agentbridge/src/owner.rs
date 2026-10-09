@@ -273,6 +273,15 @@ impl Owner {
         self.channels.remove(channel);
     }
 
+    /// Hold exactly `channels`, releasing any other.
+    pub fn hold_only(&mut self, channels: impl IntoIterator<Item = String>) {
+        self.channels = channels.into_iter().collect();
+    }
+
+    pub fn held(&self) -> impl Iterator<Item = &str> {
+        self.channels.iter().map(String::as_str)
+    }
+
     pub fn set_policy(&mut self, policy: OwnerPolicy) {
         self.policy = policy;
     }
@@ -659,6 +668,13 @@ mod tests {
         owner.release(ROOM);
         let outcome = owner.request(request(&cast, ROOM, None), NOW).unwrap();
         assert!(matches!(outcome, Outcome::Refused(_)), "{outcome:?}");
+
+        owner.hold_only([ROOM.to_string()]);
+        assert_eq!(owner.held().collect::<Vec<_>>(), [ROOM]);
+        assert!(matches!(
+            owner.request(request(&cast, ROOM, None), NOW).unwrap(),
+            Outcome::Granted(_)
+        ));
     }
 
     #[test]

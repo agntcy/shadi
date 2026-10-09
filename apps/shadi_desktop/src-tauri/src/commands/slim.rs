@@ -135,7 +135,20 @@ struct Inner {
     /// What onboarding produced, when it has run. `None` falls back to the env
     /// contract.
     identity: Option<LoadedIdentity>,
+    /// The owner's A2A service, once started (agntcy/shadi#421).
+    owner_service: Option<OwnerService>,
 }
+
+/// Held so the owner's SLIM app and its server stay alive.
+struct OwnerService {
+    name: String,
+    _app: Arc<App>,
+    _server: Arc<slim_rpc::Server>,
+}
+
+/// The derived identity that owns the rooms this Desktop moderates and signs
+/// their grants, as the agent keys are derived from the same seed.
+const OWNER_AGENT: &str = "owner";
 
 /// The derivation root plus allow-list, held in memory for the session so DID
 /// auth needs no environment variables.
@@ -149,7 +162,7 @@ struct LoadedIdentity {
 ///
 /// The state is behind an `Arc` so [`with_state`] can move a handle onto a
 /// blocking thread — see that function for why every command must.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SlimState(Arc<Mutex<Inner>>);
 
 /// Run `f` against the SLIM state on a blocking thread.
@@ -235,7 +248,170 @@ impl SlimState {
     }
 }
 
+impl SlimState {
+    /// The owner key: derived from the onboarding seed, or from
+    /// `SLIM_HUMAN_SEED` under the environment contract.
+    pub fn owner_identity(&self) -> Result<shadi_identity::AgentIdentity, String> {
+        let inner = self.0.lock().map_err(|_| "SLIM state poisoned")?;
+        let seed = match &inner.identity {
+            Some(identity) => identity.seed.clone(),
+            None => std::env::var("SLIM_HUMAN_SEED")
+                .ok()
+                .filter(|seed| !seed.is_empty())
+                .map(String::into_bytes)
+                .ok_or_else(|| {
+                    "no identity configured — complete onboarding in the Identity tab".to_string()
+                })?,
+        };
+        shadi_identity::AgentIdentity::derive(&seed, OWNER_AGENT).map_err(|e| e.to_string())
+    }
+
+    /// The rooms this Desktop moderates, which are the ones it owns.
+    pub fn moderated_channels(&self) -> Result<Vec<String>, String> {
+        let inner = self.0.lock().map_err(|_| "SLIM state poisoned")?;
+        Ok(inner
+            .rooms
+            .iter()
+            .filter(|(_, room)| room.moderator)
+            .map(|(channel, _)| channel.clone())
+            .collect())
+    }
+
+    /// Serve `executor` as the owner's A2A service at `<local name>-owner`,
+    /// authenticated as the owner identity. Blocks on SLIM, so call it from a
+    /// blocking thread. Starting it again returns the running service.
+    pub fn serve_owner(
+        &self,
+        executor: agentbridge::owner_intake::OwnerExecutor,
+    ) -> Result<String, String> {
+        let mut inner = self.0.lock().map_err(|_| "SLIM state poisoned")?;
+        if let Some(service) = &inner.owner_service {
+            return Ok(service.name.clone());
+        }
+        let connection_id = inner.ensure_connection()?;
+        let service_name = agentbridge::owner_intake::owner_service_name(&resolve_local_name()?);
+        let name = Arc::new(parse_name(&service_name)?);
+        let auth = inner.resolve_auth(OWNER_AGENT)?;
+        let app = shadi_identity::create_app(inner.client_service_mut(), name.clone(), &auth)
+            .map_err(slim_err)?;
+        app.subscribe(name, Some(connection_id)).map_err(slim_err)?;
+
+        let server = Arc::new(slim_rpc::Server::new_with_shared_rx_and_connection(
+            app.inner(),
+            app.name().as_slim_name(),
+            None,
+            app.notification_receiver(),
+            Some(slim_bindings::get_runtime()),
+        ));
+        let handler = Arc::new(a2a_server::DefaultRequestHandler::new(
+            executor,
+            a2a_server::InMemoryTaskStore::new(),
+        ));
+        shadi_a2a::SlimRpcHandler::new(handler).register(server.as_ref());
+        let serving = server.clone();
+        slim_bindings::get_runtime().spawn(async move {
+            if let Err(err) = serving.serve().await {
+                eprintln!("warning: owner service stopped: {err}");
+            }
+        });
+        inner.owner_service = Some(OwnerService {
+            name: service_name.clone(),
+            _app: app,
+            _server: server,
+        });
+        Ok(service_name)
+    }
+
+    /// Invites what the owner granted into the rooms this Desktop moderates.
+    pub fn room_inviter(&self, owner_did: String) -> RoomInviter {
+        RoomInviter {
+            inner: self.0.clone(),
+            owner_did,
+        }
+    }
+}
+
+/// Acts on the owner's grants by sending the moderator's invite. The grant is
+/// checked first, as a channel manager will check it (agntcy/shadi#420).
+pub struct RoomInviter {
+    inner: Arc<Mutex<Inner>>,
+    owner_did: String,
+}
+
+impl agentbridge::owner_intake::Inviter for RoomInviter {
+    fn invite(
+        &self,
+        grant: &[u8],
+        request: &agentbridge::owner::InviteRequest,
+    ) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let grant =
+            shadi_identity::verify_grant(grant, &self.owner_did, now).map_err(|e| e.to_string())?;
+        if grant.action != shadi_identity::GrantAction::Add
+            || grant.channel != request.channel
+            || grant.invitee != request.invitee_name
+        {
+            return Err("the grant doesn't cover this invite".to_string());
+        }
+        let did = request
+            .invitee_did
+            .clone()
+            .ok_or_else(|| "the request names no DID for the invitee".to_string())?;
+        let mut inner = self.inner.lock().map_err(|_| "SLIM state poisoned")?;
+        if !inner.room(&request.channel)?.moderator {
+            return Err(format!(
+                "this Desktop doesn't moderate '{}'",
+                request.channel
+            ));
+        }
+        inner.invite_members(
+            &request.channel,
+            vec![SlimGroupMember {
+                name: request.invitee_name.clone(),
+                did,
+                endpoint: None,
+                kind: "agent".to_string(),
+            }],
+        )
+    }
+}
+
 impl Inner {
+    /// Invite `members` into `channel`, admitting their DIDs to the trust set
+    /// so they can authenticate, and remember them on the room.
+    fn invite_members(
+        &mut self,
+        channel: &str,
+        members: Vec<SlimGroupMember>,
+    ) -> Result<(), String> {
+        admit_dids_to_trust_set(
+            members
+                .iter()
+                .map(|m| m.did.as_str())
+                .filter(|d| !d.is_empty()),
+        );
+        let connection_id = self.ensure_connection()?;
+        let app = self.ensure_app()?;
+        let session = self.live_session(channel)?;
+        for member in &members {
+            let name = Arc::new(parse_name(&member.name)?);
+            app.set_route(name.clone(), connection_id)
+                .map_err(slim_err)?;
+            session.invite_and_wait(name).map_err(slim_err)?;
+        }
+        let room = self
+            .rooms
+            .get_mut(channel)
+            .ok_or_else(|| format!("no room '{channel}'"))?;
+        for member in members {
+            room.admitted.insert(member.name.clone(), member);
+        }
+        self.persist()
+    }
+
     fn ensure_connection(&mut self) -> Result<u64, String> {
         if let Some(id) = self.connection_id {
             return Ok(id);
@@ -536,31 +712,7 @@ pub async fn slim_group_invite(
                 member.kind = kind.clone();
             }
         }
-        admit_dids_to_trust_set(
-            resolved
-                .iter()
-                .map(|(m, _)| m.did.as_str())
-                .filter(|d| !d.is_empty()),
-        );
-
-        let connection_id = inner.ensure_connection()?;
-        let app = inner.ensure_app()?;
-        let session = inner.live_session(&channel)?;
-
-        for (member, _) in &resolved {
-            let name = Arc::new(parse_name(&member.name)?);
-            app.set_route(name.clone(), connection_id).map_err(slim_err)?;
-            session.invite_and_wait(name).map_err(slim_err)?;
-        }
-
-        let room = inner
-            .rooms
-            .get_mut(&channel)
-            .ok_or_else(|| format!("no room '{channel}'"))?;
-        for (member, _) in resolved {
-            room.admitted.insert(member.name.clone(), member);
-        }
-        inner.persist()?;
+        inner.invite_members(&channel, resolved.into_iter().map(|(m, _)| m).collect())?;
         inner.group_info(&channel)
     })
     .await
@@ -1349,6 +1501,74 @@ mod tests {
     ///
     /// This is the coverage whose absence let the runtime panic ship: the panel
     /// compiled with a green suite and still died on its first real SLIM call.
+    /// The owner flow (agntcy/shadi#421) against a live node: this Desktop
+    /// moderates a room and serves its owner service with an allow-all
+    /// policy. The harness has one agent ask over A2A to let another in, who
+    /// must then reach the room's roster.
+    #[test]
+    #[ignore = "needs a live SLIM node; run docs/content/demos/desktop-owner-e2e.sh"]
+    fn live_owner_grants_an_agents_request_and_invites_the_invitee() {
+        use agentbridge::owner::{Owner, OwnerPolicy};
+        use agentbridge::owner_intake::OwnerExecutor;
+
+        let channel = std::env::var("SHADI_E2E_ROOM").expect("SHADI_E2E_ROOM");
+        let invitee = std::env::var("SHADI_E2E_INVITEE").expect("SHADI_E2E_INVITEE");
+
+        let state = SlimState::default();
+        {
+            let mut inner = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            let channel_name = Arc::new(parse_name(&channel).expect("channel name"));
+            let app = inner.ensure_app().expect("ensure_app: DID auth + connect");
+            let session = app
+                .create_session_and_wait(group_session_config(), channel_name.clone())
+                .expect("create group session");
+            inner.rooms.insert(
+                channel_name.to_string(),
+                Room {
+                    session: Some(session),
+                    moderator: true,
+                    admitted: HashMap::new(),
+                },
+            );
+        }
+
+        let identity = state.owner_identity().expect("owner identity");
+        let owner_did = identity.did();
+        let policy = OwnerPolicy::from_json(r#"{"default": "allow"}"#).expect("policy");
+        let mut owner = Owner::new(identity, policy, None);
+        owner.hold_only(state.moderated_channels().expect("moderated rooms"));
+        let owner = Arc::new(Mutex::new(owner));
+        let executor = OwnerExecutor::new(owner.clone(), Arc::new(state.room_inviter(owner_did)));
+        let service = state
+            .serve_owner(executor)
+            .expect("serve the owner service");
+        // The harness waits for this line before sending the request.
+        println!("owner service ready at {service}");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let roster = {
+                let inner = state.0.lock().unwrap_or_else(|e| e.into_inner());
+                inner.roster(&channel).unwrap_or_default()
+            };
+            if roster.iter().any(|m| m.name == invitee) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{invitee} never reached the roster: {roster:?}"
+            );
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        let audit = owner.lock().unwrap().audit().to_vec();
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.outcome == "granted" && e.request.invitee_name == invitee),
+            "no grant for {invitee} in {audit:?}"
+        );
+    }
+
     #[test]
     #[ignore = "needs a live SLIM node; run docs/content/demos/desktop-room-e2e.sh"]
     fn live_moderator_creates_room_invites_two_agents_and_sees_the_roster() {

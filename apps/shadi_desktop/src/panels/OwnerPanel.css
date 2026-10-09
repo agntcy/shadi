@@ -1,0 +1,18 @@
+.ow-rules {
+  width: 100%;
+  min-height: 12rem;
+  box-sizing: border-box;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: transparent;
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+.ow-actions {
+  display: flex;
+  gap: 0.4rem;
+}
