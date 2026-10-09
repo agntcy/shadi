@@ -72,7 +72,7 @@ pub fn run() {
             commands::identity::identity_did_from_github,
             commands::identity::identity_derive_agent,
             commands::identity::identity_verify_agent,
-            commands::identity::secret_get,
+            commands::identity::secret_exists,
             commands::identity::secret_put_key,
             commands::identity::secret_list_keychain,
             commands::identity::secret_backend_status,
