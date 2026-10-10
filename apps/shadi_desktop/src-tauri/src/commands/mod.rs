@@ -9,6 +9,7 @@
 
 pub mod agentbridge;
 pub mod bootstrap;
+pub mod channel_manager;
 pub mod dir;
 pub mod identity;
 pub mod owner;

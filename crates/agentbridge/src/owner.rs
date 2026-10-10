@@ -336,6 +336,25 @@ impl Owner {
         }
     }
 
+    /// [`Self::request`] for a caller that stops waiting at `deadline`, such
+    /// as a channel manager: an ask expires by then at the latest.
+    pub fn request_until(
+        &mut self,
+        request: InviteRequest,
+        now: u64,
+        deadline: u64,
+    ) -> Result<Outcome, OwnerError> {
+        let outcome = self.request(request, now)?;
+        let Outcome::Pending { ask_id, expires_at } = outcome else {
+            return Ok(outcome);
+        };
+        let expires_at = expires_at.min(deadline);
+        if let Some(ask) = self.pending.get_mut(&ask_id) {
+            ask.expires_at = expires_at;
+        }
+        Ok(Outcome::Pending { ask_id, expires_at })
+    }
+
     /// The owner allows a pending ask: sign its grant.
     pub fn approve(&mut self, ask_id: u64, now: u64) -> Result<Vec<u8>, OwnerError> {
         let ask = self.take_live(ask_id, now)?;
@@ -517,6 +536,31 @@ mod tests {
         assert_eq!(grant.not_after, NOW + DEFAULT_GRANT_SECONDS);
         assert_eq!(owner.audit()[0].by, DecidedBy::Rule(0));
         assert_eq!(owner.audit()[0].outcome, "granted");
+    }
+
+    #[test]
+    fn an_ask_with_a_deadline_expires_by_then() {
+        let cast = cast();
+        let mut owner = owner(&cast, r#"{"ask_timeout_seconds": 300}"#);
+        let Outcome::Pending { ask_id, expires_at } = owner
+            .request_until(request(&cast, ROOM, None), NOW, NOW + 55)
+            .unwrap()
+        else {
+            panic!("expected an ask");
+        };
+        assert_eq!(expires_at, NOW + 55);
+        assert_eq!(owner.expire(NOW + 55).unwrap()[0].id, ask_id);
+        assert_eq!(owner.audit()[1].by, DecidedBy::Timeout);
+    }
+
+    #[test]
+    fn a_deadline_leaves_a_decided_request_alone() {
+        let cast = cast();
+        let mut allowing = owner(&cast, r#"{"default": "allow"}"#);
+        assert!(matches!(
+            allowing.request_until(request(&cast, ROOM, None), NOW, NOW + 55),
+            Ok(Outcome::Granted(_))
+        ));
     }
 
     #[test]

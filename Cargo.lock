@@ -8510,6 +8510,7 @@ dependencies = [
  "agntcy-shadi-memory",
  "agntcy-shadi-sandbox",
  "agntcy-slim",
+ "agntcy-slim-auth",
  "agntcy-slim-bindings",
  "agntcy-slim-config",
  "agntcy-slim-proto",
@@ -8518,6 +8519,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "portable-pty",
+ "prost",
  "rcgen",
  "reqwest",
  "serde",
@@ -8529,6 +8531,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tempfile",
  "tokio",
+ "tonic",
  "uuid",
 ]
 
