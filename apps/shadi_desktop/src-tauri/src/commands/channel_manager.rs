@@ -815,4 +815,186 @@ mod tests {
         let text = auth.to_string();
         assert!(text.contains("EdDSA") && text.contains("jwks"), "{text}");
     }
+
+    /// Kills the channel manager when the test ends, however it ends.
+    struct Running(std::process::Child);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    /// The owner flow against a real channel manager, driven by
+    /// docs/content/demos/desktop-channel-manager-e2e.sh: the owner creates a
+    /// room through the API, codex asks to add claude-code without a grant,
+    /// the channel manager asks the owner service, and the owner's rules grant
+    /// it; a request the rules block is refused.
+    #[test]
+    #[ignore = "needs a SLIM node and the channel-manager binary; run the e2e script"]
+    fn live_channel_manager_asks_the_owner_and_adds_who_it_grants() {
+        use agentbridge::owner_intake::OwnerExecutor;
+        use slim_config::client::ClientConfig;
+        use slim_config::server::ServerConfig;
+        use slim_config::tls::server::TlsServerConfig;
+
+        let env = |key: &str| std::env::var(key).unwrap_or_else(|_| panic!("{key} is unset"));
+        let seed = env("SLIM_HUMAN_SEED");
+        let derive = |name: &str| AgentIdentity::derive(seed.as_bytes(), name).unwrap();
+        let (owner, codex, cm) = (derive("owner"), derive("codex"), derive("channel-manager"));
+        let invitee = "agntcy/shadi/claude-code";
+        let cm_name = "agntcy/shadi/channel-manager";
+        let room = env("SHADI_E2E_ROOM");
+        let api_addr = env("SHADI_E2E_CM_API");
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| dir.path().join(name).display().to_string();
+
+        // The channel manager's own key, and whom it trusts on SLIM and on its API.
+        std::fs::write(file("cm.pem"), cm.to_pkcs8_pem().unwrap()).unwrap();
+        let dids =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| derive(n).did()).collect() };
+        let jwks = |dids: Vec<String>| {
+            shadi_identity::jwks_from_dids(dids.iter().map(String::as_str)).unwrap()
+        };
+        // Its own key too: MLS checks the group creator's own credential.
+        std::fs::write(
+            file("members.jwks.json"),
+            jwks(dids(&[
+                "channel-manager",
+                "avatar",
+                "owner",
+                "claude-code",
+                "codex",
+            ])),
+        )
+        .unwrap();
+        let slim_connection =
+            ClientConfig::with_endpoint(&format!("https://{}", env("SLIM_ENDPOINT")))
+                .with_tls_setting(
+                    TlsClientConfig::new()
+                        .with_ca_file(&env("SLIM_TLS_CA"))
+                        .with_cert_and_key_file(
+                            &env("SHADI_E2E_CM_CERT"),
+                            &env("SHADI_E2E_CM_KEY"),
+                        ),
+                );
+        let api_server = ServerConfig::with_endpoint(&api_addr)
+            .with_tls_settings(TlsServerConfig::new().with_insecure(true))
+            .with_auth(slim_config::server::AuthenticationConfig::Jwt(
+                JwtConfig::new(
+                    Claims::default(),
+                    TOKEN_TTL,
+                    JwtKey::Decoding(Key {
+                        algorithm: Algorithm::EdDSA,
+                        format: KeyFormat::Jwks,
+                        key: KeyData::Data(jwks(dids(&["owner", "codex"]))),
+                    }),
+                ),
+            ));
+        let config = serde_json::json!({ "channel-manager": {
+            "slim-connection": slim_connection,
+            "api-server": api_server,
+            "local-name": cm_name,
+            "auth": {
+                "type": "jwt",
+                "private_key": { "file": file("cm.pem") },
+                "trusted_keys": { "file": file("members.jwks.json") },
+            },
+        }});
+        std::fs::write(file("config.yaml"), config.to_string()).unwrap();
+
+        let log = std::fs::File::create(env("SHADI_E2E_CM_LOG")).unwrap();
+        let _cm = Running(
+            std::process::Command::new(env("SHADI_E2E_CHANNEL_MANAGER"))
+                .env(
+                    "RUST_LOG",
+                    std::env::var("SHADI_E2E_CM_RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+                )
+                .arg("--config-file")
+                .arg(file("config.yaml"))
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .expect("start the channel manager"),
+        );
+        let up = (0..60).any(|_| {
+            std::thread::sleep(Duration::from_millis(500));
+            std::net::TcpStream::connect(&api_addr).is_ok()
+        });
+        assert!(up, "the channel manager API never came up");
+
+        // The owner service, answering for rooms the channel manager lists
+        // with this owner. Codex may add anyone but the stranger.
+        let policy = format!(
+            r#"{{"default": "block", "rules": [
+                {{"channel": "*", "invitee": "agntcy/shadi/stranger", "decision": "block"}},
+                {{"channel": "*", "requested_by": "{}", "decision": "allow"}}
+            ]}}"#,
+            codex.did()
+        );
+        std::env::set_var(
+            "SHADI_CHANNEL_MANAGER_ENDPOINT",
+            format!("http://{api_addr}"),
+        );
+        std::env::set_var("SHADI_CHANNEL_MANAGER_NAME", cm_name);
+        let channel_manager = Arc::new(ChannelManagerState::default());
+        channel_manager.init(dir.path().to_path_buf()).unwrap();
+        let cm_config = channel_manager.require().unwrap();
+        let state = SlimState::default();
+        let core = Owner::new(
+            state.owner_identity().unwrap(),
+            OwnerPolicy::from_json(&policy).unwrap(),
+            None,
+        );
+        let core = Arc::new(Mutex::new(core));
+        let executor = OwnerExecutor::new(core.clone(), Arc::new(state.room_inviter(owner.did())));
+        let service = state
+            .serve_owner(executor, Arc::new(Approvals::new(core)), channel_manager)
+            .expect("serve the owner service");
+        println!("owner service ready at {service}");
+
+        api(
+            &cm_config,
+            &owner,
+            Call::Create(cm::CreateChannelRequest {
+                channel_name: room.clone(),
+                mls_enabled: true,
+                owner_callback_name: Some(service),
+                ttl_seconds: None,
+            }),
+        )
+        .expect("create the room as its owner");
+
+        let add = |participant: &str| {
+            api(
+                &cm_config,
+                &codex,
+                Call::Add(cm::AddParticipantRequest {
+                    channel_name: room.clone(),
+                    participant_name: participant.to_string(),
+                    grant: None,
+                }),
+            )
+        };
+        add(invitee).expect("the owner grants codex's request");
+        let Reply::Participants(participants) =
+            api(&cm_config, &owner, Call::ListParticipants(room.clone())).unwrap()
+        else {
+            panic!("expected participants");
+        };
+        assert!(
+            participants.iter().any(|p| p.starts_with(invitee)),
+            "{invitee} isn't in {participants:?}"
+        );
+        let refused = add("agntcy/shadi/stranger");
+        assert!(
+            refused.is_err(),
+            "the owner's rules block the stranger: {:?}",
+            refused.err()
+        );
+        println!(
+            "granted {invitee}; refused the stranger: {}",
+            refused.err().unwrap_or_default()
+        );
+    }
 }
