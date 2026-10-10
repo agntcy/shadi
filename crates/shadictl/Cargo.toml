@@ -36,7 +36,7 @@ slim_proto = { package = "agntcy-slim-proto", version = "0.7.0" }
 slim_config = { package = "agntcy-slim-config", version = "0.16.6" }
 tonic = { version = "0.14" }
 uuid = { version = "1", features = ["v4"] }
-shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../shadi_identity" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../shadi_identity", features = ["openpgp"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bs58 = "0.5"
@@ -54,7 +54,6 @@ signal-hook = "0.4"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
 uds_windows = "1.2"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
@@ -63,11 +62,10 @@ windows-sys = { version = "0.61", features = [
 	"Win32_System_Pipes",
 ] }
 
-[target.'cfg(not(windows))'.dependencies]
-sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
-
 [dev-dependencies]
+# OpenPGP certificate fixtures; the parsing itself is in shadi_identity.
+sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
 # Building OpenSSH key fixtures for the SSH identity tests (agntcy/shadi#140).
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519"] }
 tempfile = "3.27"
-shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../shadi_identity" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../shadi_identity", features = ["openpgp"] }

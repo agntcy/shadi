@@ -999,6 +999,11 @@ pub(crate) struct DeriveAgentIdentityArgs {
 
     #[arg(long = "out-dir", value_name = "DIR")]
     pub(crate) out_dir: Option<PathBuf>,
+
+    /// Only write the DID documents to --out-dir and keep the keys out of the
+    /// secret store, for throwaway identities.
+    #[arg(long = "no-store", requires = "out_dir")]
+    pub(crate) no_store: bool,
 }
 
 #[derive(Parser, Debug)]

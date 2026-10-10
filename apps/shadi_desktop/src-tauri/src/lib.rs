@@ -23,6 +23,7 @@ pub fn run() {
         .manage(std::sync::Arc::new(
             commands::channel_manager::ChannelManagerState::default(),
         ))
+        .manage(commands::terminal::TerminalState::default())
         .setup(|app| {
             // Known rooms are persisted (agntcy/shadi#138); the app data dir is
             // only resolvable once the app exists. A failure here is reported
@@ -78,7 +79,7 @@ pub fn run() {
             commands::identity::identity_did_from_github,
             commands::identity::identity_derive_agent,
             commands::identity::identity_verify_agent,
-            commands::identity::secret_get,
+            commands::identity::secret_exists,
             commands::identity::secret_put_key,
             commands::identity::secret_list_keychain,
             commands::identity::secret_backend_status,
@@ -89,6 +90,10 @@ pub fn run() {
             commands::channel_manager::channel_manager_room_delete,
             commands::channel_manager::channel_manager_participants,
             commands::channel_manager::channel_manager_participant_set,
+            commands::terminal::terminal_open,
+            commands::terminal::terminal_write,
+            commands::terminal::terminal_resize,
+            commands::terminal::terminal_close,
             commands::owner::owner_start,
             commands::owner::owner_status,
             commands::owner::owner_pending,
@@ -110,7 +115,6 @@ pub fn run() {
             commands::slim::slim_controller_list_routes,
             commands::dir::dir_search,
             commands::dir::dir_pull,
-            commands::dir::dir_info,
             commands::dir::dir_register,
             commands::agentbridge::agentbridge_list_adapters,
             commands::agentbridge::agentbridge_handoff,

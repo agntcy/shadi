@@ -39,6 +39,7 @@ a way to pass work to agents that are not on that host.
 
 - [`shadictl`](https://agntcy.github.io/shadi/cli/#shadictl-shadi): the main CLI for policy, sandbox execution, identity, secrets, memory, and shell control.
 - [`agentbridge`](https://agntcy.github.io/shadi/agentbridge/): the A2A interconnect across hosts — coding CLIs (Claude Code, Copilot, Codex, Cursor Agent) are the flagship peers.
+- [SHADI Desktop](https://agntcy.github.io/shadi/desktop/): a native app over the same identity, sandbox, SLIM, directory and coordination features, with the real `shadictl shell` one click away.
 - [`shadi_sandbox`](https://agntcy.github.io/shadi/architecture/#2-sandbox-layer): OS-enforced sandbox policy.
 - [`agent_secrets`](https://agntcy.github.io/shadi/architecture/#1-secrets-layer): keychain-backed secret storage and verification gates.
 - [`shadi_memory`](https://agntcy.github.io/shadi/architecture/#3-memory-layer): SQLCipher-backed local memory.
@@ -80,6 +81,13 @@ Each Homebrew formula builds from its own published release tag
 Both releases also include prebuilt archives for Linux (`x86_64` and
 `aarch64`), macOS (`arm64` and `x86_64`), and Windows (`x86_64`).
 For unreleased changes or any other host, use the source build flow below.
+
+## Install the Desktop App
+
+Unsigned installers for macOS, Windows and Linux are on the
+[`shadi-desktop-v*` releases](https://github.com/agntcy/shadi/releases?q=shadi-desktop&expanded=true).
+See [SHADI Desktop](https://agntcy.github.io/shadi/desktop/) for the first
+launch on each platform and how to verify a download.
 
 ## Quick Start
 

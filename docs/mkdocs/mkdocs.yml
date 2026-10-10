@@ -82,6 +82,7 @@ nav:
       - Design Overview: design.md
   - Guides:
       - Install the CLI: install.md
+      - Desktop App: desktop.md
       - Getting Started: getting_started.md
       - Operations: operations.md
       - Telemetry: telemetry.md
@@ -95,6 +96,7 @@ nav:
       - A2A unicast demo: demos/a2a-grpc.md
       - A2A unicast sample run: demos/a2a-grpc-sample.md
       - AgentBridge: agentbridge.md
+      - Desktop walkthrough: demos/desktop-walkthrough.md
       - ASSEMBLY and CONVERGE: assembly-converge.md
       - Mobile: mobile_integration.md
   - Reference:

@@ -9,8 +9,7 @@ when a panel replaces its module's stubs with real calls into the
 corresponding SHADI crate.
 
 **Scope**: signatures and types. Implementing them is each panel issue's job,
-not this one's — `agentbridge.rs` (#120) and `slim.rs` (#118) are real; the
-remaining modules still return `not_implemented(<panel-issue>)`. Where a panel's
+not this one's, and every module is now implemented. Where a panel's
 implementation had to extend its own signatures, this document follows it rather
 than the other way round.
 
@@ -36,8 +35,8 @@ than the other way round.
   panel can hold a list of sessions from `sandbox_list_sessions` and pass one
   straight back into `policy_query`/`sandbox_status` without a separate
   "open a handle" step.
-- **Secret values never round-trip further than they have to.** `secret_get`
-  returns the raw value (the panel needs it to display it), but
+- **Secret values never round-trip further than they have to.** No command
+  returns a secret-store value: `secret_exists` answers whether a key is stored,
   `secret_list_keychain` returns key names only, and `memory_search`/
   `memory_list` return entry metadata without `payload` — only `memory_get`
   populates that field. Panels must not log or persist values returned by
@@ -90,13 +89,14 @@ than the other way round.
 |---|---|---|
 | `sandbox.rs` | `sandbox_launch`, `sandbox_list_sessions`, `sandbox_attach`, `sandbox_detach`, `sandbox_kill`, `sandbox_status` | `shadictl <flags> -- <cmd>`, shell `/sessions` `/attach` `/detach` `/kill` `/status` |
 | `policy.rs` | `policy_query`, `policy_patch`, `policy_explain`, `policy_diff`, `policy_profiles` | shell `/policy query\|patch\|explain\|diff`, `--profile` |
-| `identity.rs` | `identity_discover_ssh_keys`, `identity_generate_ssh_key`, `identity_bootstrap`, `identity_status`, `identity_trust_github_handle`, `identity_untrust_github_handle`, `identity_did_from_gpg`, `identity_did_from_github`, `identity_derive_agent`, `identity_verify_agent`, `secret_get`, `secret_put_key`, `secret_list_keychain`, `secret_backend_status` | `shadictl did-from-gpg\|did-from-github\|derive-agent-identity\|verify-agent-identity\|get-secret\|put-key`, `--list-keychain` |
+| `identity.rs` | `identity_discover_ssh_keys`, `identity_generate_ssh_key`, `identity_bootstrap`, `identity_status`, `identity_trust_github_handle`, `identity_untrust_github_handle`, `identity_did_from_gpg`, `identity_did_from_github`, `identity_derive_agent`, `identity_verify_agent`, `secret_exists`, `secret_put_key`, `secret_list_keychain`, `secret_backend_status` | `shadictl did-from-gpg\|did-from-github\|derive-agent-identity\|verify-agent-identity\|put-key`, `--list-keychain`; `secret_exists` answers only whether a key is stored, never its value |
 | `slim.rs` | `slim_node_start`, `slim_node_status`, `slim_group_create`, `slim_group_invite`, `slim_group_join`, `slim_group_list`, `slim_group_roster`, `slim_group_remove_member`, `slim_group_forget`, `slim_controller_list_connections`, `slim_controller_list_routes` | shell `/slim start-node\|create-group\|invite\|join\|controller`; the room-list/roster/remove/forget commands have no CLI equivalent (see below) |
 | `owner.rs` | `owner_start`, `owner_status`, `owner_pending`, `owner_approve`, `owner_deny`, `owner_policy_get`, `owner_policy_set`, `owner_audit` | `agentbridge request-invite` is the agent's side; the owner's inbox, rules and audit trail have no CLI equivalent |
 | `channel_manager.rs` | `channel_manager_setup`, `channel_manager_configure`, `channel_manager_rooms`, `channel_manager_room_create`, `channel_manager_room_delete`, `channel_manager_participants`, `channel_manager_participant_set` | `slimctl channel-manager create-channel\|delete-channel\|list-channels\|list-participants\|add-participant\|delete-participant`, as the owner; the owner service also answers the channel manager's `RequestApproval` |
-| `dir.rs` | `dir_search`, `dir_pull`, `dir_info`, `dir_register` | `shadictl dir search\|pull\|info`, `agentbridge register --dir-publish` |
+| `dir.rs` | `dir_search`, `dir_pull`, `dir_register` | `shadictl dir search\|pull`, `agentbridge register --dir-publish`; `dir_search` searches by author when given a DID |
 | `agentbridge.rs` | `agentbridge_list_adapters`, `agentbridge_handoff`, `agentbridge_delegate`, `agentbridge_coordinate` | `agentbridge list\|handoff\|delegate\|coordinate` |
-| `trace_memory.rs` | `trace_list`, `trace_summary`, `memory_get`, `memory_search`, `memory_list` | `shadictl trace list\|summary`, `shadictl memory get\|search\|list` |
+| `terminal.rs` | `terminal_open`, `terminal_write`, `terminal_resize`, `terminal_close` | `shadictl shell` itself, in a pty; output streams over the `terminal_open` channel, and only `shadictl` is ever run |
+| `trace_memory.rs` | `trace_list`, `trace_summary`, `memory_get`, `memory_search`, `memory_list` | `shadictl trace list\|summary`, `shadictl memory get\|search\|list`; every memory command opens the database with the key `shadictl memory` reads |
 
 Full request/response types are in each module — they're the source of
 truth; this table is a map, not a copy.

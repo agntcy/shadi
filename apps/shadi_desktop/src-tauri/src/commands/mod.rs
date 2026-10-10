@@ -4,9 +4,8 @@
 //! The Tauri IPC command contract — see ../../docs/ipc-contract.md.
 //!
 //! `agentbridge`, `slim`, `sandbox`, policy query/patch/explain/diff, and
-//! identity onboarding are implemented. DIR, remaining identity/secrets
-//! commands, and trace/memory still return [`not_implemented`]
-//! (agntcy/shadi#117, #119, #121).
+//! identity, secrets, DIR, and trace/memory are implemented, plus an
+//! embedded `shadictl` terminal.
 
 pub mod agentbridge;
 pub mod bootstrap;
@@ -17,12 +16,5 @@ pub mod owner;
 pub mod policy;
 pub mod sandbox;
 pub mod slim;
+pub mod terminal;
 pub mod trace_memory;
-
-/// Placeholder error for every stub command. `issue` is the panel issue that
-/// will replace this stub with a real implementation.
-pub(crate) fn not_implemented<T>(issue: u32) -> Result<T, String> {
-    Err(format!(
-        "not implemented yet — see agntcy/shadi#{issue}"
-    ))
-}

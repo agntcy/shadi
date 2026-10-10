@@ -27,6 +27,11 @@ slim_persistence = { package = "agntcy-slim-persistence", version = "=0.2.0" }
 # OpenSSH key parsing for the SSH-rooted identity source (agntcy/shadi#140).
 # `encryption` brings bcrypt-pbkdf so passphrase-protected keys work.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "encryption", "rand_core", "getrandom"] }
+# `did-from-gpg`: reading the Ed25519 key out of an OpenPGP certificate.
+sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"], optional = true }
+
+[features]
+openpgp = ["dep:sequoia-openpgp"]
 
 [dev-dependencies]
 slim_config = { package = "agntcy-slim-config", version = "0.16.6" }
