@@ -42,7 +42,7 @@ pub enum Decision {
     Block,
 }
 
-/// A request to let `invitee_name` into `channel`.
+/// A request to let `invitee_name` into `channel`, or to remove them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InviteRequest {
     pub channel: String,
@@ -51,6 +51,8 @@ pub struct InviteRequest {
     pub invitee_name: String,
     /// The DID the room admits under that name, when the requester gave one.
     pub invitee_did: Option<String>,
+    /// Adding the participant, or removing them.
+    pub action: GrantAction,
     /// Who asked: the agent DID its proof established, or the subject a
     /// channel manager verified.
     pub requester: String,
@@ -66,6 +68,8 @@ struct Rule {
     invitee: Option<String>,
     requested_by: Option<String>,
     requested_by_human: Option<String>,
+    /// `add` or `delete`. A rule without one decides only additions.
+    action: Option<GrantAction>,
     decision: Decision,
 }
 
@@ -75,6 +79,7 @@ impl Rule {
             want.as_deref().is_none_or(|want| Some(want) == have)
         };
         (self.channel == "*" || self.channel == request.channel)
+            && self.action.unwrap_or(GrantAction::Add) == request.action
             && match self.invitee.as_deref() {
                 Some(did) if did.starts_with("did:") => Some(did) == request.invitee_did.as_deref(),
                 invitee => is(&invitee.map(str::to_string), Some(&request.invitee_name)),
@@ -397,7 +402,7 @@ impl Owner {
             &self.identity,
             &request.channel,
             &request.invitee_name,
-            GrantAction::Add,
+            request.action,
             GrantRole::Member,
             not_after,
         )
@@ -476,6 +481,7 @@ mod tests {
             channel: channel.to_string(),
             invitee_name: PEER.to_string(),
             invitee_did: Some(cast.peer.did()),
+            action: GrantAction::Add,
             requester: cast.agent.did(),
             requester_human_did: human.map(AgentIdentity::did),
         }
@@ -511,6 +517,42 @@ mod tests {
         assert_eq!(grant.not_after, NOW + DEFAULT_GRANT_SECONDS);
         assert_eq!(owner.audit()[0].by, DecidedBy::Rule(0));
         assert_eq!(owner.audit()[0].outcome, "granted");
+    }
+
+    #[test]
+    fn a_rule_without_an_action_decides_only_additions() {
+        let cast = cast();
+        let removal = InviteRequest {
+            action: GrantAction::Delete,
+            ..request(&cast, ROOM, None)
+        };
+        let mut adder = owner(
+            &cast,
+            r#"{"default": "block", "rules": [{"channel": "*", "decision": "allow"}]}"#,
+        );
+        assert!(matches!(
+            adder.request(request(&cast, ROOM, None), NOW).unwrap(),
+            Outcome::Granted(_)
+        ));
+        assert!(matches!(
+            adder.request(removal.clone(), NOW).unwrap(),
+            Outcome::Refused(_)
+        ));
+        assert_eq!(adder.audit()[1].by, DecidedBy::Default);
+
+        let mut remover = owner(
+            &cast,
+            r#"{"default": "block", "rules": [{"channel": "*", "action": "delete", "decision": "allow"}]}"#,
+        );
+        let Outcome::Granted(grant) = remover.request(removal, NOW).unwrap() else {
+            panic!("expected a grant");
+        };
+        let grant = verify_grant(&grant, &cast.owner.did(), NOW).unwrap();
+        assert_eq!(grant.action, GrantAction::Delete);
+        assert!(matches!(
+            remover.request(request(&cast, ROOM, None), NOW).unwrap(),
+            Outcome::Refused(_)
+        ));
     }
 
     #[test]

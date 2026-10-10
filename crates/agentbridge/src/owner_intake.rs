@@ -15,6 +15,7 @@ use a2a::event::StreamResponse;
 use a2a::*;
 use a2a_server::{AgentExecutor, ExecutorContext};
 use futures::stream::BoxStream;
+use shadi_identity::GrantAction;
 
 use crate::owner::{InviteRequest, Outcome, Owner};
 
@@ -63,6 +64,7 @@ pub fn admit(signed: &[u8], now: u64) -> Result<InviteRequest, String> {
         channel,
         invitee_name,
         invitee_did: Some(invitee_did),
+        action: GrantAction::Add,
         requester: verified.did,
         requester_human_did,
     })

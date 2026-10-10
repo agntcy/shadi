@@ -358,6 +358,7 @@ dependencies = [
  "hkdf 0.13.0",
  "pkcs8 0.11.0",
  "sequoia-openpgp",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "ssh-key",
