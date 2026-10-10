@@ -1,0 +1,185 @@
+name: Release Desktop App
+
+# Unsigned installers for SHADI Desktop (agntcy/shadi#124). Push a
+# `shadi-desktop-v<version>` tag whose version matches tauri.conf.json, or
+# run this by hand for an existing tag. The app has no Apple or Windows
+# code-signing certificate yet, so the OS warns on first launch; each
+# installer still gets a SHA-256 checksum, a keyless cosign signature and a
+# build-provenance attestation, as the CLI archives do.
+
+on:
+  push:
+    tags:
+      - "shadi-desktop-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing shadi-desktop-v<version> tag"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: Create the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Check the tag matches the app version
+        run: |
+          set -euo pipefail
+          version=$(python3 -c "import json; print(json.load(open('apps/shadi_desktop/src-tauri/tauri.conf.json'))['version'])")
+          if [ "$TAG" != "shadi-desktop-v$version" ]; then
+            echo "::error::tag $TAG does not match tauri.conf.json version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # A prerelease that is never "Latest": the latest release stays the CLI's.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$TAG" --verify-tag --prerelease --latest=false \
+            --title "SHADI Desktop $VERSION" \
+            --notes "Unsigned builds of SHADI Desktop $VERSION. macOS and Windows warn before the first launch; see docs/content/desktop.md for how to open them and verify the checksums and signatures."
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      # cosign's keyless signing and actions/attest-build-provenance.
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-26
+            target: aarch64-apple-darwin
+          - name: macOS x86_64
+            runner: macos-26-intel
+            target: x86_64-apple-darwin
+          # 22.04 so the .deb and AppImage run on older glibc too.
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: Windows x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libxdo-dev \
+            patchelf
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 11.28.0
+
+      # No dependency cache: what this job builds is published.
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Install frontend dependencies
+        working-directory: apps/shadi_desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the installers
+        working-directory: apps/shadi_desktop
+        env:
+          # linuxdeploy is itself an AppImage; runners have no FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: pnpm tauri build --target ${{ matrix.target }}
+
+      - name: Collect the installers
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bundle="target/${{ matrix.target }}/release/bundle"
+          find "$bundle" -maxdepth 2 -type f \
+            \( -name '*.dmg' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.msi' -o -name '*-setup.exe' \) -exec cp {} out/ \;
+          shopt -s nullglob
+          found=(out/*)
+          [ ${#found[@]} -gt 0 ] || { echo "::error::no installers under $bundle"; exit 1; }
+          cd out
+          for f in *; do
+            if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi > "$f.sha256"
+          done
+          ls -l
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign the installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in out/*; do
+            case "$f" in *.sha256) continue ;; esac
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            out/*.dmg
+            out/*.deb
+            out/*.rpm
+            out/*.AppImage
+            out/*.msi
+            out/*-setup.exe
+
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" out/* --clobber

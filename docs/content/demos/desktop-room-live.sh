@@ -81,7 +81,7 @@ umask 077
 printf %s "$(openssl rand -hex 32)" >"$E2E/human-seed.txt"
 target/debug/shadictl derive-agent-identity --source seed --in "$E2E/human-seed.txt" \
   --name avatar --name "${AGENTS[0]}" --name "${AGENTS[1]}" \
-  --out-dir "$E2E/identities" >"$E2E/derive.log" 2>&1
+  --out-dir "$E2E/identities" --no-store >"$E2E/derive.log" 2>&1
 
 did_of() {
   python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" \

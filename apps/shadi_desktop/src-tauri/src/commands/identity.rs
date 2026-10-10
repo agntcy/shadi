@@ -17,10 +17,6 @@ use serde::{Deserialize, Serialize};
 use super::bootstrap::{
     self, AgentEntry, IdentityConfig, TrustedHuman, DEFAULT_ENDPOINT,
 };
-use super::not_implemented;
-
-const PANEL_ISSUE: u32 = 117;
-
 /// Where human key material comes from. The CLI models this as two
 /// mutually-exclusive `Option` flags (`--secret` xor `--in <file>`); a tagged
 /// union is a cleaner IPC shape for the same choice.
@@ -62,37 +58,169 @@ pub struct KeychainEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SecretBackend {
-    Keychain,
-    OnePassword { vault: String },
+    /// The OS store: the macOS Keychain, Windows Credential Manager, or the
+    /// Secret Service on Linux. The Desktop is built without the 1Password
+    /// backend, so `SHADI_SECRET_BACKEND` doesn't change it.
+    Keychain { platform: String },
+}
+
+/// Where `derive-agent-identity` keeps agent keys by default.
+const AGENT_PREFIX: &str = "agent_keys";
+
+/// The bytes a source names. They stay in the backend: what crosses IPC is
+/// at most a DID.
+fn read_source(source: &HumanKeySource) -> Result<Vec<u8>, String> {
+    match source {
+        HumanKeySource::SecretRef { key } => agent_secrets::default_store()
+            .get(key)
+            .map(|secret| secret.expose(|bytes| bytes.to_vec()))
+            .map_err(|_| format!("no secret {key}")),
+        HumanKeySource::File { path } => std::fs::read(path).map_err(|e| format!("{path}: {e}")),
+    }
+}
+
+fn did_document(public_key: &[u8]) -> Result<DidDocument, String> {
+    let (did, _, doc) = shadi_identity::did_document::ed25519_did_document(public_key)
+        .map_err(|e| e.to_string())?;
+    Ok(DidDocument {
+        did,
+        document_json: serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    })
+}
+
+fn stored_utf8(store: &dyn agent_secrets::SecretStore, key: &str) -> Option<String> {
+    let secret = store.get(key).ok()?;
+    String::from_utf8(secret.expose(|bytes| bytes.to_vec())).ok()
+}
+
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("task failed: {e}"))?
 }
 
 /// Create a `did:key` document from a GPG key (`did-from-gpg`).
 #[tauri::command]
 pub async fn identity_did_from_gpg(source: HumanKeySource) -> Result<DidDocument, String> {
-    let _ = source;
-    not_implemented(PANEL_ISSUE)
+    blocking(move || {
+        let certificate = read_source(&source)?;
+        let key =
+            shadi_identity::openpgp::ed25519_public_key(&certificate).map_err(|e| e.to_string())?;
+        did_document(&key)
+    })
+    .await
 }
 
-/// Create a `did:key` document from a GitHub user's GPG key (`did-from-github`).
+/// Create a `did:key` document from the Ed25519 SSH key a GitHub user
+/// publishes (`did-from-github --key-type ssh`).
 #[tauri::command]
 pub async fn identity_did_from_github(username: String) -> Result<DidDocument, String> {
-    let _ = username;
-    not_implemented(PANEL_ISSUE)
+    blocking(move || {
+        let handle = username.trim().trim_start_matches('@');
+        if handle.is_empty() {
+            return Err("give a GitHub handle".to_string());
+        }
+        let did = fetch_github_human_did(handle)?;
+        let key = shadi_identity::parse_did_key(&did).map_err(|e| e.to_string())?;
+        did_document(key.as_bytes())
+    })
+    .await
 }
 
-/// Derive one or more local agent identities from a human source
-/// (`derive-agent-identity`).
+/// Derive `names` from `seed` into `store`, as `derive-agent-identity` does.
+fn derive_into(
+    store: &dyn agent_secrets::SecretStore,
+    seed: &[u8],
+    names: &[String],
+    human_did: Option<&str>,
+) -> Result<Vec<AgentIdentity>, String> {
+    if names
+        .iter()
+        .any(|name| name.trim().is_empty() || name.contains('/'))
+    {
+        return Err("agent names must be non-empty and contain no '/'".to_string());
+    }
+    let b64 =
+        |bytes: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+    let mut derived = Vec::new();
+    for name in names {
+        let identity =
+            shadi_identity::AgentIdentity::derive(seed, name).map_err(|e| e.to_string())?;
+        let document = did_document(&identity.verifying_key_bytes())?;
+        let mut entries = vec![
+            ("private", b64(&identity.signing_key_bytes())),
+            ("public", b64(&identity.verifying_key_bytes())),
+            ("did", document.did.clone()),
+            ("diddoc", document.document_json),
+        ];
+        if let Some(human_did) = human_did {
+            entries.push(("human_did", human_did.to_string()));
+        }
+        for (entry, value) in entries {
+            let key = format!("{AGENT_PREFIX}/{name}/{entry}");
+            store
+                .put(&key, value.as_bytes())
+                .map_err(|e| format!("failed to store {key}: {e}"))?;
+        }
+        derived.push(AgentIdentity {
+            agent_name: name.clone(),
+            did: document.did,
+        });
+    }
+    Ok(derived)
+}
+
+/// Compare what `store` holds for `name` with what `seed` derives.
+fn verify_from(
+    store: &dyn agent_secrets::SecretStore,
+    seed: &[u8],
+    name: &str,
+    require_human_binding: bool,
+) -> Result<VerifyAgentIdentityResult, String> {
+    let expected = shadi_identity::AgentIdentity::derive(seed, name).map_err(|e| e.to_string())?;
+    let expected_did = expected.did();
+    let entry = |field: &str| stored_utf8(store, &format!("{AGENT_PREFIX}/{name}/{field}"));
+    let stored_did = entry("did");
+    let stored_public = entry("public").and_then(|b64| {
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim()).ok()
+    });
+    let matches = stored_did.as_deref() == Some(expected_did.as_str())
+        && stored_public.as_deref() == Some(expected.verifying_key_bytes().as_slice());
+    let human_binding_ok = require_human_binding
+        .then(|| entry("human_did").is_some_and(|did| shadi_identity::parse_did_key(&did).is_ok()));
+    Ok(VerifyAgentIdentityResult {
+        matches,
+        expected_did,
+        stored_did,
+        human_binding_ok,
+    })
+}
+
+/// Derive local agent identities from a human source and store them where
+/// `derive-agent-identity` does (`agent_keys/<name>/…`). Returns the DIDs.
 #[tauri::command]
 pub async fn identity_derive_agent(
     source: HumanKeySource,
     agent_names: Vec<String>,
     human_did_key: Option<String>,
 ) -> Result<Vec<AgentIdentity>, String> {
-    let _ = (source, agent_names, human_did_key);
-    not_implemented(PANEL_ISSUE)
+    blocking(move || {
+        let seed = read_source(&source)?;
+        let store = agent_secrets::default_store();
+        let human_did = match &human_did_key {
+            Some(key) => Some(
+                stored_utf8(store.as_ref(), key).ok_or_else(|| format!("no human DID at {key}"))?,
+            ),
+            None => None,
+        };
+        derive_into(store.as_ref(), &seed, &agent_names, human_did.as_deref())
+    })
+    .await
 }
 
-/// Recompute the expected agent key/DID and compare to stored values
+/// Re-derive an agent from its human source and compare with what is stored
 /// (`verify-agent-identity`).
 #[tauri::command]
 pub async fn identity_verify_agent(
@@ -100,37 +228,67 @@ pub async fn identity_verify_agent(
     agent_name: String,
     require_human_binding: bool,
 ) -> Result<VerifyAgentIdentityResult, String> {
-    let _ = (source, agent_name, require_human_binding);
-    not_implemented(PANEL_ISSUE)
+    blocking(move || {
+        let seed = read_source(&source)?;
+        let store = agent_secrets::default_store();
+        verify_from(store.as_ref(), &seed, &agent_name, require_human_binding)
+    })
+    .await
 }
 
-/// Read a secret from the SHADI secret store (`get-secret`). Returns the
-/// secret value — the panel must not log or persist this outside memory.
+/// Whether the secret store holds `key`. Never returns the value: the UI
+/// has no need for it.
 #[tauri::command]
-pub async fn secret_get(key: String) -> Result<String, String> {
-    let _ = key;
-    not_implemented(PANEL_ISSUE)
+pub async fn secret_exists(key: String) -> Result<bool, String> {
+    blocking(move || Ok(agent_secrets::default_store().get(&key).is_ok())).await
 }
 
-/// Store an OpenPGP key in the SHADI secret store (`put-key`).
+/// Store an OpenPGP key from a file in the SHADI secret store (`put-key`).
 #[tauri::command]
 pub async fn secret_put_key(key: String, openpgp_key_path: String) -> Result<(), String> {
-    let _ = (key, openpgp_key_path);
-    not_implemented(PANEL_ISSUE)
+    blocking(move || {
+        if key.trim().is_empty() {
+            return Err("give the key a name".to_string());
+        }
+        let payload =
+            std::fs::read(&openpgp_key_path).map_err(|e| format!("{openpgp_key_path}: {e}"))?;
+        shadi_identity::openpgp::ed25519_public_key(&payload)
+            .map_err(|e| format!("{openpgp_key_path} is not an OpenPGP Ed25519 key: {e}"))?;
+        agent_secrets::default_store()
+            .put(&key, &payload)
+            .map_err(|e| format!("failed to store {key}: {e}"))
+    })
+    .await
 }
 
 /// List keys under a prefix (`--list-keychain` / `--list-prefix`). Returns
 /// key names only — never values.
 #[tauri::command]
 pub async fn secret_list_keychain(prefix: Option<String>) -> Result<Vec<KeychainEntry>, String> {
-    let _ = prefix;
-    not_implemented(PANEL_ISSUE)
+    blocking(move || {
+        let mut keys = agent_secrets::default_store()
+            .list_keys()
+            .map_err(|e| e.to_string())?;
+        if let Some(prefix) = prefix.as_deref().filter(|p| !p.is_empty()) {
+            keys.retain(|key| key.starts_with(prefix));
+        }
+        keys.sort();
+        Ok(keys.into_iter().map(|key| KeychainEntry { key }).collect())
+    })
+    .await
 }
 
-/// Which secret backend is active (`SHADI_SECRET_BACKEND`).
+/// Which secret store this app uses.
 #[tauri::command]
 pub async fn secret_backend_status() -> Result<SecretBackend, String> {
-    not_implemented(PANEL_ISSUE)
+    let platform = match std::env::consts::OS {
+        "macos" => "macOS Keychain",
+        "windows" => "Windows Credential Manager",
+        _ => "Secret Service",
+    };
+    Ok(SecretBackend::Keychain {
+        platform: platform.to_string(),
+    })
 }
 
 // --- SSH onboarding (agntcy/shadi#123) ---------------------------------------
@@ -692,6 +850,65 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MemoryStore(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+
+    impl agent_secrets::SecretStore for MemoryStore {
+        fn put(&self, key: &str, secret: &[u8]) -> agent_secrets::SecretResult<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), secret.to_vec());
+            Ok(())
+        }
+        fn get(&self, key: &str) -> agent_secrets::SecretResult<agent_secrets::SecretBytes> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|v| agent_secrets::SecretBytes::new(v.clone()))
+                .ok_or(agent_secrets::SecretError::StorageFailure)
+        }
+        fn delete(&self, key: &str) -> agent_secrets::SecretResult<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+        fn list_keys(&self) -> agent_secrets::SecretResult<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().cloned().collect())
+        }
+    }
+
+    #[test]
+    fn a_derived_agent_verifies_and_a_different_seed_does_not() {
+        let store = MemoryStore::default();
+        let names = vec!["claude-code".to_string()];
+        let human = shadi_identity::AgentIdentity::generate().unwrap().did();
+        let derived = derive_into(&store, b"seed-a", &names, Some(&human)).unwrap();
+        assert_eq!(
+            derived[0].did,
+            shadi_identity::AgentIdentity::derive(b"seed-a", "claude-code")
+                .unwrap()
+                .did()
+        );
+
+        let ok = verify_from(&store, b"seed-a", "claude-code", true).unwrap();
+        assert!(ok.matches && ok.human_binding_ok == Some(true), "{ok:?}");
+        let wrong = verify_from(&store, b"seed-b", "claude-code", false).unwrap();
+        assert!(
+            !wrong.matches && wrong.human_binding_ok.is_none(),
+            "{wrong:?}"
+        );
+        assert!(derive_into(&store, b"seed-a", &["a/b".to_string()], None).is_err());
+    }
+
+    #[test]
+    fn a_did_document_names_the_key_it_was_built_from() {
+        let identity = shadi_identity::AgentIdentity::generate().unwrap();
+        let doc = did_document(&identity.verifying_key_bytes()).unwrap();
+        assert_eq!(doc.did, identity.did());
+        assert!(doc.document_json.contains(&identity.did()));
+    }
 
     fn ed25519_line() -> (String, String) {
         let seed = [3u8; 32];
