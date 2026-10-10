@@ -41,11 +41,11 @@ uuid = { version = "1", features = ["v4"] }
 # Kept in step with the root SHADI workspace. The `=` pins these carried are
 # gone: they existed because a2a-slimrpc required older
 # agntcy-slim-service/agntcy-slim-proto, which 0.2.5 no longer does.
-slim = { package = "agntcy-slim", version = "3.0.1" }
-slim_rpc = { package = "agntcy-slim-rpc", version = "3.0.1" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "3.0.1" }
-slim_proto = { package = "agntcy-slim-proto", version = "0.6.5" }
-slim_config = { package = "agntcy-slim-config", version = "0.16.5" }
+slim = { package = "agntcy-slim", version = "3.1.0" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "3.1.0" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "3.1.0" }
+slim_proto = { package = "agntcy-slim-proto", version = "0.7.0" }
+slim_config = { package = "agntcy-slim-config", version = "0.16.6" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../../../crates/shadi_identity", features = ["openpgp"] }
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.3.0", path = "../../../crates/shadi_sandbox" }
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.1", path = "../../../crates/agent_secrets" }
