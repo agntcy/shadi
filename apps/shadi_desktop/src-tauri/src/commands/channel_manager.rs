@@ -37,6 +37,9 @@ pub const APPROVAL_METHOD: &str = "RequestApproval";
 /// denial, so an ask is answered before then.
 const ANSWER_WITHIN_SECONDS: u64 = 55;
 const API_TIMEOUT: Duration = Duration::from_secs(10);
+/// A participant change can wait the channel manager's 60 s for the owner,
+/// then for the invite.
+const PARTICIPANT_TIMEOUT: Duration = Duration::from_secs(90);
 const TOKEN_TTL: Duration = Duration::from_secs(300);
 
 /// Where the channel manager is. Saved in `channel-manager.json`, or given as
@@ -177,6 +180,10 @@ fn api_client_config(
 /// One API call as the owner. Blocks, so call it off the async runtime.
 fn api(config: &ChannelManagerConfig, owner: &AgentIdentity, call: Call) -> Result<Reply, String> {
     let client_config = api_client_config(config, owner)?;
+    let timeout = match call {
+        Call::Add(_) | Call::Remove(_) => PARTICIPANT_TIMEOUT,
+        _ => API_TIMEOUT,
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -249,7 +256,7 @@ fn api(config: &ChannelManagerConfig, owner: &AgentIdentity, call: Call) -> Resu
                 }
             }
         };
-        tokio::time::timeout(API_TIMEOUT, reply)
+        tokio::time::timeout(timeout, reply)
             .await
             .map_err(|_| "the channel manager didn't answer in time".to_string())?
     })
