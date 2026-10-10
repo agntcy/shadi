@@ -2356,6 +2356,49 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn run_cli_derive_agent_identity_no_store_writes_only_the_did_documents() {
+        let root_key = unique_key("no-store-seed");
+        test_store_put(&root_key, b"no-store-seed");
+        let agent = unique_key("no-store-agent");
+        let dir = temp_dir();
+        let derive = |extra: &[&str]| {
+            let mut cli = build_cli();
+            cli.run_command = [
+                "derive-agent-identity",
+                "--source",
+                "seed",
+                "--human-secret",
+                &root_key,
+                "--name",
+                &agent,
+                "--prefix",
+                "agents",
+                "--no-store",
+            ]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect();
+            run_cli(cli)
+        };
+
+        assert_ne!(derive(&[]), ExitCode::from(0), "--no-store needs --out-dir");
+
+        let out_dir = dir.path().to_str().expect("utf8 path");
+        assert_eq!(derive(&["--out-dir", out_dir]), ExitCode::from(0));
+        let doc = std::fs::read_to_string(dir.path().join(format!("{agent}.did.json")))
+            .expect("read did doc");
+        assert!(doc.contains("\"did:key:"));
+        for entry in ["private", "public", "did", "diddoc"] {
+            assert_eq!(
+                test_store_get(&format!("agents/{agent}/{entry}")),
+                None,
+                "{entry} was stored"
+            );
+        }
+    }
+
+    #[test]
     fn run_cli_derive_agent_identity_stores_human_did_binding() {
         let root_key = unique_key("human-gpg");
         test_store_put(&root_key, b"root-secret");
@@ -2394,6 +2437,7 @@ members = [{ did = "did:key:zA", role = "human" }]
             prefix: "agents".to_string(),
             human_did_key: None,
             out_dir: None,
+            no_store: false,
         });
 
         assert_eq!(code, ExitCode::from(2));
@@ -2413,6 +2457,7 @@ members = [{ did = "did:key:zA", role = "human" }]
             prefix: "agents".to_string(),
             human_did_key: Some(unique_key("missing-human-did-key")),
             out_dir: None,
+            no_store: false,
         });
 
         assert_eq!(code, ExitCode::from(2));
@@ -2435,6 +2480,7 @@ members = [{ did = "did:key:zA", role = "human" }]
             prefix: "agents".to_string(),
             human_did_key: None,
             out_dir: Some(out_dir),
+            no_store: false,
         });
 
         assert_eq!(code, ExitCode::from(2));
@@ -2460,6 +2506,7 @@ members = [{ did = "did:key:zA", role = "human" }]
             prefix: "agents".to_string(),
             human_did_key: None,
             out_dir: None,
+            no_store: false,
         });
 
         test_store_clear_failures();
@@ -3322,6 +3369,7 @@ members = [{ did = "did:key:zA", role = "human" }]
             prefix: prefix.clone(),
             human_did_key: None,
             out_dir: None,
+            no_store: false,
         });
         assert_eq!(code, ExitCode::from(0));
 
@@ -3367,6 +3415,7 @@ members = [{ did = "did:key:zA", role = "human" }]
                 prefix: prefix.clone(),
                 human_did_key: None,
                 out_dir: None,
+                no_store: false,
             });
             assert_eq!(code, ExitCode::from(0));
             dids.push(

@@ -24,6 +24,7 @@ use shadi_sandbox::{spawn_sandboxed, NetAllowlist, NetProxy, SandboxPolicy};
 use agent_secrets::SecretStore;
 use shadi_memory::{MemoryEntry, SqlCipherStore};
 use slim_mas::{is_member_allowed, load_config as load_mas_config, resolve_group, resolve_group_dids};
+#[cfg(test)]
 use sequoia_openpgp as openpgp;
 use tracing::{field, info_span};
 

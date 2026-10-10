@@ -485,6 +485,9 @@ cargo run -p agntcy-shadi-cli -- \
   --out-dir ./agent-dids
 ```
 
+Add `--no-store` to write only the DID documents to `--out-dir` and leave the
+secret store untouched, for throwaway identities such as a test's.
+
 For identities that are neither GPG nor SSH, store source material in SHADI and
 use `--source seed`:
 
