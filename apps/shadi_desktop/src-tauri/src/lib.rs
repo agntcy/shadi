@@ -20,6 +20,9 @@ pub fn run() {
         .manage(commands::slim::SlimState::default())
         .manage(commands::sandbox::SandboxState::default())
         .manage(commands::owner::OwnerState::default())
+        .manage(std::sync::Arc::new(
+            commands::channel_manager::ChannelManagerState::default(),
+        ))
         .manage(commands::terminal::TerminalState::default())
         .setup(|app| {
             // Known rooms are persisted (agntcy/shadi#138); the app data dir is
@@ -37,6 +40,9 @@ pub fn run() {
                         Ok(true) => {}
                         Ok(false) => eprintln!("info: no identity yet — run onboarding"),
                         Err(err) => eprintln!("warning: could not load identity: {err}"),
+                    }
+                    if let Err(err) = commands::channel_manager::init(app.handle()) {
+                        eprintln!("warning: could not load the channel manager config: {err}");
                     }
                     // The transport reads mTLS material from SHADI_TMP_DIR; point
                     // it at the app's own directory unless the operator set one.
@@ -77,6 +83,13 @@ pub fn run() {
             commands::identity::secret_put_key,
             commands::identity::secret_list_keychain,
             commands::identity::secret_backend_status,
+            commands::channel_manager::channel_manager_setup,
+            commands::channel_manager::channel_manager_configure,
+            commands::channel_manager::channel_manager_rooms,
+            commands::channel_manager::channel_manager_room_create,
+            commands::channel_manager::channel_manager_room_delete,
+            commands::channel_manager::channel_manager_participants,
+            commands::channel_manager::channel_manager_participant_set,
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,

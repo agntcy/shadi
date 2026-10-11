@@ -16,6 +16,7 @@ use agentbridge::owner_intake::{Inviter, OwnerExecutor};
 use serde::Serialize;
 use tauri::Manager;
 
+use super::channel_manager::{Answer, Approvals, ChannelManagerState};
 use super::slim::{RoomInviter, SlimState};
 
 const POLICY_FILE: &str = "owner-policy.json";
@@ -26,9 +27,22 @@ const AUDIT_SHOWN: usize = 500;
 #[derive(Default)]
 pub struct OwnerState(Mutex<Option<Running>>);
 
+impl OwnerState {
+    /// The SLIM name the owner service answers at, once it runs.
+    pub fn service(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "owner state poisoned")?
+            .as_ref()
+            .map(|running| running.service.clone()))
+    }
+}
+
 struct Running {
     owner: Arc<Mutex<Owner>>,
     inviter: Arc<RoomInviter>,
+    approvals: Arc<Approvals>,
     owner_did: String,
     service: String,
 }
@@ -39,7 +53,8 @@ pub struct OwnerStatus {
     pub owner_did: Option<String>,
     /// The SLIM name agents send requests to.
     pub service: Option<String>,
-    /// The rooms this Desktop moderates, which the owner holds.
+    /// The rooms this Desktop moderates, and those a channel manager lists
+    /// with this owner: the rooms the owner holds.
     pub channels: Vec<String>,
 }
 
@@ -65,11 +80,21 @@ fn load_policy(path: &PathBuf) -> Result<OwnerPolicy, String> {
     }
 }
 
-/// Run `f` on the running owner, after holding exactly the rooms this Desktop
-/// moderates now: a room created or forgotten since the last call counts.
+fn held_channels(
+    slim: &SlimState,
+    channel_manager: &ChannelManagerState,
+) -> Result<Vec<String>, String> {
+    let mut channels = slim.moderated_channels()?;
+    channels.extend(channel_manager.owned());
+    Ok(channels)
+}
+
+/// Run `f` on the running owner, after holding exactly the rooms it owns now:
+/// a room created or forgotten since the last call counts.
 fn with_owner<T>(
     owner: &OwnerState,
     slim: &SlimState,
+    channel_manager: &ChannelManagerState,
     f: impl FnOnce(&Running, &mut Owner) -> Result<T, String>,
 ) -> Result<T, String> {
     let running = owner.0.lock().map_err(|_| "owner state poisoned")?;
@@ -77,11 +102,15 @@ fn with_owner<T>(
         .as_ref()
         .ok_or_else(|| "the owner service isn't running; start it first".to_string())?;
     let mut core = running.owner.lock().map_err(|_| "owner poisoned")?;
-    core.hold_only(slim.moderated_channels()?);
+    core.hold_only(held_channels(slim, channel_manager)?);
     f(running, &mut core)
 }
 
-fn status(owner: &OwnerState, slim: &SlimState) -> Result<OwnerStatus, String> {
+fn status(
+    owner: &OwnerState,
+    slim: &SlimState,
+    channel_manager: &ChannelManagerState,
+) -> Result<OwnerStatus, String> {
     let running = owner
         .0
         .lock()
@@ -92,10 +121,10 @@ fn status(owner: &OwnerState, slim: &SlimState) -> Result<OwnerStatus, String> {
             running: false,
             owner_did: None,
             service: None,
-            channels: slim.moderated_channels()?,
+            channels: held_channels(slim, channel_manager)?,
         });
     }
-    with_owner(owner, slim, |running, core| {
+    with_owner(owner, slim, channel_manager, |running, core| {
         Ok(OwnerStatus {
             running: true,
             owner_did: Some(running.owner_did.clone()),
@@ -111,6 +140,7 @@ pub async fn owner_start(
     app: tauri::AppHandle,
     slim: tauri::State<'_, SlimState>,
     owner: tauri::State<'_, OwnerState>,
+    channel_manager: tauri::State<'_, Arc<ChannelManagerState>>,
 ) -> Result<OwnerStatus, String> {
     if owner
         .0
@@ -122,31 +152,37 @@ pub async fn owner_start(
         let identity = slim.owner_identity()?;
         let owner_did = identity.did();
         let mut core = Owner::new(identity, policy, Some(data_file(&app, AUDIT_FILE)?));
-        core.hold_only(slim.moderated_channels()?);
+        core.hold_only(held_channels(&slim, &channel_manager)?);
         let core = Arc::new(Mutex::new(core));
         let inviter = Arc::new(slim.room_inviter(owner_did.clone()));
+        let approvals = Arc::new(Approvals::new(core.clone()));
         let executor = OwnerExecutor::new(core.clone(), inviter.clone());
 
         let handle = slim.inner().clone();
-        let service = tauri::async_runtime::spawn_blocking(move || handle.serve_owner(executor))
-            .await
-            .map_err(|e| format!("task failed: {e}"))??;
+        let serving = (approvals.clone(), channel_manager.inner().clone());
+        let service = tauri::async_runtime::spawn_blocking(move || {
+            handle.serve_owner(executor, serving.0, serving.1)
+        })
+        .await
+        .map_err(|e| format!("task failed: {e}"))??;
         *owner.0.lock().map_err(|_| "owner state poisoned")? = Some(Running {
             owner: core,
             inviter,
+            approvals,
             owner_did,
             service,
         });
     }
-    status(&owner, &slim)
+    status(&owner, &slim, &channel_manager)
 }
 
 #[tauri::command]
 pub async fn owner_status(
     slim: tauri::State<'_, SlimState>,
     owner: tauri::State<'_, OwnerState>,
+    channel_manager: tauri::State<'_, Arc<ChannelManagerState>>,
 ) -> Result<OwnerStatus, String> {
-    status(&owner, &slim)
+    status(&owner, &slim, &channel_manager)
 }
 
 /// Asks waiting for the owner, after denying those that timed out.
@@ -154,29 +190,45 @@ pub async fn owner_status(
 pub async fn owner_pending(
     slim: tauri::State<'_, SlimState>,
     owner: tauri::State<'_, OwnerState>,
+    channel_manager: tauri::State<'_, Arc<ChannelManagerState>>,
 ) -> Result<Vec<PendingAsk>, String> {
-    with_owner(&owner, &slim, |_, core| {
+    with_owner(&owner, &slim, &channel_manager, |_, core| {
         core.expire(now()).map_err(|e| e.to_string())?;
         Ok(core.pending().cloned().collect())
     })
 }
 
-/// Allow an ask: sign its grant and send the invite.
+/// Allow an ask: sign its grant, and either hand it to the channel manager
+/// waiting on it or send the invite.
 #[tauri::command]
 pub async fn owner_approve(
     slim: tauri::State<'_, SlimState>,
     owner: tauri::State<'_, OwnerState>,
+    channel_manager: tauri::State<'_, Arc<ChannelManagerState>>,
     ask_id: u64,
 ) -> Result<(), String> {
-    let (grant, request, inviter) = with_owner(&owner, &slim, |running, core| {
-        let request = core
-            .pending()
-            .find(|ask| ask.id == ask_id)
-            .map(|ask| ask.request.clone())
-            .ok_or_else(|| format!("no pending ask {ask_id}"))?;
-        let grant = core.approve(ask_id, now()).map_err(|e| e.to_string())?;
-        Ok((grant, request, running.inviter.clone()))
-    })?;
+    let (grant, request, inviter, approvals) =
+        with_owner(&owner, &slim, &channel_manager, |running, core| {
+            let request = core
+                .pending()
+                .find(|ask| ask.id == ask_id)
+                .map(|ask| ask.request.clone())
+                .ok_or_else(|| format!("no pending ask {ask_id}"))?;
+            let grant = core.approve(ask_id, now()).map_err(|e| e.to_string())?;
+            Ok((
+                grant,
+                request,
+                running.inviter.clone(),
+                running.approvals.clone(),
+            ))
+        })?;
+    if approvals.is_waiting(ask_id) {
+        return if approvals.answer(ask_id, Answer::Grant(grant)) {
+            Ok(())
+        } else {
+            Err("the channel manager stopped waiting for this answer".to_string())
+        };
+    }
     // The invite blocks on SLIM, which an async worker can't enter.
     tauri::async_runtime::spawn_blocking(move || inviter.invite(&grant, &request))
         .await
@@ -187,11 +239,15 @@ pub async fn owner_approve(
 pub async fn owner_deny(
     slim: tauri::State<'_, SlimState>,
     owner: tauri::State<'_, OwnerState>,
+    channel_manager: tauri::State<'_, Arc<ChannelManagerState>>,
     ask_id: u64,
 ) -> Result<(), String> {
-    with_owner(&owner, &slim, |_, core| {
-        core.deny(ask_id, now()).map_err(|e| e.to_string())
-    })
+    let approvals = with_owner(&owner, &slim, &channel_manager, |running, core| {
+        core.deny(ask_id, now()).map_err(|e| e.to_string())?;
+        Ok(running.approvals.clone())
+    })?;
+    approvals.answer(ask_id, Answer::Denied("denied by the owner".to_string()));
+    Ok(())
 }
 
 /// The standing rules as saved, or `{}` (ask for everything) before any save.
@@ -265,9 +321,10 @@ mod tests {
     fn nothing_runs_until_the_owner_service_starts() {
         let owner = OwnerState::default();
         let slim = SlimState::default();
-        let err = with_owner(&owner, &slim, |_, _| Ok(())).unwrap_err();
+        let channel_manager = ChannelManagerState::default();
+        let err = with_owner(&owner, &slim, &channel_manager, |_, _| Ok(())).unwrap_err();
         assert!(err.contains("start it first"), "{err}");
-        let idle = status(&owner, &slim).unwrap();
+        let idle = status(&owner, &slim, &channel_manager).unwrap();
         assert!(!idle.running && idle.owner_did.is_none());
     }
 }

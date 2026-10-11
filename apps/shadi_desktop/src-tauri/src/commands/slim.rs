@@ -278,11 +278,14 @@ impl SlimState {
     }
 
     /// Serve `executor` as the owner's A2A service at `<local name>-owner`,
-    /// authenticated as the owner identity. Blocks on SLIM, so call it from a
-    /// blocking thread. Starting it again returns the running service.
+    /// authenticated as the owner identity, along with a channel manager's
+    /// approval requests. Blocks on SLIM, so call it from a blocking thread.
+    /// Starting it again returns the running service.
     pub fn serve_owner(
         &self,
         executor: agentbridge::owner_intake::OwnerExecutor,
+        approvals: Arc<super::channel_manager::Approvals>,
+        channel_manager: Arc<super::channel_manager::ChannelManagerState>,
     ) -> Result<String, String> {
         let mut inner = self.0.lock().map_err(|_| "SLIM state poisoned")?;
         if let Some(service) = &inner.owner_service {
@@ -308,6 +311,14 @@ impl SlimState {
             a2a_server::InMemoryTaskStore::new(),
         ));
         shadi_a2a::SlimRpcHandler::new(handler).register(server.as_ref());
+        // The same name answers a channel manager's approval requests
+        // (agntcy/shadi#442), which is why rooms name it as their callback.
+        super::channel_manager::register_approval(
+            server.as_ref(),
+            approvals,
+            channel_manager,
+            self.clone(),
+        );
         let serving = server.clone();
         slim_bindings::get_runtime().spawn(async move {
             if let Err(err) = serving.serve().await {
@@ -1539,8 +1550,11 @@ mod tests {
         owner.hold_only(state.moderated_channels().expect("moderated rooms"));
         let owner = Arc::new(Mutex::new(owner));
         let executor = OwnerExecutor::new(owner.clone(), Arc::new(state.room_inviter(owner_did)));
+        let approvals = Arc::new(crate::commands::channel_manager::Approvals::new(
+            owner.clone(),
+        ));
         let service = state
-            .serve_owner(executor)
+            .serve_owner(executor, approvals, Arc::default())
             .expect("serve the owner service");
         // The harness waits for this line before sending the request.
         println!("owner service ready at {service}");
