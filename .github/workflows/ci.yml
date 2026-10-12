@@ -77,14 +77,14 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup Rust
         if: needs.changes.outputs.workspace == 'true'
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
       - name: Setup Python
         if: needs.changes.outputs.workspace == 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Restore Rust cache
         if: needs.changes.outputs.workspace == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -96,7 +96,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install just
         if: runner.os == 'Windows' && needs.changes.outputs.workspace == 'true'
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
         with:
           tool: just
       - name: Set OpenSSL env vars (Windows)
@@ -144,15 +144,15 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup Rust
         if: needs.changes.outputs.workspace == 'true'
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
           components: clippy
       - name: Setup Python
         if: needs.changes.outputs.workspace == 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Restore Rust cache
         if: needs.changes.outputs.workspace == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -180,9 +180,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
       # `cargo test` below does not pass --locked, so a PR that changes a
       # dependency without committing the lock would pass silently and leave
       # main to resolve it. `cargo metadata` resolves without compiling, so
