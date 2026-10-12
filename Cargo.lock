@@ -456,9 +456,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim"
-version = "3.2.1"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "014d88ac87fbd774ebfaa913fd6a5be8895ccdd26bbc2edf8aeee120b2e77a00"
+checksum = "11ee03961d78efe5cb89601d83e81533e581f2c05275fe3cfabe19ad6a3e938b"
 dependencies = [
  "agntcy-slim-config",
  "agntcy-slim-service",
@@ -481,9 +481,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-auth"
-version = "0.17.1"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2adbfce7c908cc24dbae16e79e40d8defc4b3706d6a422700b6bc45286fd6168"
+checksum = "faa7786f26f15f5c7c81053807eef5611a623321bb81bd85b6e0b72b9c5a31d5"
 dependencies = [
  "agntcy-slim-version",
  "aws-lc-rs",
@@ -531,9 +531,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-bindings"
-version = "3.2.1"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0366010a91e5c4cb44bbb35969ce15927a6eb4f0a68d17a1f343d8ae7ef4754b"
+checksum = "28b4927a3b814643872ee6424480dc85fb80984f58001c033d0e643127553660"
 dependencies = [
  "agntcy-slim",
  "agntcy-slim-auth",
@@ -563,9 +563,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-config"
-version = "0.17.1"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc5102f3be986554809a51f9bc6245452224de17994ff9af95bc3d425e10c834"
+checksum = "9b4d620026b3ede04e77ca7d001f63f2bc9fbbff285ca42555b40089047e8e80"
 dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-version",
@@ -621,9 +621,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-controller"
-version = "0.13.7"
+version = "0.13.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfd5f16f6ae7871ab756baecb5b1470a07f2a27e38d6a5f816d34828ee9841d5"
+checksum = "0a4895cb7803aaf9518fe74aa842d276ddae67d4294186cefc01e562af1300be"
 dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-config",
@@ -654,9 +654,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-datapath"
-version = "0.19.5"
+version = "0.19.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90eae2330176120a6877d8896c280290a2b5e205875eaf09ece26e52dbba79b1"
+checksum = "f843ef7a0b38d2bed54787bfed956a3e0f07a69aecdf525c71b66b473822d01e"
 dependencies = [
  "agntcy-slim-config",
  "agntcy-slim-proto",
@@ -702,9 +702,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-mls"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3adad6b78f4ee7c1e25bcb85f81ecbe6c1d0cb3bbd9b2acc04dc90980ab01725"
+checksum = "171d069fdf4ba1020c580eef2046ceffc378574e16ddc41a1f48df8306d44267"
 dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-persistence",
@@ -744,9 +744,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-proto"
-version = "0.7.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c0761c39d1c3c28af85527a4247ad26053c28de04eb8e5ef17f338d471b5a8e"
+checksum = "da1782168544f21ceaac15c00c34ee5a3bbbc847048b8916e8a5f929355d5b52"
 dependencies = [
  "agntcy-slim-config",
  "agntcy-slim-version",
@@ -764,9 +764,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-rpc"
-version = "3.2.1"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2abf229208006b61eab9579bf95fdd495725663a3d31130bf8ca002a92140e09"
+checksum = "d639d2a60a65f2ec011dab3f697950472ab565d962520440ac032cb424d84bca"
 dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-datapath",
@@ -788,9 +788,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-service"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e514ce8144491fe4850f37e3d1e97d160e34b518f1594f554f45d7e0579aaf9"
+checksum = "14859f46d6e36b3c88c3d1fa43e99adb6df4184436d0a3cc86d4f6ef98ce09fe"
 dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-config",
@@ -816,9 +816,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-session"
-version = "0.7.17"
+version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e28c87b848bf70a9018cc26f683d9acc8c43486823c99c9d878b2f3777e8961"
+checksum = "0055c23d28439066cc7322b5b30d95ec5ad5aa459d189b0606564826555e1b6c"
 dependencies = [
  "agntcy-slim-auth",
  "agntcy-slim-datapath",
@@ -850,9 +850,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-signal"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa9372a922934ecdb6a750535ba66073fdfa12a1b201932828ec4670a2583376"
+checksum = "97ee96acc9b7484cd7372a0a572753ad7862a126b230a8c8f57d1b35f6a6cdea"
 dependencies = [
  "agntcy-slim-version",
  "tokio",
@@ -861,9 +861,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-tracing"
-version = "0.4.27"
+version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "155c7526f41df54434c1c57cb9bbd66ef0e417abdea9a85ba599ef9b7207736e"
+checksum = "4404c9b77a108f204625bb15d1fac0065e2b2a3db0c88f66967748ee1fc45846"
 dependencies = [
  "agntcy-slim-config",
  "agntcy-slim-version",
@@ -886,9 +886,9 @@ dependencies = [
 
 [[package]]
 name = "agntcy-slim-version"
-version = "3.2.1"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fc64f6cd662151172d19b118c5358bcb11482cfbcca8df8af92cb36da0b25f8"
+checksum = "9243398f9a01b82c29ce4ccac1d9786697b88512a00ffaf39bd0e71939805e8d"
 
 [[package]]
 name = "ahash"
@@ -8065,7 +8065,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
- "base64 0.21.7",
+ "base64 0.22.1",
  "block-padding",
  "blowfish",
  "buffered-reader",
@@ -8114,7 +8114,7 @@ dependencies = [
  "sha2 0.10.9",
  "sha3 0.10.9",
  "slh-dsa",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "twofish",
  "typenum",
  "x25519-dalek",
@@ -8139,7 +8139,7 @@ checksum = "7bd22781911de0ca6debda95f073c8f18bec65d1a94f1fa9573f3102e514cea4"
 dependencies = [
  "ahash",
  "annotate-snippets",
- "base64 0.21.7",
+ "base64 0.22.1",
  "encoding_rs_io",
  "getrandom 0.3.4",
  "granit-parser",
