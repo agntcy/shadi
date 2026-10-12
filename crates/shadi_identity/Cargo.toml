@@ -19,7 +19,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hkdf = "0.13"
 sha2 = "0.11"
-slim_bindings = { package = "agntcy-slim-bindings", version = "3.2.1" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "3.3.0" }
 # Not used directly: holds the transitive mls-rs line together. slim-persistence
 # 0.1.1 moved to mls-rs 0.56 in a patch release while slim-mls 0.3.10 is on 0.54,
 # so an unpinned resolve links both (agntcy/shadi#338, agntcy/slim#2142).
@@ -34,6 +34,6 @@ sequoia-openpgp = { version = "2.2", default-features = false, features = ["cryp
 openpgp = ["dep:sequoia-openpgp"]
 
 [dev-dependencies]
-slim_config = { package = "agntcy-slim-config", version = "0.17.1" }
-slim_auth = { package = "agntcy-slim-auth", version = "0.17.1" }
+slim_config = { package = "agntcy-slim-config", version = "0.17.2" }
+slim_auth = { package = "agntcy-slim-auth", version = "0.17.2" }
 tokio = { version = "1", features = ["full"] }

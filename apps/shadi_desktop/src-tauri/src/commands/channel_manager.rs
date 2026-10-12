@@ -603,6 +603,7 @@ pub async fn channel_manager_room_create(
         mls_enabled: true,
         owner_callback_name: Some(callback),
         ttl_seconds,
+        owner_proof: None,
     };
     blocking(move || api(&config, &identity, Call::Create(request)).map(|_| ())).await?;
     channel_manager
@@ -623,6 +624,7 @@ pub async fn channel_manager_room_delete(
     let identity = slim.owner_identity()?;
     let request = cm::DeleteChannelRequest {
         channel_name: channel.clone(),
+        owner_proof: None,
     };
     blocking(move || api(&config, &identity, Call::Delete(request)).map(|_| ())).await?;
     channel_manager
@@ -961,6 +963,7 @@ mod tests {
                 mls_enabled: true,
                 owner_callback_name: Some(service),
                 ttl_seconds: None,
+                owner_proof: None,
             }),
         )
         .expect("create the room as its owner");

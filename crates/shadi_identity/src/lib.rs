@@ -19,6 +19,7 @@ use pkcs8::LineEnding;
 
 pub mod auth;
 pub mod binding;
+pub mod channel_request;
 pub mod config;
 pub mod did_document;
 pub mod did_proof;

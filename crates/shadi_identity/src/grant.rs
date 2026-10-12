@@ -123,15 +123,13 @@ pub fn issue_grant(
 ) -> Result<Vec<u8>, IdentityError> {
     check_name("channel", channel)?;
     check_name("invitee", invitee)?;
-    let mut nonce = [0u8; NONCE_BYTES];
-    getrandom::fill(&mut nonce).map_err(|e| IdentityError::KeyGen(e.to_string()))?;
     let grant = ChannelGrant {
         channel: channel.to_string(),
         invitee: invitee.to_string(),
         action,
         role,
         not_after,
-        nonce: nonce.iter().map(|b| format!("{b:02x}")).collect(),
+        nonce: new_nonce()?,
     };
     let signature =
         base64::engine::general_purpose::STANDARD.encode(owner.sign_bytes(&grant.canonical()));
@@ -255,7 +253,15 @@ fn signed_bytes(fields: [&str; 6]) -> Vec<u8> {
         .into_bytes()
 }
 
-fn check_name(what: &str, name: &str) -> Result<(), IdentityError> {
+/// A fresh nonce, as lowercase hex, for whoever acts on a statement to
+/// refuse its replay.
+pub(crate) fn new_nonce() -> Result<String, IdentityError> {
+    let mut nonce = [0u8; NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|e| IdentityError::KeyGen(e.to_string()))?;
+    Ok(nonce.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub(crate) fn check_name(what: &str, name: &str) -> Result<(), IdentityError> {
     let parts: Vec<&str> = name.split('/').collect();
     let well_formed = parts.len() == 3
         && parts
