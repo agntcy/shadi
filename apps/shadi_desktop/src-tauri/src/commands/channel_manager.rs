@@ -4,11 +4,13 @@
 //! Rooms owned through a SLIM channel manager (agntcy/shadi#442).
 //!
 //! With a channel manager configured, the Desktop creates rooms through its
-//! API as their owner: the API token is signed with the owner key, so the
-//! channel manager records the owner's `did:key` and checks the grants it
-//! signs. When someone else asks to add or remove a participant, the channel
-//! manager calls the owner's `ChannelOwnerApproval/RequestApproval` over
-//! SlimRPC; the standing rules and inbox decide, as for an agent's A2A ask.
+//! API as their owner: create and delete requests are signed with the owner
+//! key, so the channel manager records the owner's `did:key` and checks the
+//! grants it signs, the owner's own adds and removes included. When someone
+//! else asks to add or remove a participant, the channel manager calls the
+//! owner's `ChannelOwnerApproval/RequestApproval` over SlimRPC from its
+//! approval identity; the standing rules and inbox decide, as for an agent's
+//! A2A ask.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -18,7 +20,8 @@ use std::time::Duration;
 use agentbridge::owner::{InviteRequest, Outcome, Owner};
 use prost::Message as _;
 use serde::{Deserialize, Serialize};
-use shadi_identity::{AgentIdentity, GrantAction};
+use shadi_identity::channel_request::{sign_create, sign_delete, ChannelCreation};
+use shadi_identity::{issue_grant, AgentIdentity, GrantAction, GrantRole};
 use slim_auth::jwt::{Algorithm, Key, KeyData, KeyFormat};
 use slim_config::auth::jwt::{Claims, Config as JwtConfig, JwtKey};
 use slim_config::client::{AuthenticationConfig, ClientConfig};
@@ -41,9 +44,12 @@ const API_TIMEOUT: Duration = Duration::from_secs(10);
 /// then for the invite.
 const PARTICIPANT_TIMEOUT: Duration = Duration::from_secs(90);
 const TOKEN_TTL: Duration = Duration::from_secs(300);
+/// How long a signed request or the owner's own grant is good for.
+const SIGNED_FOR_SECONDS: u64 = 300;
 
 /// Where the channel manager is. Saved in `channel-manager.json`, or given as
-/// `SHADI_CHANNEL_MANAGER_ENDPOINT` and `SHADI_CHANNEL_MANAGER_NAME`.
+/// `SHADI_CHANNEL_MANAGER_ENDPOINT`, `SHADI_CHANNEL_MANAGER_NAME` and
+/// `SHADI_CHANNEL_MANAGER_APPROVAL_DID`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelManagerConfig {
     /// Its API, e.g. `http://127.0.0.1:10356`.
@@ -53,6 +59,17 @@ pub struct ChannelManagerConfig {
     /// A CA to verify a TLS API with; an `http://` endpoint needs none.
     #[serde(default)]
     pub ca_file: Option<String>,
+    /// The `did:key` it logs as its "Owner approval identity". Approval
+    /// requests from any other identity are refused.
+    #[serde(default)]
+    pub approval_did: Option<String>,
+    /// Its `audience`, when not its `name`: what signed requests name.
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// A bearer token for its API. Without one, API calls carry a token
+    /// signed with the owner key.
+    #[serde(default)]
+    pub api_token_file: Option<String>,
 }
 
 impl ChannelManagerConfig {
@@ -67,16 +84,32 @@ impl ChannelManagerConfig {
         if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
             return Err(format!("name {:?} is not org/namespace/app", self.name));
         }
+        let did = self.approval_did.as_deref().ok_or_else(|| {
+            "set its approval identity, the did:key it logs at startup".to_string()
+        })?;
+        shadi_identity::parse_did_key(did)
+            .map_err(|e| format!("approval identity {did:?}: {e}"))?;
+        if self.audience.as_deref().is_some_and(str::is_empty) {
+            return Err("audience is empty".to_string());
+        }
         Ok(())
+    }
+
+    fn audience(&self) -> &str {
+        self.audience.as_deref().unwrap_or(&self.name)
     }
 
     fn from_env() -> Option<Self> {
         let endpoint = std::env::var("SHADI_CHANNEL_MANAGER_ENDPOINT").ok()?;
         let name = std::env::var("SHADI_CHANNEL_MANAGER_NAME").ok()?;
+        let var = |key: &str| std::env::var(key).ok();
         Some(Self {
             endpoint,
             name,
-            ca_file: std::env::var("SHADI_CHANNEL_MANAGER_CA").ok(),
+            ca_file: var("SHADI_CHANNEL_MANAGER_CA"),
+            approval_did: var("SHADI_CHANNEL_MANAGER_APPROVAL_DID"),
+            audience: var("SHADI_CHANNEL_MANAGER_AUDIENCE"),
+            api_token_file: var("SHADI_CHANNEL_MANAGER_TOKEN_FILE"),
         })
     }
 }
@@ -155,26 +188,30 @@ fn api_client_config(
     config: &ChannelManagerConfig,
     owner: &AgentIdentity,
 ) -> Result<ClientConfig, String> {
+    let tls = match &config.ca_file {
+        Some(ca) => TlsClientConfig::new().with_ca_file(ca),
+        None => TlsClientConfig::insecure(),
+    };
+    let client = ClientConfig::with_endpoint(&config.endpoint).with_tls_setting(tls);
+    if let Some(file) = &config.api_token_file {
+        return Ok(client.with_auth(AuthenticationConfig::StaticJwt(
+            slim_config::auth::static_jwt::Config::with_file(file),
+        )));
+    }
     let did = owner.did();
     let key = Key {
         algorithm: Algorithm::EdDSA,
         format: KeyFormat::Pem,
         key: KeyData::Data(owner.to_pkcs8_pem().map_err(|e| e.to_string())?),
     };
-    // Self-issued, like a SHADI DID-JWT: the channel manager records `sub` as
-    // the owner of what this token creates.
+    // Self-issued, like a SHADI DID-JWT. It only authenticates the call:
+    // ownership comes from the signed requests.
     let claims = Claims::new(None, Some(did.clone()), Some(did), None);
-    let tls = match &config.ca_file {
-        Some(ca) => TlsClientConfig::new().with_ca_file(ca),
-        None => TlsClientConfig::insecure(),
-    };
-    Ok(ClientConfig::with_endpoint(&config.endpoint)
-        .with_tls_setting(tls)
-        .with_auth(AuthenticationConfig::Jwt(JwtConfig::new(
-            claims,
-            TOKEN_TTL,
-            JwtKey::Encoding(key),
-        ))))
+    Ok(client.with_auth(AuthenticationConfig::Jwt(JwtConfig::new(
+        claims,
+        TOKEN_TTL,
+        JwtKey::Encoding(key),
+    ))))
 }
 
 /// One API call as the owner. Blocks, so call it off the async runtime.
@@ -277,6 +314,87 @@ fn owned_channels(
     }
 }
 
+/// A create request signed by `owner`, who becomes the room's owner.
+fn create_request(
+    config: &ChannelManagerConfig,
+    owner: &AgentIdentity,
+    channel: &str,
+    ttl_seconds: Option<u64>,
+    callback: &str,
+) -> Result<cm::CreateChannelRequest, String> {
+    let creation = ChannelCreation {
+        audience: config.audience(),
+        channel,
+        mls_enabled: true,
+        ttl_seconds,
+        owner_callback_name: Some(callback),
+    };
+    let owner_proof =
+        sign_create(owner, &creation, now() + SIGNED_FOR_SECONDS).map_err(|e| e.to_string())?;
+    Ok(cm::CreateChannelRequest {
+        channel_name: channel.to_string(),
+        mls_enabled: true,
+        owner_callback_name: Some(callback.to_string()),
+        ttl_seconds,
+        owner_proof: Some(owner_proof),
+    })
+}
+
+fn delete_request(
+    config: &ChannelManagerConfig,
+    owner: &AgentIdentity,
+    channel: &str,
+) -> Result<cm::DeleteChannelRequest, String> {
+    let owner_proof = sign_delete(
+        owner,
+        config.audience(),
+        channel,
+        now() + SIGNED_FOR_SECONDS,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(cm::DeleteChannelRequest {
+        channel_name: channel.to_string(),
+        owner_proof: Some(owner_proof),
+    })
+}
+
+/// Adding (`present`) or removing `participant`, with `owner`'s grant.
+fn participant_call(
+    owner: &AgentIdentity,
+    channel: &str,
+    participant: &str,
+    present: bool,
+) -> Result<Call, String> {
+    let action = if present {
+        GrantAction::Add
+    } else {
+        GrantAction::Delete
+    };
+    let grant = issue_grant(
+        owner,
+        channel,
+        participant,
+        action,
+        GrantRole::Member,
+        now() + SIGNED_FOR_SECONDS,
+    )
+    .map_err(|e| e.to_string())?;
+    let (channel_name, participant_name) = (channel.to_string(), participant.to_string());
+    Ok(if present {
+        Call::Add(cm::AddParticipantRequest {
+            channel_name,
+            participant_name,
+            grant: Some(grant),
+        })
+    } else {
+        Call::Remove(cm::DeleteParticipantRequest {
+            channel_name,
+            participant_name,
+            grant: Some(grant),
+        })
+    })
+}
+
 // --- Owner approval ------------------------------------------------------------
 
 /// How an approval ends.
@@ -324,6 +442,29 @@ fn owner_request(request: &cm::ApprovalRequest) -> Result<InviteRequest, String>
 fn is_approval_caller(caller: &str, name: &str) -> bool {
     let caller: Vec<&str> = caller.split('/').take(3).collect();
     caller.join("/") == format!("{name}-approval")
+}
+
+/// Refuses an approval request unless it comes from the channel manager's
+/// approval app, and the session's verified identity, `peer`, is its approval
+/// `did:key`.
+fn check_approval_caller(
+    config: &ChannelManagerConfig,
+    caller: &str,
+    peer: Option<&str>,
+) -> Result<(), String> {
+    if !is_approval_caller(caller, &config.name) {
+        return Err(format!("{caller} is not {}-approval", config.name));
+    }
+    let Some(approval_did) = config.approval_did.as_deref() else {
+        return Err("the channel manager's approval identity is not set".to_string());
+    };
+    match peer {
+        Some(peer) if peer == approval_did => Ok(()),
+        Some(peer) => Err(format!(
+            "{peer} is not the channel manager's approval identity"
+        )),
+        None => Err("the caller's identity is not verified".to_string()),
+    }
 }
 
 /// Answers the channel manager for the owner, holding an ask until the owner
@@ -416,7 +557,16 @@ pub fn register_approval(
                 (approvals.clone(), channel_manager.clone(), slim.clone());
             async move {
                 let caller = ctx.session().destination().to_string();
-                let answer = approve(&approvals, &channel_manager, &slim, &caller, &bytes).await;
+                let peer = ctx.peer_subject();
+                let answer = approve(
+                    &approvals,
+                    &channel_manager,
+                    &slim,
+                    &caller,
+                    peer.as_deref(),
+                    &bytes,
+                )
+                .await;
                 Ok(cm::ApprovalResponse::from(answer).encode_to_vec())
             }
         },
@@ -428,13 +578,14 @@ async fn approve(
     channel_manager: &Arc<ChannelManagerState>,
     slim: &SlimState,
     caller: &str,
+    peer: Option<&str>,
     bytes: &[u8],
 ) -> Answer {
     let Some(config) = channel_manager.config() else {
         return Answer::Denied("this owner uses no channel manager".to_string());
     };
-    if !is_approval_caller(caller, &config.name) {
-        return Answer::Denied(format!("{caller} is not {}-approval", config.name));
+    if let Err(err) = check_approval_caller(&config, caller, peer) {
+        return Answer::Denied(err);
     }
     let request = match cm::ApprovalRequest::decode(bytes)
         .map_err(|e| e.to_string())
@@ -482,8 +633,8 @@ pub struct ChannelManagerSetup {
     pub config: Option<ChannelManagerConfig>,
     /// The `did:key` the channel manager records as the owner.
     pub owner_did: Option<String>,
-    /// The channel manager's `api-server.auth`, as JSON (valid YAML): it
-    /// verifies tokens signed with the owner key.
+    /// A channel manager `api-server.auth`, as JSON (valid YAML), that
+    /// verifies the tokens API calls carry when no token file is set.
     pub api_auth: Option<String>,
 }
 
@@ -598,13 +749,7 @@ pub async fn channel_manager_room_create(
         "start the owner service first, so the channel manager can ask you".to_string()
     })?;
     let identity = slim.owner_identity()?;
-    let request = cm::CreateChannelRequest {
-        channel_name: channel.clone(),
-        mls_enabled: true,
-        owner_callback_name: Some(callback),
-        ttl_seconds,
-        owner_proof: None,
-    };
+    let request = create_request(&config, &identity, &channel, ttl_seconds, &callback)?;
     blocking(move || api(&config, &identity, Call::Create(request)).map(|_| ())).await?;
     channel_manager
         .owned
@@ -622,10 +767,7 @@ pub async fn channel_manager_room_delete(
 ) -> Result<(), String> {
     let config = channel_manager.require()?;
     let identity = slim.owner_identity()?;
-    let request = cm::DeleteChannelRequest {
-        channel_name: channel.clone(),
-        owner_proof: None,
-    };
+    let request = delete_request(&config, &identity, &channel)?;
     blocking(move || api(&config, &identity, Call::Delete(request)).map(|_| ())).await?;
     channel_manager
         .owned
@@ -649,7 +791,7 @@ pub async fn channel_manager_participants(
     }
 }
 
-/// Add or remove a participant as the owner, which needs no grant.
+/// Add or remove a participant with the owner's own grant.
 #[tauri::command]
 pub async fn channel_manager_participant_set(
     slim: tauri::State<'_, SlimState>,
@@ -660,19 +802,7 @@ pub async fn channel_manager_participant_set(
 ) -> Result<(), String> {
     let config = channel_manager.require()?;
     let identity = slim.owner_identity()?;
-    let call = if present {
-        Call::Add(cm::AddParticipantRequest {
-            channel_name: channel,
-            participant_name: participant,
-            grant: None,
-        })
-    } else {
-        Call::Remove(cm::DeleteParticipantRequest {
-            channel_name: channel,
-            participant_name: participant,
-            grant: None,
-        })
-    };
+    let call = participant_call(&identity, &channel, &participant, present)?;
     blocking(move || api(&config, &identity, call).map(|_| ())).await
 }
 
@@ -736,13 +866,19 @@ mod tests {
         assert!(!is_approval_caller("agntcy/ns/someone-approval/42", cm));
     }
 
-    #[test]
-    fn a_config_needs_an_http_endpoint_and_a_slim_name() {
-        let config = |endpoint: &str, name: &str| ChannelManagerConfig {
+    fn config(endpoint: &str, name: &str) -> ChannelManagerConfig {
+        ChannelManagerConfig {
             endpoint: endpoint.to_string(),
             name: name.to_string(),
             ca_file: None,
-        };
+            approval_did: Some(AgentIdentity::generate().unwrap().did()),
+            audience: None,
+            api_token_file: None,
+        }
+    }
+
+    #[test]
+    fn a_config_needs_an_http_endpoint_a_slim_name_and_an_approval_did() {
         assert!(config("http://127.0.0.1:10356", "agntcy/ns/cm")
             .validate()
             .is_ok());
@@ -752,6 +888,68 @@ mod tests {
         assert!(config("https://cm.example", "agntcy/cm")
             .validate()
             .is_err());
+        let mut no_did = config("http://127.0.0.1:10356", "agntcy/ns/cm");
+        no_did.approval_did = None;
+        assert!(no_did.validate().is_err());
+        no_did.approval_did = Some("agntcy/ns/cm-approval".to_string());
+        assert!(no_did.validate().is_err());
+    }
+
+    #[test]
+    fn only_the_approval_did_may_ask_the_owner() {
+        let config = config("http://127.0.0.1:10356", "agntcy/ns/cm");
+        let did = config.approval_did.clone().unwrap();
+        let caller = "agntcy/ns/cm-approval/42";
+        assert!(check_approval_caller(&config, caller, Some(&did)).is_ok());
+        let other = AgentIdentity::generate().unwrap().did();
+        assert!(check_approval_caller(&config, caller, Some(&other)).is_err());
+        assert!(check_approval_caller(&config, caller, None).is_err());
+        assert!(check_approval_caller(&config, "agntcy/ns/cm/42", Some(&did)).is_err());
+        let unset = ChannelManagerConfig {
+            approval_did: None,
+            ..config
+        };
+        assert!(check_approval_caller(&unset, caller, Some(&did)).is_err());
+    }
+
+    #[test]
+    fn create_and_delete_are_signed_for_the_channel_managers_audience() {
+        let owner = AgentIdentity::generate().unwrap();
+        let mut config = config("http://127.0.0.1:10356", "agntcy/ns/cm");
+        let proof = |request: Option<Vec<u8>>| -> serde_json::Value {
+            serde_json::from_slice(&request.unwrap()).unwrap()
+        };
+        let create = create_request(&config, &owner, ROOM, Some(60), "agntcy/ns/owner").unwrap();
+        let signed = proof(create.owner_proof);
+        assert_eq!(signed["audience"], "agntcy/ns/cm");
+        assert_eq!(signed["owner"], owner.did().as_str());
+        assert_eq!(
+            (&signed["channel"], &signed["ttl_seconds"]),
+            (&serde_json::json!(ROOM), &serde_json::json!(60))
+        );
+        assert_eq!(signed["owner_callback_name"], "agntcy/ns/owner");
+
+        config.audience = Some("cm.example".to_string());
+        let delete = delete_request(&config, &owner, ROOM).unwrap();
+        let signed = proof(delete.owner_proof);
+        assert_eq!(
+            (&signed["audience"], &signed["channel"]),
+            (&serde_json::json!("cm.example"), &serde_json::json!(ROOM))
+        );
+    }
+
+    #[test]
+    fn the_owners_own_changes_carry_its_grant() {
+        let owner = AgentIdentity::generate().unwrap();
+        let Call::Remove(remove) = participant_call(&owner, ROOM, PEER, false).unwrap() else {
+            panic!("expected a removal");
+        };
+        let grant =
+            shadi_identity::verify_grant(&remove.grant.unwrap(), &owner.did(), now()).unwrap();
+        assert_eq!(
+            (grant.action, grant.channel.as_str(), grant.invitee.as_str()),
+            (GrantAction::Delete, ROOM, PEER)
+        );
     }
 
     #[tokio::test]
@@ -829,9 +1027,11 @@ mod tests {
 
     /// The owner flow against a real channel manager, driven by
     /// docs/content/demos/desktop-channel-manager-e2e.sh: the owner creates a
-    /// room through the API, codex asks to add claude-code without a grant,
-    /// the channel manager asks the owner service, and the owner's rules grant
-    /// it; a request the rules block is refused.
+    /// room with a signed request, codex asks to add claude-code without a
+    /// grant, the channel manager asks the owner service from its approval
+    /// identity, and the owner's rules grant it; a request the rules block is
+    /// refused. The owner then removes claude-code with its own grant and
+    /// deletes the room with a signed request.
     #[test]
     #[ignore = "needs a SLIM node and the channel-manager binary; run the e2e script"]
     fn live_channel_manager_asks_the_owner_and_adds_who_it_grants() {
@@ -844,6 +1044,7 @@ mod tests {
         let seed = env("SLIM_HUMAN_SEED");
         let derive = |name: &str| AgentIdentity::derive(seed.as_bytes(), name).unwrap();
         let (owner, codex, cm) = (derive("owner"), derive("codex"), derive("channel-manager"));
+        let approval = derive("channel-manager-approval");
         let invitee = "agntcy/shadi/claude-code";
         let cm_name = "agntcy/shadi/channel-manager";
         let room = env("SHADI_E2E_ROOM");
@@ -853,6 +1054,7 @@ mod tests {
 
         // The channel manager's own key, and whom it trusts on SLIM and on its API.
         std::fs::write(file("cm.pem"), cm.to_pkcs8_pem().unwrap()).unwrap();
+        std::fs::write(file("approval.pem"), approval.to_pkcs8_pem().unwrap()).unwrap();
         let dids =
             |names: &[&str]| -> Vec<String> { names.iter().map(|n| derive(n).did()).collect() };
         let jwks = |dids: Vec<String>| {
@@ -863,6 +1065,7 @@ mod tests {
             file("members.jwks.json"),
             jwks(dids(&[
                 "channel-manager",
+                "channel-manager-approval",
                 "avatar",
                 "owner",
                 "claude-code",
@@ -902,6 +1105,11 @@ mod tests {
                 "private_key": { "file": file("cm.pem") },
                 "trusted_keys": { "file": file("members.jwks.json") },
             },
+            "approval-auth": {
+                "type": "jwt",
+                "private_key": { "file": file("approval.pem") },
+                "trusted_keys": { "file": file("members.jwks.json") },
+            },
         }});
         std::fs::write(file("config.yaml"), config.to_string()).unwrap();
 
@@ -939,6 +1147,7 @@ mod tests {
             format!("http://{api_addr}"),
         );
         std::env::set_var("SHADI_CHANNEL_MANAGER_NAME", cm_name);
+        std::env::set_var("SHADI_CHANNEL_MANAGER_APPROVAL_DID", approval.did());
         let channel_manager = Arc::new(ChannelManagerState::default());
         channel_manager.init(dir.path().to_path_buf()).unwrap();
         let cm_config = channel_manager.require().unwrap();
@@ -955,18 +1164,8 @@ mod tests {
             .expect("serve the owner service");
         println!("owner service ready at {service}");
 
-        api(
-            &cm_config,
-            &owner,
-            Call::Create(cm::CreateChannelRequest {
-                channel_name: room.clone(),
-                mls_enabled: true,
-                owner_callback_name: Some(service),
-                ttl_seconds: None,
-                owner_proof: None,
-            }),
-        )
-        .expect("create the room as its owner");
+        let create = create_request(&cm_config, &owner, &room, None, &service).unwrap();
+        api(&cm_config, &owner, Call::Create(create)).expect("create the room as its owner");
 
         let add = |participant: &str| {
             api(
@@ -980,14 +1179,18 @@ mod tests {
             )
         };
         add(invitee).expect("the owner grants codex's request");
-        let Reply::Participants(participants) =
-            api(&cm_config, &owner, Call::ListParticipants(room.clone())).unwrap()
-        else {
-            panic!("expected participants");
+        let participants = || {
+            let Reply::Participants(participants) =
+                api(&cm_config, &owner, Call::ListParticipants(room.clone())).unwrap()
+            else {
+                panic!("expected participants");
+            };
+            participants
         };
+        let joined = participants();
         assert!(
-            participants.iter().any(|p| p.starts_with(invitee)),
-            "{invitee} isn't in {participants:?}"
+            joined.iter().any(|p| p.starts_with(invitee)),
+            "{invitee} isn't in {joined:?}"
         );
         let refused = add("agntcy/shadi/stranger");
         assert!(
@@ -999,5 +1202,24 @@ mod tests {
             "granted {invitee}; refused the stranger: {}",
             refused.err().unwrap_or_default()
         );
+
+        let remove = participant_call(&owner, &room, invitee, false).unwrap();
+        api(&cm_config, &owner, remove).expect("the owner removes with its own grant");
+        let left = participants();
+        assert!(
+            !left.iter().any(|p| p.starts_with(invitee)),
+            "{invitee} is still in {left:?}"
+        );
+        let unsigned = cm::DeleteChannelRequest {
+            channel_name: room.clone(),
+            owner_proof: None,
+        };
+        assert!(
+            api(&cm_config, &owner, Call::Delete(unsigned)).is_err(),
+            "an unsigned delete of an owned room is refused"
+        );
+        let delete = delete_request(&cm_config, &owner, &room).unwrap();
+        api(&cm_config, &owner, Call::Delete(delete)).expect("the owner deletes the room");
+        println!("removed {invitee} and deleted {room}");
     }
 }

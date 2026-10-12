@@ -49,6 +49,9 @@ interface ChannelManagerConfig {
   endpoint: string;
   name: string;
   ca_file: string | null;
+  approval_did: string | null;
+  audience: string | null;
+  api_token_file: string | null;
 }
 
 interface ChannelManagerSetup {
@@ -257,6 +260,9 @@ function ChannelManagerSection({ running }: { running: boolean }) {
   const [endpoint, setEndpoint] = useState("");
   const [name, setName] = useState("");
   const [caFile, setCaFile] = useState("");
+  const [approvalDid, setApprovalDid] = useState("");
+  const [audience, setAudience] = useState("");
+  const [tokenFile, setTokenFile] = useState("");
   const [rooms, setRooms] = useState<ManagedRoom[]>([]);
   const [channel, setChannel] = useState("");
   const [ttl, setTtl] = useState("");
@@ -278,6 +284,9 @@ function ChannelManagerSection({ running }: { running: boolean }) {
       setEndpoint(next.config?.endpoint ?? "");
       setName(next.config?.name ?? "");
       setCaFile(next.config?.ca_file ?? "");
+      setApprovalDid(next.config?.approval_did ?? "");
+      setAudience(next.config?.audience ?? "");
+      setTokenFile(next.config?.api_token_file ?? "");
       if (next.config) await loadRooms();
     } catch (e) {
       setError(String(e));
@@ -291,7 +300,16 @@ function ChannelManagerSection({ running }: { running: boolean }) {
   async function save(clear: boolean) {
     setError(null);
     try {
-      const config = clear ? null : { endpoint, name, ca_file: caFile || null };
+      const config = clear
+        ? null
+        : {
+            endpoint,
+            name,
+            ca_file: caFile || null,
+            approval_did: approvalDid || null,
+            audience: audience || null,
+            api_token_file: tokenFile || null,
+          };
       await invoke("channel_manager_configure", { config });
       await loadSetup();
       if (clear) setRooms([]);
@@ -318,8 +336,9 @@ function ChannelManagerSection({ running }: { running: boolean }) {
       <h2>Channel manager</h2>
       <p className="sl-muted">
         With a SLIM channel manager, rooms are created through it and it moderates them. You stay
-        their owner: it asks the owner service here before letting anyone else add or remove a
-        participant. Without one, the Rooms tab moderates rooms itself.
+        their owner: requests to create or delete them are signed with the owner key, and it asks
+        the owner service here before letting anyone else add or remove a participant. Without one,
+        the Rooms tab moderates rooms itself.
       </p>
       <div className="sl-row">
         <input
@@ -340,18 +359,44 @@ function ChannelManagerSection({ running }: { running: boolean }) {
           value={caFile}
           onChange={(e) => setCaFile(e.target.value)}
         />
-        <button onClick={() => save(false)} disabled={!endpoint || !name}>
+      </div>
+      <div className="sl-row">
+        <input
+          className="sl-input"
+          placeholder="Owner approval identity: the did:key it logs at startup"
+          value={approvalDid}
+          onChange={(e) => setApprovalDid(e.target.value.trim())}
+        />
+        <input
+          className="sl-input"
+          placeholder="Audience, if not its local-name"
+          value={audience}
+          onChange={(e) => setAudience(e.target.value)}
+        />
+        <input
+          className="sl-input"
+          placeholder="API token file (optional)"
+          value={tokenFile}
+          onChange={(e) => setTokenFile(e.target.value)}
+        />
+        <button onClick={() => save(false)} disabled={!endpoint || !name || !approvalDid}>
           Save
         </button>
         {setup?.config && <button onClick={() => save(true)}>Clear</button>}
       </div>
       <ErrorText message={error} />
-      {setup?.api_auth && (
+      {setup?.config && setup.owner_did && (
+        <p className="sl-muted">
+          It records <span className="sl-did">{setup.owner_did}</span> as the owner of the rooms
+          created here.
+        </p>
+      )}
+      {setup?.api_auth && !setup.config?.api_token_file && (
         <details>
-          <summary className="sl-muted">The channel manager&apos;s api-server.auth for this owner</summary>
+          <summary className="sl-muted">Optional: an api-server.auth that admits only this owner</summary>
           <p className="sl-muted">
-            It verifies tokens signed with the owner key, so it records{" "}
-            <span className="sl-did">{setup.owner_did}</span> as the owner of the rooms created here.
+            Without a token file, API calls carry a token signed with the owner key, which this
+            verifies.
           </p>
           <textarea className="ow-rules" readOnly value={setup.api_auth} />
         </details>

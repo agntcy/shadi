@@ -3,16 +3,19 @@
 # (agntcy/shadi#442).
 #
 # Stands up a SLIM node with DID auth and mTLS and derives the moderator, the
-# owner key, two agents (claude-code, codex) and the channel manager's own key
-# from a throwaway seed. The desktop crate's live test starts the channel
-# manager, serves the owner service, and creates a room through the API as its
-# owner. codex then asks the channel manager to add claude-code without a
-# grant; the channel manager asks the owner, whose rules grant it, and
-# claude-code joins. A request the rules block is refused.
+# owner key, two agents (claude-code, codex) and the channel manager's own and
+# approval keys from a throwaway seed. The desktop crate's live test starts the
+# channel manager, serves the owner service, and creates a room with a request
+# signed by its owner. codex then asks the channel manager to add claude-code
+# without a grant; the channel manager asks the owner from its approval
+# identity, the owner's rules grant it, and claude-code joins. A request the
+# rules block is refused. The owner then removes claude-code with its own
+# grant and deletes the room with a signed request.
 #
 #   bash docs/content/demos/desktop-channel-manager-e2e.sh
 #
-# Needs the channel manager 3.2 or later, which has the did:key identity:
+# Needs the channel manager 3.3 or later, which takes ownership from signed
+# requests and has approval-auth:
 #   cargo install agntcy-slim-channel-manager --locked
 # Set SHADI_E2E_CHANNEL_MANAGER to use another binary, and SHADI_E2E_CM_RUST_LOG
 # for its logs (e.g. `info,slim_session=debug`). The channel manager's
@@ -54,6 +57,7 @@ umask 077
 printf %s "$(openssl rand -hex 32)" >"$E2E/human-seed.txt"
 target/debug/shadictl derive-agent-identity --source seed --in "$E2E/human-seed.txt" \
   --name avatar --name owner --name "$INVITEE" --name codex --name channel-manager \
+  --name channel-manager-approval \
   --out-dir "$E2E/identities" --no-store >"$E2E/derive.log" 2>&1
 
 did_of() {
@@ -62,7 +66,7 @@ did_of() {
 }
 # Everyone trusts the channel manager, which moderates the room and calls the
 # owner service.
-DIDS="$(did_of avatar),$(did_of owner),$(did_of "$INVITEE"),$(did_of codex),$(did_of channel-manager)"
+DIDS="$(did_of avatar),$(did_of owner),$(did_of "$INVITEE"),$(did_of codex),$(did_of channel-manager),$(did_of channel-manager-approval)"
 
 export SHADI_SLIM_AUTH=did
 SLIM_HUMAN_SEED="$(cat "$E2E/human-seed.txt")"
@@ -73,7 +77,7 @@ export SLIM_TLS_CERT="$E2E/shadi-slim-mtls/client-avatar.crt"
 export SLIM_TLS_KEY="$E2E/shadi-slim-mtls/client-avatar.key"
 export SLIM_TLS_CA="$E2E/shadi-slim-mtls/ca.crt"
 export SLIM_MEMBER_DIDS="$DIDS"
-echo "    channel manager $(did_of channel-manager)"
+echo "    channel manager $(did_of channel-manager), approvals $(did_of channel-manager-approval)"
 
 echo "==> starting SLIM node on $SLIM_ENDPOINT"
 SHADI_AGENT_ID=avatar target/debug/shadictl slim start-node >"$E2E/node.log" 2>&1 &
@@ -122,7 +126,7 @@ grep -vE '^\s*$' "$E2E/desktop-test.log" | grep -vE 'INFO|DEBUG' | tail -15
 
 echo
 if [ "$TEST_RC" -eq 0 ]; then
-  echo "PASS — the channel manager asked the owner, who granted codex's request for $INVITEE."
+  echo "PASS — the channel manager asked the owner, who granted codex's request for $INVITEE, then removed it and deleted the room."
 else
   echo "FAIL — see $E2E (re-run with SHADI_E2E_KEEP=1 to keep the scratch dir)"
   exit 1
