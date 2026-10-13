@@ -1,0 +1,9 @@
+{
+  "id": "fake-harness",
+  "bin": "fake-harness",
+  "pass_env_prefixes": ["FAKE_HARNESS_"],
+  "execute": {
+    "args": ["{prompt}"]
+  },
+  "result": { "kind": "stdout" }
+}
