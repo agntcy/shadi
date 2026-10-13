@@ -173,6 +173,14 @@ mod tests {
         let _store = default_store();
     }
 
+    /// `MemoryStore` does not implement `is_available`, so this is the trait
+    /// default: a store counts as available unless it says otherwise, which
+    /// only the no-op store does.
+    #[test]
+    fn stores_are_available_unless_they_opt_out() {
+        assert!(MemoryStore::new().is_available());
+    }
+
     #[test]
     fn memory_store_lists_inserted_keys() {
         let store = MemoryStore::new();

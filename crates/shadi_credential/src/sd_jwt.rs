@@ -398,11 +398,50 @@ mod tests {
         assert!(err.to_string().contains("OKP/Ed25519"), "{err}");
     }
 
+    /// An `x` of the right length is not yet a key: `agent_did` is derived from
+    /// it, so a value that is not a point would bind the credential to a DID no
+    /// agent can ever hold.
+    #[test]
+    fn rejects_a_cnf_key_that_is_not_a_point_on_the_curve() {
+        // A `y` coordinate with no matching `x`, so decompression fails.
+        let mut off_curve = [0u8; 32];
+        off_curve[31] = 1;
+
+        for (x, needle) in [
+            (b64(&off_curve), "not an Ed25519 public key"),
+            (b64(&[7u8; 31]), "not 32 bytes"),
+        ] {
+            let mut payload = payload();
+            payload["cnf"]["jwk"]["x"] = serde_json::json!(x);
+            let err = parse_sd_jwt(&credential_with(payload, &[])).expect_err("reject");
+            assert!(err.to_string().contains(needle), "{x}: {err}");
+        }
+    }
+
+    /// `exp` drives `find_valid`. A non-numeric one must be refused at import
+    /// rather than silently stored as non-expiring.
+    #[test]
+    fn rejects_a_non_numeric_exp() {
+        let mut payload = payload();
+        payload["exp"] = serde_json::json!("2026-10-13T00:00:00Z");
+        let err = parse_sd_jwt(&credential_with(payload, &[])).expect_err("reject");
+        assert!(err.to_string().contains("number of seconds"), "{err}");
+    }
+
     #[test]
     fn rejects_a_malformed_disclosure() {
-        let raw = credential_with(payload(), &[b64(br#"["salt"]"#)]);
-        let err = parse_sd_jwt(&raw).expect_err("reject");
-        assert!(err.to_string().contains("expected 2 or 3"), "{err}");
+        for (body, needle) in [
+            (br#"["salt"]"#.to_vec(), "expected 2 or 3"),
+            (br#"{"salt":"x"}"#.to_vec(), "not a JSON array"),
+            (
+                br#"["salt", 7, "value"]"#.to_vec(),
+                "claim name is not a string",
+            ),
+        ] {
+            let raw = credential_with(payload(), &[b64(&body)]);
+            let err = parse_sd_jwt(&raw).expect_err("reject");
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
     }
 
     #[test]

@@ -238,10 +238,34 @@ mod tests {
         )
     }
 
+    /// The same credential with nothing disclosable — legal, and the operator
+    /// commands have to render it.
+    fn fixture_without_disclosures() -> String {
+        let raw = fixture();
+        let (issuer_jwt, _) = raw.split_once('~').expect("tilde");
+        format!("{issuer_jwt}~")
+    }
+
     fn import_fixture(vault: &dyn CredentialVault) -> String {
         shadi_credential::import(vault, &fixture(), 1_000)
             .expect("import")
             .id
+    }
+
+    /// A `CredentialCli` pinned to sqlcipher, so nothing in these tests can
+    /// reach a developer's real keychain.
+    fn cli(db: Option<PathBuf>, key: Option<&str>, command: CredentialCommand) -> CredentialCli {
+        CredentialCli {
+            db,
+            key: key.map(str::to_string),
+            key_name: "shadi/credential/absent-in-tests".to_string(),
+            backend: Some("sqlcipher".to_string()),
+            command,
+        }
+    }
+
+    fn list() -> CredentialCommand {
+        CredentialCommand::List { json: false }
     }
 
     #[test]
@@ -368,6 +392,48 @@ mod tests {
         assert_eq!(output, "no credentials");
     }
 
+    #[test]
+    fn show_json_reveals_values_only_under_disclose() {
+        let vault = vault();
+        let id = import_fixture(&vault);
+
+        let hidden = handle_credential_command(
+            &CredentialCommand::Show {
+                id: id.clone(),
+                disclose: false,
+                json: true,
+            },
+            &vault,
+        )
+        .expect("show");
+        let parsed: Value = serde_json::from_str(&hidden).expect("json");
+        assert_eq!(parsed["id"], id);
+        assert_eq!(parsed["claims"][0], "groups");
+        assert!(parsed.get("disclosed").is_none(), "{hidden}");
+        assert!(parsed.get("raw").is_none(), "{hidden}");
+
+        let shown = handle_credential_command(
+            &CredentialCommand::Show {
+                id,
+                disclose: true,
+                json: true,
+            },
+            &vault,
+        )
+        .expect("show");
+        let parsed: Value = serde_json::from_str(&shown).expect("json");
+        assert_eq!(parsed["disclosed"]["groups"], "platform-admins");
+    }
+
+    #[test]
+    fn a_credential_with_no_disclosures_lists_no_claims() {
+        let vault = vault();
+        shadi_credential::import(&vault, &fixture_without_disclosures(), 1_000).expect("import");
+
+        let output = handle_credential_command(&list(), &vault).expect("list");
+        assert!(output.contains("claims:    (none)"), "{output}");
+    }
+
     /// A credential with no `exp` is non-expiring, and says so.
     #[test]
     fn list_renders_a_missing_exp_as_never() {
@@ -379,5 +445,113 @@ mod tests {
         let output = handle_credential_command(&CredentialCommand::List { json: false }, &vault)
             .expect("list");
         assert!(output.contains("expires:   never"), "{output}");
+    }
+
+    /// The vault is unlocked by its own key under its own name. A credential
+    /// read must not require — or accept — the memory key.
+    #[test]
+    fn the_command_takes_the_credential_environment_not_the_memory_one() {
+        use clap::CommandFactory;
+
+        let names: Vec<String> = CredentialCli::command()
+            .get_arguments()
+            .filter_map(|arg| arg.get_env())
+            .map(|env| env.to_string_lossy().into_owned())
+            .collect();
+
+        for expected in [
+            "SHADI_CREDENTIAL_DB",
+            "SHADI_CREDENTIAL_KEY",
+            "SHADI_CREDENTIAL_KEY_NAME",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+        assert!(
+            !names.iter().any(|name| name.starts_with("SHADI_MEMORY")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn importing_then_listing_works_through_the_command_entry_point() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("credentials.db");
+        let file = dir.path().join("credential.txt");
+        std::fs::write(&file, fixture()).expect("write");
+
+        assert_eq!(
+            run_credential_command(cli(
+                Some(db.clone()),
+                Some("test-key"),
+                CredentialCommand::Import { file },
+            )),
+            ExitCode::SUCCESS
+        );
+        // A second process, opening the same database again.
+        assert_eq!(
+            run_credential_command(cli(Some(db), Some("test-key"), list())),
+            ExitCode::SUCCESS
+        );
+    }
+
+    /// The keychain holds one item per credential, so it needs neither a
+    /// database nor a key — and must not demand one to open.
+    #[test]
+    fn the_keychain_backend_opens_without_a_database_or_key() {
+        let cli = CredentialCli {
+            backend: Some("keychain".to_string()),
+            ..cli(None, None, list())
+        };
+        assert!(open_vault(&cli).is_ok());
+    }
+
+    /// With no `--backend`, the choice comes from the secret store rather than
+    /// from a hard-coded target: a keychain where one exists, sqlcipher
+    /// otherwise. Either answer opens here.
+    #[test]
+    fn an_unset_backend_takes_the_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = CredentialCli {
+            backend: None,
+            ..cli(
+                Some(dir.path().join("credentials.db")),
+                Some("test-key"),
+                list(),
+            )
+        };
+        assert!(open_vault(&cli).is_ok());
+    }
+
+    #[test]
+    fn a_vault_that_cannot_be_opened_is_a_nonzero_exit() {
+        assert_eq!(
+            run_credential_command(cli(None, Some("test-key"), list())),
+            ExitCode::from(1)
+        );
+    }
+
+    #[test]
+    fn open_vault_says_which_part_of_the_configuration_is_missing() {
+        let db = || Some(PathBuf::from("/nonexistent/credentials.db"));
+
+        for (cli, needle) in [
+            (cli(None, Some("k"), list()), "database path"),
+            (cli(db(), Some(""), list()), "SHADI_CREDENTIAL_KEY is empty"),
+            // No key given, so the secret store is consulted under the
+            // vault's own name — which the error has to name.
+            (cli(db(), None, list()), "shadi/credential/absent-in-tests"),
+            (
+                CredentialCli {
+                    backend: Some("postgres".to_string()),
+                    ..cli(db(), Some("k"), list())
+                },
+                "unknown vault backend",
+            ),
+        ] {
+            let Err(err) = open_vault(&cli) else {
+                panic!("expected an error mentioning {needle}");
+            };
+            assert!(err.contains(needle), "{needle}: {err}");
+        }
     }
 }

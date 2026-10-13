@@ -181,3 +181,46 @@ impl CredentialVault for SqlCipherVault {
         Ok(records)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The point of the separate file: the credential key opens it and no
+    /// other key does, so holding the memory key is not a way in.
+    #[test]
+    fn the_database_does_not_open_under_another_key() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let vault = SqlCipherVault::open(file.path(), "credential-key").expect("open");
+        vault
+            .put(&CredentialRecord {
+                id: "cred-1".to_string(),
+                agent_did: "did:key:zAgent".to_string(),
+                issuer: "https://idp.example/realms/eng".to_string(),
+                credential_type: "urn:shadi:agent-admission:1".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                raw: "opaque-credential-bytes".to_string(),
+                created_at: 1_000,
+                expires_at: None,
+            })
+            .expect("put");
+
+        let Err(err) = SqlCipherVault::open(file.path(), "memory-key") else {
+            panic!("the wrong key opened the database");
+        };
+        assert!(matches!(err, CredentialError::Storage(_)), "{err}");
+        // Nor are the stored bytes readable without it.
+        let bytes = std::fs::read(file.path()).expect("read");
+        assert!(!bytes.windows(23).any(|w| w == b"opaque-credential-bytes"));
+    }
+
+    #[test]
+    fn opening_an_unusable_path_reports_a_storage_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let Err(err) = SqlCipherVault::open(&dir.path().join("missing").join("vault.db"), "k")
+        else {
+            panic!("opened a database under a directory that does not exist");
+        };
+        assert!(matches!(err, CredentialError::Storage(_)), "{err}");
+    }
+}

@@ -48,7 +48,11 @@ impl std::str::FromStr for VaultBackend {
 /// keychain, and a cancelled prompt would then be indistinguishable from
 /// having no keychain, silently picking the wrong backend.
 pub fn default_backend() -> VaultBackend {
-    if agent_secrets::default_store().is_available() {
+    backend_for(agent_secrets::default_store().is_available())
+}
+
+fn backend_for(store_available: bool) -> VaultBackend {
+    if store_available {
         VaultBackend::Keychain
     } else {
         VaultBackend::SqlCipher
@@ -214,10 +218,23 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct FakeSecretStore {
         items: Mutex<HashMap<String, Vec<u8>>>,
+        /// Present but unusable — a locked keychain. Fails with something
+        /// other than the not-found the backend translates to `None`.
+        broken: bool,
+    }
+
+    impl FakeSecretStore {
+        fn usable(&self) -> SecretResult<()> {
+            if self.broken {
+                return Err(SecretError::StorageFailure);
+            }
+            Ok(())
+        }
     }
 
     impl SecretStore for FakeSecretStore {
         fn put(&self, key: &str, secret: &[u8]) -> SecretResult<()> {
+            self.usable()?;
             self.items
                 .lock()
                 .unwrap()
@@ -226,6 +243,7 @@ pub(crate) mod tests {
         }
 
         fn get(&self, key: &str) -> SecretResult<SecretBytes> {
+            self.usable()?;
             self.items
                 .lock()
                 .unwrap()
@@ -236,6 +254,7 @@ pub(crate) mod tests {
         }
 
         fn delete(&self, key: &str) -> SecretResult<()> {
+            self.usable()?;
             self.items
                 .lock()
                 .unwrap()
@@ -245,6 +264,7 @@ pub(crate) mod tests {
         }
 
         fn list_keys(&self) -> SecretResult<Vec<String>> {
+            self.usable()?;
             Ok(self.items.lock().unwrap().keys().cloned().collect())
         }
     }
@@ -375,6 +395,57 @@ pub(crate) mod tests {
         let vault = KeychainVault::new(Box::new(store));
         vault.put(&record("cred-1")).expect("put");
         assert_eq!(vault.list().expect("list").len(), 1);
+    }
+
+    /// A broken store must not read as an empty vault: only the store's
+    /// not-found becomes `None`, everything else surfaces.
+    #[test]
+    fn a_broken_store_is_reported_rather_than_read_as_absence() {
+        let vault = KeychainVault::new(Box::new(FakeSecretStore {
+            broken: true,
+            ..Default::default()
+        }));
+        assert!(vault.put(&record("cred-1")).is_err());
+        assert!(vault.get("cred-1").is_err());
+        assert!(vault.delete("cred-1").is_err());
+        assert!(vault.list().is_err());
+    }
+
+    /// Anything else that wrote under `credentials/` — an older schema, a
+    /// hand-edited item — is a reported error, not a silent skip.
+    #[test]
+    fn an_unreadable_stored_record_names_the_problem() {
+        let store = FakeSecretStore::default();
+        store.put("credentials/cred-1", b"not json").unwrap();
+        let vault = KeychainVault::new(Box::new(store));
+
+        let err = vault.get("cred-1").expect_err("unreadable").to_string();
+        assert!(err.contains("stored record is unreadable"), "{err}");
+        assert!(vault.list().is_err());
+    }
+
+    /// The bug behind `SecretStore::is_available`: choosing by probing the
+    /// store prompted the keychain, and a cancelled prompt then looked exactly
+    /// like having no keychain at all.
+    #[test]
+    fn without_a_secret_store_the_default_is_sqlcipher() {
+        assert_eq!(backend_for(false), VaultBackend::SqlCipher);
+        assert_eq!(backend_for(true), VaultBackend::Keychain);
+        assert_eq!(
+            default_backend(),
+            backend_for(agent_secrets::default_store().is_available())
+        );
+    }
+
+    #[test]
+    fn default_vault_builds_both_backends() {
+        // The keychain needs neither a path nor a key, and must not demand one.
+        assert!(default_vault(VaultBackend::Keychain, None, None).is_ok());
+
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let vault = default_vault(VaultBackend::SqlCipher, Some(file.path()), Some("test-key"))
+            .expect("sqlcipher");
+        assert!(vault.list().expect("list").is_empty());
     }
 
     #[test]
