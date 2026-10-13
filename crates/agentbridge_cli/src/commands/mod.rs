@@ -1,3 +1,4 @@
+pub mod announce;
 pub mod card;
 pub mod coordinate;
 pub mod delegate;
