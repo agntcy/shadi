@@ -350,9 +350,9 @@ version = "0.1.0"
 dependencies = [
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-identity",
- "agntcy-shadi-memory",
  "base64 0.23.1",
  "ed25519-dalek",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

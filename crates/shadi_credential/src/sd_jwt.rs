@@ -14,7 +14,7 @@ use base64::Engine;
 use ed25519_dalek::VerifyingKey;
 use serde_json::Value;
 
-use shadi_memory::CredentialRecord;
+use crate::store::CredentialRecord;
 
 use crate::vault::CredentialVault;
 use crate::CredentialError;

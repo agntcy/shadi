@@ -4,12 +4,14 @@
 //! Verifiable credential handling for SHADI: a local vault, and the SD-JWT VC
 //! format that currently fills it.
 //!
-//! The two are deliberately separate modules. [`vault`] knows nothing about
-//! SD-JWT — it stores opaque credential bytes under columns it can query —
-//! while [`sd_jwt`] owns everything tilde-separated. A second credential
-//! format lands as a sibling of `sd_jwt`, not as a change to `vault`.
+//! The two are deliberately separate. [`vault`] and [`store`] know nothing
+//! about SD-JWT — they keep opaque credential bytes under columns they can
+//! query — while [`sd_jwt`] owns everything tilde-separated. A second
+//! credential format lands as a sibling of `sd_jwt`, not as a change to the
+//! storage.
 
 pub mod sd_jwt;
+pub mod store;
 pub mod vault;
 
 use thiserror::Error;
@@ -25,8 +27,8 @@ pub enum CredentialError {
 }
 
 pub use sd_jwt::{import, parse_sd_jwt, Disclosure, ParsedCredential};
-pub use shadi_memory::CredentialRecord;
+pub use store::{CredentialRecord, SqlCipherVault};
 pub use vault::{
-    default_backend, default_vault, CredentialVault, KeychainVault, SqlCipherVault, VaultBackend,
+    default_backend, default_vault, CredentialVault, KeychainVault, VaultBackend,
     CREDENTIAL_KEY_PREFIX,
 };

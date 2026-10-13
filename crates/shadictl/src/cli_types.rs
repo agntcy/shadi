@@ -131,14 +131,16 @@ pub(crate) struct MemoryCli {
 #[derive(Parser, Debug)]
 #[command(name = "credential", about = "Inspect the local OpenID4VC credential vault")]
 pub(crate) struct CredentialCli {
-    /// Only read by the sqlcipher backend; the keychain needs no database.
-    #[arg(long, env = "SHADI_MEMORY_DB", value_name = "PATH")]
+    /// Its own database, not the memory one: whoever can read credentials
+    /// must not thereby be able to read memory. Only the sqlcipher backend
+    /// reads it; the keychain needs no database.
+    #[arg(long, env = "SHADI_CREDENTIAL_DB", value_name = "PATH")]
     pub(crate) db: Option<PathBuf>,
 
-    #[arg(long, env = "SHADI_MEMORY_KEY")]
+    #[arg(long, env = "SHADI_CREDENTIAL_KEY")]
     pub(crate) key: Option<String>,
 
-    #[arg(long = "key-name", env = "SHADI_MEMORY_KEY_NAME", default_value = "shadi/memory/sqlcipher_key")]
+    #[arg(long = "key-name", env = "SHADI_CREDENTIAL_KEY_NAME", default_value = "shadi/credential/sqlcipher_key")]
     pub(crate) key_name: String,
 
     /// Force a backend when the default guesses wrong — mainly how a headless

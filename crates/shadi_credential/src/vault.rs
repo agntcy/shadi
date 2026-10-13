@@ -15,8 +15,8 @@
 use std::path::Path;
 
 use agent_secrets::SecretStore;
-use shadi_memory::{CredentialRecord, SqlCipherStore};
 
+use crate::store::{CredentialRecord, SqlCipherVault};
 use crate::CredentialError;
 
 /// Keychain items are named `credentials/<id>`; enumeration filters on this.
@@ -71,57 +71,6 @@ pub trait CredentialVault: Send + Sync {
         credential_type: &str,
         now: i64,
     ) -> Result<Vec<CredentialRecord>, CredentialError>;
-}
-
-// --- SQLCipher ---------------------------------------------------------------
-
-/// The path every Linux developer, every container and every CI run takes,
-/// because the keychain backend is a no-op off macOS.
-pub struct SqlCipherVault {
-    store: SqlCipherStore,
-}
-
-impl SqlCipherVault {
-    pub fn open(path: &Path, key: &str) -> Result<Self, CredentialError> {
-        let store = SqlCipherStore::open(path, key)
-            .map_err(|err| CredentialError::Storage(err.to_string()))?;
-        Ok(Self { store })
-    }
-}
-
-fn storage<T>(result: Result<T, shadi_memory::MemoryError>) -> Result<T, CredentialError> {
-    result.map_err(|err| CredentialError::Storage(err.to_string()))
-}
-
-impl CredentialVault for SqlCipherVault {
-    fn put(&self, record: &CredentialRecord) -> Result<(), CredentialError> {
-        storage(self.store.put_credential(record))
-    }
-
-    fn get(&self, id: &str) -> Result<Option<CredentialRecord>, CredentialError> {
-        storage(self.store.get_credential(id))
-    }
-
-    fn list(&self) -> Result<Vec<CredentialRecord>, CredentialError> {
-        storage(self.store.list_credentials())
-    }
-
-    fn delete(&self, id: &str) -> Result<bool, CredentialError> {
-        Ok(storage(self.store.delete_credential(id))? > 0)
-    }
-
-    fn find_valid(
-        &self,
-        agent_did: &str,
-        issuer: &str,
-        credential_type: &str,
-        now: i64,
-    ) -> Result<Vec<CredentialRecord>, CredentialError> {
-        storage(
-            self.store
-                .find_valid_credentials(agent_did, issuer, credential_type, now),
-        )
-    }
 }
 
 // --- Keychain ----------------------------------------------------------------

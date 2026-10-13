@@ -11,6 +11,7 @@ use std::process::Command;
 /// this key. A model subprocess that inherits it and can read the database file
 /// has the credentials.
 pub(crate) fn scrub_vault_env(command: &mut Command) {
+    command.env_remove("SHADI_CREDENTIAL_KEY");
     command.env_remove("SHADI_MEMORY_KEY");
 }
 
@@ -19,14 +20,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scrub_marks_the_vault_key_for_removal() {
+    fn scrub_marks_the_vault_keys_for_removal() {
         let mut command = Command::new("true");
+        command.env("SHADI_CREDENTIAL_KEY", "secret");
         command.env("SHADI_MEMORY_KEY", "secret");
         scrub_vault_env(&mut command);
 
-        let removed = command
-            .get_envs()
-            .any(|(key, value)| key == "SHADI_MEMORY_KEY" && value.is_none());
-        assert!(removed, "the vault key is still passed to the child");
+        for name in ["SHADI_CREDENTIAL_KEY", "SHADI_MEMORY_KEY"] {
+            let removed = command
+                .get_envs()
+                .any(|(key, value)| key == name && value.is_none());
+            assert!(removed, "{name} is still passed to the child");
+        }
     }
 }

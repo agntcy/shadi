@@ -26,12 +26,29 @@ fn open_vault(cli: &CredentialCli) -> Result<Box<dyn CredentialVault>, String> {
     // that needs one: on a machine with no secret store the keychain path
     // would otherwise fail on a key it never uses.
     let key = match backend {
-        VaultBackend::SqlCipher => Some(resolve_memory_key(cli.key.as_deref(), &cli.key_name)?),
+        VaultBackend::SqlCipher => Some(resolve_credential_key(cli)?),
         VaultBackend::Keychain => None,
     };
 
     shadi_credential::default_vault(backend, cli.db.as_deref(), key.as_deref())
         .map_err(|err| err.to_string())
+}
+
+/// The vault's own key, never the memory one — the two databases are separate
+/// so that reading credentials does not also unlock memory.
+fn resolve_credential_key(cli: &CredentialCli) -> Result<String, String> {
+    if let Some(key) = cli.key.as_deref() {
+        if key.is_empty() {
+            return Err("SHADI_CREDENTIAL_KEY is empty".to_string());
+        }
+        return Ok(key.to_string());
+    }
+
+    let secret = default_secret_store()
+        .get(&cli.key_name)
+        .map_err(|_| format!("missing SHADI key: {}", cli.key_name))?;
+    let raw = secret.expose(|bytes| bytes.to_vec());
+    String::from_utf8(raw).map_err(|_| "the credential vault key is not utf-8".to_string())
 }
 
 pub(crate) fn handle_credential_command(
