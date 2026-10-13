@@ -185,6 +185,37 @@ fn start_listeners(
     dir_publish: Option<DirPublishOptions>,
     verbose: bool,
 ) -> anyhow::Result<()> {
+    // Announce before serving and withdraw when the listeners return (Ctrl-C,
+    // or a listener failing to start): the guard lives until this function ends.
+    let serves_card = a2a_listen.is_some()
+        && matches!(a2a_binding, A2ABinding::Jsonrpc | A2ABinding::HttpJson);
+    let locators = super::announce::listener_locators(
+        tool,
+        slim_endpoint,
+        a2a_listen,
+        a2a_binding,
+        card_interface_url,
+    );
+    let (card_tool, card_slim, card_listen) = (
+        tool.to_string(),
+        slim_endpoint.map(str::to_string),
+        a2a_listen.map(str::to_string),
+    );
+    let _announcement = super::announce::start(
+        tool,
+        best_effort_did(tool).as_deref(),
+        locators,
+        serves_card,
+        move || {
+            build_agent_card(
+                &card_tool,
+                card_slim.as_deref(),
+                card_listen.as_deref(),
+                a2a_binding,
+            )
+        },
+    )?;
+
     if let Some(listen) = a2a_listen {
         println!(
             "Starting A2A {} listener on {listen} ...",
@@ -910,9 +941,7 @@ fn agent_card_with(
         ));
     }
     if let Some(listen) = a2a_listen {
-        let url = card
-            .advertise_url()
-            .map_or_else(|| advertised_a2a_url(listen), str::to_string);
+        let url = interface_url(card, listen);
         supported_interfaces.push(AgentInterface::new(
             url,
             a2a_binding.as_protocol_binding(),
@@ -1328,6 +1357,17 @@ fn a2a_tls_dir() -> PathBuf {
 
 fn is_loopback_addr(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
+}
+
+/// The URL the card advertises for the `--a2a-listen` interface, which the
+/// dir-runtime locators repeat so the two agree.
+fn card_interface_url(listen: &str) -> String {
+    interface_url(&super::card::config(), listen)
+}
+
+fn interface_url(card: &super::card::CardConfig, listen: &str) -> String {
+    card.advertise_url()
+        .map_or_else(|| advertised_a2a_url(listen), str::to_string)
 }
 
 fn advertised_a2a_url(listen: &str) -> String {

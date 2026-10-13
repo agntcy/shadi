@@ -104,6 +104,30 @@ enum Cmd {
         /// Advertise skills and domains without checking them against the OASF server.
         #[arg(long)]
         skip_oasf_validation: bool,
+
+        /// Announce this agent to runtime discovery (dir-runtime) while it runs:
+        /// write a process descriptor, and delete it on Ctrl-C or SIGTERM. Needs
+        /// --slim-endpoint or --a2a-listen.
+        #[arg(long)]
+        dir_announce: bool,
+
+        /// dir-runtime's descriptor directory (used with --dir-announce).
+        #[arg(long, env = "DIR_RUNTIME_WORKLOADS_DIR", default_value = commands::announce::DEFAULT_WORKLOADS_DIR)]
+        dir_announce_dir: String,
+
+        /// Address for an HTTP listener serving only the agent card at
+        /// /.well-known/agent-card.json, so runtime discovery can read it. With
+        /// --dir-announce and a SLIM or gRPC binding, a free loopback port is used
+        /// when unset. Set it to publish the card from a container (e.g.
+        /// 0.0.0.0:8081, next to Docker discovery labels); it works without
+        /// --dir-announce too.
+        #[arg(long)]
+        card_listen: Option<String>,
+
+        /// CID of the OASF record the agent was built from, put on the announced
+        /// workload as org.agntcy/agent-record.
+        #[arg(long, value_name = "CID")]
+        source_record: Option<String>,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -322,7 +346,18 @@ fn main() {
             oasf_schema_url,
             oasf_schema_version,
             skip_oasf_validation,
+            dir_announce,
+            dir_announce_dir,
+            card_listen,
+            source_record,
         } => {
+            let announce_opts = commands::announce::AnnounceOptions {
+                enabled: dir_announce,
+                dir: dir_announce_dir,
+                card_listen,
+                source_record,
+            };
+            let needs_listener = dir_announce && slim_endpoint.is_none() && a2a_listen.is_none();
             let card_opts = commands::card::CardOptions {
                 skills,
                 domains,
@@ -336,7 +371,16 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            commands::card::configure(&card_opts).and_then(|()| {
+            if needs_listener {
+                Err(anyhow::anyhow!(
+                    "--dir-announce needs an A2A listener: pass --slim-endpoint or --a2a-listen"
+                ))
+            } else {
+                Ok(())
+            }
+            .and_then(|()| commands::announce::configure(announce_opts))
+            .and_then(|()| commands::card::configure(&card_opts))
+            .and_then(|()| {
                 commands::register::run(
                     &tool,
                     command.as_deref(),
