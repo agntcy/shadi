@@ -17,6 +17,8 @@ struct Cli {
     command: Cmd,
 }
 
+// Parsed once per process; boxing the large `Register` variant would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Register and start a CLI tool adapter.
@@ -66,6 +68,39 @@ enum Cmd {
         /// truncated one-line preview.
         #[arg(long)]
         verbose: bool,
+
+        /// OASF skill the agent offers, by name (repeatable). Advertised in the
+        /// card and in its OASF discovery extension, next to
+        /// `ai_ml_engineering/agent_orchestration/multi_agent_coordination`, which is
+        /// always advertised. Names are checked against the OASF schema version below.
+        #[arg(long = "skill", value_name = "OASF_SKILL")]
+        skills: Vec<String>,
+
+        /// OASF domain the agent applies to, by name (repeatable).
+        #[arg(long = "domain", value_name = "OASF_DOMAIN")]
+        domains: Vec<String>,
+
+        /// The agent's version, shown in its card. Defaults to agentbridge's.
+        #[arg(long = "version", value_name = "VERSION")]
+        agent_version: Option<String>,
+
+        /// DID of the human vouching for the agent, added to the card's OASF
+        /// identity extension. A claim until a binding certificate backs it.
+        #[arg(long, env = "SHADI_HUMAN_DID")]
+        human_did: Option<String>,
+
+        /// OASF schema server that checks skills and domains and names the card
+        /// extensions (`<url>/<version>/objects/discovery`).
+        #[arg(long, env = "OASF_SCHEMA_URL", default_value = commands::card::DEFAULT_OASF_SCHEMA_URL)]
+        oasf_schema_url: String,
+
+        /// OASF schema version to validate against and advertise.
+        #[arg(long, env = "OASF_SCHEMA_VERSION", default_value = commands::card::DEFAULT_OASF_SCHEMA_VERSION)]
+        oasf_schema_version: String,
+
+        /// Advertise skills and domains without checking them against the OASF server.
+        #[arg(long)]
+        skip_oasf_validation: bool,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -256,20 +291,40 @@ fn main() {
             a2a_listen,
             a2a_binding,
             verbose,
+            skills,
+            domains,
+            agent_version,
+            human_did,
+            oasf_schema_url,
+            oasf_schema_version,
+            skip_oasf_validation,
         } => {
+            let card_opts = commands::card::CardOptions {
+                skills,
+                domains,
+                version: agent_version,
+                human_did,
+                oasf_schema_url,
+                oasf_schema_version,
+                skip_validation: skip_oasf_validation,
+            };
             let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            commands::register::run(
-                &tool,
-                command.as_deref(),
-                &args,
-                slim_endpoint.as_deref(),
-                a2a_listen.as_deref(),
-                a2a_binding,
-                publish_opts,
-                verbose,
+            commands::card::configure(&card_opts, commands::register::agent_did(&tool)).and_then(
+                |()| {
+                    commands::register::run(
+                        &tool,
+                        command.as_deref(),
+                        &args,
+                        slim_endpoint.as_deref(),
+                        a2a_listen.as_deref(),
+                        a2a_binding,
+                        publish_opts,
+                        verbose,
+                    )
+                },
             )
         }
         Cmd::List {
@@ -534,6 +589,42 @@ mod tests {
         .expect("parse register verbose");
         match verbose.command {
             Cmd::Register { verbose, .. } => assert!(verbose),
+            _ => panic!("expected register subcommand"),
+        }
+
+        let card = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "copilot",
+            "--skill",
+            "software_engineering/code_debugging/error_handling",
+            "--skill",
+            "software_engineering/code_generation",
+            "--domain",
+            "technology/networking/network_security",
+            "--version",
+            "2.1.0",
+            "--skip-oasf-validation",
+        ])
+        .expect("parse register card flags");
+        match card.command {
+            Cmd::Register {
+                skills,
+                domains,
+                agent_version,
+                oasf_schema_url,
+                oasf_schema_version,
+                skip_oasf_validation,
+                ..
+            } => {
+                assert_eq!(skills.len(), 2);
+                assert_eq!(domains, vec!["technology/networking/network_security"]);
+                assert_eq!(agent_version.as_deref(), Some("2.1.0"));
+                assert_eq!(oasf_schema_url, commands::card::DEFAULT_OASF_SCHEMA_URL);
+                assert_eq!(oasf_schema_version, commands::card::DEFAULT_OASF_SCHEMA_VERSION);
+                assert!(skip_oasf_validation);
+            }
             _ => panic!("expected register subcommand"),
         }
 
