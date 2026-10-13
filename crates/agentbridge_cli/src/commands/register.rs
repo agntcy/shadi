@@ -237,6 +237,12 @@ fn start_listeners(
     Ok(())
 }
 
+/// The agent's DID when DID auth is configured in the environment, for the
+/// card's identity extension.
+pub fn agent_did(agent_id: &str) -> Option<String> {
+    best_effort_did(agent_id)
+}
+
 /// Best-effort DID for `agent_id` when no SLIM listener is running to supply
 /// one: `Some(did)` iff DID auth is actually configured in the environment,
 /// `None` otherwise (the card is then published without an `authors` entry).
@@ -886,6 +892,7 @@ fn build_agent_card(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
 ) -> AgentCard {
+    let card = super::card::config();
     let mut supported_interfaces = Vec::new();
     if let Some(endpoint) = slim_endpoint {
         supported_interfaces.push(AgentInterface::new(
@@ -911,17 +918,17 @@ fn build_agent_card(
             "agentbridge adapter for '{agent_id}'. Supports context handoff, \
              task delegation, and autonomous code coordination."
         ),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: card.version().to_string(),
         supported_interfaces,
         capabilities: AgentCapabilities {
             streaming: Some(true),
             push_notifications: Some(false),
-            extensions: None,
+            extensions: Some(card.extensions()),
             extended_agent_card: Some(false),
         },
         default_input_modes: vec!["text/plain".to_string()],
         default_output_modes: vec!["text/plain".to_string()],
-        skills: default_skills(),
+        skills: card.agent_skills(),
         provider: None,
         documentation_url: None,
         icon_url: None,
@@ -929,39 +936,6 @@ fn build_agent_card(
         security_requirements: None,
         signatures: None,
     }
-}
-
-/// The standard agentbridge skill set: task delegation, agent coordination,
-/// and generating output. Shared by every adapter's `AgentCard`. Each `id` is
-/// a real OASF skill taxonomy class (confirmed against a live Directory's
-/// schema validator) — arbitrary strings are rejected by `dirctl push`.
-fn default_skills() -> Vec<AgentSkill> {
-    [
-        (
-            "agent_orchestration/task_decomposition",
-            "Breaks down and delegates coding tasks to other coding agents.",
-        ),
-        (
-            "agent_orchestration/agent_coordination",
-            "Coordinates and hands off task context between coding agents.",
-        ),
-        (
-            "natural_language_processing/natural_language_generation/text_completion",
-            "Generates code and text completions on request.",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, description)| AgentSkill {
-        id: id.to_string(),
-        name: id.to_string(),
-        description: description.to_string(),
-        tags: Vec::new(),
-        examples: None,
-        input_modes: None,
-        output_modes: None,
-        security_requirements: None,
-    })
-    .collect()
 }
 
 /// Require that this process is running under a SHADI sandbox with network

@@ -232,6 +232,7 @@ dependencies = [
  "futures",
  "opentelemetry",
  "opentelemetry_sdk",
+ "reqwest",
  "rustls-pki-types",
  "serde_json",
  "thiserror 2.0.21",
