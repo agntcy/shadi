@@ -9,6 +9,9 @@ use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+mod credentials;
+pub use credentials::CredentialRecord;
+
 #[derive(Debug, Error)]
 pub enum MemoryError {
     #[error("database error: {0}")]
@@ -29,7 +32,7 @@ pub struct MemoryEntry {
 }
 
 pub struct SqlCipherStore {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
 }
 
 // SqlCipherStore serializes all access to the underlying `rusqlite::Connection`
@@ -62,6 +65,7 @@ impl SqlCipherStore {
                 ON memory_entries(created_at);
             ",
         )?;
+        conn.execute_batch(credentials::CREATE_CREDENTIALS_TABLE)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

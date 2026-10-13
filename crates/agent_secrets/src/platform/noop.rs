@@ -28,6 +28,10 @@ impl SecretStore for NoopSecretStore {
     fn list_keys(&self) -> SecretResult<Vec<String>> {
         Err(SecretError::NotSupported)
     }
+
+    fn is_available(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -45,5 +49,6 @@ mod tests {
         assert!(matches!(store.get("key"), Err(SecretError::NotSupported)));
         assert!(matches!(store.delete("key"), Err(SecretError::NotSupported)));
         assert!(matches!(store.list_keys(), Err(SecretError::NotSupported)));
+        assert!(!store.is_available());
     }
 }

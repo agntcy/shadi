@@ -124,7 +124,9 @@ impl GenericStdioAdapter {
         command: &str,
         args: &[&str],
     ) -> Result<Self, CliAdapterError> {
-        let mut child = Command::new(command)
+        let mut cmd = Command::new(command);
+        super::scrub_vault_env(&mut cmd);
+        let mut child = cmd
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

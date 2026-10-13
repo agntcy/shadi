@@ -306,6 +306,7 @@ dependencies = [
  "agntcy-shadi-a2a",
  "agntcy-shadi-agent-secrets",
  "agntcy-shadi-agent-transport-slim",
+ "agntcy-shadi-credential",
  "agntcy-shadi-identity",
  "agntcy-shadi-memory",
  "agntcy-shadi-sandbox",
@@ -341,6 +342,22 @@ dependencies = [
  "unicode-width",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "agntcy-shadi-credential"
+version = "0.1.0"
+dependencies = [
+ "agntcy-shadi-agent-secrets",
+ "agntcy-shadi-identity",
+ "agntcy-shadi-memory",
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn run_memory_command(cli: MemoryCli) -> ExitCode {
-    let key = match resolve_memory_key(&cli) {
+    let key = match resolve_memory_key(cli.key.as_deref(), &cli.key_name) {
         Ok(key) => key,
         Err(err) => {
             eprintln!("{}", err);
@@ -111,8 +111,8 @@ pub(crate) fn handle_memory_command(cli: &MemoryCli, store: &SqlCipherStore) -> 
     }
 }
 
-pub(crate) fn resolve_memory_key(cli: &MemoryCli) -> Result<String, String> {
-    if let Some(key) = cli.key.as_ref() {
+pub(crate) fn resolve_memory_key(key: Option<&str>, key_name: &str) -> Result<String, String> {
+    if let Some(key) = key {
         if key.is_empty() {
             return Err("SHADI_MEMORY_KEY is empty".to_string());
         }
@@ -121,8 +121,8 @@ pub(crate) fn resolve_memory_key(cli: &MemoryCli) -> Result<String, String> {
 
     let store = default_secret_store();
     let secret = store
-        .get(&cli.key_name)
-        .map_err(|_| format!("missing SHADI key: {}", cli.key_name))?;
+        .get(key_name)
+        .map_err(|_| format!("missing SHADI key: {}", key_name))?;
     let raw = secret.expose(|bytes| bytes.to_vec());
     String::from_utf8(raw).map_err(|_| "SHADI memory key is not utf-8".to_string())
 }

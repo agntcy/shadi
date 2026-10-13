@@ -50,6 +50,16 @@ pub trait SecretStore: Send + Sync {
     fn get(&self, key: &str) -> SecretResult<SecretBytes>;
     fn delete(&self, key: &str) -> SecretResult<()>;
     fn list_keys(&self) -> SecretResult<Vec<String>>;
+
+    /// Whether this backend can store anything at all.
+    ///
+    /// Callers choosing between this store and some other place to keep a
+    /// secret need the answer *without* touching it: probing with a real
+    /// operation prompts the keychain, and a cancelled or locked keychain then
+    /// looks the same as having no keychain. Only the no-op store says false.
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
 pub fn default_store() -> Box<dyn SecretStore> {

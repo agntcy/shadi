@@ -23,6 +23,7 @@ agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version 
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.1", path = "../agent_secrets", features = ["onepassword"] }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.3.0", path = "../shadi_a2a" }
 shadi_memory = { package = "agntcy-shadi-memory", version = "0.2.1", path = "../shadi_memory" }
+shadi_credential = { package = "agntcy-shadi-credential", version = "0.1.0", path = "../shadi_credential" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.1.3", path = "../shadi_telemetry" }
 slim_mas = { package = "agntcy-shadi-slim-mas", version = "0.1.6", path = "../slim_mas" }
 agentbridge = { package = "agntcy-agentbridge", version = "0.4.0", path = "../agentbridge" }
