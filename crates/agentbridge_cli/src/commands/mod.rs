@@ -5,5 +5,6 @@ pub mod delegate;
 pub mod egress;
 pub mod handoff;
 pub mod list;
+pub mod record;
 pub mod register;
 pub mod request_invite;
