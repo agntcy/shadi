@@ -3,10 +3,6 @@
 
 //! A local store for issued verifiable credentials.
 //!
-//! A credential arrives rarely — one browser login every few months — and is
-//! read once per task a peer gates on a claim, so it has to survive restarts,
-//! stay encrypted at rest and work the same on a laptop and in a container.
-//!
 //! **This module does not know what a credential looks like.** It stores the
 //! bytes verbatim and queries the columns a caller lifted out of them, so
 //! adding a credential format means adding a sibling of [`crate::sd_jwt`],
@@ -42,11 +38,10 @@ impl std::str::FromStr for VaultBackend {
 
 /// Which backend to use when the operator did not say.
 ///
-/// Goes through the existing secret-store dispatch — keychain, 1Password or
-/// no-op — rather than naming a backend per target OS. Asks whether the store
-/// works instead of trying an operation on it: a probe would prompt the
-/// keychain, and a cancelled prompt would then be indistinguishable from
-/// having no keychain, silently picking the wrong backend.
+/// Goes through the existing secret-store dispatch rather than naming a
+/// backend per target OS, and asks whether the store works instead of trying
+/// an operation on it: a probe prompts the keychain, and a cancelled prompt is
+/// indistinguishable from having no keychain.
 pub fn default_backend() -> VaultBackend {
     backend_for(agent_secrets::default_store().is_available())
 }
@@ -79,8 +74,8 @@ pub trait CredentialVault: Send + Sync {
 
 // --- Keychain ----------------------------------------------------------------
 
-/// One keychain item per credential. No index to maintain: the store's own key
-/// registry is already kept and self-heals stale entries.
+/// One keychain item per credential. No index to maintain: the store keeps its
+/// own key registry and self-heals stale entries.
 pub struct KeychainVault {
     store: Box<dyn SecretStore>,
 }
@@ -149,8 +144,7 @@ impl CredentialVault for KeychainVault {
         }
     }
 
-    // No query engine here, so filter in memory. The population is single
-    // digits — one credential per agent — and will stay that way.
+    // No query engine here, so filter in memory.
     fn find_valid(
         &self,
         agent_did: &str,

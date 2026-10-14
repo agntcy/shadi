@@ -66,10 +66,10 @@ pub(crate) fn handle_credential_command(
         CredentialCommand::List { json } => {
             span.record("credential.command", &"list");
             let records = vault.list().map_err(|err| err.to_string())?;
-            let summaries = records
+            let summaries: Vec<_> = records
                 .iter()
                 .map(|record| summarise(record, false))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect();
             if *json {
                 return serde_json::to_string_pretty(&summaries).map_err(|err| err.to_string());
             }
@@ -82,7 +82,7 @@ pub(crate) fn handle_credential_command(
                 .get(id)
                 .map_err(|err| err.to_string())?
                 .ok_or_else(|| format!("no credential with id {id}"))?;
-            let summary = summarise(&record, *disclose)?;
+            let summary = summarise(&record, *disclose);
             if *json {
                 return serde_json::to_string_pretty(&summary).map_err(|err| err.to_string());
             }
@@ -134,11 +134,15 @@ struct CredentialSummary {
     claims: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disclosed: Option<Value>,
+    /// Why `claims` is empty, when the reason is that `raw` could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unreadable: Option<String>,
 }
 
-fn summarise(record: &CredentialRecord, disclose: bool) -> Result<CredentialSummary, String> {
-    let parsed = shadi_credential::parse_sd_jwt(&record.raw).map_err(|err| err.to_string())?;
-    Ok(CredentialSummary {
+/// The columns are always printable; the claims are not, so a credential this
+/// binary cannot parse is still listed rather than failing the whole command.
+fn summarise(record: &CredentialRecord, disclose: bool) -> CredentialSummary {
+    let mut summary = CredentialSummary {
         id: record.id.clone(),
         credential_type: record.credential_type.clone(),
         format: record.format.clone(),
@@ -146,17 +150,37 @@ fn summarise(record: &CredentialRecord, disclose: bool) -> Result<CredentialSumm
         agent_did: record.agent_did.clone(),
         created_at: record.created_at,
         expires_at: record.expires_at,
-        claims: parsed.disclosures.iter().map(claim_name).collect(),
-        disclosed: disclose.then(|| {
-            Value::Object(
-                parsed
-                    .disclosures
-                    .iter()
-                    .map(|d| (claim_name(d), d.value.clone()))
-                    .collect(),
-            )
-        }),
-    })
+        claims: Vec::new(),
+        disclosed: None,
+        unreadable: None,
+    };
+
+    match disclosures(record) {
+        Ok(disclosures) => {
+            summary.claims = disclosures.iter().map(claim_name).collect();
+            if disclose {
+                summary.disclosed = Some(Value::Object(
+                    disclosures
+                        .iter()
+                        .map(|d| (claim_name(d), d.value.clone()))
+                        .collect(),
+                ));
+            }
+        }
+        Err(err) => summary.unreadable = Some(err),
+    }
+    summary
+}
+
+/// Only a format this binary knows how to read is parsed; the vault stores
+/// others verbatim and nothing here may assume they are SD-JWT.
+fn disclosures(record: &CredentialRecord) -> Result<Vec<Disclosure>, String> {
+    if !record.format.ends_with("sd-jwt") {
+        return Err(format!("unsupported format {}", record.format));
+    }
+    shadi_credential::parse_sd_jwt(&record.raw)
+        .map(|parsed| parsed.disclosures)
+        .map_err(|err| err.to_string())
 }
 
 /// Array-element disclosures have no claim name.
@@ -178,6 +202,11 @@ fn format_summaries(summaries: &[CredentialSummary]) -> String {
                 Some(exp) => exp.to_string(),
                 None => "never".to_string(),
             };
+            let claims = match summary.unreadable.as_deref() {
+                Some(reason) => format!("(unreadable: {reason})"),
+                None if summary.claims.is_empty() => "(none)".to_string(),
+                None => summary.claims.join(", "),
+            };
             let mut text = format!(
                 "{}\n  type:      {}\n  format:    {}\n  issuer:    {}\n  agent:     {}\n  expires:   {}\n  claims:    {}",
                 summary.id,
@@ -186,11 +215,7 @@ fn format_summaries(summaries: &[CredentialSummary]) -> String {
                 summary.issuer,
                 summary.agent_did,
                 expires,
-                if summary.claims.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    summary.claims.join(", ")
-                },
+                claims,
             );
             if let Some(Value::Object(disclosed)) = summary.disclosed.as_ref() {
                 text.push_str("\n  disclosed:");
@@ -216,8 +241,7 @@ mod tests {
         SqlCipherVault::open(&path, "test-key").expect("open vault")
     }
 
-    /// Mirrors the T1 fixture shape: `dc+sd-jwt`, two disclosures, trailing
-    /// tilde, no key-binding JWT.
+    /// `dc+sd-jwt`, one disclosure, trailing tilde, no key-binding JWT.
     fn fixture() -> String {
         let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let key =
@@ -246,14 +270,27 @@ mod tests {
         format!("{issuer_jwt}~")
     }
 
+    /// A stored record, for the cases import would refuse to create.
+    fn record(id: &str) -> CredentialRecord {
+        CredentialRecord {
+            id: id.to_string(),
+            agent_did: "did:key:zAgent".to_string(),
+            issuer: "https://idp.example/realms/eng".to_string(),
+            credential_type: "urn:shadi:agent-admission:1".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            raw: fixture(),
+            created_at: 1_000,
+            expires_at: None,
+        }
+    }
+
     fn import_fixture(vault: &dyn CredentialVault) -> String {
         shadi_credential::import(vault, &fixture(), 1_000)
             .expect("import")
             .id
     }
 
-    /// A `CredentialCli` pinned to sqlcipher, so nothing in these tests can
-    /// reach a developer's real keychain.
+    /// A `CredentialCli` pinned to sqlcipher.
     fn cli(db: Option<PathBuf>, key: Option<&str>, command: CredentialCommand) -> CredentialCli {
         CredentialCli {
             db,
@@ -432,6 +469,50 @@ mod tests {
 
         let output = handle_credential_command(&list(), &vault).expect("list");
         assert!(output.contains("claims:    (none)"), "{output}");
+    }
+
+    /// A record this binary cannot read must not take the rest of the listing
+    /// with it, and must say why rather than look like a credential with no
+    /// claims.
+    #[test]
+    fn an_unreadable_credential_is_listed_with_the_reason() {
+        let vault = vault();
+        import_fixture(&vault);
+
+        let mut other_format = record("mdoc-1");
+        other_format.format = "mso_mdoc".to_string();
+        vault.put(&other_format).expect("put");
+
+        let mut corrupt = record("corrupt-1");
+        corrupt.raw = "no-longer-an-sd-jwt".to_string();
+        vault.put(&corrupt).expect("put");
+
+        let output = handle_credential_command(&list(), &vault).expect("list");
+        assert!(output.contains("groups"), "{output}");
+        assert!(
+            output.contains("(unreadable: unsupported format mso_mdoc)"),
+            "{output}"
+        );
+        assert!(
+            output.contains("(unreadable: malformed credential"),
+            "{output}"
+        );
+
+        // And one of them on its own still shows what the columns know.
+        let shown = handle_credential_command(
+            &CredentialCommand::Show {
+                id: "mdoc-1".to_string(),
+                disclose: true,
+                json: true,
+            },
+            &vault,
+        )
+        .expect("show");
+        let parsed: Value = serde_json::from_str(&shown).expect("json");
+        assert_eq!(parsed["issuer"], "https://idp.example/realms/eng");
+        assert_eq!(parsed["claims"], json!([]));
+        assert!(parsed.get("disclosed").is_none(), "{shown}");
+        assert_eq!(parsed["unreadable"], "unsupported format mso_mdoc");
     }
 
     /// A credential with no `exp` is non-expiring, and says so.

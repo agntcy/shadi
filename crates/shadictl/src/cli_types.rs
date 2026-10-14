@@ -143,8 +143,7 @@ pub(crate) struct CredentialCli {
     #[arg(long = "key-name", env = "SHADI_CREDENTIAL_KEY_NAME", default_value = "shadi/credential/sqlcipher_key")]
     pub(crate) key_name: String,
 
-    /// Force a backend when the default guesses wrong — mainly how a headless
-    /// test pins itself to sqlcipher on a developer's Mac.
+    /// Force a backend instead of taking the default.
     #[arg(long, env = "SHADI_CREDENTIAL_BACKEND", value_name = "keychain|sqlcipher")]
     pub(crate) backend: Option<String>,
 

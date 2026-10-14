@@ -4,12 +4,10 @@ mod workdir;
 
 use std::process::Command;
 
-/// Keep the credential vault's database key out of an adapter subprocess.
+/// Keep the vault database keys out of an adapter subprocess.
 ///
-/// Adapters inherit the parent's whole environment, and off macOS the secret
-/// store is a no-op, so an environment variable is the only working carrier of
-/// this key. A model subprocess that inherits it and can read the database file
-/// has the credentials.
+/// A child inherits the whole environment, and a child holding a key and able
+/// to read the database file holds its contents.
 pub(crate) fn scrub_vault_env(command: &mut Command) {
     command.env_remove("SHADI_CREDENTIAL_KEY");
     command.env_remove("SHADI_MEMORY_KEY");

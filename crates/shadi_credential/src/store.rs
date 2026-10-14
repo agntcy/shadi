@@ -75,8 +75,23 @@ fn row_to_record(row: &Row<'_>) -> rusqlite::Result<CredentialRecord> {
     })
 }
 
-/// The path every Linux developer, every container and every CI run takes,
-/// because the keychain backend is a no-op off macOS.
+/// The contents are encrypted, but the file still carries who holds which
+/// credentials. SQLite gives journal and WAL files the database's own mode, so
+/// only this one needs setting.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> Result<(), CredentialError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
+        CredentialError::Storage(format!("cannot restrict {}: {err}", path.display()))
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path) -> Result<(), CredentialError> {
+    Ok(())
+}
+
 pub struct SqlCipherVault {
     // `Connection` is `Send` but not `Sync` — it caches prepared statements in
     // a `RefCell` — and the vault is shared across threads.
@@ -91,6 +106,7 @@ impl SqlCipherVault {
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        restrict_to_owner(path)?;
         conn.pragma_update(None, "key", key)?;
         conn.pragma_update(None, "cipher_compatibility", 4)?;
         conn.execute_batch(CREATE_CREDENTIALS_TABLE)?;
@@ -212,6 +228,23 @@ mod tests {
         // Nor are the stored bytes readable without it.
         let bytes = std::fs::read(file.path()).expect("read");
         assert!(!bytes.windows(23).any(|w| w == b"opaque-credential-bytes"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_database_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.db");
+        let vault = SqlCipherVault::open(&path, "credential-key").expect("open");
+        vault.list().expect("list");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
     }
 
     #[test]
