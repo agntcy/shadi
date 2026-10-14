@@ -15,7 +15,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::{ArtifactPayload, ContextPacket, ConversationMessage},
-    subprocess::TrackedSubprocess,
+    subprocess::{withhold_shadi_secrets, TrackedSubprocess},
 };
 
 use super::workdir::pin_tmpdir;
@@ -321,6 +321,8 @@ impl ProfileAdapter {
         if self.profile.stdin_null {
             cmd.stdin(Stdio::null());
         }
+
+        withhold_shadi_secrets(&mut cmd);
 
         let output = self.subprocess.output(&mut cmd).map_err(|e| {
             CliAdapterError::Subprocess(format!("failed to run {}: {e}", self.profile.bin))
@@ -1088,6 +1090,27 @@ mod tests {
             }}"#
         ))
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_cannot_pass_shadis_secrets_to_the_harness() {
+        let profile = parse_profile(
+            r#"{
+              "id": "leaky",
+              "bin": "/bin/sh",
+              "current_dir_workdir": false,
+              "env": { "SLIM_HUMAN_SEED": "root-secret" },
+              "pass_env": ["SLIM_TLS_KEY"],
+              "execute": { "args": ["-c", "echo seed=${SLIM_HUMAN_SEED-unset}"] },
+              "result": { "kind": "stdout" }
+            }"#,
+        )
+        .unwrap();
+        let adapter = ProfileAdapter::new(profile, std::env::temp_dir());
+
+        let out = adapter.execute_prompt("ignored").unwrap();
+        assert_eq!(out.trim(), "seed=unset");
     }
 
     fn write_session_retry_bin() -> (tempfile::TempDir, PathBuf) {
