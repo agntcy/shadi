@@ -114,5 +114,5 @@ dirctl runtime list --oasf-schema-url https://schema.oasf.outshift.com --oasf-sc
 
 - Everything listed is a claim made by whoever started the workload; nothing is verified yet (agntcy/dir-runtime#94).
 - The card names no author yet, so `dirctl runtime list --author` finds no agentbridge agents; the author comes with card signatures (#482).
-- Skill names are OASF 1.1.0 classes, e.g. `ai_ml_engineering/agent_orchestration/multi_agent_coordination`, which every agent advertises.
+- Skill names are OASF 1.1.0 classes. An agent advertises only the skills it is given (`--skill`, or a `--record`); without one it has no `discovery` extension and isn't found by skill.
 - SIGTERM sent to `shadictl` (rather than to `agentbridge`) ends the agent without withdrawing the announcement; dir-runtime still drops it by its PID.
