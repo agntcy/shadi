@@ -30,7 +30,7 @@ services:
       - --skill=software_engineering/code_debugging/error_handling
       - --domain=technology/networking/network_security
       - --version=1.0.0
-      - --human-did=${HUMAN_DID:-did:key:zDemoHuman}
+      - --advertise-url=https://127.0.0.1:18443
 
   summarizer:
     <<: *agent
@@ -42,4 +42,4 @@ services:
     command:
       - --skill=language_processing/language_generation/summarization
       - --version=2.0.0
-      - --human-did=${HUMAN_DID:-did:key:zDemoHuman}
+      - --advertise-url=https://127.0.0.1:28443

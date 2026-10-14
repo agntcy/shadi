@@ -48,7 +48,7 @@ shadictl --net-block \
      --a2a-listen 127.0.0.1:19950 --a2a-binding http+json \
      --skill software_engineering/code_debugging/error_handling \
      --domain technology/networking/network_security \
-     --version 1.0.0 --human-did did:key:zDemoHuman \
+     --version 1.0.0 \
      --dir-announce
 ```
 
@@ -59,7 +59,7 @@ In another terminal:
 ```sh
 dirctl runtime list
 dirctl runtime list --skill "software_engineering/*" --runtime process
-dirctl runtime list --author did:key:zDemoHuman --output json
+dirctl runtime list --domain "technology/*" --output json
 ```
 
 Ctrl-C (or SIGTERM to `agentbridge`) withdraws the announcement; the agent disappears from the list. If the process dies without cleaning up, dir-runtime drops it once it notices the PID is gone.
@@ -71,7 +71,7 @@ docker build -f examples/agentbridge-container/Dockerfile -t agentbridge-fake .
 docker compose -f examples/agentbridge-container/compose.yaml up -d
 ```
 
-Each container runs `agentbridge register` inside `shadictl`, with the A2A listener on HTTP+JSON over a self-signed certificate (port 8443) and the card on plain HTTP (port 8081), both published to the host. `dirctl daemon` discovers the containers by their labels and reads their cards from the published ports:
+Each container runs `agentbridge register` inside `shadictl`, with the A2A listener on HTTP+JSON over a self-signed certificate (port 8443) and the card on plain HTTP (port 8081), both published to the host. `--advertise-url` puts the published A2A port in the card (`https://127.0.0.1:18443`), since the listen address `0.0.0.0:8443` isn't reachable from the host. `dirctl daemon` discovers the containers by their labels and reads their cards from the published ports:
 
 ```sh
 dirctl runtime list --runtime docker
@@ -96,12 +96,13 @@ docker run -d --name my-agent -p 38443:8443 -p 38081:8081 \
   --label org.agntcy/discover=true --label org.agntcy/agent-type=a2a \
   -e SHADI_SLIM_AUTH=did -e SLIM_HUMAN_SEED=demo-human-seed \
   -e SLIM_MEMBER_DIDS=did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK \
-  agentbridge-fake --skill software_engineering/code_generation
+  agentbridge-fake --skill software_engineering/code_generation \
+  --advertise-url https://127.0.0.1:38443
 ```
 
 ## Using a local OASF server
 
-Point both sides at it. agentbridge validates against it and names the extensions after it; `dirctl daemon` must accept it, or it ignores the extensions:
+Point both sides at it. agentbridge validates against it and names the `discovery` extension after it; `dirctl daemon` must accept it, or it ignores the extension:
 
 ```sh
 agentbridge register … --oasf-schema-url http://localhost:8080
@@ -112,5 +113,6 @@ dirctl runtime list --oasf-schema-url https://schema.oasf.outshift.com --oasf-sc
 ## Notes
 
 - Everything listed is a claim made by whoever started the workload; nothing is verified yet (agntcy/dir-runtime#94).
+- The card names no author yet, so `dirctl runtime list --author` finds no agentbridge agents; the author comes with card signatures (#482).
 - Skill names are OASF 1.1.0 classes, e.g. `ai_ml_engineering/agent_orchestration/multi_agent_coordination`, which every agent advertises.
 - SIGTERM sent to `shadictl` (rather than to `agentbridge`) ends the agent without withdrawing the announcement; dir-runtime still drops it by its PID.
