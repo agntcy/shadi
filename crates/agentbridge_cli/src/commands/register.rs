@@ -70,7 +70,11 @@ pub fn run(
         if let Some(profile) = load_profile(tool).map_err(|e| anyhow::anyhow!("{e}"))? {
             let work_dir = register_work_dir(command);
             let id = profile.id.clone();
-            let adapter = Arc::new(ProfileAdapter::new(profile, work_dir.clone()));
+            let adapter = ProfileAdapter::new(profile, work_dir.clone());
+            let adapter = Arc::new(match super::record::config_root() {
+                Some(root) => adapter.with_config_root(root),
+                None => adapter,
+            });
             println!(
                 "Registered {id} adapter from profile (agent id: {}, dir: {})",
                 adapter.agent_id().0,

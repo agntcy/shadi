@@ -43,6 +43,9 @@ serde_json = "1.0"
 semver = "1"
 url = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
+base64 = "0.22"
+flate2 = "1"
+tar = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
@@ -52,6 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
 
 [dev-dependencies]
+tempfile = "3.27"
 opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tower = { version = "0.5", features = ["util"] }

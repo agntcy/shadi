@@ -496,10 +496,11 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Delete the descriptor put in the returned slot on SIGTERM, then exit as
-/// SIGTERM would. Ctrl-C (SIGINT) already returns through the listeners, which
-/// drops the [`Announcement`]. Returns once the handler is registered, so a
-/// SIGTERM right after the descriptor is written still withdraws it.
+/// Delete the descriptor put in the returned slot (and a `--record` config
+/// root) on SIGTERM, then exit as SIGTERM would. Ctrl-C (SIGINT) already
+/// returns through the listeners, which drops the [`Announcement`]. Returns
+/// once the handler is registered, so a SIGTERM right after the descriptor is
+/// written still withdraws it.
 fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
     let path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
@@ -532,6 +533,7 @@ fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
                         remove_descriptor(&p);
                     }
                     stop_in_flight();
+                    super::record::cleanup();
 
                     std::process::exit(143);
                 }
