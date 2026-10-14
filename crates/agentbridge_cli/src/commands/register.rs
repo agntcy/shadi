@@ -237,12 +237,6 @@ fn start_listeners(
     Ok(())
 }
 
-/// The agent's DID when DID auth is configured in the environment, for the
-/// card's identity extension.
-pub fn agent_did(agent_id: &str) -> Option<String> {
-    best_effort_did(agent_id)
-}
-
 /// Best-effort DID for `agent_id` when no SLIM listener is running to supply
 /// one: `Some(did)` iff DID auth is actually configured in the environment,
 /// `None` otherwise (the card is then published without an `authors` entry).
@@ -892,7 +886,22 @@ fn build_agent_card(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
 ) -> AgentCard {
-    let card = super::card::config();
+    agent_card_with(
+        &super::card::config(),
+        agent_id,
+        slim_endpoint,
+        a2a_listen,
+        a2a_binding,
+    )
+}
+
+fn agent_card_with(
+    card: &super::card::CardConfig,
+    agent_id: &str,
+    slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
+) -> AgentCard {
     let mut supported_interfaces = Vec::new();
     if let Some(endpoint) = slim_endpoint {
         supported_interfaces.push(AgentInterface::new(
@@ -901,11 +910,9 @@ fn build_agent_card(
         ));
     }
     if let Some(listen) = a2a_listen {
-        let url = if listen.contains("://") {
-            listen.to_string()
-        } else {
-            format!("http://{listen}")
-        };
+        let url = card
+            .advertise_url()
+            .map_or_else(|| advertised_a2a_url(listen), str::to_string);
         supported_interfaces.push(AgentInterface::new(
             url,
             a2a_binding.as_protocol_binding(),
@@ -2699,6 +2706,34 @@ test push ... FAILED
         let iface = &card.supported_interfaces[0];
         assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_JSONRPC);
         assert!(iface.url.contains("127.0.0.1:8080"), "{}", iface.url);
+    }
+
+    #[test]
+    fn build_agent_card_advertises_https_for_a_non_loopback_listener() {
+        let card = build_agent_card(
+            "copilot",
+            None,
+            Some("0.0.0.0:8443"),
+            A2ABinding::HttpJson,
+        );
+        assert_eq!(card.supported_interfaces[0].url, "https://0.0.0.0:8443");
+    }
+
+    #[test]
+    fn build_agent_card_uses_the_advertise_url_override() {
+        let config = super::super::card::CardConfig::from_options(&super::super::card::CardOptions {
+            advertise_url: Some("https://127.0.0.1:28443".into()),
+            ..Default::default()
+        });
+        let card = agent_card_with(
+            &config,
+            "copilot",
+            Some("127.0.0.1:47357"),
+            Some("0.0.0.0:8443"),
+            A2ABinding::HttpJson,
+        );
+        assert_eq!(card.supported_interfaces.len(), 2);
+        assert_eq!(card.supported_interfaces[1].url, "https://127.0.0.1:28443");
     }
 
     #[test]
