@@ -9,7 +9,8 @@
 # when none is mounted. The agent card is also served over plain HTTP on
 # CARD_PORT, which runtime discovery reads (the container's discovery labels
 # are set by docker run / compose). Extra arguments are passed to register,
-# e.g. --skill / --domain / --version.
+# e.g. --skill / --domain / --version, and --advertise-url with the published
+# A2A port, so the card names an address clients can reach.
 set -eu
 
 A2A_PORT="${A2A_PORT:-8443}"
