@@ -165,10 +165,19 @@ fn dirctl_json(args: &[&str], server: &str) -> anyhow::Result<Value> {
         .args(["--server-addr", server, "--output", "json"])
         .output()
         .map_err(|e| {
-            anyhow::anyhow!(
-                "could not run dirctl ({e}); install it or set SHADI_DIRCTL_BINARY. \
-                 brew tap agntcy/dir https://github.com/agntcy/dir/ && brew install dirctl"
-            )
+            let binary = dirctl();
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                anyhow::anyhow!(
+                    "could not run dirctl ({binary}): {e}. The SHADI sandbox may not allow \
+                     running programs from that path (paths through the /tmp symlink are \
+                     refused); put it under $HOME or use the real path (/private/tmp/…)"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "could not run dirctl ({binary}): {e}; install it or set SHADI_DIRCTL_BINARY. \
+                     brew tap agntcy/dir https://github.com/agntcy/dir/ && brew install dirctl"
+                )
+            }
         })?;
 
     if !output.status.success() {
