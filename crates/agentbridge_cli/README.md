@@ -70,8 +70,9 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 ### `list` — discover registered adapters
 
 ```bash
-# Query DIR for registered adapters
+# Query DIR for A2A agents, optionally only those with an OASF skill
 agentbridge list
+agentbridge list --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination
 
 # List listeners this machine started with register --slim-endpoint / --a2a-listen
 agentbridge list --local

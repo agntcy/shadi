@@ -1,5 +1,7 @@
 use agentbridge::local_registry::{LocalAdapterRecord, LocalAdapterRegistry};
-use agentbridge::member_source::{CandidateMember, DirLookupOptions, MemberSource, SkillSearchSource};
+use agentbridge::member_source::{
+    A2AAgentSearchSource, CandidateMember, DirLookupOptions, MemberSource,
+};
 use shadi_a2a::A2ALocator;
 
 /// List registered agentbridge adapters.
@@ -7,18 +9,24 @@ use shadi_a2a::A2ALocator;
 /// `--local` lists listeners this machine started with
 /// `register --slim-endpoint` and/or `--a2a-listen` (lease files under
 /// `$SHADI_TMP_DIR`). Without `--local`, queries the agntcy Agent Directory
-/// for adapters advertising the standard agentbridge skills, resolving each
+/// for A2A agents (records with an `integration/a2a` module), with any of
+/// `skills` when given, resolving each
 /// match to a real `{name, did, slim_endpoint, locator}` via
 /// [`SkillSearchSource`].
-pub fn run(local: bool, server_addr: &str, github_token: Option<&str>) -> anyhow::Result<()> {
+pub fn run(
+    local: bool,
+    skills: &[String],
+    server_addr: &str,
+    github_token: Option<&str>,
+) -> anyhow::Result<()> {
     if local {
         return list_local(&LocalAdapterRegistry::from_env());
     }
 
-    println!("Searching Agent Directory ({server_addr}) for agentbridge adapters...\n");
+    println!("Searching Agent Directory ({server_addr}) for A2A agents...\n");
 
-    let source = SkillSearchSource {
-        skill: "agent_orchestration/agent_coordination".to_string(),
+    let source = A2AAgentSearchSource {
+        skills: skills.to_vec(),
         dir: DirLookupOptions {
             server_addr: server_addr.to_string(),
             gh_token: github_token.map(str::to_string),
@@ -31,7 +39,7 @@ pub fn run(local: bool, server_addr: &str, github_token: Option<&str>) -> anyhow
         .map_err(|e| anyhow::anyhow!("DIR search failed: {e}"))?;
 
     if candidates.is_empty() {
-        println!("No agentbridge adapters found in DIR.");
+        println!("No A2A agents found in DIR.");
         println!("Register one with: agentbridge register --tool <name> --dir-publish");
     } else {
         for c in &candidates {
