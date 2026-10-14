@@ -10,6 +10,8 @@
   "current_dir_workdir": true,
   "stdin_null": true,
   "extra_args_env": "CODEX_ARGS",
+  "isolation": { "env": { "CODEX_HOME": "{config_root}" } },
+  "provision": { "skills": { "dir": "{config_root}/skills" } },
   "execute": {
     "args": [
       "exec",
