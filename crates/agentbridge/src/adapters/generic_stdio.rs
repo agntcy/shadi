@@ -9,6 +9,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::ContextPacket,
+    subprocess::withhold_shadi_secrets,
 };
 
 // --- Wire protocol ----------------------------------------------------------
@@ -124,8 +125,7 @@ impl GenericStdioAdapter {
         command: &str,
         args: &[&str],
     ) -> Result<Self, CliAdapterError> {
-        let mut child = Command::new(command)
-            .args(args)
+        let mut child = withhold_shadi_secrets(Command::new(command).args(args))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
