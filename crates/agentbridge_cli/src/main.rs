@@ -70,7 +70,7 @@ enum Cmd {
         verbose: bool,
 
         /// OASF skill the agent offers, by name (repeatable). Advertised in the
-        /// card and in its OASF discovery extension, next to
+        /// card's OASF discovery extension, next to
         /// `ai_ml_engineering/agent_orchestration/multi_agent_coordination`, which is
         /// always advertised. Names are checked against the OASF schema version below.
         #[arg(long = "skill", value_name = "OASF_SKILL")]
@@ -84,10 +84,11 @@ enum Cmd {
         #[arg(long = "version", value_name = "VERSION")]
         agent_version: Option<String>,
 
-        /// DID of the human vouching for the agent, added to the card's OASF
-        /// identity extension. A claim until a binding certificate backs it.
-        #[arg(long, env = "SHADI_HUMAN_DID")]
-        human_did: Option<String>,
+        /// URL to advertise in the card for `--a2a-listen`, when clients reach
+        /// the listener at another address (e.g. a published container port).
+        /// Defaults to the listen address: http on loopback, https elsewhere.
+        #[arg(long, value_name = "URL")]
+        advertise_url: Option<String>,
 
         /// OASF schema server that checks skills and domains and names the card
         /// extensions (`<url>/<version>/objects/discovery`).
@@ -294,7 +295,7 @@ fn main() {
             skills,
             domains,
             agent_version,
-            human_did,
+            advertise_url,
             oasf_schema_url,
             oasf_schema_version,
             skip_oasf_validation,
@@ -303,7 +304,7 @@ fn main() {
                 skills,
                 domains,
                 version: agent_version,
-                human_did,
+                advertise_url,
                 oasf_schema_url,
                 oasf_schema_version,
                 skip_validation: skip_oasf_validation,
@@ -312,20 +313,18 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            commands::card::configure(&card_opts, commands::register::agent_did(&tool)).and_then(
-                |()| {
-                    commands::register::run(
-                        &tool,
-                        command.as_deref(),
-                        &args,
-                        slim_endpoint.as_deref(),
-                        a2a_listen.as_deref(),
-                        a2a_binding,
-                        publish_opts,
-                        verbose,
-                    )
-                },
-            )
+            commands::card::configure(&card_opts).and_then(|()| {
+                commands::register::run(
+                    &tool,
+                    command.as_deref(),
+                    &args,
+                    slim_endpoint.as_deref(),
+                    a2a_listen.as_deref(),
+                    a2a_binding,
+                    publish_opts,
+                    verbose,
+                )
+            })
         }
         Cmd::List {
             local,
