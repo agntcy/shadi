@@ -1,12 +1,11 @@
 //! What `register` advertises in its A2A agent card beyond the transport: the
-//! agent's version, its A2A skills, and the OASF `discovery` extension (OASF
-//! schema version, skills and domains) that runtime discovery (dir-runtime)
-//! indexes.
+//! agent's version and the OASF `discovery` extension (OASF schema version,
+//! skills and domains) that runtime discovery (dir-runtime) indexes.
 //!
-//! Each fact is stated once. OASF classes appear only in the `discovery`
-//! extension; the card's A2A `skills` describe what agentbridge does in A2A
-//! terms and are the same for every agent (the OASF record `--dir-publish`
-//! pushes is built from them, and DIR search relies on their names).
+//! Each fact is stated once, and nothing is advertised that the agent wasn't
+//! given: its skills and domains come from `--skill` / `--domain` and from the
+//! `--record` it runs. An agent with no skill has no `discovery` extension (the
+//! OASF object requires one) and no A2A card skills.
 //!
 //! The configuration is set once per process, before any listener starts, and
 //! read by every place that builds the card, so the served card, the
@@ -16,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use a2a::{AgentExtension, AgentSkill};
+use a2a::AgentExtension;
 use serde_json::{json, Value};
 
 /// OASF schema server whose vocabulary skills and domains are checked against
@@ -25,36 +24,6 @@ pub const DEFAULT_OASF_SCHEMA_URL: &str = "https://schema.oasf.outshift.com";
 
 /// OASF version the `discovery` object was released in.
 pub const DEFAULT_OASF_SCHEMA_VERSION: &str = "1.1.0";
-
-/// Always in the `discovery` extension: every bridged agent can join
-/// `coordinate` groups. An OASF 1.1.0 class.
-const COORDINATION_SKILL: &str = "ai_ml_engineering/agent_orchestration/multi_agent_coordination";
-
-/// In the `discovery` extension only when no skill is given, since they
-/// describe any harness. OASF 1.1.0 classes.
-const GENERIC_SKILLS: [&str; 2] = [
-    "ai_ml_engineering/agent_orchestration/task_decomposition",
-    "language_processing/language_generation/text_completion",
-];
-
-/// The card's A2A skills: what every agentbridge adapter offers over A2A.
-/// Their ids predate OASF 1.1.0 and are kept as they are, because the record
-/// `--dir-publish` pushes copies them and DIR search (e.g. the
-/// dir-group-discovery demo) looks agents up by them.
-const A2A_SKILLS: [(&str, &str); 3] = [
-    (
-        "agent_orchestration/task_decomposition",
-        "Breaks down and delegates coding tasks to other coding agents.",
-    ),
-    (
-        "agent_orchestration/agent_coordination",
-        "Coordinates and hands off task context between coding agents.",
-    ),
-    (
-        "natural_language_processing/natural_language_generation/text_completion",
-        "Generates code and text completions on request.",
-    ),
-];
 
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -106,8 +75,11 @@ static CARD_CONFIG: OnceLock<CardConfig> = OnceLock::new();
 /// before any listener starts. Call once, before serving.
 pub fn configure(opts: &CardOptions) -> anyhow::Result<()> {
     let config = CardConfig::from_options(opts);
+    require_skill_for_domains(&config)?;
 
-    if opts.skip_validation {
+    if config.skills.is_empty() {
+        // Nothing to advertise, so nothing to validate.
+    } else if opts.skip_validation {
         eprintln!(
             "[agentbridge] warning: OASF validation skipped; skills and domains are advertised unchecked"
         );
@@ -120,6 +92,17 @@ pub fn configure(opts: &CardOptions) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("card settings were already configured"))
 }
 
+/// The OASF `discovery` object requires skills, so domains alone can't be
+/// advertised.
+fn require_skill_for_domains(config: &CardConfig) -> anyhow::Result<()> {
+    if config.skills.is_empty() && !config.domains.is_empty() {
+        anyhow::bail!(
+            "--domain needs at least one --skill: the OASF discovery object requires skills"
+        );
+    }
+    Ok(())
+}
+
 /// The settings in effect: the configured ones, or the defaults when none were
 /// set (unit tests, and commands that never call [`configure`]).
 pub fn config() -> CardConfig {
@@ -128,17 +111,10 @@ pub fn config() -> CardConfig {
 
 impl CardConfig {
     pub(crate) fn from_options(opts: &CardOptions) -> Self {
-        let mut skills = vec![COORDINATION_SKILL.to_string()];
-
-        let extra: Vec<String> = if opts.skills.is_empty() {
-            GENERIC_SKILLS.iter().map(|s| s.to_string()).collect()
-        } else {
-            opts.skills.clone()
-        };
-
-        for skill in extra {
-            if !skills.contains(&skill) {
-                skills.push(skill);
+        let mut skills: Vec<String> = Vec::new();
+        for skill in &opts.skills {
+            if !skills.contains(skill) {
+                skills.push(skill.clone());
             }
         }
 
@@ -172,23 +148,6 @@ impl CardConfig {
         self.advertise_url.as_deref()
     }
 
-    /// The card's A2A skills, the same for every agentbridge adapter.
-    pub fn agent_skills(&self) -> Vec<AgentSkill> {
-        A2A_SKILLS
-            .iter()
-            .map(|(id, description)| AgentSkill {
-                id: id.to_string(),
-                name: id.to_string(),
-                description: description.to_string(),
-                tags: Vec::new(),
-                examples: None,
-                input_modes: None,
-                output_modes: None,
-                security_requirements: None,
-            })
-            .collect()
-    }
-
     /// The OASF `discovery` payload: schema version, skills and domains.
     pub fn discovery_payload(&self) -> Value {
         let classes = |names: &[String]| -> Vec<Value> {
@@ -207,8 +166,13 @@ impl CardConfig {
         payload
     }
 
-    /// The card extensions: the OASF `discovery` extension.
+    /// The card extensions: the OASF `discovery` extension, when the agent has
+    /// a skill.
     pub fn extensions(&self) -> Vec<AgentExtension> {
+        if self.skills.is_empty() {
+            return Vec::new();
+        }
+
         vec![AgentExtension {
             uri: format!(
                 "{}/{}/objects/discovery",
@@ -330,23 +294,33 @@ mod tests {
     }
 
     #[test]
-    fn defaults_put_coordination_and_the_generic_skills_in_the_extension() {
+    fn nothing_is_advertised_without_a_skill() {
         let config = CardConfig::from_options(&options());
 
-        assert_eq!(
-            discovery_skills(&config),
-            vec![COORDINATION_SKILL, GENERIC_SKILLS[0], GENERIC_SKILLS[1]]
-        );
+        assert!(config.extensions().is_empty());
         assert_eq!(config.version(), env!("CARGO_PKG_VERSION"));
         assert!(config.advertise_url().is_none());
+        require_skill_for_domains(&config).expect("no skill, no domain");
     }
 
     #[test]
-    fn explicit_skills_replace_the_generic_ones_but_keep_coordination() {
+    fn a_domain_without_a_skill_is_refused() {
+        let err = require_skill_for_domains(&CardConfig::from_options(&CardOptions {
+            domains: vec!["technology/networking/network_security".into()],
+            ..options()
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--domain needs at least one --skill"), "{err}");
+    }
+
+    #[test]
+    fn the_given_skills_are_advertised_once_each_in_order() {
         let config = CardConfig::from_options(&CardOptions {
             skills: vec![
                 "software_engineering/code_debugging/error_handling".into(),
-                COORDINATION_SKILL.into(),
+                "ai_ml_engineering/agent_orchestration/multi_agent_coordination".into(),
+                "software_engineering/code_debugging/error_handling".into(),
             ],
             version: Some("2.0.0".into()),
             ..options()
@@ -355,34 +329,17 @@ mod tests {
         assert_eq!(
             discovery_skills(&config),
             vec![
-                COORDINATION_SKILL,
-                "software_engineering/code_debugging/error_handling"
+                "software_engineering/code_debugging/error_handling",
+                "ai_ml_engineering/agent_orchestration/multi_agent_coordination"
             ]
         );
         assert_eq!(config.version(), "2.0.0");
     }
 
     #[test]
-    fn a2a_skills_stay_agentbridges_own_and_do_not_mirror_oasf_skills() {
-        let config = CardConfig::from_options(&CardOptions {
-            skills: vec!["software_engineering/code_debugging/error_handling".into()],
-            ..options()
-        });
-
-        let ids: Vec<String> = config.agent_skills().into_iter().map(|s| s.id).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "agent_orchestration/task_decomposition",
-                "agent_orchestration/agent_coordination",
-                "natural_language_processing/natural_language_generation/text_completion",
-            ]
-        );
-    }
-
-    #[test]
     fn the_only_extension_is_discovery_with_the_versioned_object_uri() {
         let config = CardConfig::from_options(&CardOptions {
+            skills: vec!["software_engineering/code_debugging/error_handling".into()],
             domains: vec!["technology/networking/network_security".into()],
             oasf_schema_url: "http://localhost:8080/".into(),
             ..options()
@@ -405,10 +362,13 @@ mod tests {
 
     #[test]
     fn domains_are_left_out_when_none_are_given() {
-        assert!(CardConfig::from_options(&options())
-            .discovery_payload()
-            .get("domains")
-            .is_none());
+        assert!(CardConfig::from_options(&CardOptions {
+            skills: vec!["software_engineering/code_debugging/error_handling".into()],
+            ..options()
+        })
+        .discovery_payload()
+        .get("domains")
+        .is_none());
     }
 
     #[test]
@@ -442,6 +402,7 @@ mod tests {
 
     fn config_for(url: String) -> CardConfig {
         CardConfig::from_options(&CardOptions {
+            skills: vec!["software_engineering/code_debugging/error_handling".into()],
             oasf_schema_url: url,
             ..options()
         })

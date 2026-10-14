@@ -26,7 +26,7 @@ use agentbridge::mas::{
     EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
     SemanticPayload,
 };
-use agentbridge::member_source::{DirLookupOptions, MemberSource, SkillSearchSource};
+use agentbridge::member_source::{A2AAgentSearchSource, DirLookupOptions, MemberSource};
 use agentbridge::{CliAdapter, ContextPacket};
 use serde::{Deserialize, Serialize};
 use shadi_mas::experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig};
@@ -123,8 +123,8 @@ pub async fn agentbridge_list_adapters(
         return Ok(Vec::new());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let source = SkillSearchSource {
-            skill: "agent_orchestration/agent_coordination".to_string(),
+        let source = A2AAgentSearchSource {
+            skills: Vec::new(),
             dir: DirLookupOptions {
                 server_addr: dir_server,
                 gh_token,

@@ -69,10 +69,11 @@ enum Cmd {
         #[arg(long)]
         verbose: bool,
 
-        /// OASF skill the agent offers, by name (repeatable). Advertised in the
-        /// card's OASF discovery extension, next to
-        /// `ai_ml_engineering/agent_orchestration/multi_agent_coordination`, which is
-        /// always advertised. Names are checked against the OASF schema version below.
+        /// OASF skill the agent offers, by name (repeatable), advertised in the
+        /// card's OASF discovery extension and checked against the OASF schema
+        /// version below. Nothing is advertised by default: an agent without a
+        /// skill (here or from --record) has no discovery extension and isn't
+        /// found by skill.
         #[arg(long = "skill", value_name = "OASF_SKILL")]
         skills: Vec<String>,
 
@@ -109,6 +110,11 @@ enum Cmd {
         /// List listeners started by `register --slim-endpoint` / `--a2a-listen` on this host.
         #[arg(long)]
         local: bool,
+
+        /// Only agents with this OASF skill (repeatable: any of them). Without
+        /// it, every A2A agent in the Directory.
+        #[arg(long = "skill", value_name = "OASF_SKILL", conflicts_with = "local")]
+        skills: Vec<String>,
 
         /// Agent Directory server address.
         #[arg(long, default_value = "prod.gateway.ads.outshift.io:443")]
@@ -328,9 +334,10 @@ fn main() {
         }
         Cmd::List {
             local,
+            skills,
             dir_server,
             gh_token,
-        } => commands::list::run(local, &dir_server, gh_token.as_deref()),
+        } => commands::list::run(local, &skills, &dir_server, gh_token.as_deref()),
         Cmd::Handoff {
             from,
             to,

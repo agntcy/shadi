@@ -706,7 +706,7 @@ for a full walkthrough:
 
 ```bash
 cargo run -p agntcy-shadi-cli -- slim create-group \
-  --members "skill:agent_orchestration/agent_coordination" \
+  --members "skill:ai_ml_engineering/agent_orchestration/multi_agent_coordination" \
   --members "did:did:key:z6Mk..." \
   --members "explicit:trusted-bot=did:key:z6Mk...@10.0.0.5:47560" \
   --dir-server 127.0.0.1:8888 \
