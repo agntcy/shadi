@@ -126,9 +126,25 @@ enum Cmd {
         card_listen: Option<String>,
 
         /// CID of the OASF record the agent was built from, put on the announced
-        /// workload as org.agntcy/agent-record.
+        /// workload as org.agntcy/agent-record. Defaults to the --record CID.
         #[arg(long, value_name = "CID")]
         source_record: Option<String>,
+
+        /// Don't put the --record CID on the announced workload.
+        #[arg(long, conflicts_with = "source_record")]
+        no_source_record: bool,
+
+        /// Run an agent skill from a DIR record (CID or name[:version][@digest]):
+        /// pull it from --record-server and give its agent skills to the harness,
+        /// which starts without the host user's own configuration. Needs a
+        /// profile with `isolation` and `provision.skills`. The record's skills
+        /// and domains are advertised next to --skill / --domain.
+        #[arg(long, value_name = "REF")]
+        record: Option<String>,
+
+        /// DIR node holding the --record (e.g. a local `dirctl daemon`).
+        #[arg(long, value_name = "ADDR", default_value = commands::record::DEFAULT_RECORD_SERVER)]
+        record_server: String,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -360,6 +376,9 @@ fn main() {
             dir_announce_dir,
             card_listen,
             source_record,
+            no_source_record,
+            record,
+            record_server,
         } => {
             // Both serve or announce a listener, so they need one.
             let needs_listener = slim_endpoint.is_none()
@@ -370,13 +389,17 @@ fn main() {
             } else {
                 "--card-listen"
             };
-            let announce_opts = commands::announce::AnnounceOptions {
+            let mut announce_opts = commands::announce::AnnounceOptions {
                 enabled: dir_announce,
                 dir: dir_announce_dir,
                 card_listen,
                 source_record,
             };
-            let card_opts = commands::card::CardOptions {
+            let record_opts = commands::record::RecordOptions {
+                reference: record,
+                server: record_server,
+            };
+            let mut card_opts = commands::card::CardOptions {
                 skills,
                 domains,
                 version: agent_version,
@@ -396,11 +419,20 @@ fn main() {
             } else {
                 Ok(())
             }
-            .and_then(|()| commands::announce::configure(announce_opts))
+            .and_then(|()| commands::record::prepare(&record_opts, &tool))
+            .and_then(|source| {
+                if let Some(source) = source {
+                    card_opts.add_record(&source);
+                    if !no_source_record && announce_opts.source_record.is_none() {
+                        announce_opts.source_record = Some(source.cid);
+                    }
+                }
+                commands::announce::configure(announce_opts)
+            })
             .and_then(|()| publishable(dir_publish, &card_opts.skills))
             .and_then(|()| commands::card::configure(&card_opts))
             .and_then(|()| {
-                commands::register::run(
+                let result = commands::register::run(
                     &tool,
                     command.as_deref(),
                     &args,
@@ -409,7 +441,9 @@ fn main() {
                     a2a_binding,
                     publish_opts,
                     verbose,
-                )
+                );
+                commands::record::cleanup();
+                result
             })
         }
         Cmd::List {

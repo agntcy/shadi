@@ -62,6 +62,15 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
 
 # Publish an OASF record to the Agent Directory after registering
 agentbridge register --tool claude-code --dir-publish
+
+# Run an agent skill from a DIR record: pull it from a local dirctl daemon and
+# give its agent skills to a harness started without your own configuration
+# (needs a profile with `isolation` and `provision.skills`: claude-code, codex).
+# The isolated harness doesn't see your login: pass an API key (ANTHROPIC_API_KEY).
+shadictl --net-block --net-allow 127.0.0.1:50051 --net-allow localhost:8888 \
+  --net-allow schema.oasf.outshift.com:443 --read ~/.dir --read ~/.config/dirctl -- \
+  agentbridge register --tool claude-code --record code-review:1.0.0 \
+    --record-server localhost:8888 --a2a-listen 127.0.0.1:50051 --a2a-binding http+json
 ```
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
