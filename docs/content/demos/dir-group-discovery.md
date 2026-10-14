@@ -125,9 +125,11 @@ source docs/content/demos/demo-env-dir.sh
 export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"
 SHADI_AGENT_ID=copilot target/debug/shadictl --net-block \
   --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
+  --net-allow schema.oasf.outshift.com:443 \
   --read "$SHADI_TMP_DIR" -- \
   target/debug/agentbridge register --tool copilot \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
+  --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination \
   --dir-publish --dir-server "$SHADI_DIR_SERVER"
 ```
 
@@ -139,13 +141,13 @@ Published. CID: baeareiccmurazht4fdrmlcl3optjab7qvybnejojjappzfgjhmgqx6dd5u
 [agentbridge] ready — listening on agntcy/shadi/copilot-a2a
 ```
 
-Repeat in **Terminal codex** with `--tool codex`. Both adapters advertise the
-standard agentbridge skill set — `agent_orchestration/task_decomposition`,
-`agent_orchestration/agent_coordination`, and
-`natural_language_processing/natural_language_generation/text_completion` —
-real [OASF](https://github.com/agntcy/oasf) skill taxonomy classes, confirmed
-against a live Directory's schema validator (arbitrary skill strings are
-rejected by `dirctl push`).
+Repeat in **Terminal codex** with `--tool codex`. An agent advertises only the
+skills it is given: `--skill` names an [OASF](https://github.com/agntcy/oasf)
+1.1.0 class, checked against the OASF schema server before the listener starts
+(hence `--net-allow schema.oasf.outshift.com:443`), and the record
+`--dir-publish` pushes carries it. Here both get
+`ai_ml_engineering/agent_orchestration/multi_agent_coordination`, which step 5
+searches for.
 
 ## 4. Discover them with `agentbridge list`
 
@@ -157,7 +159,7 @@ target/debug/agentbridge list --dir-server "$SHADI_DIR_SERVER"
 ```
 
 ```text
-Searching Agent Directory (127.0.0.1:8888) for agentbridge adapters...
+Searching Agent Directory (127.0.0.1:8888) for A2A agents...
 
 codex     did=did:key:z6MkjFJX8CHfgsZKWpS2FfQz38KyzHkf2mDo1vKJ9rMfSUvg  slim://127.0.0.1:47660
 copilot   did=did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb  slim://127.0.0.1:47660
@@ -165,6 +167,15 @@ copilot   did=did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb  slim://1
 
 Both entries are real, resolved from Directory records `agentbridge list`
 pulled and parsed — not raw `dirctl` stdout.
+
+`agentbridge list` shows every A2A agent in the Directory (records with an
+`integration/a2a` module); `--skill <class>` (repeatable) narrows it to agents
+with any of those skills:
+
+```bash
+target/debug/agentbridge list --dir-server "$SHADI_DIR_SERVER" \
+  --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination
+```
 
 Listeners on this host (no DIR) are listed the same way after
 `register --slim-endpoint`:
@@ -181,7 +192,7 @@ target/debug/agentbridge list --local
 
 ```bash
 target/debug/shadictl slim create-group \
-  --members "skill:agent_orchestration/agent_coordination" \
+  --members "skill:ai_ml_engineering/agent_orchestration/multi_agent_coordination" \
   --dir-server "$SHADI_DIR_SERVER" \
   --write-config /tmp/shadi-dir-demo/mas.toml \
   agntcy/shadi/dir-room
@@ -260,9 +271,11 @@ source docs/content/demos/demo-env-dir.sh
 export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"
 SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block \
   --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
+  --net-allow schema.oasf.outshift.com:443 \
   --read "$SHADI_TMP_DIR" -- \
   target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
+  --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination \
   --dir-publish --dir-server "$SHADI_DIR_SERVER"
 ```
 
@@ -277,7 +290,7 @@ important part, `/slim invite-from` operates on the live in-process trust
 set `create-group` built):
 
 ```text
-/slim invite-from skill:agent_orchestration/agent_coordination
+/slim invite-from skill:ai_ml_engineering/agent_orchestration/multi_agent_coordination
 ```
 
 `invite-from` re-runs the skill search live. It finds `claude-code` — but
@@ -301,7 +314,7 @@ or communicated out of band), creating the group with one extra spec:
 
 ```bash
 target/debug/shadictl slim create-group \
-  --members "skill:agent_orchestration/agent_coordination" \
+  --members "skill:ai_ml_engineering/agent_orchestration/multi_agent_coordination" \
   --members "explicit:claude-code=did:key:z6MkkYR1mqCHqEutWUM6bKoqPsPj2diDu8ykXk3cZMGxeQV9" \
   --dir-server "$SHADI_DIR_SERVER" \
   agntcy/shadi/dir-room
@@ -331,7 +344,7 @@ combinable in one `--members` list:
 
 ```bash
 target/debug/shadictl slim create-group \
-  --members "skill:agent_orchestration/agent_coordination" \
+  --members "skill:ai_ml_engineering/agent_orchestration/multi_agent_coordination" \
   --members "did:did:key:z6MkkYR1mqCHqEutWUM6bKoqPsPj2diDu8ykXk3cZMGxeQV9" \
   --members "explicit:trusted-bot=did:key:z6Mk...@10.0.0.5:47560" \
   --dir-server "$SHADI_DIR_SERVER" \

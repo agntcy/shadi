@@ -935,7 +935,7 @@ fn agent_card_with(
         },
         default_input_modes: vec!["text/plain".to_string()],
         default_output_modes: vec!["text/plain".to_string()],
-        skills: card.agent_skills(),
+        skills: Vec::new(),
         provider: None,
         documentation_url: None,
         icon_url: None,
@@ -2666,18 +2666,11 @@ test push ... FAILED
     }
 
     #[test]
-    fn build_agent_card_includes_default_skills() {
+    fn build_agent_card_has_no_hardcoded_skills() {
         let card = build_agent_card("codex", None, None, A2ABinding::Grpc);
-        assert_eq!(card.skills.len(), 3);
-        assert!(card
-            .skills
-            .iter()
-            .any(|s| s.id.contains("task_decomposition")));
-        assert!(card
-            .skills
-            .iter()
-            .any(|s| s.id.contains("agent_coordination")));
-        assert!(card.skills.iter().any(|s| s.id.contains("text_completion")));
+        assert!(card.skills.is_empty());
+        let extensions = card.capabilities.extensions.unwrap_or_default();
+        assert!(extensions.is_empty(), "no skill given, no discovery extension");
     }
 
     #[test]

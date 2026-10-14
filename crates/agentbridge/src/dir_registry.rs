@@ -11,7 +11,9 @@ use time::OffsetDateTime;
 /// An OASF record requires `schema_version`, `name`, `version`, `description`,
 /// `authors`, `created_at`, and `skills` at its *top level* — the AgentCard
 /// itself doesn't carry a DID or live at the record's top level, so this
-/// hoists `name`/`version`/`description`/`skills` out of the card, adds the
+/// hoists `name`/`version`/`description` out of the card, takes the skills,
+/// domains and schema version from its OASF `discovery` extension (or, for a
+/// card without one, its A2A skill ids under OASF 1.0.0), adds the
 /// agent's DID as the `authors` entry (no other AgentCard field carries a
 /// DID) and a fresh `created_at`, and carries the full card verbatim in a
 /// well-known `integration/a2a` module so `dirctl export --format=a2a` and
@@ -30,24 +32,32 @@ pub fn wrap_agent_card(card_json: &Value, did: Option<&str>) -> Value {
         .get("version")
         .and_then(Value::as_str)
         .unwrap_or("0.0.0");
-    let skills: Vec<Value> = card_json
-        .get("skills")
-        .and_then(Value::as_array)
-        .map(|skills| {
-            skills
-                .iter()
-                .filter_map(|s| s.get("id").and_then(Value::as_str))
-                .map(|id| serde_json::json!({"name": id}))
-                .collect()
-        })
-        .unwrap_or_default();
+    let discovery = discovery_params(card_json);
+    let skills: Vec<Value> = match discovery.and_then(|d| d.get("skills")) {
+        Some(Value::Array(skills)) => skills.clone(),
+        _ => card_json
+            .get("skills")
+            .and_then(Value::as_array)
+            .map(|skills| {
+                skills
+                    .iter()
+                    .filter_map(|s| s.get("id").and_then(Value::as_str))
+                    .map(|id| serde_json::json!({"name": id}))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let schema_version = discovery
+        .and_then(|d| d.get("schema_version"))
+        .and_then(Value::as_str)
+        .unwrap_or("1.0.0");
     let created_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default();
 
-    serde_json::json!({
+    let mut record = serde_json::json!({
         "name": name,
-        "schema_version": "1.0.0",
+        "schema_version": schema_version,
         "version": version,
         "description": description,
         "authors": authors,
@@ -60,7 +70,25 @@ pub fn wrap_agent_card(card_json: &Value, did: Option<&str>) -> Value {
                 "card_schema_version": "v1.0.0",
             }
         }]
-    })
+    });
+    if let Some(domains) = discovery.and_then(|d| d.get("domains")) {
+        record["domains"] = domains.clone();
+    }
+    record
+}
+
+/// The `params` of the card's OASF `discovery` extension, if it has one.
+fn discovery_params(card_json: &Value) -> Option<&Value> {
+    card_json
+        .pointer("/capabilities/extensions")?
+        .as_array()?
+        .iter()
+        .find(|e| {
+            e.get("uri")
+                .and_then(Value::as_str)
+                .is_some_and(|uri| uri.ends_with("/objects/discovery"))
+        })?
+        .get("params")
 }
 
 const DIRCTL_HINT: &str =
@@ -218,6 +246,32 @@ mod tests {
                 {"name": "agent_orchestration/task_decomposition"},
                 {"name": "agent_orchestration/agent_coordination"},
             ])
+        );
+    }
+
+    #[test]
+    fn wrap_agent_card_takes_oasf_classes_from_the_discovery_extension() {
+        let card = serde_json::json!({
+            "name": "debugger",
+            "skills": [],
+            "capabilities": {"extensions": [{
+                "uri": "https://schema.oasf.outshift.com/1.1.0/objects/discovery",
+                "params": {
+                    "schema_version": "1.1.0",
+                    "skills": [{"name": "software_engineering/code_debugging/error_handling"}],
+                    "domains": [{"name": "technology/networking/network_security"}],
+                },
+            }]},
+        });
+        let record = wrap_agent_card(&card, None);
+        assert_eq!(record["schema_version"], "1.1.0");
+        assert_eq!(
+            record["skills"],
+            serde_json::json!([{"name": "software_engineering/code_debugging/error_handling"}])
+        );
+        assert_eq!(
+            record["domains"],
+            serde_json::json!([{"name": "technology/networking/network_security"}])
         );
     }
 
