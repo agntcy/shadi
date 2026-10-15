@@ -235,6 +235,11 @@ enum Cmd {
         /// already has a locator scheme). Default is grpc.
         #[arg(long, value_parser = shadi_a2a::A2ABinding::parse_unicast)]
         a2a_binding: Option<shadi_a2a::A2ABinding>,
+
+        /// dir-runtime to look `--to` up in when it isn't a listener on this
+        /// host (agents announced with `register --dir-announce`).
+        #[arg(long, value_name = "ADDR", default_value = "localhost:8888")]
+        runtime: String,
     },
 
     /// Ask a channel's owner over A2A to let someone into the channel.
@@ -499,6 +504,7 @@ fn main() {
             endpoint,
             a2a_url,
             a2a_binding,
+            runtime,
         } => commands::delegate::run(
             &prompt,
             &to,
@@ -506,6 +512,7 @@ fn main() {
             &endpoint,
             a2a_url.as_deref(),
             a2a_binding,
+            &runtime,
         ),
         Cmd::RequestInvite {
             owner,
