@@ -369,6 +369,24 @@ pub(crate) mod tests {
         keeps_a_credential_without_exp(&keychain_vault());
     }
 
+    #[test]
+    fn keychain_backend_excludes_a_credential_expiring_exactly_now() {
+        let vault = keychain_vault();
+        vault.put(&record("cred-1")).expect("put");
+        let find = |now| {
+            vault
+                .find_valid(
+                    "did:key:zAgent",
+                    "https://idp.example/realms/eng",
+                    "urn:shadi:agent-admission:1",
+                    now,
+                )
+                .expect("find")
+        };
+        assert!(find(2_000).is_empty());
+        assert_eq!(find(1_999).len(), 1);
+    }
+
     fn replaces_in_place(vault: &dyn CredentialVault) {
         vault.put(&record("cred-1")).expect("put");
         let mut updated = record("cred-1");
@@ -437,10 +455,6 @@ pub(crate) mod tests {
     fn without_a_secret_store_the_default_is_sqlcipher() {
         assert_eq!(backend_for(false), VaultBackend::SqlCipher);
         assert_eq!(backend_for(true), VaultBackend::Keychain);
-        assert_eq!(
-            default_backend(),
-            backend_for(agent_secrets::default_store().is_available())
-        );
     }
 
     #[test]

@@ -230,6 +230,37 @@ mod tests {
         assert!(!bytes.windows(23).any(|w| w == b"opaque-credential-bytes"));
     }
 
+    /// `exp` is the first instant the credential is no longer valid.
+    #[test]
+    fn a_credential_expiring_exactly_now_is_excluded() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let vault = SqlCipherVault::open(file.path(), "credential-key").expect("open");
+        vault
+            .put(&CredentialRecord {
+                id: "cred-1".to_string(),
+                agent_did: "did:key:zAgent".to_string(),
+                issuer: "https://idp.example/realms/eng".to_string(),
+                credential_type: "urn:shadi:agent-admission:1".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                raw: "opaque-credential-bytes".to_string(),
+                created_at: 1_000,
+                expires_at: Some(2_000),
+            })
+            .expect("put");
+        let find = |now| {
+            vault
+                .find_valid(
+                    "did:key:zAgent",
+                    "https://idp.example/realms/eng",
+                    "urn:shadi:agent-admission:1",
+                    now,
+                )
+                .expect("find")
+        };
+        assert!(find(2_000).is_empty());
+        assert_eq!(find(1_999).len(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_database_is_readable_only_by_its_owner() {

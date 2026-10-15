@@ -114,9 +114,15 @@ pub fn parse_sd_jwt(raw: &str) -> Result<ParsedCredential, CredentialError> {
 
     let expires_at = match payload.get("exp") {
         None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_i64().ok_or_else(|| {
-            CredentialError::Malformed("`exp` is not a number of seconds".to_string())
-        })?),
+        // NumericDate may be fractional; floor so it can only expire earlier.
+        Some(value) => Some(
+            value
+                .as_i64()
+                .or_else(|| value.as_f64().map(|f| f.floor() as i64))
+                .ok_or_else(|| {
+                    CredentialError::Malformed("`exp` is not a number of seconds".to_string())
+                })?,
+        ),
     };
 
     let jwk = payload
@@ -444,6 +450,15 @@ mod tests {
         payload["exp"] = serde_json::json!("2026-10-13T00:00:00Z");
         let err = parse_sd_jwt(&credential_with(payload, &[])).expect_err("reject");
         assert!(err.to_string().contains("number of seconds"), "{err}");
+    }
+
+    /// RFC 7519 NumericDate permits a fractional value.
+    #[test]
+    fn a_fractional_exp_is_floored() {
+        let mut payload = payload();
+        payload["exp"] = serde_json::json!(2000.5);
+        let parsed = parse_sd_jwt(&credential_with(payload, &[])).expect("parse");
+        assert_eq!(parsed.expires_at, Some(2_000));
     }
 
     #[test]
