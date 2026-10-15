@@ -27,7 +27,7 @@ the skills it was given, so nothing here spends tokens.
   its OASF `discovery` extension, checked against the OASF schema server
   before the listener starts. No skill is added automatically.
 - **Announced while it runs** — `--dir-announce` registers the running
-  instance with runtime discovery and withdraws it on Ctrl-C or SIGTERM.
+  instance with runtime discovery and withdraws it when it stops.
   Containers are announced by their labels.
 - **Found by skill** — `dirctl runtime list --skill …` lists running agents,
   with the record each was built from.
@@ -41,13 +41,16 @@ the skills it was given, so nothing here spends tokens.
 cargo build -p agntcy-shadi-cli -p agntcy-agentbridge-cli
 
 # 2. Build dirctl with runtime discovery (dirctl daemon + dirctl runtime list)
-git clone https://github.com/agntcy/dir.git ../dir
+git clone --branch feat/runtime-stale-descriptors https://github.com/agntcy/dir.git ../dir
 (cd ../dir/cli && go build -o "$HOME/go/bin/dirctl-dev" .)
 ```
 
 `dirctl runtime list` and process discovery in `dirctl daemon` ship with DIR
-1.8.0; the output shown here and the clean-up of stale descriptors need DIR's
-`main` branch until the next release, so build `dirctl` as above.
+1.8.0. The JSON output used here
+([agntcy/dir#2366](https://github.com/agntcy/dir/pull/2366)) and the clean-up
+of stale descriptors ([agntcy/dir#2373](https://github.com/agntcy/dir/pull/2373))
+aren't merged yet; #2373's branch carries both, so build `dirctl` from it as
+above. Once both are merged, build from `main` instead.
 
 !!! note "Runtime discovery is local for now"
     The runtime discovery API is served by `dirctl daemon`, which runs DIR's
@@ -274,8 +277,11 @@ or DID: a name that isn't a listener on this host is looked up at the
 dir-runtime (`--runtime`, default `localhost:8888`), which reports this
 announced agent with its DID and locator.
 
-Press **Ctrl-C** in Terminal R: the agent withdraws its announcement, and
-`dirctl runtime list` no longer shows it.
+Press **Ctrl-C** in Terminal R: `dirctl runtime list` no longer shows the
+agent. Ctrl-C reaches `shadictl`, which kills `agentbridge` outright, so the
+descriptor is left behind and `dirctl daemon` removes it on its next scan,
+once it sees the process is gone. SIGTERM sent to `agentbridge` itself
+withdraws the announcement at once.
 
 ## 6. With a real harness
 
@@ -374,8 +380,10 @@ target/debug/agentbridge delegate --to claude-code-isolated \
 ### Harnesses without isolation
 
 `copilot` and `cursor-agent` have neither `isolation` nor a place for skills
-(`provision.skills`), so they refuse `--record`: their login lives in the
-keychain or their own configuration, which an isolated run would lose. They still run as agents from flags (step 7's
+(`provision.skills`), so they refuse `--record`. That is only because neither
+has been implemented for these harnesses yet; their login lives in the
+keychain or their own configuration, which an isolated profile has to bring
+along. They still run as agents from flags (step 7's
 command with `--tool <name>`), using your own configuration and login: the
 sandbox then has to allow the harness's configuration and wherever its login
 is stored. For a login kept in the macOS keychain, that means
@@ -420,12 +428,18 @@ endpoint:
 ```bash
 target/debug/shadictl --net-block \
   --net-allow "$SLIM_ENDPOINT" --net-allow schema.oasf.outshift.com:443 \
+  --net-allow 127.0.0.1:19953 \
   --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
   -- target/debug/agentbridge register --tool codex \
      --command "$SHADI_TMP_DIR/work" --slim-endpoint "$SLIM_ENDPOINT" \
      --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination \
-     --dir-announce
+     --card-listen 127.0.0.1:19953 --dir-announce
 ```
+
+SLIM doesn't serve the agent card, so `--dir-announce` adds a card listener
+for dir-runtime to read. The sandbox only allows listed ports, so give it a
+fixed one (`--card-listen`, with the same `--net-allow`), a different port for
+each agent.
 
 Then the moderator resolves the group from running agents:
 
@@ -487,8 +501,8 @@ has no `discovery` extension, so `--skill` filters don't find it.
 - **Isolated harnesses don't see your login.** A real harness started with
   `--record` gets a fresh configuration, so it needs a credential it can read
   (step 6).
-- **Stale announcements clean themselves up.** SIGTERM to `shadictl` (or a
-  crash) ends the agent without withdrawing its announcement; `dirctl daemon`
+- **Stale announcements clean themselves up.** Ctrl-C or SIGTERM to `shadictl`
+  (or a crash) ends the agent without withdrawing its announcement; `dirctl daemon`
   removes the descriptor once the process is gone, and its `started_at`
   keeps a reused PID from reviving it.
 - **One OASF version per card.** A record's classes join the card only when
