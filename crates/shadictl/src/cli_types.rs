@@ -129,6 +129,59 @@ pub(crate) struct MemoryCli {
 }
 
 #[derive(Parser, Debug)]
+#[command(name = "credential", about = "Inspect the local OpenID4VC credential vault")]
+pub(crate) struct CredentialCli {
+    /// Its own database, not the memory one: whoever can read credentials
+    /// must not thereby be able to read memory. Only the sqlcipher backend
+    /// reads it; the keychain needs no database.
+    #[arg(long, env = "SHADI_CREDENTIAL_DB", value_name = "PATH")]
+    pub(crate) db: Option<PathBuf>,
+
+    #[arg(long, env = "SHADI_CREDENTIAL_KEY")]
+    pub(crate) key: Option<String>,
+
+    #[arg(long = "key-name", env = "SHADI_CREDENTIAL_KEY_NAME", default_value = "shadi/credential/sqlcipher_key")]
+    pub(crate) key_name: String,
+
+    /// Force a backend instead of taking the default.
+    #[arg(long, env = "SHADI_CREDENTIAL_BACKEND", value_name = "keychain|sqlcipher")]
+    pub(crate) backend: Option<String>,
+
+    #[command(subcommand)]
+    pub(crate) command: CredentialCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CredentialCommand {
+    /// Identifiers, types, issuers, expiry and the *names* of the disclosable
+    /// claims — never their values.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        #[arg(long)]
+        id: String,
+        /// Print the claim values too. Revealing them is a decision, not a
+        /// side effect of looking.
+        #[arg(long)]
+        disclose: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Delete {
+        #[arg(long)]
+        id: String,
+    },
+    /// Read a credential from a file — how a hand-issued fixture gets in
+    /// before the issuance command exists.
+    Import {
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+    },
+}
+
+#[derive(Parser, Debug)]
 #[command(name = "trace", about = "Inspect local SHADI trace logs")]
 pub(crate) struct TraceCli {
     #[arg(long, value_name = "PATH")]
@@ -146,6 +199,8 @@ pub(crate) enum Commands {
     Policy(PolicyCli),
     #[command(name = "memory")]
     Memory(MemoryCli),
+    #[command(name = "credential")]
+    Credential(CredentialCli),
     #[command(name = "trace")]
     Trace(TraceCli),
     #[command(name = "slim-mas")]

@@ -50,6 +50,26 @@ pub trait SecretStore: Send + Sync {
     fn get(&self, key: &str) -> SecretResult<SecretBytes>;
     fn delete(&self, key: &str) -> SecretResult<()>;
     fn list_keys(&self) -> SecretResult<Vec<String>>;
+
+    /// Keys starting with `prefix`. Overridden where `list_keys` reads every
+    /// item to check it exists; the result may then name an item that is gone.
+    fn list_keys_prefixed(&self, prefix: &str) -> SecretResult<Vec<String>> {
+        Ok(self
+            .list_keys()?
+            .into_iter()
+            .filter(|k| k.starts_with(prefix))
+            .collect())
+    }
+
+    /// Whether this backend can store anything at all.
+    ///
+    /// Callers choosing between this store and some other place to keep a
+    /// secret need the answer *without* touching it: probing with a real
+    /// operation prompts the keychain, and a cancelled or locked keychain then
+    /// looks the same as having no keychain. Only the no-op store says false.
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
 pub fn default_store() -> Box<dyn SecretStore> {
@@ -161,6 +181,14 @@ mod tests {
     #[test]
     fn default_store_constructs_a_backend() {
         let _store = default_store();
+    }
+
+    /// `MemoryStore` does not implement `is_available`, so this is the trait
+    /// default: a store counts as available unless it says otherwise, which
+    /// only the no-op store does.
+    #[test]
+    fn stores_are_available_unless_they_opt_out() {
+        assert!(MemoryStore::new().is_available());
     }
 
     #[test]

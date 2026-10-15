@@ -218,7 +218,9 @@ impl SecretStore for MacosKeychainStore {
     /// deleting the registry item is not a fix: it hides live keys instead.
     /// A missing item is definitive — a locked or unavailable keychain reports
     /// something other than not-found — so a stale entry is pruned rather than
-    /// re-checked on every listing.
+    /// re-checked on every listing. A replaced login keychain also reports
+    /// not-found and so prunes live entries; the items survive and `get` by
+    /// key still finds them, but they stop being listed.
     fn list_keys(&self) -> SecretResult<Vec<String>> {
         let mut live = Vec::new();
         let mut stale = false;
@@ -238,6 +240,16 @@ impl SecretStore for MacosKeychainStore {
             self.store_registry(&live)?;
         }
         Ok(live)
+    }
+
+    /// Registry entries under `prefix`. Nothing is read, so unrelated secrets
+    /// raise no ACL prompt, and nothing is pruned.
+    fn list_keys_prefixed(&self, prefix: &str) -> SecretResult<Vec<String>> {
+        Ok(self
+            .load_registry()?
+            .into_iter()
+            .filter(|key| key != REGISTRY_ACCOUNT && key.starts_with(prefix))
+            .collect())
     }
 }
 
@@ -385,6 +397,43 @@ mod tests {
 
         store.delete("a").unwrap();
         store.delete("b").unwrap();
+        store.delete(REGISTRY_ACCOUNT).unwrap();
+    }
+
+    #[test]
+    fn list_keys_prefixed_leaves_an_entry_outside_the_prefix_alone() {
+        let service = unique_service();
+        let store = MacosKeychainStore::new(service.clone());
+        store.put("credentials/one", b"1").unwrap();
+        store.put("other", b"2").unwrap();
+
+        // Removed behind the store's back, as Keychain Access would.
+        delete_generic_password(&service, "other").unwrap();
+
+        assert_eq!(
+            store.list_keys_prefixed("credentials/").unwrap(),
+            vec!["credentials/one".to_string()]
+        );
+        // Never read, so never pruned: only `list_keys` prunes.
+        assert!(store.load_registry().unwrap().contains(&"other".to_string()));
+
+        store.delete("credentials/one").unwrap();
+        store.delete(REGISTRY_ACCOUNT).unwrap();
+    }
+
+    #[test]
+    fn list_keys_prefixed_still_names_an_item_that_is_gone() {
+        let service = unique_service();
+        let store = MacosKeychainStore::new(service.clone());
+        store.put("credentials/gone", b"1").unwrap();
+        delete_generic_password(&service, "credentials/gone").unwrap();
+
+        assert_eq!(
+            store.list_keys_prefixed("credentials/").unwrap(),
+            vec!["credentials/gone".to_string()]
+        );
+        assert!(store.list_keys().unwrap().is_empty());
+
         store.delete(REGISTRY_ACCOUNT).unwrap();
     }
 

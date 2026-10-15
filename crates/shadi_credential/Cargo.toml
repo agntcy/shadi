@@ -1,0 +1,31 @@
+[package]
+name = "agntcy-shadi-credential"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "Verifiable credential vault and SD-JWT handling for SHADI."
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "shadi_credential"
+
+[dependencies]
+agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.1", path = "../agent_secrets" }
+shadi_identity = { package = "agntcy-shadi-identity", version = "0.3.0", path = "../shadi_identity" }
+base64 = "0.23"
+ed25519-dalek = "2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+uuid = { version = "1", features = ["v4"] }
+
+# Mirrors shadi_memory's crypto provider choice; see the comment there.
+[target.'cfg(not(windows))'.dependencies]
+rusqlite = { workspace = true, features = ["bundled-sqlcipher"] }
+
+[target.'cfg(windows)'.dependencies]
+rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[dev-dependencies]
+tempfile = "3.27"

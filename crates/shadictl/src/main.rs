@@ -29,6 +29,7 @@ use sequoia_openpgp as openpgp;
 use tracing::{field, info_span};
 
 mod memory_command;
+mod credential_command;
 mod identity_command;
 mod cli_types;
 mod dir_command;
@@ -48,6 +49,7 @@ mod trusted_secret_delivery;
 mod shell_command;
 
 use cli_types::*;
+use credential_command::*;
 use dir_command::*;
 use introspection_command::*;
 use identity_command::*;
@@ -260,6 +262,7 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::Config(command) => run_config_command(command),
         Commands::Policy(command) => run_policy_command(command),
         Commands::Memory(command) => run_memory_command(command),
+        Commands::Credential(command) => run_credential_command(command),
         Commands::Trace(command) => run_trace_command(command),
         Commands::SlimMas(command) => run_slim_mas_command(command),
         Commands::DidFromGpg(command) => run_did_from_gpg_command(command),
