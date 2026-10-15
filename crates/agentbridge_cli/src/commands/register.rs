@@ -204,6 +204,7 @@ fn start_listeners(
     let _announcement = super::announce::start(
         tool,
         best_effort_did(tool).as_deref(),
+        a2a_listen.map(|_| a2a_binding),
         locators,
         serves_card,
         move || {
@@ -1048,7 +1049,9 @@ fn run_slim_listener(
         shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
         shadi_identity::SlimAuth::SharedSecret(_) => String::new(),
     };
-    let _local_lease = if did.is_empty() {
+    // An announced listener is found through its dir-runtime descriptor
+    // instead (one record per listener).
+    let _local_lease = if did.is_empty() || super::announce::enabled() {
         None
     } else {
         match agentbridge::local_registry::LocalAdapterRegistry::from_env().publish(
@@ -1472,7 +1475,7 @@ fn run_unicast_listener(
         a2a_binding.as_protocol_binding()
     );
 
-    let _local_lease = if register_locally {
+    let _local_lease = if register_locally && !super::announce::enabled() {
         match LocalAdapterRegistry::from_env().publish(&LocalAdapterRecord {
             name: agent_id.to_string(),
             did: did.clone(),
