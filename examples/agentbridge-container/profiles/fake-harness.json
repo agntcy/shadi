@@ -2,6 +2,8 @@
   "id": "fake-harness",
   "bin": "fake-harness",
   "pass_env_prefixes": ["FAKE_HARNESS_"],
+  "isolation": { "env": { "FAKE_HARNESS_HOME": "{config_root}" } },
+  "provision": { "skills": { "dir": "{config_root}/skills" } },
   "execute": {
     "args": ["{prompt}"]
   },
