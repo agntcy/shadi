@@ -9,8 +9,8 @@
 //!
 //! The descriptor replaces the listener's local lease rather than sitting next
 //! to it: it carries the agent DID (`agntcy.dir/identity`) and A2A binding as
-//! annotations, so `list --local` and `delegate --to <name>` find announced
-//! listeners through it.
+//! annotations, so `list` and `delegate --to <name>` find announced listeners
+//! through dir-runtime.
 
 use std::fs;
 use std::io::Write;
