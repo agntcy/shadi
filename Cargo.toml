@@ -45,7 +45,7 @@ rust-version = "1.98"
 
 # Pinned workspace-wide: two crates open SQLCipher databases and Cargo allows
 # only one `links = "sqlite3"` crate, so a drifted version breaks the build.
-# Stay on 0.37 until SLIM's mls-rs-provider-sqlite leaves ^0.37 — 0.38+ pulls
-# libsqlite3-sys 0.36+, which cannot coexist with SLIM 2.3.0.
+# Stay on 0.37 until mls-rs-provider-sqlite (via SLIM 3.2.1) leaves ^0.37 — 0.38+
+# pulls libsqlite3-sys 0.36+, which cannot coexist with the 0.35 SLIM locks.
 [workspace.dependencies]
 rusqlite = "0.37"
