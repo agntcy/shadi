@@ -209,6 +209,7 @@ fn start_listeners(
     let _announcement = super::announce::start(
         tool,
         best_effort_did(tool).as_deref(),
+        slim_endpoint,
         a2a_listen.map(|_| a2a_binding),
         locators,
         serves_card,
