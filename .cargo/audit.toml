@@ -19,4 +19,13 @@ ignore = [
 	# Tracked upstream at https://github.com/agntcy/slim/issues/2057; drop this
 	# the moment that pin allows 1.18 and `cargo update -p rustls` succeeds.
 	"RUSTSEC-2026-0285",
+	# Fixed in rustls 0.23.46, blocked by the same pin. Reachable: an
+	# unauthenticated ServerHello downgrades later connections to classical key
+	# exchange.
+	"RUSTSEC-2026-0349",
+	# Same pin. Not reachable: `Debug` of client session values exposes TLS
+	# secrets, and SHADI never formats them; brotli certificate decompression,
+	# and rustls is built without its brotli feature.
+	"RUSTSEC-2026-0346",
+	"RUSTSEC-2026-0348",
 ]
