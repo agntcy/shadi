@@ -306,7 +306,7 @@ it reads from its environment:
 | Harness | Install | Credential | Model API |
 | --- | --- | --- | --- |
 | `claude-code-isolated` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `api.anthropic.com:443` |
-| `codex-isolated` | [Codex CLI](https://github.com/openai/codex) (`codex`) | `OPENAI_API_KEY` | `api.openai.com:443` |
+| `codex-isolated` | [Codex CLI](https://github.com/openai/codex) (`codex`) | `CODEX_API_KEY` | `api.openai.com:443` |
 | `goose-isolated` | [goose](https://goose-docs.ai/) (`brew install block-goose-cli`) | `GOOSE_PROVIDER` and `GOOSE_MODEL` (passed as `--provider` / `--model`) and that provider's key, e.g. `ANTHROPIC_API_KEY` | the provider's API, e.g. `api.anthropic.com:443` |
 | `opencode-isolated` | [opencode](https://opencode.ai) (`brew install opencode`) | the provider's key, e.g. `ANTHROPIC_API_KEY`; the model via `OPENCODE_ARGS="--model anthropic/<model>"` | the provider's API, plus `models.dev:443` |
 
@@ -339,7 +339,7 @@ target/debug/shadictl --net-block \
 
 ```bash
 source docs/content/demos/demo-env-runtime.sh
-export OPENAI_API_KEY=…
+export CODEX_API_KEY=…
 target/debug/shadictl --net-block \
   --net-allow 127.0.0.1:19971 --net-allow schema.oasf.outshift.com:443 \
   --net-allow localhost:8888 --net-allow api.openai.com:443 \
