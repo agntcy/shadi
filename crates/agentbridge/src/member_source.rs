@@ -160,6 +160,15 @@ impl MemberSource for RunningAgentSource {
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
+        // An older dirctl prints the cobra error and still exits 0.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("unknown command \"runtime\"") {
+            return Err(format!(
+                "{} has no `runtime` command; runtime discovery needs dirctl 1.8.0 or later \
+                 (set SHADI_DIRCTL_BINARY to point at one)",
+                dirctl_binary()
+            ));
+        }
         running_candidates(&output.stdout)
     }
 }
