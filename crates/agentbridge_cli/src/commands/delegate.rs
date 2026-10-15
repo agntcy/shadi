@@ -111,36 +111,53 @@ fn resolve_delegate_peer(
         limit: 5,
     };
 
-    let leased = registry.resolve_live(to);
-    if let Err(err) = &leased {
-        if err.contains("ambiguous") {
-            return Err(anyhow::anyhow!("{err}"));
-        }
-        let runtime_opts = DirLookupOptions {
-            server_addr: runtime.to_string(),
-            gh_token: None,
-            limit: 0,
-        };
-        match find_running_peer(to, &runtime_opts) {
-            Ok(Some(peer)) => {
-                return apply_locator_override(to, Ok(peer), a2a_url_override, a2a_binding)
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-            }
-            Ok(None) => {}
-            Err(e) if e.contains("ambiguous") => return Err(anyhow::anyhow!("{e}")),
+    let runtime_opts = DirLookupOptions {
+        server_addr: runtime.to_string(),
+        gh_token: None,
+        limit: 0,
+    };
+    resolve_peer_with(
+        to,
+        registry.resolve_live(to).map(|_| ()),
+        || find_running_peer(to, &runtime_opts),
+        || resolve_adapter_peer(to, &registry, Some(&dir)),
+        a2a_url_override,
+        a2a_binding,
+        runtime,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Pick the peer from a local lease (`leased` says whether one matches), else from dir-runtime
+/// (`running`), else from `fallback` (a lease again, or the Directory), and
+/// apply `--a2a-url` / `--a2a-binding`. Several matching instances are an
+/// error unless `to` is a DID and `--a2a-url` picks the instance.
+fn resolve_peer_with(
+    to: &str,
+    leased: Result<(), String>,
+    running: impl FnOnce() -> Result<Option<CandidateMember>, String>,
+    fallback: impl FnOnce() -> Result<CandidateMember, String>,
+    a2a_url_override: Option<&str>,
+    a2a_binding: Option<A2ABinding>,
+    runtime: &str,
+) -> Result<CandidateMember, String> {
+    let resolved = match leased {
+        Err(err) if err.contains("ambiguous") => Err(err),
+        Err(_) => match running() {
+            Ok(Some(peer)) => Ok(peer),
+            Ok(None) => fallback(),
+            Err(e) if e.contains("ambiguous") => Err(e),
             // No dir-runtime running is normal (it's optional); report
             // anything else.
-            Err(e) if e.contains("connection refused") || e.contains("Unavailable") => {}
-            Err(e) => eprintln!("[agentbridge] couldn't ask dir-runtime {runtime}: {e}"),
-        }
-    }
-
-    match resolve_adapter_peer(to, &registry, Some(&dir)) {
-        Ok(peer) => apply_locator_override(to, Ok(peer), a2a_url_override, a2a_binding)
-            .map_err(|e| anyhow::anyhow!("{e}")),
-        Err(err) => apply_locator_override(to, Err(err), a2a_url_override, a2a_binding)
-            .map_err(|e| anyhow::anyhow!("{e}")),
-    }
+            Err(e) if e.contains("connection refused") || e.contains("Unavailable") => fallback(),
+            Err(e) => {
+                eprintln!("[agentbridge] couldn't ask dir-runtime {runtime}: {e}");
+                fallback()
+            }
+        },
+        Ok(_) => fallback(),
+    };
+    apply_locator_override(to, resolved, a2a_url_override, a2a_binding)
 }
 
 fn apply_parsed_locator(peer: &mut CandidateMember, locator: A2ALocator) {
@@ -200,6 +217,78 @@ fn apply_locator_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn instance(port: u16) -> CandidateMember {
+        CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zTwice".to_string(),
+            slim_endpoint: None,
+            a2a_url: Some(format!("http://127.0.0.1:{port}")),
+            a2a_binding: Some(A2ABinding::HttpJson),
+        }
+    }
+
+    #[test]
+    fn a_locator_picks_one_of_several_local_instances_of_a_did() {
+        let ambiguous = || Err("ambiguous: 2 live adapters match".to_string());
+        let resolve = |to: &str, url: Option<&str>| {
+            resolve_peer_with(
+                to,
+                ambiguous(),
+                || panic!("a local match doesn't ask dir-runtime"),
+                || panic!("nor fall back"),
+                url,
+                Some(A2ABinding::HttpJson),
+                "localhost:8888",
+            )
+        };
+
+        let picked = resolve("did:key:zTwice", Some("http://127.0.0.1:2")).unwrap();
+        assert_eq!(picked.did, "did:key:zTwice");
+        assert_eq!(picked.a2a_url.as_deref(), Some("http://127.0.0.1:2"));
+        assert!(resolve("did:key:zTwice", None)
+            .unwrap_err()
+            .contains("ambiguous"));
+        assert!(resolve("copilot", Some("http://127.0.0.1:2"))
+            .unwrap_err()
+            .contains("ambiguous"));
+    }
+
+    #[test]
+    fn a_locator_picks_one_of_several_running_instances_of_a_did() {
+        let resolve = |to: &str, url: Option<&str>| {
+            resolve_peer_with(
+                to,
+                Err("no live adapter".to_string()),
+                || Err("ambiguous: 2 running agents match".to_string()),
+                || panic!("an ambiguous dir-runtime match doesn't fall back"),
+                url,
+                Some(A2ABinding::HttpJson),
+                "localhost:8888",
+            )
+        };
+
+        let picked = resolve("did:key:zTwice", Some("http://127.0.0.1:2")).unwrap();
+        assert_eq!(picked.a2a_url.as_deref(), Some("http://127.0.0.1:2"));
+        assert!(resolve("did:key:zTwice", None)
+            .unwrap_err()
+            .contains("ambiguous"));
+    }
+
+    #[test]
+    fn a_running_agent_is_used_when_no_lease_matches() {
+        let peer = resolve_peer_with(
+            "copilot",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(1))),
+            || panic!("found in dir-runtime"),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:1"));
+    }
 
     #[test]
     fn locator_override_keeps_did_as_the_name() {
