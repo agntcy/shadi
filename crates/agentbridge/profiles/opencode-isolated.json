@@ -1,0 +1,31 @@
+{
+  "id": "opencode-isolated",
+  "bin": "opencode",
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{workdir}",
+    "TMP": "{workdir}",
+    "TEMP": "{workdir}"
+  },
+  "current_dir_workdir": true,
+  "extra_args_env": "OPENCODE_ARGS",
+  "isolation": {
+    "env": {
+      "HOME": "{config_root}",
+      "XDG_CONFIG_HOME": "{config_root}/.config",
+      "XDG_DATA_HOME": "{config_root}/.local/share",
+      "XDG_STATE_HOME": "{config_root}/.local/state",
+      "XDG_CACHE_HOME": "{config_root}/.cache"
+    }
+  },
+  "provision": { "skills": { "dir": "{config_root}/.config/opencode/skills" } },
+  "execute": {
+    "args": [
+      "run",
+      "--auto",
+      "{extra_args}",
+      "{prompt}"
+    ]
+  },
+  "result": { "kind": "stdout" }
+}

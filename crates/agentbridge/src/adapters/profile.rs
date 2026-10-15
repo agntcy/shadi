@@ -21,32 +21,44 @@ use crate::{
 use super::workdir::pin_tmpdir;
 
 const BUNDLED_CLAUDE: &str = include_str!("../../profiles/claude-code.json");
+const BUNDLED_CLAUDE_ISOLATED: &str = include_str!("../../profiles/claude-code-isolated.json");
 const BUNDLED_COPILOT: &str = include_str!("../../profiles/copilot.json");
 const BUNDLED_CODEX: &str = include_str!("../../profiles/codex.json");
+const BUNDLED_CODEX_ISOLATED: &str = include_str!("../../profiles/codex-isolated.json");
 const BUNDLED_CURSOR: &str = include_str!("../../profiles/cursor-agent.json");
 const BUNDLED_GOOSE: &str = include_str!("../../profiles/goose.json");
+const BUNDLED_GOOSE_ISOLATED: &str = include_str!("../../profiles/goose-isolated.json");
 const BUNDLED_OPENCODE: &str = include_str!("../../profiles/opencode.json");
+const BUNDLED_OPENCODE_ISOLATED: &str = include_str!("../../profiles/opencode-isolated.json");
 
 /// IDs shipped under `crates/agentbridge/profiles/`.
 pub fn bundled_profile_ids() -> &'static [&'static str] {
     &[
         "claude-code",
+        "claude-code-isolated",
         "copilot",
         "codex",
+        "codex-isolated",
         "cursor-agent",
         "goose",
+        "goose-isolated",
         "opencode",
+        "opencode-isolated",
     ]
 }
 
 fn bundled_json(id: &str) -> Option<&'static str> {
     match id {
         "claude-code" => Some(BUNDLED_CLAUDE),
+        "claude-code-isolated" => Some(BUNDLED_CLAUDE_ISOLATED),
         "copilot" => Some(BUNDLED_COPILOT),
         "codex" => Some(BUNDLED_CODEX),
+        "codex-isolated" => Some(BUNDLED_CODEX_ISOLATED),
         "cursor-agent" => Some(BUNDLED_CURSOR),
         "goose" => Some(BUNDLED_GOOSE),
+        "goose-isolated" => Some(BUNDLED_GOOSE_ISOLATED),
         "opencode" => Some(BUNDLED_OPENCODE),
+        "opencode-isolated" => Some(BUNDLED_OPENCODE_ISOLATED),
         _ => None,
     }
 }
@@ -146,6 +158,13 @@ pub struct CliProfile {
     pub pass_env_suffixes: Vec<String>,
     #[serde(default)]
     pub stdin_null: bool,
+    /// How to start the harness without the host user's configuration, for
+    /// running a DIR record. Applied only when the adapter has a config root.
+    #[serde(default)]
+    pub isolation: Option<IsolationSpec>,
+    /// Where an isolated harness reads what it is given, e.g. agent skills.
+    #[serde(default)]
+    pub provision: Option<ProvisionSpec>,
     pub execute: ExecuteSpec,
     #[serde(default)]
     pub session: Option<SessionSpec>,
@@ -157,6 +176,56 @@ pub struct CliProfile {
 pub struct EnvFlag {
     pub flag: String,
     pub env: String,
+}
+
+/// Env values and leading args that point the harness at a per-run
+/// `{config_root}` instead of the user's own configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct IsolationSpec {
+    /// Set on the child; `{config_root}` and `{workdir}` are substituted.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Put before the profile's `execute.args`; `{config_root}` is substituted.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProvisionSpec {
+    #[serde(default)]
+    pub skills: Option<SkillsProvision>,
+}
+
+/// Agent skills go to `<dir>/<skill name>/SKILL.md` (plus the bundle's other files).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillsProvision {
+    /// Directory template; `{config_root}` is substituted.
+    pub dir: String,
+}
+
+impl CliProfile {
+    /// Whether the profile can start the harness without the user's own
+    /// configuration (its `isolation` section).
+    pub fn is_isolated(&self) -> bool {
+        self.isolation.is_some()
+    }
+
+    /// The directory agent skills are provisioned into, when the profile
+    /// declares one: under `config_root` for an isolated run, or under the
+    /// harness's `workdir` (e.g. a project's `.claude/skills`). `None` when the
+    /// template needs a config root and there is none.
+    pub fn skills_dir(&self, config_root: Option<&Path>, workdir: &Path) -> Option<PathBuf> {
+        let spec = self.provision.as_ref()?.skills.as_ref()?;
+        let mut dir = spec.dir.replace("{workdir}", &workdir.to_string_lossy());
+        if dir.contains("{config_root}") {
+            dir = substitute_config_root(&dir, config_root?);
+        }
+        Some(PathBuf::from(dir))
+    }
+}
+
+fn substitute_config_root(template: &str, config_root: &Path) -> String {
+    template.replace("{config_root}", &config_root.to_string_lossy())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -215,6 +284,7 @@ struct State {
 pub struct ProfileAdapter {
     id: AgentId,
     work_dir: PathBuf,
+    config_root: Option<PathBuf>,
     profile: CliProfile,
     state: Mutex<State>,
     subprocess: TrackedSubprocess,
@@ -226,12 +296,28 @@ impl ProfileAdapter {
         Self {
             id: AgentId(profile.id.clone()),
             work_dir,
+            config_root: None,
             profile,
             state: Mutex::new(State {
                 sessions: Vec::new(),
             }),
             subprocess: TrackedSubprocess::new(),
         }
+    }
+
+    /// Run the harness isolated, with its configuration under `config_root`
+    /// (the profile's `isolation` section). Without that section this changes
+    /// nothing.
+    pub fn with_config_root(mut self, config_root: impl Into<PathBuf>) -> Self {
+        self.config_root = Some(config_root.into());
+        self
+    }
+
+    fn isolation(&self) -> Option<(&IsolationSpec, &Path)> {
+        Some((
+            self.profile.isolation.as_ref()?,
+            self.config_root.as_deref()?,
+        ))
     }
 
     fn session_id(&self, conversation: &str) -> Result<Option<String>, CliAdapterError> {
@@ -311,6 +397,18 @@ impl ProfileAdapter {
         }
         for (key, value) in collect_pass_env(&self.profile) {
             cmd.env(key, value);
+        }
+        if let Some((isolation, root)) = self.isolation() {
+            for (key, value) in &isolation.env {
+                let value = substitute_config_root(value, root).replace("{workdir}", &workdir);
+                cmd.env(key, value);
+            }
+            cmd.args(
+                isolation
+                    .args
+                    .iter()
+                    .map(|arg| substitute_config_root(arg, root)),
+            );
         }
         if self.profile.current_dir_workdir {
             cmd.current_dir(&self.work_dir);
@@ -707,6 +805,49 @@ mod tests {
     }
 
     #[test]
+    fn where_each_bundled_profile_receives_a_records_skills() {
+        let (root, work) = (Path::new("/r"), Path::new("/w"));
+        for (id, isolated, dir) in [
+            ("claude-code-isolated", true, Some("/r/.claude/skills")),
+            ("codex-isolated", true, Some("/r/.codex/skills")),
+            ("goose-isolated", true, Some("/r/.config/goose/skills")),
+            ("opencode-isolated", true, Some("/r/.config/opencode/skills")),
+            ("claude-code", false, Some("/w/.claude/skills")),
+            ("codex", false, Some("/w/.agents/skills")),
+            ("goose", false, Some("/w/.goose/skills")),
+            ("opencode", false, Some("/w/.opencode/skills")),
+            ("copilot", false, None),
+            ("cursor-agent", false, None),
+        ] {
+            let profile = load_bundled(id);
+            assert_eq!(profile.is_isolated(), isolated, "{id}");
+            let root = isolated.then_some(root);
+            assert_eq!(
+                profile.skills_dir(root, work),
+                dir.map(PathBuf::from),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_profiles_move_home_away_from_the_users() {
+        for id in [
+            "claude-code-isolated",
+            "codex-isolated",
+            "goose-isolated",
+            "opencode-isolated",
+        ] {
+            let isolation = load_bundled(id).isolation.expect(id);
+            assert_eq!(
+                isolation.env.get("HOME").map(String::as_str),
+                Some("{config_root}"),
+                "{id} must not read ~/.agents/skills or ~/.claude/skills"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_profiles_parse() {
         for id in bundled_profile_ids() {
             let p = load_bundled(id);
@@ -992,13 +1133,12 @@ mod tests {
     }
 
     #[test]
-    fn opencode_argv_uses_auto_and_dir() {
+    fn opencode_argv_uses_auto_and_runs_in_the_workdir() {
+        // opencode 2.x has no --dir: the harness runs in the work directory.
         let p = load_bundled("opencode");
         let argv = render_argv(&p, "/ws", "fix the tests", None, None, true);
-        assert_eq!(
-            argv,
-            vec!["run", "--auto", "--dir", "/ws", "fix the tests"]
-        );
+        assert_eq!(argv, vec!["run", "--auto", "fix the tests"]);
+        assert!(p.current_dir_workdir);
     }
 
     #[test]
@@ -1133,6 +1273,58 @@ echo '{"result":"ok","session_id":"sid-9"}'
             std::fs::set_permissions(&path, perms).unwrap();
             (dir, path)
         }
+    }
+
+    #[cfg(unix)]
+    fn isolated_env_profile() -> CliProfile {
+        parse_profile(
+            r#"{
+              "id": "isolated",
+              "bin": "/bin/sh",
+              "current_dir_workdir": false,
+              "isolation": {
+                "env": { "FAKE_HOME": "{config_root}" },
+                "args": ["-c", "echo home=$FAKE_HOME arg=$1", "sh", "{config_root}/x"]
+              },
+              "provision": { "skills": { "dir": "{config_root}/skills" } },
+              "execute": { "args": ["{prompt}"] }
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolation_applies_only_with_a_config_root() {
+        let root = tempfile::tempdir().unwrap();
+        let isolated = ProfileAdapter::new(isolated_env_profile(), std::env::temp_dir())
+            .with_config_root(root.path());
+        let out = isolated.execute_prompt("ignored").unwrap();
+        let root_str = root.path().to_string_lossy();
+        assert!(out.contains(&format!("home={root_str}")), "{out}");
+        assert!(out.contains(&format!("arg={root_str}/x")), "{out}");
+
+        let profile = isolated_env_profile();
+        assert_eq!(
+            profile.skills_dir(Some(root.path()), Path::new("/w")),
+            Some(root.path().join("skills"))
+        );
+        assert!(ProfileAdapter::new(profile, std::env::temp_dir())
+            .isolation()
+            .is_none());
+    }
+
+    #[test]
+    fn a_config_root_skills_dir_needs_a_config_root() {
+        let profile = parse_profile(
+            r#"{"id":"x","bin":"x","provision":{"skills":{"dir":"{config_root}/s"}},"execute":{"args":[]}}"#,
+        )
+        .unwrap();
+        assert!(profile.skills_dir(None, Path::new("/w")).is_none());
+        assert_eq!(
+            profile.skills_dir(Some(Path::new("/r")), Path::new("/w")),
+            Some(PathBuf::from("/r/s"))
+        );
     }
 
     #[test]

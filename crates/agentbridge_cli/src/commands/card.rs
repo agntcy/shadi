@@ -47,6 +47,35 @@ pub struct CardOptions {
     pub skip_validation: bool,
 }
 
+impl CardOptions {
+    /// Advertise the version (unless `--version` is given), skills and domains
+    /// of the `--record` the agent runs, next to the flags'. Skills and domains
+    /// only when the record uses the card's OASF version: class names differ
+    /// between versions, and the card states one.
+    pub fn add_record(&mut self, record: &super::record::SourceRecord) {
+        if self.version.is_none() && !record.version.is_empty() {
+            self.version = Some(record.version.clone());
+        }
+
+        if record.schema_version != self.oasf_schema_version {
+            eprintln!(
+                "[agentbridge] warning: record {} uses OASF {}, the card OASF {}; \
+                 its skills and domains are not advertised (pass them with --skill / --domain)",
+                record.name, record.schema_version, self.oasf_schema_version
+            );
+            return;
+        }
+
+        let mut skills = record.skills.clone();
+        skills.append(&mut self.skills);
+        self.skills = skills;
+
+        let mut domains = record.domains.clone();
+        domains.append(&mut self.domains);
+        self.domains = domains;
+    }
+}
+
 /// The resolved card settings every card builder reads.
 #[derive(Clone, Debug)]
 pub struct CardConfig {
@@ -215,9 +244,9 @@ fn validate(config: &CardConfig) -> anyhow::Result<()> {
         .map_err(|e| {
             anyhow::anyhow!(
                 "could not reach the OASF server to validate skills and domains ({url}): {e}.\n\
-                 Under `shadictl --net-block`, allow it with `--net-allow {host}:443` (or its port); \
+                 Under `shadictl --net-block`, allow it with `--net-allow {host}`; \
                  or fix --oasf-schema-url, or pass --skip-oasf-validation to advertise them unchecked.",
-                host = host_of(&config.schema_url)
+                host = net_allow_target(&config.schema_url)
             )
         })?;
 
@@ -248,9 +277,18 @@ fn validate(config: &CardConfig) -> anyhow::Result<()> {
     )
 }
 
-fn host_of(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    rest.split(['/', ':']).next().unwrap_or(rest)
+/// `host:port` of a URL, as `shadictl --net-allow` takes it.
+fn net_allow_target(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if authority
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+    {
+        return authority.to_string();
+    }
+    let port = if scheme == "http" { 80 } else { 443 };
+    format!("{authority}:{port}")
 }
 
 /// Human-readable lines for each error in an OASF validation response. A
@@ -353,6 +391,50 @@ mod tests {
         assert_eq!(config.version(), "2.0.0");
     }
 
+    fn record(schema_version: &str) -> super::super::record::SourceRecord {
+        super::super::record::SourceRecord {
+            cid: "bafy".into(),
+            name: "code-review".into(),
+            version: "1.0.0".into(),
+            schema_version: schema_version.into(),
+            skills: vec!["software_engineering/code_review".into()],
+            domains: vec!["technology/software_engineering".into()],
+        }
+    }
+
+    #[test]
+    fn a_records_classes_join_the_flags_when_its_oasf_version_matches() {
+        let mut opts = CardOptions {
+            skills: vec!["software_engineering/code_debugging/error_handling".into()],
+            ..options()
+        };
+        opts.add_record(&record("1.1.0"));
+
+        let config = CardConfig::from_options(&opts);
+        assert_eq!(
+            discovery_skills(&config),
+            vec![
+                "software_engineering/code_review",
+                "software_engineering/code_debugging/error_handling"
+            ]
+        );
+        assert_eq!(
+            config.discovery_payload()["domains"],
+            json!([{ "name": "technology/software_engineering" }])
+        );
+        assert_eq!(config.version(), "1.0.0");
+    }
+
+    #[test]
+    fn a_record_in_another_oasf_version_adds_nothing() {
+        let mut opts = options();
+        opts.add_record(&record("1.0.0"));
+
+        assert!(opts.skills.is_empty());
+        assert!(opts.domains.is_empty());
+        assert_eq!(opts.version.as_deref(), Some("1.0.0"));
+    }
+
     #[test]
     fn the_only_extension_is_discovery_with_the_versioned_object_uri() {
         let config = CardConfig::from_options(&CardOptions {
@@ -389,12 +471,16 @@ mod tests {
     }
 
     #[test]
-    fn host_of_strips_scheme_port_and_path() {
+    fn net_allow_target_keeps_the_port_or_uses_the_schemes() {
         assert_eq!(
-            host_of("https://schema.oasf.outshift.com"),
-            "schema.oasf.outshift.com"
+            net_allow_target("https://schema.oasf.outshift.com"),
+            "schema.oasf.outshift.com:443"
         );
-        assert_eq!(host_of("http://localhost:8080/x"), "localhost");
+        assert_eq!(
+            net_allow_target("http://localhost:8080/x"),
+            "localhost:8080"
+        );
+        assert_eq!(net_allow_target("http://localhost"), "localhost:80");
     }
 
     /// Serve one HTTP response on a free loopback port and return its URL.
@@ -480,7 +566,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("could not reach the OASF server"), "{err}");
-        assert!(err.contains("--net-allow 127.0.0.1:443"), "{err}");
+        assert!(err.contains(&format!("--net-allow {addr}")), "{err}");
         assert!(err.contains("--skip-oasf-validation"), "{err}");
     }
 
