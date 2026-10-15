@@ -81,14 +81,15 @@ enum Cmd {
         #[arg(long = "domain", value_name = "OASF_DOMAIN")]
         domains: Vec<String>,
 
-        /// The agent's version, shown in its card. Defaults to agentbridge's.
-        #[arg(long = "version", value_name = "VERSION")]
+        /// The agent's version (semantic version, e.g. 1.2.0), shown in its card.
+        /// Defaults to agentbridge's.
+        #[arg(long = "version", value_name = "VERSION", value_parser = parse_semver)]
         agent_version: Option<String>,
 
         /// URL to advertise in the card for `--a2a-listen`, when clients reach
         /// the listener at another address (e.g. a published container port).
         /// Defaults to the listen address: http on loopback, https elsewhere.
-        #[arg(long, value_name = "URL")]
+        #[arg(long, value_name = "URL", value_parser = parse_http_url)]
         advertise_url: Option<String>,
 
         /// OASF schema server that checks skills and domains and names the card
@@ -277,6 +278,22 @@ fn subscriber() -> impl tracing::Subscriber + Send + Sync {
             ),
         )
         .with(shadi_telemetry::layers("agentbridge").with_filter(LevelFilter::INFO))
+}
+
+/// `--version`: a semantic version, as the card and DIR record expect.
+fn parse_semver(raw: &str) -> Result<String, String> {
+    semver::Version::parse(raw)
+        .map(|v| v.to_string())
+        .map_err(|e| format!("not a semantic version (e.g. 1.2.0): {e}"))
+}
+
+/// `--advertise-url`: an absolute http(s) URL clients can connect to.
+fn parse_http_url(raw: &str) -> Result<String, String> {
+    let url = url::Url::parse(raw).map_err(|e| format!("not an absolute URL: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("must be an http:// or https:// URL with a host".to_string());
+    }
+    Ok(raw.to_string())
 }
 
 fn main() {
@@ -683,5 +700,22 @@ mod tests {
             ),
             _ => panic!("expected request-invite subcommand"),
         }
+    }
+
+    #[test]
+    fn register_rejects_a_non_semver_version_and_a_non_http_advertise_url() {
+        let base = ["agentbridge", "register", "--tool", "x"];
+        let parse = |extra: &[&str]| {
+            let mut args = base.to_vec();
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+
+        assert!(parse(&["--version", "latest"]).is_err());
+        assert!(parse(&["--version", "1.2.0"]).is_ok());
+        assert!(parse(&["--advertise-url", "not-a-url"]).is_err());
+        assert!(parse(&["--advertise-url", "ftp://host:21"]).is_err());
+        assert!(parse(&["--advertise-url", ""]).is_err());
+        assert!(parse(&["--advertise-url", "https://127.0.0.1:28443"]).is_ok());
     }
 }
