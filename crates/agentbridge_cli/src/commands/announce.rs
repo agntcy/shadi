@@ -240,6 +240,9 @@ fn descriptor(agent_id: &str, pid: u32, locators: &[Locator], about: &Annotation
     json!({
         "name": agent_id,
         "pid": pid,
+        // When the descriptor was written: dir-runtime treats a process that
+        // started later and holds the same PID as a reused PID, not this one.
+        "started_at": now_rfc3339(),
         "labels": labels,
         "annotations": annotations,
         "locators": locators
@@ -247,6 +250,12 @@ fn descriptor(agent_id: &str, pid: u32, locators: &[Locator], about: &Annotation
             .map(|l| json!({ "protocol": l.protocol, "url": l.url }))
             .collect::<Vec<_>>(),
     })
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Write `<dir>/<id>.json` atomically: a hidden temporary file renamed into
@@ -489,6 +498,12 @@ mod tests {
             json!("did:key:zAgent")
         );
         assert_eq!(d["annotations"][A2A_BINDING_ANNOTATION], json!("JSONRPC"));
+        let started = d["started_at"].as_str().expect("started_at");
+        assert!(
+            time::OffsetDateTime::parse(started, &time::format_description::well_known::Rfc3339)
+                .is_ok(),
+            "{started}"
+        );
 
         let bare = descriptor(
             "codex",
