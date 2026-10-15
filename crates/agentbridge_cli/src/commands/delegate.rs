@@ -128,6 +128,9 @@ fn resolve_delegate_peer(
             }
             Ok(None) => {}
             Err(e) if e.contains("ambiguous") => return Err(anyhow::anyhow!("{e}")),
+            // No dir-runtime running is normal (it's optional); report
+            // anything else.
+            Err(e) if e.contains("connection refused") || e.contains("Unavailable") => {}
             Err(e) => eprintln!("[agentbridge] couldn't ask dir-runtime {runtime}: {e}"),
         }
     }
