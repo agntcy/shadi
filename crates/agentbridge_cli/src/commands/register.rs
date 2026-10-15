@@ -189,6 +189,8 @@ fn start_listeners(
     if let Some(listen) = a2a_listen {
         ensure_listen_address_free(listen)?;
     }
+    let for_sigterm = Arc::clone(&adapter);
+    super::announce::before_sigterm_exit(move || for_sigterm.kill_in_flight());
 
     // Announce before serving and withdraw when the listeners return (Ctrl-C,
     // or a listener failing to start): the guard lives until this function ends.

@@ -398,6 +398,7 @@ fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
                     if let Some(p) = path.lock().ok().and_then(|mut p| p.take()) {
                         remove_descriptor(&p);
                     }
+                    stop_in_flight();
 
                     std::process::exit(143);
                 }
@@ -408,6 +409,26 @@ fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
     }
 
     path
+}
+
+type StopHook = Box<dyn Fn() + Send>;
+
+static STOP_HOOKS: Mutex<Vec<StopHook>> = Mutex::new(Vec::new());
+
+/// Run `stop` before SIGTERM exits, as Ctrl-C's shutdown would (e.g. kill the
+/// harness running a task), so no child outlives the agent.
+pub fn before_sigterm_exit(stop: impl Fn() + Send + 'static) {
+    if let Ok(mut hooks) = STOP_HOOKS.lock() {
+        hooks.push(Box::new(stop));
+    }
+}
+
+fn stop_in_flight() {
+    if let Ok(hooks) = STOP_HOOKS.lock() {
+        for stop in hooks.iter() {
+            stop();
+        }
+    }
 }
 
 /// Serve the agent card at `/.well-known/agent-card.json` on its own HTTP
