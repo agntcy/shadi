@@ -27,7 +27,9 @@ const BUNDLED_CODEX: &str = include_str!("../../profiles/codex.json");
 const BUNDLED_CODEX_ISOLATED: &str = include_str!("../../profiles/codex-isolated.json");
 const BUNDLED_CURSOR: &str = include_str!("../../profiles/cursor-agent.json");
 const BUNDLED_GOOSE: &str = include_str!("../../profiles/goose.json");
+const BUNDLED_GOOSE_ISOLATED: &str = include_str!("../../profiles/goose-isolated.json");
 const BUNDLED_OPENCODE: &str = include_str!("../../profiles/opencode.json");
+const BUNDLED_OPENCODE_ISOLATED: &str = include_str!("../../profiles/opencode-isolated.json");
 
 /// IDs shipped under `crates/agentbridge/profiles/`.
 pub fn bundled_profile_ids() -> &'static [&'static str] {
@@ -39,7 +41,9 @@ pub fn bundled_profile_ids() -> &'static [&'static str] {
         "codex-isolated",
         "cursor-agent",
         "goose",
+        "goose-isolated",
         "opencode",
+        "opencode-isolated",
     ]
 }
 
@@ -52,7 +56,9 @@ fn bundled_json(id: &str) -> Option<&'static str> {
         "codex-isolated" => Some(BUNDLED_CODEX_ISOLATED),
         "cursor-agent" => Some(BUNDLED_CURSOR),
         "goose" => Some(BUNDLED_GOOSE),
+        "goose-isolated" => Some(BUNDLED_GOOSE_ISOLATED),
         "opencode" => Some(BUNDLED_OPENCODE),
+        "opencode-isolated" => Some(BUNDLED_OPENCODE_ISOLATED),
         _ => None,
     }
 }
@@ -802,14 +808,16 @@ mod tests {
     fn where_each_bundled_profile_receives_a_records_skills() {
         let (root, work) = (Path::new("/r"), Path::new("/w"));
         for (id, isolated, dir) in [
-            ("claude-code-isolated", true, Some("/r/skills")),
-            ("codex-isolated", true, Some("/r/skills")),
+            ("claude-code-isolated", true, Some("/r/.claude/skills")),
+            ("codex-isolated", true, Some("/r/.codex/skills")),
+            ("goose-isolated", true, Some("/r/.config/goose/skills")),
+            ("opencode-isolated", true, Some("/r/.config/opencode/skills")),
             ("claude-code", false, Some("/w/.claude/skills")),
             ("codex", false, Some("/w/.agents/skills")),
+            ("goose", false, Some("/w/.goose/skills")),
+            ("opencode", false, Some("/w/.opencode/skills")),
             ("copilot", false, None),
             ("cursor-agent", false, None),
-            ("goose", false, None),
-            ("opencode", false, None),
         ] {
             let profile = load_bundled(id);
             assert_eq!(profile.is_isolated(), isolated, "{id}");
@@ -818,6 +826,23 @@ mod tests {
                 profile.skills_dir(root, work),
                 dir.map(PathBuf::from),
                 "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_profiles_move_home_away_from_the_users() {
+        for id in [
+            "claude-code-isolated",
+            "codex-isolated",
+            "goose-isolated",
+            "opencode-isolated",
+        ] {
+            let isolation = load_bundled(id).isolation.expect(id);
+            assert_eq!(
+                isolation.env.get("HOME").map(String::as_str),
+                Some("{config_root}"),
+                "{id} must not read ~/.agents/skills or ~/.claude/skills"
             );
         }
     }
@@ -1108,13 +1133,12 @@ mod tests {
     }
 
     #[test]
-    fn opencode_argv_uses_auto_and_dir() {
+    fn opencode_argv_uses_auto_and_runs_in_the_workdir() {
+        // opencode 2.x has no --dir: the harness runs in the work directory.
         let p = load_bundled("opencode");
         let argv = render_argv(&p, "/ws", "fix the tests", None, None, true);
-        assert_eq!(
-            argv,
-            vec!["run", "--auto", "--dir", "/ws", "fix the tests"]
-        );
+        assert_eq!(argv, vec!["run", "--auto", "fix the tests"]);
+        assert!(p.current_dir_workdir);
     }
 
     #[test]
