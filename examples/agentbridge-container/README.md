@@ -91,6 +91,8 @@ docker exec <container> agentbridge list --local   # prints the agent's DID
 agentbridge delegate --to <that DID> --a2a-url https://127.0.0.1:38443 --a2a-binding http+json "…"
 ```
 
+The container runs as uid 10001 and must be able to read the key. Docker Desktop handles that; on Linux, mount a copy owned by that user (`cp /tmp/agent-key.pem /tmp/agent-key-10001.pem && sudo chown 10001 /tmp/agent-key-10001.pem`, still mode 0600) instead of making the key world-readable.
+
 To run one container by hand, pass the labels and any `register` flags:
 
 ```sh
