@@ -263,6 +263,7 @@ fn start_listeners(
                     eprintln!("[agentbridge] {binding} listener: {err}; stopping");
                     super::announce::withdraw(&written);
                     super::announce::stop_in_flight();
+                    super::record::cleanup();
                     std::process::exit(1);
                 }
             });
