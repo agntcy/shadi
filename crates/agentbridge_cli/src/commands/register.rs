@@ -206,7 +206,7 @@ fn start_listeners(
         slim_endpoint.map(str::to_string),
         a2a_listen.map(str::to_string),
     );
-    let _announcement = super::announce::start(
+    let announcement = super::announce::start(
         tool,
         best_effort_did(tool).as_deref(),
         slim_endpoint,
@@ -232,6 +232,7 @@ fn start_listeners(
             let http_adapter = Arc::clone(&adapter);
             let http_tool = tool.to_string();
             let http_listen = listen.to_string();
+            let descriptor = announcement.as_ref().map(|a| a.path().to_path_buf());
             std::thread::spawn(move || {
                 if let Err(err) = run_unicast_listener(
                     &http_tool,
@@ -242,7 +243,15 @@ fn start_listeners(
                     false,
                     verbose,
                 ) {
-                    eprintln!("[agentbridge] {} listener: {err}", a2a_binding.as_protocol_binding());
+                    // Don't keep serving (and announcing) only half the agent.
+                    eprintln!(
+                        "[agentbridge] {} listener: {err}; stopping",
+                        a2a_binding.as_protocol_binding()
+                    );
+                    if let Some(path) = descriptor {
+                        super::announce::withdraw(&path);
+                    }
+                    std::process::exit(1);
                 }
             });
         } else {
