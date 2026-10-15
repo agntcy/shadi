@@ -20,7 +20,7 @@ Run agentbridge agents as host processes and as Docker containers, and find them
 
 ## Prerequisites
 
-- `dirctl` with runtime discovery that lists host processes and filters by agent (agntcy/dir#2352 and #2353), started with runtime discovery on:
+- `dirctl` with runtime discovery that lists host processes and filters by agent (agntcy/dir#2352, #2353 and #2366), started with runtime discovery on:
 
   ```sh
   DIRECTORY_DAEMON_RUNTIME_ENABLED=true dirctl daemon start
@@ -64,6 +64,40 @@ dirctl runtime list --domain "technology/*" --output json
 ```
 
 SIGTERM sent to `agentbridge` itself withdraws the announcement at once; the agent disappears from the list. Ctrl-C reaches `shadictl` instead, which kills `agentbridge` (it runs in its own session) with SIGKILL, so the descriptor stays behind until dir-runtime notices the PID is gone and drops it.
+
+## An agent from a DIR agent skill
+
+`register --record` pulls an agent-skill record from a DIR node and gives its skills to the harness, which starts with a fresh configuration (`isolation` and `provision.skills` in its profile; the fake harness lists what it was given). The record's version, skills and domains go into the card, and its CID onto the workload as `org.agntcy/agent-record`.
+
+Import a skill with OASF 1.1.0 classes (the card's version; a record in another version keeps only the flags' skills):
+
+```sh
+cat > /tmp/import-code-review.yaml <<EOF
+type: agent-skill
+file_path: $HOME/Github/agntcy/dir/tests/e2e/shared/testdata/code-review
+schema_version: "1.1.0"
+enricher:
+  static:
+    skills: [{ name: software_engineering/code_debugging/error_handling }]
+    domains: [{ name: technology/software_engineering }]
+EOF
+dirctl import --config /tmp/import-code-review.yaml
+```
+
+Run it. Inside the sandbox, `dirctl` needs the DIR node and read access to its own state; `SHADI_DIRCTL_BINARY` picks the `dirctl` to run when the sandbox's `PATH` would find another:
+
+```sh
+shadictl --net-block \
+  --net-allow 127.0.0.1:19960 --net-allow schema.oasf.outshift.com:443 \
+  --net-allow localhost:8888 --read ~/.dir --read ~/.config/dirctl \
+  --write ~/.agntcy/dir-runtime/workloads.d \
+  -- agentbridge register --tool fake-harness \
+     --a2a-listen 127.0.0.1:19960 --a2a-binding http+json \
+     --record code-review --record-server localhost:8888 --dir-announce
+
+dirctl runtime list --label org.agntcy/agent-record=.
+agentbridge delegate --to fake-harness "Review: return a / b"   # answers with the code-review skill
+```
 
 ## Containers
 
