@@ -154,12 +154,15 @@ pub fn start(
             source_record: opts.source_record.as_deref(),
         },
     );
-    // Ready to withdraw on SIGTERM before the descriptor is visible.
+    // Ready to withdraw on SIGTERM before the descriptor is visible, and the
+    // slot held while it is published: a SIGTERM meanwhile waits for the path.
     let on_sigterm = remove_on_sigterm();
-    let path = write_descriptor(&dir, &workload_id, &descriptor)?;
-    if let Ok(mut slot) = on_sigterm.lock() {
+    let path = {
+        let mut slot = on_sigterm.lock().unwrap_or_else(|e| e.into_inner());
+        let path = write_descriptor(&dir, &workload_id, &descriptor)?;
         *slot = Some(path.clone());
-    }
+        path
+    };
 
     println!(
         "[agentbridge] announced to dir-runtime as {workload_id} ({})",
