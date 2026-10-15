@@ -121,6 +121,51 @@ impl MemberSource for A2AAgentSearchSource {
     }
 }
 
+/// Discover running agents through runtime discovery: `dirctl runtime list
+/// --output json`, with any of `skills` when given, against the dir-runtime at
+/// `runtime.server_addr` (e.g. a local `dirctl daemon`). Only agentbridge
+/// listeners that announced their DID (`register --dir-announce`) become
+/// candidates; containers and other workloads without one are skipped.
+pub struct RunningAgentSource {
+    pub skills: Vec<String>,
+    pub runtime: DirLookupOptions,
+}
+
+impl MemberSource for RunningAgentSource {
+    fn resolve(&self) -> Result<Vec<CandidateMember>, String> {
+        let mut cmd = Command::new(dirctl_binary());
+        cmd.args(["runtime", "list", "--output", "json"]);
+        for skill in &self.skills {
+            cmd.args(["--skill", skill]);
+        }
+        cmd.args(["--server-addr", &self.runtime.server_addr]);
+        apply_dir_auth(&mut cmd, &self.runtime);
+
+        let output = match cmd.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err("dirctl not found in PATH".to_string());
+            }
+            Err(e) => return Err(format!("dirctl runtime list failed: {e}")),
+            Ok(o) => o,
+        };
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        running_candidates(&output.stdout)
+    }
+}
+
+/// Candidates in `dirctl runtime list --output json` output.
+fn running_candidates(stdout: &[u8]) -> Result<Vec<CandidateMember>, String> {
+    let workloads: Vec<Value> = serde_json::from_slice(stdout)
+        .map_err(|e| format!("dirctl runtime list printed no workload list: {e}"))?;
+    Ok(workloads
+        .iter()
+        .filter_map(crate::local_registry::listener_from_workload)
+        .map(|listener| listener.to_candidate())
+        .collect())
+}
+
 /// Discover a candidate by an already-known DID: `dirctl search --author
 /// <did>` resolves its current name/skills/SLIM endpoint from the Directory
 /// without the moderator needing to know anything but the DID up front.
@@ -155,7 +200,9 @@ impl MemberSource for ExplicitListSource {
 // ---------------------------------------------------------------------------
 
 /// Parse one `--members`/`invite-from` spec into the `MemberSource` it names:
-/// `skill:<skill>` → [`SkillSearchSource`], `did:<did>` → [`DidLookupSource`],
+/// `skill:<skill>` → [`SkillSearchSource`] (DIR records), `running:<skill>` →
+/// [`RunningAgentSource`] (running agents, through runtime discovery on the
+/// same server), `did:<did>` → [`DidLookupSource`],
 /// `explicit:<name>=<did>[@<endpoint>]` → [`ExplicitListSource`].
 pub fn parse_member_spec(
     spec: &str,
@@ -170,6 +217,18 @@ pub fn parse_member_spec(
         return Ok(Box::new(SkillSearchSource {
             skill: skill.to_string(),
             dir: dir.clone(),
+        }));
+    }
+
+    if let Some(skill) = spec.strip_prefix("running:") {
+        if skill.is_empty() {
+            return Err(format!(
+                "invalid member spec '{spec}': running: needs a skill name (or *)"
+            ));
+        }
+        return Ok(Box::new(RunningAgentSource {
+            skills: vec![skill.to_string()],
+            runtime: dir.clone(),
         }));
     }
 
@@ -1232,5 +1291,46 @@ esac
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn running_spec_parses_to_runtime_discovery() {
+        assert!(parse_member_spec("running:software_engineering/*", &test_dir()).is_ok());
+        assert!(parse_member_spec("running:", &test_dir()).is_err());
+    }
+
+    #[test]
+    fn running_candidates_are_announced_listeners_with_a_did() {
+        let workloads = serde_json::json!([
+            {
+                "id": "copilot-xyz-1", "name": "copilot", "runtime": "process",
+                "labels": { "org.agntcy/discover": "true", "org.agntcy/agent-type": "a2a" },
+                "annotations": {
+                    "agntcy.dir/identity": "did:key:zCopilot",
+                    "org.agntcy/a2a-binding": "HTTP+JSON"
+                },
+                "locators": [
+                    { "protocol": "slim", "url": "slim://127.0.0.1:47357/agntcy/shadi/copilot-a2a" },
+                    { "protocol": "http", "url": "http://127.0.0.1:19960" }
+                ]
+            },
+            {
+                "id": "94d1", "name": "agentbridge-container-debugger-1", "runtime": "docker",
+                "labels": { "org.agntcy/discover": "true", "org.agntcy/agent-type": "a2a" },
+                "locators": [{ "protocol": "tcp", "url": "tcp://0.0.0.0:18443" }]
+            }
+        ]);
+
+        let candidates = running_candidates(workloads.to_string().as_bytes()).unwrap();
+        assert_eq!(candidates.len(), 1, "the container has no DID");
+        let c = &candidates[0];
+        assert_eq!(
+            (c.name.as_str(), c.did.as_str()),
+            ("copilot", "did:key:zCopilot")
+        );
+        assert_eq!(c.slim_endpoint.as_deref(), Some("127.0.0.1:47357"));
+        assert_eq!(c.a2a_url.as_deref(), Some("http://127.0.0.1:19960"));
+        assert_eq!(c.a2a_binding, Some(A2ABinding::HttpJson));
+        assert!(running_candidates(b"not json").is_err());
     }
 }
