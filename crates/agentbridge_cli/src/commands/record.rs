@@ -91,7 +91,8 @@ fn provision(
         anyhow::anyhow!(
             "profile '{tool}' can't run a DIR record: it has no `isolation` and \
              `provision.skills` sections, so the harness would read the host user's \
-             configuration and has nowhere to receive the skill"
+             configuration and has nowhere to receive the skill. The bundled profiles \
+             that can are claude-code-isolated and codex-isolated"
         )
     })?;
 
