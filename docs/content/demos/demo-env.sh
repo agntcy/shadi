@@ -18,6 +18,10 @@ mkdir -p "$SHADI_TMP_DIR"
 # Seatbelt's subpath rules don't match a path accessed through the /tmp
 # symlink if the rule was generated for the canonicalized /private/tmp form.
 export SHADI_TMP_DIR="$(cd "$SHADI_TMP_DIR" && pwd -P)"
+# Listeners record themselves here for `agentbridge list --local`. Agent
+# terminals grant only this directory to the sandbox (--allow), so create it
+# up front: inside the sandbox its parent is read-only.
+mkdir -p "$SHADI_TMP_DIR/agentbridge-local"
 export SLIM_ENDPOINT="${SLIM_ENDPOINT:-127.0.0.1:47560}"
 
 # One transport cert is fine for the demo — identity is the DID, not the TLS CN.

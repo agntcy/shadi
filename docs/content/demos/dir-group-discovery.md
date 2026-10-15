@@ -126,7 +126,7 @@ export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF7
 SHADI_AGENT_ID=copilot target/debug/shadictl --net-block \
   --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
   --net-allow schema.oasf.outshift.com:443 \
-  --read "$SHADI_TMP_DIR" -- \
+  --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   target/debug/agentbridge register --tool copilot \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
   --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination \
@@ -140,6 +140,10 @@ Publishing AgentCard for 'copilot' to 127.0.0.1:8888...
 Published. CID: baeareiccmurazht4fdrmlcl3optjab7qvybnejojjappzfgjhmgqx6dd5u
 [agentbridge] ready — listening on agntcy/shadi/copilot-a2a
 ```
+
+`--allow "$SHADI_TMP_DIR/agentbridge-local"` lets each listener write its
+lease there for `agentbridge list --local`; the rest of `$SHADI_TMP_DIR` (the
+mTLS material) stays read-only.
 
 Repeat in **Terminal codex** with `--tool codex`. An agent advertises only the
 skills it is given: `--skill` names an [OASF](https://github.com/agntcy/oasf)
@@ -275,7 +279,7 @@ export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF7
 SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block \
   --net-allow "$SLIM_ENDPOINT" --net-allow "$SHADI_DIR_SERVER" \
   --net-allow schema.oasf.outshift.com:443 \
-  --read "$SHADI_TMP_DIR" -- \
+  --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
   --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination \
