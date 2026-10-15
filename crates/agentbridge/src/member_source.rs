@@ -223,10 +223,14 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
             continue;
         };
         match protocol {
-            Some("slim") if candidate.slim_endpoint.is_none() => {
-                // slim://<endpoint>/<org>/<ns>/<name>
-                let rest = url.strip_prefix("slim://").unwrap_or(url);
-                candidate.slim_endpoint = Some(rest.split('/').next().unwrap_or(rest).to_string());
+            // slim://<endpoint>/<org>/<ns>/<name>; the annotation, when set,
+            // already holds the endpoint with its scheme.
+            Some("slim") => {
+                if candidate.slim_endpoint.is_none() {
+                    let rest = url.strip_prefix("slim://").unwrap_or(url);
+                    candidate.slim_endpoint =
+                        Some(rest.split('/').next().unwrap_or(rest).to_string());
+                }
             }
             // The first unicast locator is the A2A listener; a later `http`
             // one is the card listener.
@@ -1528,6 +1532,29 @@ esac
             Some("http://node:47357"),
             "the annotated endpoint keeps its scheme"
         );
+    }
+
+    #[test]
+    fn an_annotated_slim_endpoint_leaves_the_unicast_locator_alone() {
+        let workloads = serde_json::json!([{
+            "name": "codex",
+            "labels": { "org.agntcy/agent-type": "a2a" },
+            "annotations": {
+                "agntcy.dir/identity": "did:key:zCodex",
+                "org.agntcy/a2a-binding": "HTTP+JSON",
+                "org.agntcy/slim-endpoint": "https://node:47357"
+            },
+            "locators": [
+                { "protocol": "slim", "url": "slim://node:47357/agntcy/shadi/codex-a2a" },
+                { "protocol": "http", "url": "http://127.0.0.1:19960" }
+            ]
+        }]);
+
+        let candidates = running_candidates(workloads.to_string().as_bytes()).unwrap();
+        let c = &candidates[0];
+        assert_eq!(c.slim_endpoint.as_deref(), Some("https://node:47357"));
+        assert_eq!(c.a2a_url.as_deref(), Some("http://127.0.0.1:19960"));
+        assert_eq!(c.a2a_binding, Some(A2ABinding::HttpJson));
     }
 
     #[cfg(unix)]
