@@ -41,12 +41,12 @@ uuid = { version = "1", features = ["v4"] }
 # Kept in step with the root SHADI workspace. The `=` pins these carried are
 # gone: they existed because a2a-slimrpc required older
 # agntcy-slim-service/agntcy-slim-proto, which 0.2.5 no longer does.
-slim = { package = "agntcy-slim", version = "3.3.0" }
-slim_rpc = { package = "agntcy-slim-rpc", version = "3.3.0" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "3.3.0" }
-slim_proto = { package = "agntcy-slim-proto", version = "0.8.0" }
-slim_config = { package = "agntcy-slim-config", version = "0.17.2" }
-slim_auth = { package = "agntcy-slim-auth", version = "0.17.2" }
+slim = { package = "agntcy-slim", version = "3.4.1" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "3.4.1" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "3.4.1" }
+slim_proto = { package = "agntcy-slim-proto", version = "0.8.3" }
+slim_config = { package = "agntcy-slim-config", version = "0.17.5" }
+slim_auth = { package = "agntcy-slim-auth", version = "0.17.5" }
 # The channel manager's gRPC client and messages (agntcy/shadi#442).
 prost = "0.14"
 tonic = "0.14"
