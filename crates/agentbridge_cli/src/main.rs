@@ -419,7 +419,13 @@ fn main() {
             } else {
                 Ok(())
             }
-            .and_then(|()| commands::record::prepare(&record_opts, &tool))
+            .and_then(|()| {
+                commands::record::prepare(
+                    &record_opts,
+                    &tool,
+                    &commands::register::work_dir(command.as_deref()),
+                )
+            })
             .and_then(|source| {
                 if let Some(source) = source {
                     card_opts.add_record(&source);

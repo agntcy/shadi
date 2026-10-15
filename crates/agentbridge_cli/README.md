@@ -65,8 +65,9 @@ agentbridge register --tool claude-code --dir-publish
 
 # Run an agent skill from a DIR record: pull it from a local dirctl daemon and
 # give its agent skills to a harness started without your own configuration
-# (needs a profile with `isolation` and `provision.skills`: claude-code-isolated,
-# codex-isolated).
+# (claude-code-isolated / codex-isolated start the harness without your own
+# configuration; plain claude-code / codex work too, with a warning, and get the
+# skills in the work directory's .claude/skills or .agents/skills).
 # The isolated harness doesn't see your login: pass a credential it reads
 # (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for claude, OPENAI_API_KEY for
 # codex). Allow SHADI_TMP_DIR, which holds the run's config and the work dir,
