@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 use shadi_a2a::A2ABinding;
 
 pub use agentbridge::local_registry::DEFAULT_WORKLOADS_DIR;
-use agentbridge::local_registry::{A2A_BINDING_ANNOTATION, IDENTITY_ANNOTATION};
+use agentbridge::local_registry::{
+    A2A_BINDING_ANNOTATION, IDENTITY_ANNOTATION, SLIM_ENDPOINT_ANNOTATION,
+};
 
 /// Labels dir-runtime's process discovery and A2A resolver act on.
 const DISCOVER_LABEL: &str = "org.agntcy/discover";
@@ -84,6 +86,7 @@ impl Drop for Announcement {
 pub fn start(
     agent_id: &str,
     agent_did: Option<&str>,
+    slim_endpoint: Option<&str>,
     a2a_binding: Option<A2ABinding>,
     mut locators: Vec<Locator>,
     serves_card: bool,
@@ -109,6 +112,11 @@ pub fn start(
     if locators.is_empty() {
         anyhow::bail!("--dir-announce needs an A2A listener: pass --slim-endpoint or --a2a-listen");
     }
+    if opts.dir.trim().is_empty() {
+        anyhow::bail!(
+            "the descriptor directory (--dir-announce-dir / DIR_RUNTIME_WORKLOADS_DIR) is empty"
+        );
+    }
 
     if !serves_card || opts.card_listen.is_some() {
         let addr = serve_card(opts.card_listen.as_deref(), card)?;
@@ -129,13 +137,17 @@ pub fn start(
         &locators,
         &Annotations {
             agent_did,
+            slim_endpoint,
             a2a_binding,
             source_record: opts.source_record.as_deref(),
         },
     );
+    // Ready to withdraw on SIGTERM before the descriptor is visible.
+    let on_sigterm = remove_on_sigterm();
     let path = write_descriptor(&dir, &workload_id, &descriptor)?;
-
-    remove_on_sigterm(path.clone());
+    if let Ok(mut slot) = on_sigterm.lock() {
+        *slot = Some(path.clone());
+    }
 
     println!(
         "[agentbridge] announced to dir-runtime as {workload_id} ({})",
@@ -158,7 +170,7 @@ pub fn listener_locators(
     if let Some(endpoint) = slim_endpoint {
         locators.push(Locator {
             protocol: "slim".to_string(),
-            url: format!("slim://{endpoint}/agntcy/shadi/{agent_id}-a2a"),
+            url: format!("slim://{}/agntcy/shadi/{agent_id}-a2a", slim_node(endpoint)),
         });
     }
 
@@ -207,8 +219,18 @@ fn sanitize(s: &str) -> String {
 /// What the descriptor says about the agent beyond its name and locators.
 struct Annotations<'a> {
     agent_did: Option<&'a str>,
+    slim_endpoint: Option<&'a str>,
     a2a_binding: Option<A2ABinding>,
     source_record: Option<&'a str>,
+}
+
+/// The SLIM node part of an endpoint for a `slim://` locator: without a
+/// connection scheme (`https://node:47357`) or trailing slash. The endpoint
+/// itself, scheme included, goes into the `org.agntcy/slim-endpoint`
+/// annotation, since a scheme-less endpoint means HTTPS to SLIM clients.
+fn slim_node(endpoint: &str) -> &str {
+    let rest = endpoint.split_once("://").map_or(endpoint, |(_, r)| r);
+    rest.trim_end_matches('/')
 }
 
 /// Whether `--dir-announce` is on: then the descriptor stands in for the local
@@ -229,6 +251,9 @@ fn descriptor(agent_id: &str, pid: u32, locators: &[Locator], about: &Annotation
     let mut annotations = serde_json::Map::new();
     if let Some(did) = about.agent_did.filter(|d| !d.is_empty()) {
         annotations.insert(IDENTITY_ANNOTATION.to_string(), json!(did));
+    }
+    if let Some(endpoint) = about.slim_endpoint.filter(|e| !e.is_empty()) {
+        annotations.insert(SLIM_ENDPOINT_ANNOTATION.to_string(), json!(endpoint));
     }
     if let Some(binding) = about.a2a_binding {
         annotations.insert(
@@ -326,13 +351,19 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Delete the descriptor on SIGTERM, then exit as SIGTERM would. Ctrl-C (SIGINT)
-/// already returns through the listeners, which drops the [`Announcement`].
-fn remove_on_sigterm(path: PathBuf) {
+/// Delete the descriptor put in the returned slot on SIGTERM, then exit as
+/// SIGTERM would. Ctrl-C (SIGINT) already returns through the listeners, which
+/// drops the [`Announcement`]. Returns once the handler is registered, so a
+/// SIGTERM right after the descriptor is written still withdraws it.
+fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
+    let path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+
     #[cfg(unix)]
     {
-        let path = Arc::new(Mutex::new(Some(path)));
+        let slot = Arc::clone(&path);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let path = slot;
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -341,9 +372,10 @@ fn remove_on_sigterm(path: PathBuf) {
             };
 
             runtime.block_on(async {
-                let Ok(mut term) =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                else {
+                let term =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+                let _ = ready_tx.send(());
+                let Ok(mut term) = term else {
                     return;
                 };
 
@@ -356,10 +388,11 @@ fn remove_on_sigterm(path: PathBuf) {
                 }
             });
         });
+        // A runtime that can't start never registers a handler; don't wait for it.
+        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
     }
 
-    #[cfg(not(unix))]
-    let _ = path;
+    path
 }
 
 /// Serve the agent card at `/.well-known/agent-card.json` on its own HTTP
@@ -370,9 +403,22 @@ fn serve_card(
     listen: Option<&str>,
     card: impl Fn() -> AgentCard + Send + Sync + 'static,
 ) -> anyhow::Result<SocketAddr> {
+    let chosen = listen.is_some();
     let listen = listen.unwrap_or("127.0.0.1:0");
-    let std_listener = TcpListener::bind(listen)
-        .map_err(|e| anyhow::anyhow!("bind card listener {listen}: {e}"))?;
+    let std_listener = TcpListener::bind(listen).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            let hint = if chosen {
+                format!("allow it with `shadictl --net-allow {listen}`")
+            } else {
+                "the SHADI sandbox only allows listed ports, so pick one: \
+                 `--card-listen 127.0.0.1:<port>` and `shadictl --net-allow 127.0.0.1:<port>`"
+                    .to_string()
+            };
+            anyhow::anyhow!("binding the card listener {listen} is not permitted; {hint}")
+        } else {
+            anyhow::anyhow!("bind card listener {listen}: {e}")
+        }
+    })?;
     std_listener.set_nonblocking(true)?;
 
     let addr = std_listener.local_addr()?;
@@ -478,6 +524,7 @@ mod tests {
             &locators,
             &Annotations {
                 agent_did: Some("did:key:zAgent"),
+                slim_endpoint: Some("https://node:47357"),
                 a2a_binding: Some(A2ABinding::Jsonrpc),
                 source_record: Some("bafy-skill"),
             },
@@ -498,6 +545,10 @@ mod tests {
             json!("did:key:zAgent")
         );
         assert_eq!(d["annotations"][A2A_BINDING_ANNOTATION], json!("JSONRPC"));
+        assert_eq!(
+            d["annotations"][SLIM_ENDPOINT_ANNOTATION],
+            json!("https://node:47357")
+        );
         let started = d["started_at"].as_str().expect("started_at");
         assert!(
             time::OffsetDateTime::parse(started, &time::format_description::well_known::Rfc3339)
@@ -511,6 +562,7 @@ mod tests {
             &locators,
             &Annotations {
                 agent_did: None,
+                slim_endpoint: None,
                 a2a_binding: None,
                 source_record: None,
             },
@@ -580,5 +632,19 @@ mod tests {
             assert_eq!(expand_home("~/x/y"), PathBuf::from(home).join("x/y"));
         }
         assert_eq!(expand_home("/abs"), PathBuf::from("/abs"));
+    }
+
+    #[test]
+    fn a_slim_locator_names_the_node_without_its_scheme() {
+        for endpoint in ["node:47357", "http://node:47357", "https://node:47357/"] {
+            let locators =
+                listener_locators("codex", Some(endpoint), None, A2ABinding::Grpc, |u| {
+                    u.into()
+                });
+            assert_eq!(
+                locators[0].url, "slim://node:47357/agntcy/shadi/codex-a2a",
+                "{endpoint}"
+            );
+        }
     }
 }

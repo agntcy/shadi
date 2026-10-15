@@ -118,9 +118,10 @@ enum Cmd {
         /// Address for an HTTP listener serving only the agent card at
         /// /.well-known/agent-card.json, so runtime discovery can read it. With
         /// --dir-announce and a SLIM or gRPC binding, a free loopback port is used
-        /// when unset. Set it to publish the card from a container (e.g.
-        /// 0.0.0.0:8081, next to Docker discovery labels); it works without
-        /// --dir-announce too.
+        /// when unset (under `shadictl --net-block`, set one and allow it). Set it
+        /// to publish the card from a container (e.g. 0.0.0.0:8081) labelled
+        /// `org.agntcy/discover=true` and `org.agntcy/agent-type=a2a`; it works
+        /// without --dir-announce too, but needs --slim-endpoint or --a2a-listen.
         #[arg(long)]
         card_listen: Option<String>,
 
@@ -360,13 +361,21 @@ fn main() {
             card_listen,
             source_record,
         } => {
+            // Both serve or announce a listener, so they need one.
+            let needs_listener = slim_endpoint.is_none()
+                && a2a_listen.is_none()
+                && (dir_announce || card_listen.is_some());
+            let listener_flag = if dir_announce {
+                "--dir-announce"
+            } else {
+                "--card-listen"
+            };
             let announce_opts = commands::announce::AnnounceOptions {
                 enabled: dir_announce,
                 dir: dir_announce_dir,
                 card_listen,
                 source_record,
             };
-            let needs_listener = dir_announce && slim_endpoint.is_none() && a2a_listen.is_none();
             let card_opts = commands::card::CardOptions {
                 skills,
                 domains,
@@ -382,7 +391,7 @@ fn main() {
             });
             if needs_listener {
                 Err(anyhow::anyhow!(
-                    "--dir-announce needs an A2A listener: pass --slim-endpoint or --a2a-listen"
+                    "{listener_flag} needs an A2A listener: pass --slim-endpoint or --a2a-listen"
                 ))
             } else {
                 Ok(())
