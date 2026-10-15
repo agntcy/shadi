@@ -236,11 +236,14 @@ target/debug/agentbridge list --skill "software_engineering/*"   # only announce
 ```
 
 ```text
-fake-harness  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [local, runtime localhost:8888]
+fake-harness  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [runtime (localhost:8888)]
 ```
 
-Each line says where the agent was found: `local` (this host's listeners) and
-`runtime <addr>` for each dir-runtime. `agentbridge` runs `dirctl runtime list`
+Each line says where the agent's record is: `local` for a listener on this
+host that isn't announced (its lease), `runtime (<addr>)` for an announced
+agent that dir-runtime reported, and `announced` for an announced listener on
+this host that no reachable dir-runtime reported (e.g. while the daemon is
+down). `agentbridge` runs `dirctl runtime list`
 itself, so it needs a `dirctl` with that command (1.8.0 or later, via
 `SHADI_DIRCTL_BINARY`); with an older one it says so and lists only local
 listeners.
