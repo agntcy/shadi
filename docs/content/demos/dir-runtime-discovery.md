@@ -277,15 +277,17 @@ Press **Ctrl-C** in Terminal R: the agent withdraws its announcement, and
 The bundled profiles under `crates/agentbridge/profiles/` drive real coding
 CLIs. For a record, prefer the isolated ones:
 
-- **`claude-code-isolated`, `codex-isolated`** run the same CLIs as
-  `claude-code` and `codex` with a fresh configuration directory per run
-  (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`), holding only the record's skills. The
-  harness doesn't see your own skills, settings, MCP servers or login.
-- **`claude-code`, `codex`** work too, with a warning: the record's skills go
-  into the working directory (`.claude/skills`, `.agents/skills`; an existing
-  skill of the same name is never replaced, and they are removed when
-  `register` stops), and the harness also reads your own configuration and
-  login. Whoever can send it a task can try to make it reveal or use them.
+- **`claude-code-isolated`, `codex-isolated`, `goose-isolated`,
+  `opencode-isolated`** run the same CLIs as their plain profiles with a fresh
+  `HOME` and configuration directory per run, holding only the record's
+  skills. The harness doesn't see your own skills (including user-level ones
+  in `~/.agents/skills` or `~/.claude/skills`), settings, MCP servers or login.
+- **`claude-code`, `codex`, `goose`, `opencode`** work too, with a warning:
+  the record's skills go into the working directory (`.claude/skills`,
+  `.agents/skills`, `.goose/skills`, `.opencode/skills`; an existing skill of
+  the same name is never replaced, and they are removed when `register`
+  stops), and the harness also reads your own configuration and login.
+  Whoever can send it a task can try to make it reveal or use them.
 
 That also means the harness doesn't see your login, so give it a credential
 it reads from its environment:
@@ -294,6 +296,16 @@ it reads from its environment:
 | --- | --- | --- | --- |
 | `claude-code-isolated` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `api.anthropic.com:443` |
 | `codex-isolated` | [Codex CLI](https://github.com/openai/codex) (`codex`) | `OPENAI_API_KEY` | `api.openai.com:443` |
+| `goose-isolated` | [goose](https://goose-docs.ai/) (`brew install block-goose-cli`) | `GOOSE_PROVIDER` and `GOOSE_MODEL` (passed as `--provider` / `--model`) and that provider's key, e.g. `ANTHROPIC_API_KEY` | the provider's API, e.g. `api.anthropic.com:443` |
+| `opencode-isolated` | [opencode](https://opencode.ai) (`brew install opencode`) | the provider's key, e.g. `ANTHROPIC_API_KEY`; the model via `OPENCODE_ARGS="--model anthropic/<model>"` | the provider's API, plus `models.dev:443` |
+
+!!! warning "opencode doesn't run inside the SHADI sandbox yet"
+    opencode 2.x starts a local server on a random port for every run, and
+    `shadictl --net-block` only allows the ports it is given, so the task
+    fails with `Failed to start server`. This applies to the plain `opencode`
+    profile too. `opencode-isolated` provisions skills correctly; running it
+    needs the sandbox to allow the harness its own loopback server
+    ([shadi#496](https://github.com/agntcy/shadi/issues/496)).
 
 **Terminal R**, claude-code-isolated:
 
@@ -356,8 +368,9 @@ target/debug/agentbridge delegate --to claude-code-isolated \
 
 ### Harnesses without isolation
 
-`copilot`, `cursor-agent`, `goose` and `opencode` have neither `isolation`
-nor a place for skills (`provision.skills`), so they refuse `--record`. They still run as agents from flags (step 7's
+`copilot` and `cursor-agent` have neither `isolation` nor a place for skills
+(`provision.skills`), so they refuse `--record`: their login lives in the
+keychain or their own configuration, which an isolated run would lose. They still run as agents from flags (step 7's
 command with `--tool <name>`), using your own configuration and login: the
 sandbox then has to allow the harness's configuration and wherever its login
 is stored. For a login kept in the macOS keychain, that means
