@@ -25,5 +25,14 @@ COPY --from=build /usr/local/bin/agentbridge /usr/local/bin/shadictl /usr/local/
 COPY examples/agentbridge-container/fake-harness examples/agentbridge-container/entrypoint.sh /usr/local/bin/
 COPY examples/agentbridge-container/profiles /opt/agentbridge/profiles
 ENV AGENTBRIDGE_PROFILES_DIR=/opt/agentbridge/profiles
+# Run as a non-root user from an empty working directory: shadictl's default
+# policy grants the working directory, which would otherwise be /.
+# The local lease lives in SHADI_TMP_DIR, so `docker exec <container>
+# agentbridge list --local` shows the agent and its DID.
+RUN useradd --create-home --uid 10001 agent \
+ && mkdir /home/agent/work /home/agent/tmp && chown agent: /home/agent/work /home/agent/tmp
+ENV SHADI_TMP_DIR=/home/agent/tmp
+USER agent
+WORKDIR /home/agent/work
 EXPOSE 8443 8081
 ENTRYPOINT ["entrypoint.sh"]
