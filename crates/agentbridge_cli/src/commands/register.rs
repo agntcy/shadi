@@ -185,6 +185,11 @@ fn start_listeners(
     dir_publish: Option<DirPublishOptions>,
     verbose: bool,
 ) -> anyhow::Result<()> {
+    // Don't announce an instance that can't start: the A2A address must be free.
+    if let Some(listen) = a2a_listen {
+        ensure_listen_address_free(listen)?;
+    }
+
     // Announce before serving and withdraw when the listeners return (Ctrl-C,
     // or a listener failing to start): the guard lives until this function ends.
     let serves_card = a2a_listen.is_some()
@@ -1522,6 +1527,8 @@ fn run_unicast_listener(
         .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
 
     runtime.block_on(async move {
+        // Bind first, so "ready" is only printed for a listener that is up.
+        let listener = bind_listener(addr)?;
         println!(
             "[agentbridge] ready — A2A {} on {a2a_url}",
             a2a_binding.as_protocol_binding()
@@ -1535,8 +1542,7 @@ fn run_unicast_listener(
                 let grpc_service = A2aServiceServer::new(GrpcHandler::new(handler));
                 match grpc_server_tls_config(&addr)? {
                     Some(tls) => {
-                        let incoming = TcpIncoming::bind(addr)
-                            .map_err(|e| format!("bind A2A gRPC {addr}: {e}"))?;
+                        let incoming = TcpIncoming::from(tokio_listener(listener)?);
                         let incoming = tonic_tls::rustls::TlsIncoming::new(incoming, tls);
                         tokio::select! {
                             result = TonicServer::builder()
@@ -1552,10 +1558,11 @@ fn run_unicast_listener(
                         }
                     }
                     None => {
+                        let incoming = TcpIncoming::from(tokio_listener(listener)?);
                         tokio::select! {
                             result = TonicServer::builder()
                                 .add_service(grpc_service)
-                                .serve(addr) => {
+                                .serve_with_incoming(incoming) => {
                                 result.map_err(|e| format!("A2A gRPC server error: {e}"))
                             }
                             _ = tokio::signal::ctrl_c() => {
@@ -1575,7 +1582,7 @@ fn run_unicast_listener(
                 };
                 let router = with_agent_card(router, agent_id, listen, a2a_binding);
                 tokio::select! {
-                    result = serve_http_router(addr, router) => result,
+                    result = serve_http_router(addr, listener, router) => result,
                     _ = tokio::signal::ctrl_c() => {
                         println!("\n[agentbridge] shutting down...");
                         adapter_for_shutdown.kill_in_flight();
@@ -1604,12 +1611,50 @@ fn with_agent_card(
     ))
 }
 
-async fn serve_http_router(addr: SocketAddr, router: axum::Router) -> Result<(), String> {
+/// Bind the A2A listener's address, explaining an address already in use.
+fn bind_listener(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
+    let listener = std::net::TcpListener::bind(addr).map_err(|e| bind_error(addr, &e))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("A2A listener {addr}: {e}"))?;
+    Ok(listener)
+}
+
+fn tokio_listener(listener: std::net::TcpListener) -> Result<tokio::net::TcpListener, String> {
+    tokio::net::TcpListener::from_std(listener).map_err(|e| format!("A2A listener: {e}"))
+}
+
+fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        format!(
+            "{addr} is already in use. Is another listener (e.g. another instance of this \
+             agent) on it? Pick another --a2a-listen port"
+        )
+    } else {
+        format!("bind A2A listener {addr}: {e}")
+    }
+}
+
+/// Fail before announcing or serving anything when `listen` can't be bound.
+/// The address is released again right away; the listener binds it for real.
+fn ensure_listen_address_free(listen: &str) -> anyhow::Result<()> {
+    // An address that doesn't parse is reported by the listener itself.
+    let Ok(addr) = listen.parse::<SocketAddr>() else {
+        return Ok(());
+    };
+    std::net::TcpListener::bind(addr)
+        .map(drop)
+        .map_err(|e| anyhow::anyhow!("{}", bind_error(addr, &e)))
+}
+
+async fn serve_http_router(
+    addr: SocketAddr,
+    listener: std::net::TcpListener,
+    router: axum::Router,
+) -> Result<(), String> {
     match a2a_server_tls_paths(&addr)? {
         None => {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| format!("bind A2A HTTP {addr}: {e}"))?;
+            let listener = tokio_listener(listener)?;
             axum::serve(listener, router)
                 .await
                 .map_err(|e| format!("A2A HTTP server error: {e}"))
@@ -1625,7 +1670,8 @@ async fn serve_http_router(addr: SocketAddr, router: axum::Router) -> Result<(),
                         key.display()
                     )
                 })?;
-            axum_server::bind_rustls(addr, config)
+            axum_server::tls_rustls::from_tcp_rustls(listener, config)
+                .map_err(|e| format!("A2A listener {addr}: {e}"))?
                 .serve(router.into_make_service())
                 .await
                 .map_err(|e| format!("A2A HTTPS server error: {e}"))
@@ -2770,6 +2816,20 @@ test push ... FAILED
         );
         assert_eq!(card.supported_interfaces.len(), 2);
         assert_eq!(card.supported_interfaces[1].url, "https://127.0.0.1:28443");
+    }
+
+    #[test]
+    fn an_address_in_use_is_refused_with_an_explanation() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = taken.local_addr().unwrap().to_string();
+
+        let err = ensure_listen_address_free(&addr).unwrap_err().to_string();
+        assert!(err.contains("already in use"), "{err}");
+        assert!(err.contains("--a2a-listen"), "{err}");
+
+        drop(taken);
+        ensure_listen_address_free(&addr).expect("free once released");
+        ensure_listen_address_free("not an address").expect("left to the listener");
     }
 
     #[test]
