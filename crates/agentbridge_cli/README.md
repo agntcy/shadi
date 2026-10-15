@@ -91,9 +91,13 @@ settings, for `--record`).
 ### `list` — discover registered adapters
 
 ```bash
-# Query DIR for A2A agents, optionally only those with an OASF skill
+# Running agents: this host's listeners and every agent a dir-runtime
+# (--runtime, default localhost:8888) reports, each labelled with its source
 agentbridge list
 agentbridge list --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination
+
+# Published A2A agents: DIR records pushed by register --dir-publish
+agentbridge list --published --dir-server 127.0.0.1:8888
 
 # List listeners this machine started with register --slim-endpoint / --a2a-listen
 agentbridge list --local

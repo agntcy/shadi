@@ -420,8 +420,9 @@ pub(crate) struct SlimCreateGroupArgs {
     /// Channel to create, e.g. agntcy/shadi/my-room.
     pub(crate) channel: String,
 
-    /// Member source spec, repeatable: skill:<skill> | did:<did> |
-    /// explicit:<name>=<did>[@<endpoint>]. Resolved candidates' DIDs are
+    /// Member source spec, repeatable: skill:<skill> (DIR records) |
+    /// running:<skill> (running agents, through runtime discovery on
+    /// --dir-server) | did:<did> | explicit:<name>=<did>[@<endpoint>]. Resolved candidates' DIDs are
     /// unioned into this group's trust set (SLIM_MEMBER_DIDS) — resolving a
     /// candidate does not by itself invite it into the live session; use
     /// `/slim invite <name>` or `/slim invite-from <spec>` for that.

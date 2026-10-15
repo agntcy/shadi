@@ -5,8 +5,8 @@
   dies mid-line, or never sends a newline must produce an error rather than a
   panic, and must not be buffered past `STDIO_LINE_MAX_BYTES` (64 KiB).
 - **`member-spec`** — feeds arbitrary strings to `parse_member_spec`, which
-  backs `--members` and `/slim invite-from`. Only `skill:`, `did:` and
-  `explicit:` specs may parse, and an accepted `explicit:` spec may not yield
+  backs `--members` and `/slim invite-from`. Only `skill:`, `running:`, `did:`
+  and `explicit:` specs may parse, and an accepted `explicit:` spec may not yield
   a member with an empty name or DID.
 
 ## Running
