@@ -156,7 +156,7 @@ pub fn start(
     );
     // Ready to withdraw on SIGTERM before the descriptor is visible, and the
     // slot held while it is published: a SIGTERM meanwhile waits for the path.
-    let on_sigterm = remove_on_sigterm();
+    let on_sigterm = on_sigterm();
     let path = {
         let mut slot = on_sigterm.lock().unwrap_or_else(|e| e.into_inner());
         let path = write_descriptor(&dir, &workload_id, &descriptor)?;
@@ -366,51 +366,52 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Delete the descriptor put in the returned slot (and a `--record` config
-/// root) on SIGTERM, then exit as SIGTERM would. Ctrl-C (SIGINT) already
-/// returns through the listeners, which drops the [`Announcement`]. Returns
-/// once the handler is registered, so a SIGTERM right after the descriptor is
-/// written still withdraws it.
-fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
-    let path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+/// The descriptor to delete on SIGTERM. The first call registers the handler,
+/// which deletes it (and what `--record` provisioned), then exits as SIGTERM
+/// would. Ctrl-C (SIGINT) already returns through the listeners, which drops
+/// the [`Announcement`]. Returns once the handler is registered, so a SIGTERM
+/// right after the descriptor is written still withdraws it.
+pub fn on_sigterm() -> &'static Mutex<Option<PathBuf>> {
+    static PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static HANDLER: OnceLock<()> = OnceLock::new();
 
-    #[cfg(unix)]
-    {
-        let slot = Arc::clone(&path);
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let path = slot;
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-
-            runtime.block_on(async {
-                let term =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
-                let _ = ready_tx.send(());
-                let Ok(mut term) = term else {
+    HANDLER.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
                     return;
                 };
 
-                if term.recv().await.is_some() {
-                    if let Some(p) = path.lock().ok().and_then(|mut p| p.take()) {
-                        remove_descriptor(&p);
+                runtime.block_on(async {
+                    let term =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+                    let _ = ready_tx.send(());
+                    let Ok(mut term) = term else {
+                        return;
+                    };
+
+                    if term.recv().await.is_some() {
+                        if let Some(p) = PATH.lock().ok().and_then(|mut p| p.take()) {
+                            remove_descriptor(&p);
+                        }
+                        stop_in_flight();
+                        super::record::cleanup();
+
+                        std::process::exit(143);
                     }
-                    stop_in_flight();
-                    super::record::cleanup();
-
-                    std::process::exit(143);
-                }
+                });
             });
-        });
-        // A runtime that can't start never registers a handler; don't wait for it.
-        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
-    }
+            // A runtime that can't start never registers a handler; don't wait for it.
+            let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    });
 
-    path
+    &PATH
 }
 
 type StopHook = Box<dyn Fn() + Send>;
