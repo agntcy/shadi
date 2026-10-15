@@ -1,39 +1,79 @@
 use agentbridge::local_registry::{LocalAdapterRecord, LocalAdapterRegistry};
 use agentbridge::member_source::{
-    A2AAgentSearchSource, CandidateMember, DirLookupOptions, MemberSource,
+    A2AAgentSearchSource, CandidateMember, DirLookupOptions, MemberSource, RunningAgentSource,
 };
 use shadi_a2a::A2ALocator;
 
-/// List registered agentbridge adapters.
+/// Where `agentbridge list` looks.
+pub struct ListOptions<'a> {
+    /// Only this host's listeners (`--local`).
+    pub local: bool,
+    /// DIR records instead of running agents (`--published`).
+    pub published: bool,
+    /// OASF skills to filter on (`--skill`, any of them).
+    pub skills: &'a [String],
+    /// dir-runtimes to ask for running agents (`--runtime`).
+    pub runtimes: &'a [String],
+    /// The Directory for `--published`.
+    pub dir_server: &'a str,
+    pub gh_token: Option<&'a str>,
+}
+
+/// List agentbridge agents.
 ///
-/// `--local` lists listeners this machine started with
-/// `register --slim-endpoint` and/or `--a2a-listen` (lease files under
-/// `$SHADI_TMP_DIR`). Without `--local`, queries the agntcy Agent Directory
-/// for A2A agents (records with an `integration/a2a` module), with any of
-/// `skills` when given, resolving each
-/// match to a real `{name, did, slim_endpoint, locator}` via
-/// [`SkillSearchSource`].
-pub fn run(
-    local: bool,
-    skills: &[String],
-    server_addr: &str,
-    github_token: Option<&str>,
-) -> anyhow::Result<()> {
-    if local {
+/// By default, the running ones: this host's listeners (leases under
+/// `$SHADI_TMP_DIR`, and listeners announced to dir-runtime) and every agent
+/// each `--runtime` lists, merged and de-duplicated. `--local` lists only this
+/// host's listeners; `--published` searches DIR records (`register
+/// --dir-publish`) instead, which say what was published, not what runs.
+pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
+    if opts.local {
         return list_local(&LocalAdapterRegistry::from_env());
     }
+    if opts.published {
+        return list_published(opts);
+    }
 
-    println!("Searching Agent Directory ({server_addr}) for A2A agents...\n");
+    let mut candidates = Vec::new();
+    // Local listeners carry no skills to filter on, so a skill filter only
+    // applies to what runtime discovery reports.
+    if opts.skills.is_empty() {
+        let records = LocalAdapterRegistry::from_env()
+            .list_live()
+            .map_err(|e| anyhow::anyhow!("local discovery failed: {e}"))?;
+        candidates.extend(records.iter().map(LocalAdapterRecord::to_candidate));
+    }
+    for runtime in opts.runtimes {
+        let source = RunningAgentSource {
+            skills: opts.skills.to_vec(),
+            runtime: lookup(runtime, opts.gh_token),
+        };
+        match source.resolve() {
+            Ok(found) => candidates.extend(found),
+            Err(e) => eprintln!("[agentbridge] skipping dir-runtime {runtime}: {e}"),
+        }
+    }
+
+    let candidates = dedup(candidates);
+    if candidates.is_empty() {
+        println!("No running agentbridge agents found.");
+        println!("Start one with: agentbridge register --tool <name> --a2a-listen <host:port> [--dir-announce]");
+    } else {
+        for c in &candidates {
+            println!("{}", render_candidate(c));
+        }
+    }
+    Ok(())
+}
+
+fn list_published(opts: &ListOptions<'_>) -> anyhow::Result<()> {
+    let server_addr = opts.dir_server;
+    println!("Searching Agent Directory ({server_addr}) for published A2A agents...\n");
 
     let source = A2AAgentSearchSource {
-        skills: skills.to_vec(),
-        dir: DirLookupOptions {
-            server_addr: server_addr.to_string(),
-            gh_token: github_token.map(str::to_string),
-            limit: 20,
-        },
+        skills: opts.skills.to_vec(),
+        dir: lookup(server_addr, opts.gh_token),
     };
-
     let candidates = source
         .resolve()
         .map_err(|e| anyhow::anyhow!("DIR search failed: {e}"))?;
@@ -48,8 +88,27 @@ pub fn run(
             println!("{}", render_candidate(c));
         }
     }
-
     Ok(())
+}
+
+fn lookup(server_addr: &str, gh_token: Option<&str>) -> DirLookupOptions {
+    DirLookupOptions {
+        server_addr: server_addr.to_string(),
+        gh_token: gh_token.map(str::to_string),
+        limit: 20,
+    }
+}
+
+/// One entry per agent DID and locator: an announced listener is both a local
+/// listener and a running workload.
+fn dedup(candidates: Vec<CandidateMember>) -> Vec<CandidateMember> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<CandidateMember> = candidates
+        .into_iter()
+        .filter(|c| seen.insert((c.did.clone(), c.slim_endpoint.clone(), c.a2a_url.clone())))
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name).then(a.did.cmp(&b.did)));
+    out
 }
 
 fn list_local(registry: &LocalAdapterRegistry) -> anyhow::Result<()> {
@@ -96,6 +155,38 @@ fn render_local_listing(records: &[LocalAdapterRecord]) -> String {
 mod tests {
     use super::*;
     use shadi_a2a::A2ABinding;
+
+    fn candidate(name: &str, did: &str, url: &str) -> CandidateMember {
+        CandidateMember {
+            name: name.into(),
+            did: did.into(),
+            slim_endpoint: None,
+            a2a_url: Some(url.into()),
+            a2a_binding: Some(shadi_a2a::A2ABinding::HttpJson),
+        }
+    }
+
+    #[test]
+    fn an_agent_listed_by_both_sources_appears_once() {
+        let merged = dedup(vec![
+            candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
+            candidate("codex", "did:key:zB", "http://127.0.0.1:2"),
+            candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
+            candidate("copilot", "did:key:zA", "http://127.0.0.1:3"),
+        ]);
+        let names: Vec<(&str, &str)> = merged
+            .iter()
+            .map(|c| (c.name.as_str(), c.a2a_url.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("codex", "http://127.0.0.1:2"),
+                ("copilot", "http://127.0.0.1:1"),
+                ("copilot", "http://127.0.0.1:3"),
+            ]
+        );
+    }
 
     #[test]
     fn local_discovery_empty_registry_is_ok() {

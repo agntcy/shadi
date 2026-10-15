@@ -178,12 +178,23 @@ enum Cmd {
         #[arg(long)]
         local: bool,
 
-        /// Only agents with this OASF skill (repeatable: any of them). Without
-        /// it, every A2A agent in the Directory.
+        /// Only agents with this OASF skill (repeatable: any of them). Applies
+        /// to running agents runtime discovery reports, and to --published;
+        /// listeners that aren't announced carry no skills, so they are left out.
         #[arg(long = "skill", value_name = "OASF_SKILL", conflicts_with = "local")]
         skills: Vec<String>,
 
-        /// Agent Directory server address.
+        /// dir-runtime to ask for running agents (repeatable), e.g. a local
+        /// `dirctl daemon`. An unreachable one is reported and skipped.
+        #[arg(long = "runtime", value_name = "ADDR", default_value = "localhost:8888", conflicts_with_all = ["local", "published"])]
+        runtimes: Vec<String>,
+
+        /// Search DIR records (`register --dir-publish`) instead of running
+        /// agents: what was published, not what runs.
+        #[arg(long, conflicts_with = "local")]
+        published: bool,
+
+        /// Agent Directory server address (for --published).
         #[arg(long, default_value = "prod.gateway.ads.outshift.io:443")]
         dir_server: String,
 
@@ -560,9 +571,18 @@ fn main() {
         Cmd::List {
             local,
             skills,
+            runtimes,
+            published,
             dir_server,
             gh_token,
-        } => commands::list::run(local, &skills, &dir_server, gh_token.as_deref()),
+        } => commands::list::run(&commands::list::ListOptions {
+            local,
+            published,
+            skills: &skills,
+            runtimes: &runtimes,
+            dir_server: &dir_server,
+            gh_token: gh_token.as_deref(),
+        }),
         Cmd::Handoff {
             from,
             to,
