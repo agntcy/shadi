@@ -17,9 +17,9 @@ and `/slim join` are untouched by any of this.
   publishes a real A2A `AgentCard` (real skills, real SLIM endpoint) wrapped in
   DIR's `integration/a2a` OASF module, with the agent's `did:key` as the
   record's `authors` entry — not a disconnected placeholder record.
-- **Discovery by skill** — `agentbridge list` and `shadictl slim create-group
-  --members skill:<skill>` resolve real `{name, did, slim_endpoint}` triples
-  from a Directory search, not raw CLI output.
+- **Discovery by skill** — `agentbridge list --published` and `shadictl slim
+  create-group --members skill:<skill>` resolve real `{name, did,
+  slim_endpoint}` triples from a Directory search, not raw CLI output.
 - **Discovery by already-known DID** — `--members did:<did>` resolves an
   agent's current name/endpoint from Directory when the moderator already
   trusts a specific DID but not necessarily anything else about it.
@@ -149,17 +149,17 @@ skills it is given: `--skill` names an [OASF](https://github.com/agntcy/oasf)
 `ai_ml_engineering/agent_orchestration/multi_agent_coordination`, which step 5
 searches for.
 
-## 4. Discover them with `agentbridge list`
+## 4. Discover them with `agentbridge list --published`
 
 **Any terminal:**
 
 ```bash
 source docs/content/demos/demo-env-dir.sh
-target/debug/agentbridge list --dir-server "$SHADI_DIR_SERVER"
+target/debug/agentbridge list --published --dir-server "$SHADI_DIR_SERVER"
 ```
 
 ```text
-Searching Agent Directory (127.0.0.1:8888) for A2A agents...
+Searching Agent Directory (127.0.0.1:8888) for published A2A agents...
 
 codex     did=did:key:z6MkjFJX8CHfgsZKWpS2FfQz38KyzHkf2mDo1vKJ9rMfSUvg  slim://127.0.0.1:47660
 copilot   did=did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb  slim://127.0.0.1:47660
@@ -168,14 +168,18 @@ copilot   did=did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb  slim://1
 Both entries are real, resolved from Directory records `agentbridge list`
 pulled and parsed — not raw `dirctl` stdout.
 
-`agentbridge list` shows every A2A agent in the Directory (records with an
+`--published` shows every A2A agent in the Directory (records with an
 `integration/a2a` module); `--skill <class>` (repeatable) narrows it to agents
 with any of those skills:
 
 ```bash
-target/debug/agentbridge list --dir-server "$SHADI_DIR_SERVER" \
+target/debug/agentbridge list --published --dir-server "$SHADI_DIR_SERVER" \
   --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination
 ```
+
+Without `--published`, `agentbridge list` lists *running* agents instead: this
+host's listeners, and agents announced to runtime discovery (see
+[Runtime Discovery Demo](dir-runtime-discovery.md)).
 
 Listeners on this host (no DIR) are listed the same way after
 `register --slim-endpoint`:
