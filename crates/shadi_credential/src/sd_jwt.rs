@@ -19,6 +19,9 @@ use crate::store::CredentialRecord;
 use crate::vault::CredentialVault;
 use crate::CredentialError;
 
+/// The only issuer JWT `typ` this module reads.
+pub const SD_JWT_FORMAT: &str = "dc+sd-jwt";
+
 /// One disclosure: `[salt, name, value]`, or `[salt, value]` for an array
 /// element, which has no name.
 #[derive(Debug, Clone, PartialEq)]
@@ -94,11 +97,16 @@ pub fn parse_sd_jwt(raw: &str) -> Result<ParsedCredential, CredentialError> {
         ));
     }
 
-    // The format is read, not assumed: the vault needs to know how to read
-    // `raw` back, and a credential with no `typ` is indistinguishable from any
-    // other JWT the same realm signed.
+    // A plain JWT with a trailing `~` is structurally close enough to pass
+    // everything else here, so `typ` is the only thing that says this is an
+    // SD-JWT VC the vault can read back.
     let header = decode_json(issuer_jwt[0], "the issuer JWT header")?;
     let format = required_str(&header, "typ")?;
+    if format != SD_JWT_FORMAT {
+        return Err(CredentialError::Malformed(format!(
+            "the issuer JWT `typ` is {format}, expected {SD_JWT_FORMAT}"
+        )));
+    }
 
     let payload = decode_json(issuer_jwt[1], "the issuer JWT payload")?;
     let issuer = required_str(&payload, "iss")?;
@@ -323,16 +331,26 @@ mod tests {
         );
     }
 
-    /// The format is read from the header, not assumed, so a realm retuning
-    /// `token_jws_type` is visible in the vault rather than silently wrong.
+    /// Only `dc+sd-jwt` is readable: a plain JWT with a trailing `~` must be
+    /// refused at import, not stored and then reported unsupported at `show`.
     #[test]
-    fn the_format_comes_from_the_issuer_jwt_typ() {
-        let raw = credential_with_header(
-            serde_json::json!({"alg": "EdDSA", "typ": "vc+sd-jwt"}),
+    fn rejects_any_typ_other_than_dc_sd_jwt() {
+        for typ in ["JWT", "foo-sd-jwt"] {
+            let raw = credential_with_header(
+                serde_json::json!({"alg": "EdDSA", "typ": typ}),
+                payload(),
+                &[],
+            );
+            let err = parse_sd_jwt(&raw).expect_err("reject");
+            assert!(err.to_string().contains(typ), "{typ}: {err}");
+        }
+
+        let ok = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": SD_JWT_FORMAT}),
             payload(),
             &[],
         );
-        assert_eq!(parse_sd_jwt(&raw).expect("parse").format, "vc+sd-jwt");
+        assert_eq!(parse_sd_jwt(&ok).expect("parse").format, "dc+sd-jwt");
     }
 
     #[test]

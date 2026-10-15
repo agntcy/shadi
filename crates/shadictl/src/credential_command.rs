@@ -133,7 +133,7 @@ struct CredentialSummary {
     expires_at: Option<i64>,
     claims: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    disclosed: Option<Value>,
+    disclosed: Option<Vec<Value>>,
     /// Why `claims` is empty, when the reason is that `raw` could not be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     unreadable: Option<String>,
@@ -159,12 +159,14 @@ fn summarise(record: &CredentialRecord, disclose: bool) -> CredentialSummary {
         Ok(disclosures) => {
             summary.claims = disclosures.iter().map(claim_name).collect();
             if disclose {
-                summary.disclosed = Some(Value::Object(
+                // A list, not a map: array elements have no name and
+                // names may repeat, so any key would collapse entries.
+                summary.disclosed = Some(
                     disclosures
                         .iter()
-                        .map(|d| (claim_name(d), d.value.clone()))
+                        .map(|d| json!({ "name": d.name, "value": d.value }))
                         .collect(),
-                ));
+                );
             }
         }
         Err(err) => summary.unreadable = Some(err),
@@ -175,7 +177,7 @@ fn summarise(record: &CredentialRecord, disclose: bool) -> CredentialSummary {
 /// Only a format this binary knows how to read is parsed; the vault stores
 /// others verbatim and nothing here may assume they are SD-JWT.
 fn disclosures(record: &CredentialRecord) -> Result<Vec<Disclosure>, String> {
-    if !record.format.ends_with("sd-jwt") {
+    if record.format != shadi_credential::SD_JWT_FORMAT {
         return Err(format!("unsupported format {}", record.format));
     }
     shadi_credential::parse_sd_jwt(&record.raw)
@@ -217,10 +219,11 @@ fn format_summaries(summaries: &[CredentialSummary]) -> String {
                 expires,
                 claims,
             );
-            if let Some(Value::Object(disclosed)) = summary.disclosed.as_ref() {
+            if let Some(disclosed) = summary.disclosed.as_ref() {
                 text.push_str("\n  disclosed:");
-                for (name, value) in disclosed {
-                    text.push_str(&format!("\n    {name}: {value}"));
+                for entry in disclosed {
+                    let name = entry["name"].as_str().unwrap_or("<array element>");
+                    text.push_str(&format!("\n    {name}: {}", entry["value"]));
                 }
             }
             text
@@ -243,6 +246,11 @@ mod tests {
 
     /// `dc+sd-jwt`, one disclosure, trailing tilde, no key-binding JWT.
     fn fixture() -> String {
+        fixture_with(&[json!(["c2FsdA", "groups", "platform-admins"])])
+    }
+
+    /// The same credential carrying exactly `disclosures`.
+    fn fixture_with(disclosures: &[Value]) -> String {
         let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let key =
             ed25519_dalek::VerifyingKey::from(&ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
@@ -252,14 +260,16 @@ mod tests {
             "exp": 2_000,
             "cnf": { "jwk": { "kty": "OKP", "crv": "Ed25519", "x": b64(key.as_bytes()) } },
         });
-        let groups = b64(json!(["c2FsdA", "groups", "platform-admins"])
-            .to_string()
-            .as_bytes());
-        format!(
-            "{}.{}.c2ln~{groups}~",
+        let mut raw = format!(
+            "{}.{}.c2ln~",
             b64(br#"{"alg":"EdDSA","typ":"dc+sd-jwt"}"#),
             b64(payload.to_string().as_bytes()),
-        )
+        );
+        for d in disclosures {
+            raw.push_str(&b64(d.to_string().as_bytes()));
+            raw.push('~');
+        }
+        raw
     }
 
     /// The same credential with nothing disclosable — legal, and the operator
@@ -459,7 +469,55 @@ mod tests {
         )
         .expect("show");
         let parsed: Value = serde_json::from_str(&shown).expect("json");
-        assert_eq!(parsed["disclosed"]["groups"], "platform-admins");
+        assert_eq!(
+            parsed["disclosed"],
+            json!([{ "name": "groups", "value": "platform-admins" }])
+        );
+    }
+
+    fn disclosed_json(disclosures: &[Value]) -> Value {
+        let vault = vault();
+        let raw = fixture_with(disclosures);
+        let id = shadi_credential::import(&vault, &raw, 1_000)
+            .expect("import")
+            .id;
+        let shown = handle_credential_command(
+            &CredentialCommand::Show {
+                id,
+                disclose: true,
+                json: true,
+            },
+            &vault,
+        )
+        .expect("show");
+        serde_json::from_str::<Value>(&shown).expect("json")["disclosed"].clone()
+    }
+
+    #[test]
+    fn disclose_shows_every_array_element() {
+        let disclosed = disclosed_json(&[json!(["c2FsdA", "first"]), json!(["c2FsdA", "second"])]);
+        assert_eq!(
+            disclosed,
+            json!([
+                { "name": null, "value": "first" },
+                { "name": null, "value": "second" },
+            ])
+        );
+    }
+
+    #[test]
+    fn disclose_shows_every_claim_sharing_a_name() {
+        let disclosed = disclosed_json(&[
+            json!(["c2FsdA", "groups", "admins"]),
+            json!(["c2FsdA", "groups", "auditors"]),
+        ]);
+        assert_eq!(
+            disclosed,
+            json!([
+                { "name": "groups", "value": "admins" },
+                { "name": "groups", "value": "auditors" },
+            ])
+        );
     }
 
     #[test]

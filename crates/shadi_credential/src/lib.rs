@@ -26,7 +26,7 @@ pub enum CredentialError {
     Storage(String),
 }
 
-pub use sd_jwt::{import, parse_sd_jwt, Disclosure, ParsedCredential};
+pub use sd_jwt::{import, parse_sd_jwt, Disclosure, ParsedCredential, SD_JWT_FORMAT};
 pub use store::{CredentialRecord, SqlCipherVault};
 pub use vault::{
     default_backend, default_vault, CredentialVault, KeychainVault, VaultBackend,
