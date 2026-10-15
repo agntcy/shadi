@@ -258,6 +258,7 @@ fn start_listeners(
                     if let Some(path) = descriptor {
                         super::announce::withdraw(&path);
                     }
+                    super::record::cleanup();
                     std::process::exit(1);
                 }
             });
