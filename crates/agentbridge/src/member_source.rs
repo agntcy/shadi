@@ -157,10 +157,6 @@ impl MemberSource for RunningAgentSource {
             Err(e) => return Err(format!("dirctl runtime list failed: {e}")),
             Ok(o) => o,
         };
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-        // An older dirctl prints the cobra error and still exits 0.
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("unknown command \"runtime\"") {
             return Err(format!(
@@ -168,6 +164,9 @@ impl MemberSource for RunningAgentSource {
                  (set SHADI_DIRCTL_BINARY to point at one)",
                 dirctl_binary()
             ));
+        }
+        if !output.status.success() {
+            return Err(stderr.trim().to_string());
         }
         running_candidates(&output.stdout)
     }
