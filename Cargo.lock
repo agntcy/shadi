@@ -234,6 +234,7 @@ dependencies = [
  "opentelemetry_sdk",
  "reqwest",
  "rustls-pki-types",
+ "semver",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -243,6 +244,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
