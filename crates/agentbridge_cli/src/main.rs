@@ -296,6 +296,15 @@ fn parse_http_url(raw: &str) -> Result<String, String> {
     Ok(raw.to_string())
 }
 
+/// An OASF record needs at least one skill, so `--dir-publish` without one
+/// would only fail once the listener is up.
+fn publishable(dir_publish: bool, skills: &[String]) -> anyhow::Result<()> {
+    if dir_publish && skills.is_empty() {
+        anyhow::bail!("--dir-publish needs at least one --skill: an OASF record must list a skill");
+    }
+    Ok(())
+}
+
 fn main() {
     subscriber().init();
     // Same as shadictl: a2a-grpc enables rustls `ring` beside SLIM aws-lc-rs.
@@ -336,18 +345,20 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            commands::card::configure(&card_opts).and_then(|()| {
-                commands::register::run(
-                    &tool,
-                    command.as_deref(),
-                    &args,
-                    slim_endpoint.as_deref(),
-                    a2a_listen.as_deref(),
-                    a2a_binding,
-                    publish_opts,
-                    verbose,
-                )
-            })
+            publishable(dir_publish, &card_opts.skills)
+                .and_then(|()| commands::card::configure(&card_opts))
+                .and_then(|()| {
+                    commands::register::run(
+                        &tool,
+                        command.as_deref(),
+                        &args,
+                        slim_endpoint.as_deref(),
+                        a2a_listen.as_deref(),
+                        a2a_binding,
+                        publish_opts,
+                        verbose,
+                    )
+                })
         }
         Cmd::List {
             local,
@@ -537,6 +548,14 @@ mod tests {
     #[test]
     fn rejects_unknown_subcommand() {
         assert!(Cli::try_parse_from(["agentbridge", "nope"]).is_err());
+    }
+
+    #[test]
+    fn dir_publish_needs_a_skill() {
+        let skill = vec!["software_engineering/code_generation".to_string()];
+        assert!(publishable(true, &[]).is_err());
+        assert!(publishable(true, &skill).is_ok());
+        assert!(publishable(false, &[]).is_ok(), "skill-less without publishing is fine");
     }
 
     #[test]

@@ -230,7 +230,12 @@ fn validate(config: &CardConfig) -> anyhow::Result<()> {
     }
 
     let body: Value = response.json()?;
-    let errors = validation_errors(&body);
+    let errors = validation_errors(&body).map_err(|e| {
+        anyhow::anyhow!(
+            "the OASF server at {url} didn't answer like an OASF validator: {e}. \
+             Check --oasf-schema-url, or pass --skip-oasf-validation to advertise them unchecked."
+        )
+    })?;
 
     if errors.is_empty() {
         return Ok(());
@@ -248,26 +253,38 @@ fn host_of(url: &str) -> &str {
     rest.split(['/', ':']).next().unwrap_or(rest)
 }
 
-/// Human-readable lines for each error in an OASF validation response.
-fn validation_errors(body: &Value) -> Vec<String> {
-    body.get("errors")
+/// Human-readable lines for each error in an OASF validation response. A
+/// response without an `errors` array and a matching `error_count` isn't a
+/// validator's answer, so it doesn't count as a pass.
+fn validation_errors(body: &Value) -> Result<Vec<String>, String> {
+    let errors = body
+        .get("errors")
         .and_then(Value::as_array)
-        .map(|errors| {
-            errors
-                .iter()
-                .map(|e| {
-                    let message = e
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("invalid");
-                    match e.get("attribute_path").and_then(Value::as_str) {
-                        Some(path) => format!("{path}: {message}"),
-                        None => message.to_string(),
-                    }
-                })
-                .collect()
+        .ok_or("no `errors` list")?;
+    let count = body
+        .get("error_count")
+        .and_then(Value::as_u64)
+        .ok_or("no `error_count`")?;
+    if count != errors.len() as u64 {
+        return Err(format!(
+            "`error_count` is {count} but {} errors are listed",
+            errors.len()
+        ));
+    }
+
+    Ok(errors
+        .iter()
+        .map(|e| {
+            let message = e
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid");
+            match e.get("attribute_path").and_then(Value::as_str) {
+                Some(path) => format!("{path}: {message}"),
+                None => message.to_string(),
+            }
         })
-        .unwrap_or_default()
+        .collect())
 }
 
 #[cfg(test)]
@@ -428,6 +445,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_refuses_a_response_that_isnt_a_validators() {
+        for body in [
+            "{}",
+            r#"{"error":"validation unavailable"}"#,
+            r#"{"errors":[]}"#,
+            r#"{"errors":[],"error_count":2}"#,
+        ] {
+            let url = serve_once("200 OK", body);
+
+            let err = validate(&config_for(url)).unwrap_err().to_string();
+            assert!(
+                err.contains("didn't answer like an OASF validator"),
+                "{body}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_fails_on_a_non_success_status() {
         let url = serve_once("404 Not Found", "{}");
 
@@ -457,8 +492,19 @@ mod tests {
 
         assert_eq!(
             validation_errors(&body),
-            vec!["skills[1]: Unknown \"name\" value"]
+            Err("no `error_count`".to_string())
         );
-        assert!(validation_errors(&json!({ "errors": [] })).is_empty());
+        let body = json!({
+            "errors": [{ "message": "Unknown \"name\" value", "attribute_path": "skills[1]" }],
+            "error_count": 1,
+        });
+        assert_eq!(
+            validation_errors(&body),
+            Ok(vec!["skills[1]: Unknown \"name\" value".to_string()])
+        );
+        assert_eq!(
+            validation_errors(&json!({ "errors": [], "error_count": 0 })),
+            Ok(vec![])
+        );
     }
 }
