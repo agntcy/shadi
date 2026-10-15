@@ -109,7 +109,8 @@ The demo uses in-process mock adapters for clarity. The full production stack ad
 | Native `handoff --from/--to` | same specs as `coordinate` |
 | A2A task delegation | `LiveA2ATaskAdapter` (crates/shadi_mas/src/experiments) |
 | SLIM group broadcast | `LiveSlimMessagingAdapter::group()` |
-| DIR agent discovery | `shadictl dir` / `agentbridge list` |
+| DIR agent discovery | `shadictl dir` / `agentbridge list --published` |
+| Running agent discovery | `agentbridge list` (this host and dir-runtime) |
 | Context persistence | `shadi_memory::SqlCipherStore` |
 
 ## Running with real agents
