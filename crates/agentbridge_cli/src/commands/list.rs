@@ -47,6 +47,7 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
                 .map(|r| (r.to_candidate(), LOCAL_SOURCE.to_string())),
         );
     }
+    let mut unavailable = Vec::new();
     for runtime in opts.runtimes {
         let source = RunningAgentSource {
             skills: opts.skills.to_vec(),
@@ -57,7 +58,9 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
                 let label = format!("{RUNTIME_SOURCE} ({runtime})");
                 found.extend(candidates.into_iter().map(|c| (c, label.clone())));
             }
-            Err(e) => eprintln!("[agentbridge] skipping dir-runtime {runtime}: {e}"),
+            // Runtime discovery is optional: say so after the listing
+            // instead of failing or printing the transport error.
+            Err(e) => unavailable.push(runtime_note(runtime, &e)),
         }
     }
 
@@ -70,7 +73,26 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
             println!("{}  [{}]", render_candidate(c), sources.join(", "));
         }
     }
+    for note in &unavailable {
+        println!("{note}");
+    }
     Ok(())
+}
+
+/// One sentence on a dir-runtime that couldn't be asked: not running, or a
+/// `dirctl` that can't ask it.
+fn runtime_note(runtime: &str, error: &str) -> String {
+    if error.contains("has no `runtime` command") {
+        return format!("Agents announced to dir-runtime aren't listed: {error}.");
+    }
+    if error.contains("connection refused") || error.contains("Unavailable") {
+        return format!(
+            "No dir-runtime is running at {runtime}, so agents announced with --dir-announce \
+             aren't listed (start one with `dirctl daemon start`)."
+        );
+    }
+    let first = error.lines().next().unwrap_or(error);
+    format!("Agents announced to dir-runtime at {runtime} aren't listed: {first}")
 }
 
 /// A listener on this host that isn't announced: found through its lease.
@@ -186,6 +208,22 @@ mod tests {
             a2a_url: Some(url.into()),
             a2a_binding: Some(shadi_a2a::A2ABinding::HttpJson),
         }
+    }
+
+    #[test]
+    fn an_unreachable_runtime_is_a_note_not_an_error() {
+        let refused = "Error: failed to list workloads: rpc error: code = Unavailable desc = \
+                       connection error: dial tcp 127.0.0.1:8888: connect: connection refused";
+        assert_eq!(
+            runtime_note("localhost:8888", refused),
+            "No dir-runtime is running at localhost:8888, so agents announced with \
+             --dir-announce aren't listed (start one with `dirctl daemon start`)."
+        );
+        let old = "/opt/homebrew/bin/dirctl has no `runtime` command; runtime discovery needs \
+                   dirctl 1.8.0 or later (set SHADI_DIRCTL_BINARY to point at one)";
+        assert!(runtime_note("localhost:8888", old).starts_with(
+            "Agents announced to dir-runtime aren't listed: /opt/homebrew/bin/dirctl"
+        ));
     }
 
     #[test]
