@@ -17,10 +17,13 @@
   "system_flag": "--system-prompt",
   "split_large_prompt": true,
   "isolation": {
-    "env": { "CLAUDE_CONFIG_DIR": "{config_root}" },
+    "env": {
+      "HOME": "{config_root}",
+      "CLAUDE_CONFIG_DIR": "{config_root}/.claude"
+    },
     "args": ["--strict-mcp-config"]
   },
-  "provision": { "skills": { "dir": "{config_root}/skills" } },
+  "provision": { "skills": { "dir": "{config_root}/.claude/skills" } },
   "execute": {
     "args": [
       "--print",
