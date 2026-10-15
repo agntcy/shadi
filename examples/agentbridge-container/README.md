@@ -11,7 +11,7 @@ Run agentbridge agents as host processes and as Docker containers, and find them
 
 ## How an agent is found
 
-1. `agentbridge register` serves its A2A card, which lists its OASF skills and domains in the OASF `discovery` extension (`<schema URL>/<version>/objects/discovery`) and its DIDs in the `identity` extension. Skills and domains are checked against the OASF server first.
+1. `agentbridge register` serves its A2A card, which lists its OASF skills and domains in the OASF `discovery` extension (`<schema URL>/<version>/objects/discovery`). Skills and domains are checked against the OASF server first.
 2. Runtime discovery learns the workload exists:
    - **Host process:** `--dir-announce` writes a descriptor to `~/.agntcy/dir-runtime/workloads.d` and deletes it when `register` stops.
    - **Container:** the `org.agntcy/discover=true` and `org.agntcy/agent-type=a2a` labels.
@@ -39,7 +39,8 @@ Run agentbridge agents as host processes and as Docker containers, and find them
 
 ```sh
 export AGENTBRIDGE_PROFILES_DIR=$PWD/examples/agentbridge-container/profiles
-export PATH=$PWD/examples/agentbridge-container:$PATH   # puts fake-harness on PATH
+export PATH=$PWD/target/debug:$PWD/examples/agentbridge-container:$PATH   # agentbridge, shadictl, fake-harness
+export FAKE_HARNESS_SKILLS=software_engineering/code_debugging/error_handling   # what fake-harness prints
 
 shadictl --net-block \
   --net-allow 127.0.0.1:19950 --net-allow schema.oasf.outshift.com:443 \
@@ -62,7 +63,7 @@ dirctl runtime list --skill "software_engineering/*" --runtime process
 dirctl runtime list --domain "technology/*" --output json
 ```
 
-Ctrl-C (or SIGTERM to `agentbridge`) withdraws the announcement; the agent disappears from the list. If the process dies without cleaning up, dir-runtime drops it once it notices the PID is gone.
+SIGTERM sent to `agentbridge` itself withdraws the announcement at once; the agent disappears from the list. Ctrl-C reaches `shadictl` instead, which kills `agentbridge` (it runs in its own session) with SIGKILL, so the descriptor stays behind until dir-runtime notices the PID is gone and drops it.
 
 ## Containers
 
@@ -86,7 +87,8 @@ Discovery only needs the card, which is plain HTTP. Sending a container a task g
 mkcert -install && mkcert -cert-file /tmp/agent.pem -key-file /tmp/agent-key.pem localhost 127.0.0.1
 docker run … -v /tmp/agent.pem:/tls/cert.pem:ro -v /tmp/agent-key.pem:/tls/key.pem:ro \
   -e A2A_TLS_CERT=/tls/cert.pem -e A2A_TLS_KEY=/tls/key.pem agentbridge-fake …
-agentbridge delegate --to <agent DID from the card> --a2a-url https://127.0.0.1:38443 --a2a-binding http+json "…"
+docker exec <container> agentbridge list --local   # prints the agent's DID
+agentbridge delegate --to <that DID> --a2a-url https://127.0.0.1:38443 --a2a-binding http+json "…"
 ```
 
 To run one container by hand, pass the labels and any `register` flags:
@@ -96,6 +98,7 @@ docker run -d --name my-agent -p 38443:8443 -p 38081:8081 \
   --label org.agntcy/discover=true --label org.agntcy/agent-type=a2a \
   -e SHADI_SLIM_AUTH=did -e SLIM_HUMAN_SEED=demo-human-seed \
   -e SLIM_MEMBER_DIDS=did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK \
+  -e FAKE_HARNESS_SKILLS=software_engineering/code_generation \
   agentbridge-fake --skill software_engineering/code_generation \
   --advertise-url https://127.0.0.1:38443
 ```
@@ -114,5 +117,5 @@ dirctl runtime list --oasf-schema-url https://schema.oasf.outshift.com --oasf-sc
 
 - Everything listed is a claim made by whoever started the workload; nothing is verified yet (agntcy/dir-runtime#94).
 - The card names no author yet, so `dirctl runtime list --author` finds no agentbridge agents; the author comes with card signatures (#482).
-- Skill names are OASF 1.1.0 classes. An agent advertises only the skills it is given (`--skill`, or a `--record`); without one it has no `discovery` extension and isn't found by skill.
-- SIGTERM sent to `shadictl` (rather than to `agentbridge`) ends the agent without withdrawing the announcement; dir-runtime still drops it by its PID.
+- Skill names are OASF 1.1.0 classes. An agent advertises only the skills it is given with `--skill`; without one it has no `discovery` extension and isn't found by skill.
+- The card carries no DID yet; a container's agent DID is in its local lease, which `docker exec <container> agentbridge list --local` prints.
