@@ -15,7 +15,7 @@ set -eu
 
 A2A_PORT="${A2A_PORT:-8443}"
 CARD_PORT="${CARD_PORT:-8081}"
-TLS_DIR="${TLS_DIR:-/tmp/agentbridge-tls}"
+TLS_DIR="${TLS_DIR:-$HOME/tls}"
 
 if [ -z "${A2A_TLS_CERT:-}" ]; then
   mkdir -p "$TLS_DIR"
@@ -24,7 +24,12 @@ if [ -z "${A2A_TLS_CERT:-}" ]; then
   export A2A_TLS_CERT="$TLS_DIR/cert.pem" A2A_TLS_KEY="$TLS_DIR/key.pem"
 fi
 
+# The sandbox only reads what it is given: grant the profiles and the
+# certificate and key directories, whether generated above or mounted, and
+# let the listener write its local lease.
 exec shadictl --net-block \
+  --read "$AGENTBRIDGE_PROFILES_DIR" --allow "$SHADI_TMP_DIR" \
+  --read "$(dirname "$A2A_TLS_CERT")" --read "$(dirname "$A2A_TLS_KEY")" \
   --net-allow "0.0.0.0:${A2A_PORT}" --net-allow "0.0.0.0:${CARD_PORT}" \
   --net-allow schema.oasf.outshift.com:443 \
   -- agentbridge register --tool fake-harness \
