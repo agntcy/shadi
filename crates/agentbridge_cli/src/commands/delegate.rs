@@ -128,7 +128,7 @@ fn resolve_delegate_peer(
             }
             Ok(None) => {}
             Err(e) if e.contains("ambiguous") => return Err(anyhow::anyhow!("{e}")),
-            Err(e) => eprintln!("[agentbridge] dir-runtime {runtime} not asked: {e}"),
+            Err(e) => eprintln!("[agentbridge] couldn't ask dir-runtime {runtime}: {e}"),
         }
     }
 
