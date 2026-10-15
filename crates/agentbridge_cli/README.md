@@ -105,8 +105,10 @@ What the agent card advertises:
   way to test offline.
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
-`cursor-agent`, `goose`, `opencode`, and `claude-code-isolated` / `codex-isolated`
-(the same harnesses started without your own configuration, for `--record`).
+`cursor-agent`, `goose`, `opencode`, and `claude-code-isolated` / `codex-isolated` /
+`goose-isolated` / `opencode-isolated` (the same harnesses started with a fresh
+`HOME` and configuration per run, so they read none of your own skills or
+settings, for `--record`).
 
 ### `list` — discover registered adapters
 
