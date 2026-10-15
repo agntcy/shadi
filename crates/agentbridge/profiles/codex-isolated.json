@@ -1,0 +1,26 @@
+{
+  "id": "codex-isolated",
+  "bin": "codex",
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{workdir}",
+    "TMP": "{workdir}",
+    "TEMP": "{workdir}"
+  },
+  "current_dir_workdir": true,
+  "stdin_null": true,
+  "extra_args_env": "CODEX_ARGS",
+  "isolation": { "env": { "CODEX_HOME": "{config_root}" } },
+  "provision": { "skills": { "dir": "{config_root}/skills" } },
+  "execute": {
+    "args": [
+      "exec",
+      "{prompt}",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "{extra_args}"
+    ]
+  },
+  "result": { "kind": "strip_after_first_line", "line": "--------" }
+}

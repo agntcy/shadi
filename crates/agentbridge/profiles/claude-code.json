@@ -16,11 +16,6 @@
   "current_dir_workdir": true,
   "system_flag": "--system-prompt",
   "split_large_prompt": true,
-  "isolation": {
-    "env": { "CLAUDE_CONFIG_DIR": "{config_root}" },
-    "args": ["--strict-mcp-config"]
-  },
-  "provision": { "skills": { "dir": "{config_root}/skills" } },
   "execute": {
     "args": [
       "--print",
