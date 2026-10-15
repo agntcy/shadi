@@ -243,12 +243,17 @@ fake-harness  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [runtime (localh
 Each line says where the agent's record is: `local` for a listener on this
 host that isn't announced (its lease), and `runtime (<addr>)` for an agent
 that dir-runtime reported. An announced listener writes no lease, so it is
-found only through dir-runtime: while the daemon is down it isn't listed, and
-`agentbridge list --local` (leases only) never shows it. `agentbridge` runs
-`dirctl runtime list`
-itself, so it needs a `dirctl` with that command (1.8.0 or later, via
-`SHADI_DIRCTL_BINARY`); with an older one it says so and lists only local
-listeners.
+found only through dir-runtime, and `agentbridge list --local` (leases only)
+never shows it. Runtime discovery is optional: with no daemon running,
+`agentbridge list` lists the local listeners and ends with
+
+```text
+No dir-runtime is running at localhost:8888, so agents announced with --dir-announce aren't listed (start one with `dirctl daemon start`).
+```
+
+`agentbridge` runs `dirctl runtime list` itself, with the `dirctl` that
+`SHADI_DIRCTL_BINARY` names, or else the first one on `PATH`; it needs 1.8.0 or
+later, and with an older one it says so and lists only local listeners.
 
 ## 5. Send it a task
 
