@@ -13,7 +13,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use agentbridge::{load_profile, CliProfile};
 use base64::Engine;
@@ -28,17 +28,13 @@ pub const DEFAULT_RECORD_SERVER: &str = "localhost:8888";
 const MEDIA_TYPE_MARKDOWN: &str = "application/agent-skills+md";
 const MEDIA_TYPE_BUNDLE: &str = "application/agent-skills+gzip";
 
-/// What `--record` wrote, to point the adapter at and to remove when done.
-#[derive(Debug)]
-struct Provisioned {
-    /// The isolated run's config root, removed whole.
-    config_root: Option<PathBuf>,
-    /// Skill folders written into the harness's own skills directory (a
-    /// profile without isolation), removed one by one.
-    skill_dirs: Vec<PathBuf>,
-}
+/// The isolated run's config root, for the adapter, once provisioning is done.
+static CONFIG_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-static PROVISIONED: OnceLock<Provisioned> = OnceLock::new();
+/// Every directory `--record` created (the config root, skill folders), each
+/// recorded as soon as it is created, so [`cleanup`] removes them however the
+/// run ends. Nothing it didn't create is in here.
+static CREATED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// `--record` settings from the command line.
 #[derive(Clone, Debug, Default)]
@@ -85,33 +81,32 @@ pub fn prepare(
         .ok_or_else(|| anyhow::anyhow!("--record needs a harness profile; '{tool}' has none"))?;
     let config_root = profile.is_isolated().then(|| config_root_for(tool));
 
-    let (source, skill_dirs) = provision(
+    // Remove what was provisioned on SIGTERM, with or without --dir-announce.
+    super::announce::on_sigterm();
+    let source = provision(
         reference,
         &opts.server,
         &profile,
         config_root.as_deref(),
         workdir,
-    )?;
+    )
+    .inspect_err(|_| cleanup())?;
 
-    PROVISIONED
-        .set(Provisioned {
-            config_root,
-            skill_dirs,
-        })
+    CONFIG_ROOT
+        .set(config_root)
         .map_err(|_| anyhow::anyhow!("--record was already prepared"))?;
 
     Ok(Some(source))
 }
 
-/// Write the record's skills where the profile says. Returns the record and,
-/// for a profile without isolation, the skill folders written.
+/// Write the record's skills where the profile says. Returns the record.
 fn provision(
     reference: &str,
     server: &str,
     profile: &CliProfile,
     config_root: Option<&Path>,
     workdir: &Path,
-) -> anyhow::Result<(SourceRecord, Vec<PathBuf>)> {
+) -> anyhow::Result<SourceRecord> {
     let tool = &profile.id;
     let skills_dir = profile.skills_dir(config_root, workdir).ok_or_else(|| {
         anyhow::anyhow!(
@@ -146,10 +141,14 @@ fn provision(
     );
 
     match config_root {
-        Some(root) => rebuild_dir(root)?,
+        Some(root) => {
+            rebuild_dir(root)?;
+            created(root);
+        }
         None => {
             // The harness's own skills directory: never replace a skill
-            // that is already there.
+            // that is already there. Checked up front so nothing is written
+            // when one is; write_skill still claims each folder exclusively.
             for module in &modules {
                 let dir = skills_dir.join(sanitize(&module.name));
                 if dir.exists() {
@@ -163,7 +162,6 @@ fn provision(
         }
     }
 
-    let mut written = Vec::new();
     for module in &modules {
         let dir = write_skill(module, &skills_dir)?;
         eprintln!(
@@ -171,31 +169,29 @@ fn provision(
             module.name,
             dir.display()
         );
-        written.push(dir);
     }
 
-    let skill_dirs = if config_root.is_some() {
-        Vec::new()
-    } else {
-        written
-    };
-    Ok((source, skill_dirs))
+    Ok(source)
+}
+
+fn created(dir: &Path) {
+    if let Ok(mut created) = CREATED.lock() {
+        created.push(dir.to_path_buf());
+    }
 }
 
 /// The config root `--record` provisioned, for the adapter to run isolated.
 pub fn config_root() -> Option<&'static Path> {
-    PROVISIONED.get()?.config_root.as_deref()
+    CONFIG_ROOT.get()?.as_deref()
 }
 
-/// Delete what `--record` provisioned, once the harness is done.
+/// Delete what `--record` created, once the harness is done or provisioning
+/// failed.
 pub fn cleanup() {
-    let Some(provisioned) = PROVISIONED.get() else {
+    let Ok(mut created) = CREATED.lock() else {
         return;
     };
-    if let Some(root) = &provisioned.config_root {
-        let _ = std::fs::remove_dir_all(root);
-    }
-    for dir in &provisioned.skill_dirs {
+    for dir in created.drain(..).rev() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -428,11 +424,22 @@ fn skill_modules(record: &Value) -> anyhow::Result<Vec<SkillModule>> {
     Ok(modules)
 }
 
-/// Write one skill to `<skills_dir>/<name>/`; returns that directory.
+/// Write one skill to `<skills_dir>/<name>/`, which must not exist yet (another
+/// registration's skill, or a module whose name sanitizes the same); returns
+/// that directory.
 fn write_skill(module: &SkillModule, skills_dir: &Path) -> anyhow::Result<PathBuf> {
     let dir = skills_dir.join(sanitize(&module.name));
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| anyhow::anyhow!("could not create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(skills_dir)
+        .map_err(|e| anyhow::anyhow!("could not create {}: {e}", skills_dir.display()))?;
+    match std::fs::create_dir(&dir) {
+        Ok(()) => created(&dir),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(
+            "{} already exists; not replacing it with the record's skill '{}'",
+            dir.display(),
+            module.name
+        ),
+        Err(e) => anyhow::bail!("could not create {}: {e}", dir.display()),
+    }
 
     match module.media_type.as_str() {
         MEDIA_TYPE_MARKDOWN => std::fs::write(dir.join("SKILL.md"), &module.data)
@@ -711,10 +718,10 @@ mod tests {
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
 
-        let (source, written) = result.unwrap();
+        let source = result.unwrap();
         assert!(
-            written.is_empty(),
-            "an isolated run removes its root, not skill dirs"
+            CREATED.lock().unwrap().contains(&root.path().to_path_buf()),
+            "an isolated run removes its root"
         );
         assert_eq!(source.cid, "bafy-test");
         assert_eq!(
@@ -754,24 +761,108 @@ mod tests {
         let again = provision("code-review", "localhost:1", &profile, None, work.path());
         std::env::remove_var("SHADI_DIRCTL_BINARY");
 
-        let (_, written) = first.unwrap();
+        first.unwrap();
         let skill = work.path().join(".claude/skills/code-review");
-        assert_eq!(written, vec![skill.clone()]);
+        assert!(CREATED.lock().unwrap().contains(&skill));
         assert!(skill.join("SKILL.md").is_file());
         let err = again.unwrap_err().to_string();
         assert!(err.contains("already exists"), "{err}");
+        cleanup();
+        assert!(!skill.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_provision_is_rolled_back_by_cleanup() {
+        let _guard = dirctl_env_lock();
+        let (script, _bin) = fake_dirctl_serving(json!({
+            "name": "two", "version": "1.0.0", "schema_version": "1.1.0",
+            "modules": [
+                markdown_module("first", "---\nname: first\n---\n"),
+                {
+                    "name": AGENT_SKILLS_MODULE,
+                    "data": { "skill_manifest": { "name": "broken" } },
+                    "artifact": {
+                        "media_type": MEDIA_TYPE_BUNDLE,
+                        "data": b64(&bundle(&[("README.md", "no skill here\n")]))
+                    }
+                }
+            ]
+        }));
+        let profile: CliProfile = serde_json::from_str(
+            r#"{"id":"plain","bin":"true",
+                "provision":{"skills":{"dir":"{workdir}/skills"}},
+                "execute":{"args":[]}}"#,
+        )
+        .unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let mine = work.path().join("skills/mine");
+        std::fs::create_dir_all(&mine).unwrap();
+
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let err = provision("two", "localhost:1", &profile, None, work.path()).unwrap_err();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert!(err.to_string().contains("has no SKILL.md"), "{err}");
+        assert!(work.path().join("skills/first/SKILL.md").is_file());
+        cleanup();
+        assert!(!work.path().join("skills/first").exists());
+        assert!(!work.path().join("skills/broken").exists());
+        assert!(mine.is_dir(), "only what provisioning created is removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_skills_with_the_same_folder_are_refused() {
+        let _guard = dirctl_env_lock();
+        let (script, _bin) = fake_dirctl_serving(json!({
+            "name": "dup", "version": "1.0.0", "schema_version": "1.1.0",
+            "modules": [
+                markdown_module("dup", "---\nname: dup\n---\n"),
+                markdown_module("dup", "---\nname: dup\n---\n")
+            ]
+        }));
+        let profile: CliProfile = serde_json::from_str(
+            r#"{"id":"iso","bin":"true",
+                "isolation":{"env":{"HOME":"{config_root}"}},
+                "provision":{"skills":{"dir":"{config_root}/skills"}},
+                "execute":{"args":[]}}"#,
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let err = provision(
+            "dup",
+            "localhost:1",
+            &profile,
+            Some(root.path()),
+            Path::new("/w"),
+        )
+        .unwrap_err()
+        .to_string();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert!(err.contains("already exists"), "{err}");
+        cleanup();
+        assert!(!root.path().exists());
     }
 
     /// A `dirctl` stand-in serving one agent-skill record named `name`.
     #[cfg(unix)]
     fn fake_dirctl(name: &str) -> (PathBuf, tempfile::TempDir) {
+        fake_dirctl_serving(json!({
+            "name": name, "version": "1.0.0", "schema_version": "1.1.0",
+            "modules": [markdown_module(name, &format!("---\nname: {name}\n---\n"))]
+        }))
+    }
+
+    /// A `dirctl` stand-in serving `record`.
+    #[cfg(unix)]
+    fn fake_dirctl_serving(record: Value) -> (PathBuf, tempfile::TempDir) {
         use std::os::unix::fs::PermissionsExt;
 
         let bin = tempfile::tempdir().unwrap();
-        let record = json!({
-            "name": name, "version": "1.0.0", "schema_version": "1.1.0",
-            "modules": [markdown_module(name, &format!("---\nname: {name}\n---\n"))]
-        });
         std::fs::write(bin.path().join("record.json"), record.to_string()).unwrap();
         let script = bin.path().join("dirctl");
         std::fs::write(

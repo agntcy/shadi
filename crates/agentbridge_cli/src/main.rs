@@ -476,7 +476,7 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            if needs_listener {
+            let result = if needs_listener {
                 Err(anyhow::anyhow!(
                     "{listener_flag} needs an A2A listener: pass --slim-endpoint or --a2a-listen"
                 ))
@@ -525,7 +525,7 @@ fn main() {
             })
             .and_then(|()| commands::card::configure(&card_opts))
             .and_then(|()| {
-                let result = commands::register::run(
+                commands::register::run(
                     &tool,
                     command.as_deref(),
                     &args,
@@ -534,10 +534,11 @@ fn main() {
                     a2a_binding,
                     publish_opts,
                     verbose,
-                );
-                commands::record::cleanup();
-                result
-            })
+                )
+            });
+            // Also when configuring the card failed after provisioning.
+            commands::record::cleanup();
+            result
         }
         Cmd::List {
             local,
