@@ -71,10 +71,22 @@ pub struct Announcement {
     path: PathBuf,
 }
 
+impl Announcement {
+    /// The descriptor, for [`withdraw`] from a thread that outlives this guard.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 impl Drop for Announcement {
     fn drop(&mut self) {
         remove_descriptor(&self.path);
     }
+}
+
+/// Delete an announcement's descriptor before exiting without unwinding.
+pub fn withdraw(path: &Path) {
+    remove_descriptor(path);
 }
 
 /// Start announcing this `register`, if `--dir-announce` is set.
