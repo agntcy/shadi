@@ -34,14 +34,18 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
         return list_published(opts);
     }
 
-    let mut candidates = Vec::new();
+    let mut found = Vec::new();
     // Local listeners carry no skills to filter on, so a skill filter only
     // applies to what runtime discovery reports.
     if opts.skills.is_empty() {
         let records = LocalAdapterRegistry::from_env()
             .list_live()
             .map_err(|e| anyhow::anyhow!("local discovery failed: {e}"))?;
-        candidates.extend(records.iter().map(LocalAdapterRecord::to_candidate));
+        found.extend(
+            records
+                .iter()
+                .map(|r| (r.to_candidate(), LOCAL_SOURCE.to_string())),
+        );
     }
     for runtime in opts.runtimes {
         let source = RunningAgentSource {
@@ -49,22 +53,29 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
             runtime: lookup(runtime, opts.gh_token),
         };
         match source.resolve() {
-            Ok(found) => candidates.extend(found),
+            Ok(candidates) => {
+                let label = format!("runtime {runtime}");
+                found.extend(candidates.into_iter().map(|c| (c, label.clone())));
+            }
             Err(e) => eprintln!("[agentbridge] skipping dir-runtime {runtime}: {e}"),
         }
     }
 
-    let candidates = dedup(candidates);
-    if candidates.is_empty() {
+    let merged = merge(found);
+    if merged.is_empty() {
         println!("No running agentbridge agents found.");
         println!("Start one with: agentbridge register --tool <name> --a2a-listen <host:port> [--dir-announce]");
     } else {
-        for c in &candidates {
-            println!("{}", render_candidate(c));
+        for (c, sources) in &merged {
+            println!("{}  [{}]", render_candidate(c), sources.join(", "));
         }
     }
     Ok(())
 }
+
+/// Where a listener on this host was found: its lease, or its dir-runtime
+/// descriptor if it was announced.
+const LOCAL_SOURCE: &str = "local";
 
 fn list_published(opts: &ListOptions<'_>) -> anyhow::Result<()> {
     let server_addr = opts.dir_server;
@@ -97,15 +108,23 @@ fn lookup(server_addr: &str, gh_token: Option<&str>) -> DirLookupOptions {
     }
 }
 
-/// One entry per agent DID and locator: an announced listener is both a local
-/// listener and a running workload.
-fn dedup(candidates: Vec<CandidateMember>) -> Vec<CandidateMember> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<CandidateMember> = candidates
-        .into_iter()
-        .filter(|c| seen.insert((c.did.clone(), c.slim_endpoint.clone(), c.a2a_url.clone())))
-        .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name).then(a.did.cmp(&b.did)));
+/// One entry per agent DID and locator, with every source that reported it:
+/// an announced listener is both a local listener and a running workload.
+fn merge(found: Vec<(CandidateMember, String)>) -> Vec<(CandidateMember, Vec<String>)> {
+    let mut out: Vec<(CandidateMember, Vec<String>)> = Vec::new();
+    for (candidate, source) in found {
+        let same = |c: &CandidateMember| {
+            c.did == candidate.did
+                && c.slim_endpoint == candidate.slim_endpoint
+                && c.a2a_url == candidate.a2a_url
+        };
+        match out.iter_mut().find(|(c, _)| same(c)) {
+            Some((_, sources)) if !sources.contains(&source) => sources.push(source),
+            Some(_) => {}
+            None => out.push((candidate, vec![source])),
+        }
+    }
+    out.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name).then(a.did.cmp(&b.did)));
     out
 }
 
@@ -165,23 +184,49 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_listed_by_both_sources_appears_once() {
-        let merged = dedup(vec![
-            candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
-            candidate("codex", "did:key:zB", "http://127.0.0.1:2"),
-            candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
-            candidate("copilot", "did:key:zA", "http://127.0.0.1:3"),
+    fn an_agent_listed_by_both_sources_appears_once_with_both() {
+        let local = || LOCAL_SOURCE.to_string();
+        let runtime = || "runtime localhost:8888".to_string();
+        let merged = merge(vec![
+            (
+                candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
+                local(),
+            ),
+            (
+                candidate("codex", "did:key:zB", "http://127.0.0.1:2"),
+                local(),
+            ),
+            (
+                candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
+                runtime(),
+            ),
+            (
+                candidate("copilot", "did:key:zA", "http://127.0.0.1:3"),
+                runtime(),
+            ),
+            (
+                candidate("copilot", "did:key:zA", "http://127.0.0.1:3"),
+                runtime(),
+            ),
         ]);
-        let names: Vec<(&str, &str)> = merged
+        let rows: Vec<(&str, &str, String)> = merged
             .iter()
-            .map(|c| (c.name.as_str(), c.a2a_url.as_deref().unwrap()))
+            .map(|(c, s)| (c.name.as_str(), c.a2a_url.as_deref().unwrap(), s.join(", ")))
             .collect();
         assert_eq!(
-            names,
+            rows,
             vec![
-                ("codex", "http://127.0.0.1:2"),
-                ("copilot", "http://127.0.0.1:1"),
-                ("copilot", "http://127.0.0.1:3"),
+                ("codex", "http://127.0.0.1:2", "local".to_string()),
+                (
+                    "copilot",
+                    "http://127.0.0.1:1",
+                    "local, runtime localhost:8888".to_string()
+                ),
+                (
+                    "copilot",
+                    "http://127.0.0.1:3",
+                    "runtime localhost:8888".to_string()
+                ),
             ]
         );
     }
