@@ -1654,13 +1654,16 @@ fn tokio_listener(listener: std::net::TcpListener) -> Result<tokio::net::TcpList
 }
 
 fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
-    if e.kind() == std::io::ErrorKind::AddrInUse {
-        format!(
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!(
             "{addr} is already in use. Is another listener (e.g. another instance of this \
              agent) on it? Pick another --a2a-listen port"
-        )
-    } else {
-        format!("bind A2A listener {addr}: {e}")
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "binding {addr} is not permitted. Under `shadictl --net-block`, allow it with \
+             `--net-allow {addr}`: it must match --a2a-listen"
+        ),
+        _ => format!("bind A2A listener {addr}: {e}"),
     }
 }
 
@@ -2859,6 +2862,14 @@ test push ... FAILED
         drop(taken);
         ensure_listen_address_free(&addr).expect("free once released");
         ensure_listen_address_free("not an address").expect("left to the listener");
+    }
+
+    #[test]
+    fn a_refused_bind_points_at_the_sandbox_allow_list() {
+        let addr: SocketAddr = "127.0.0.1:19962".parse().unwrap();
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = bind_error(addr, &denied);
+        assert!(msg.contains("--net-allow 127.0.0.1:19962"), "{msg}");
     }
 
     #[test]
