@@ -302,7 +302,6 @@ impl ProfileAdapter {
         );
 
         let mut cmd = Command::new(&self.profile.bin);
-        super::scrub_vault_env(&mut cmd);
         if self.profile.pin_tmpdir {
             pin_tmpdir(&mut cmd, &self.work_dir);
         }

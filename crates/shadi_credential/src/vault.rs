@@ -75,7 +75,7 @@ pub trait CredentialVault: Send + Sync {
 // --- Keychain ----------------------------------------------------------------
 
 /// One keychain item per credential. No index to maintain: the store keeps its
-/// own key registry and self-heals stale entries.
+/// own key registry; listing does not self-heal it, so `list` skips a stale entry.
 pub struct KeychainVault {
     store: Box<dyn SecretStore>,
 }
@@ -121,7 +121,7 @@ impl CredentialVault for KeychainVault {
     fn list(&self) -> Result<Vec<CredentialRecord>, CredentialError> {
         let keys = self
             .store
-            .list_keys()
+            .list_keys_prefixed(CREDENTIAL_KEY_PREFIX)
             .map_err(|err| CredentialError::Storage(err.to_string()))?;
         let mut records = Vec::new();
         for key in keys {

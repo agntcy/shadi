@@ -51,6 +51,16 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, key: &str) -> SecretResult<()>;
     fn list_keys(&self) -> SecretResult<Vec<String>>;
 
+    /// Keys starting with `prefix`. Overridden where `list_keys` reads every
+    /// item to check it exists; the result may then name an item that is gone.
+    fn list_keys_prefixed(&self, prefix: &str) -> SecretResult<Vec<String>> {
+        Ok(self
+            .list_keys()?
+            .into_iter()
+            .filter(|k| k.starts_with(prefix))
+            .collect())
+    }
+
     /// Whether this backend can store anything at all.
     ///
     /// Callers choosing between this store and some other place to keep a
