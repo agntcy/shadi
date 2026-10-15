@@ -68,7 +68,7 @@ pub fn run(
     // for local handoff/coordinate; register no longer constructs them.
     if tool != "generic-stdio" {
         if let Some(profile) = load_profile(tool).map_err(|e| anyhow::anyhow!("{e}"))? {
-            let work_dir = register_work_dir(command);
+            let work_dir = work_dir(command);
             let id = profile.id.clone();
             let adapter = ProfileAdapter::new(profile, work_dir.clone());
             let adapter = Arc::new(match super::record::config_root() {
@@ -140,7 +140,8 @@ pub fn run(
     Ok(())
 }
 
-fn register_work_dir(command: Option<&str>) -> PathBuf {
+/// The harness's working directory: `--command`, or the current directory.
+pub fn work_dir(command: Option<&str>) -> PathBuf {
     command
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))

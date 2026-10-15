@@ -16,6 +16,7 @@
   "current_dir_workdir": true,
   "system_flag": "--system-prompt",
   "split_large_prompt": true,
+  "provision": { "skills": { "dir": "{workdir}/.claude/skills" } },
   "execute": {
     "args": [
       "--print",
