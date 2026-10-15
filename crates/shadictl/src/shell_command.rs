@@ -194,7 +194,7 @@ Examples:
     /slim invite agntcy/shadi/avatar
     /slim invite acme/ops/oncall-bot"),
         ("/slim invite-from", "\
-Usage: /slim invite-from <skill:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>
+Usage: /slim invite-from <skill:<skill>|running:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>
 
 Re-resolve one member-source spec live (same syntax as `shadictl slim
 create-group --members`) and invite whichever resolved candidates are already
@@ -1166,7 +1166,7 @@ impl ShellSession {
     fn cmd_slim_invite_from(&mut self, args: &[&str]) -> LoopAction {
         if args.len() != 1 {
             eprintln!(
-                "usage: /slim invite-from <skill:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>"
+                "usage: /slim invite-from <skill:<skill>|running:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>"
             );
             return LoopAction::Continue;
         }

@@ -715,6 +715,8 @@ cargo run -p agntcy-shadi-cli -- slim create-group \
 ```
 
 - `--members SPEC` (repeatable): `skill:<skill>` (Directory search by skill),
+  `running:<skill>` (running agents announced with `register --dir-announce`,
+  through runtime discovery on `--dir-server`, e.g. a local `dirctl daemon`),
   `did:<did>` (Directory search by author DID), or
   `explicit:<name>=<did>[@<endpoint>]` (no Directory round trip). Every
   resolved candidate's DID is unioned into the group's trust set.
