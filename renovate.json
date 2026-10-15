@@ -49,12 +49,13 @@
       "dependencyDashboardApproval": true
     },
     {
-      "description": "The SLIM crates must move together: slim_auth 0.14 caps below 0.15 while slim_rpc 2.3 requires it, which puts two versions in the tree and breaks the TokenProvider bounds.",
+      "description": "The SLIM crates, and a2a-slimrpc built on them, must move together: two slim_auth versions in the tree break the TokenProvider bounds, and mls-rs-crypto-awslc pins aws-lc-rs exactly, so two of its versions never resolve.",
       "matchManagers": [
         "cargo"
       ],
       "matchPackageNames": [
-        "/^agntcy-slim/"
+        "/^agntcy-slim/",
+        "a2a-slimrpc"
       ],
       "groupName": "slim"
     },
@@ -70,7 +71,7 @@
       "enabled": false
     },
     {
-      "description": "rusqlite 0.38+ pulls a second libsqlite3-sys (links=sqlite3) that conflicts with SLIM 2.3.0 \u2192 mls-rs-provider-sqlite 0.22 \u2192 rusqlite 0.37. Re-enable when slim-persistence moves off rusqlite ^0.37.",
+      "description": "rusqlite 0.38+ pulls a second libsqlite3-sys (links=sqlite3) that conflicts with agntcy-slim-persistence 0.2.0 \u2192 mls-rs-provider-sqlite 0.23 \u2192 rusqlite 0.37. Re-enable when slim-persistence moves off rusqlite ^0.37.",
       "matchManagers": [
         "cargo"
       ],
@@ -84,16 +85,6 @@
         "github-actions"
       ],
       "groupName": "github actions"
-    },
-    {
-      "description": "agntcy-slim-auth 0.16 requires mls-rs-crypto-awslc 0.25 -> aws-lc-rs =1.16.3, while a2a-slimrpc (0.2.9 included) still requires slim_auth ^0.15.3 -> mls-rs-crypto-awslc 0.23 -> aws-lc-rs =1.16.2. mls-rs-crypto-awslc pins aws-lc-rs exactly, so two of its versions can never coexist. Remove this ceiling once a2a-slimrpc moves to slim_auth 0.16 (a2aproject/a2a-rs#289).",
-      "matchManagers": [
-        "cargo"
-      ],
-      "matchPackageNames": [
-        "agntcy-slim-auth"
-      ],
-      "allowedVersions": "<0.16"
     }
   ]
 }
