@@ -21,8 +21,10 @@ use crate::{
 use super::workdir::pin_tmpdir;
 
 const BUNDLED_CLAUDE: &str = include_str!("../../profiles/claude-code.json");
+const BUNDLED_CLAUDE_ISOLATED: &str = include_str!("../../profiles/claude-code-isolated.json");
 const BUNDLED_COPILOT: &str = include_str!("../../profiles/copilot.json");
 const BUNDLED_CODEX: &str = include_str!("../../profiles/codex.json");
+const BUNDLED_CODEX_ISOLATED: &str = include_str!("../../profiles/codex-isolated.json");
 const BUNDLED_CURSOR: &str = include_str!("../../profiles/cursor-agent.json");
 const BUNDLED_GOOSE: &str = include_str!("../../profiles/goose.json");
 const BUNDLED_OPENCODE: &str = include_str!("../../profiles/opencode.json");
@@ -31,8 +33,10 @@ const BUNDLED_OPENCODE: &str = include_str!("../../profiles/opencode.json");
 pub fn bundled_profile_ids() -> &'static [&'static str] {
     &[
         "claude-code",
+        "claude-code-isolated",
         "copilot",
         "codex",
+        "codex-isolated",
         "cursor-agent",
         "goose",
         "opencode",
@@ -42,8 +46,10 @@ pub fn bundled_profile_ids() -> &'static [&'static str] {
 fn bundled_json(id: &str) -> Option<&'static str> {
     match id {
         "claude-code" => Some(BUNDLED_CLAUDE),
+        "claude-code-isolated" => Some(BUNDLED_CLAUDE_ISOLATED),
         "copilot" => Some(BUNDLED_COPILOT),
         "codex" => Some(BUNDLED_CODEX),
+        "codex-isolated" => Some(BUNDLED_CODEX_ISOLATED),
         "cursor-agent" => Some(BUNDLED_CURSOR),
         "goose" => Some(BUNDLED_GOOSE),
         "opencode" => Some(BUNDLED_OPENCODE),
@@ -782,6 +788,21 @@ mod tests {
         load_profile(id)
             .expect("profile parse")
             .unwrap_or_else(|| panic!("missing bundled profile {id}"))
+    }
+
+    #[test]
+    fn only_the_isolated_profiles_can_run_a_record() {
+        let root = Path::new("/r");
+        for id in ["claude-code", "codex", "copilot", "cursor-agent", "goose", "opencode"] {
+            assert!(load_bundled(id).skills_dir(root).is_none(), "{id}");
+        }
+        for id in ["claude-code-isolated", "codex-isolated"] {
+            assert_eq!(
+                load_bundled(id).skills_dir(root),
+                Some(root.join("skills")),
+                "{id}"
+            );
+        }
     }
 
     #[test]
