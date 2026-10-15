@@ -429,8 +429,9 @@ pub fn resolve_adapter_peer(
     }
     let Some(did) = parse_peer_did(query) else {
         return Err(format!(
-            "no live adapter named '{query}'. Use the DID from `list --local` \
-             (`--to did:key:…`) so a URL change still finds the same agent"
+            "no live adapter named '{query}' on this host or at the dir-runtime. Use \
+             its DID from `agentbridge list` (`--to did:key:…`) so a URL change still \
+             finds the same agent"
         ));
     };
     let Some(dir) = dir else {
