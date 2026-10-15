@@ -639,5 +639,6 @@ corrupting the state machine.
 - Try the [Secure Agent Group Demo](demos/did-agent-group.md) for a full multi-agent, DID-identified walkthrough.
 - Try the [Round-robin Rust Demo](demos/collab-rust.md) for a multi-turn loop where each agent may write at most two lines and chooses the next A2A peer.
 - Try the [Agent Directory Discovery Demo](demos/dir-group-discovery.md) to form and grow a group by discovering members in DIR instead of naming them by hand.
+- Try the [Runtime Discovery Demo](demos/dir-runtime-discovery.md) to run an agent skill from DIR as an agent (`register --record`), announce it to runtime discovery (`--dir-announce`) and find it by skill while it runs.
 - Review the transport layer in [SLIM and A2A](slim_a2a.md).
 - See sandboxing guidance for running bridged tools in [Sandbox and Policies](sandbox.md).
