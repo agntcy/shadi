@@ -227,8 +227,9 @@ The card's own A2A `skills` list is empty: OASF classes live only in the
 `discovery` extension (`https://schema.oasf.outshift.com/1.1.0/objects/discovery`).
 
 `agentbridge list` shows the same agent from agentbridge's side. It lists
-running agents from two sources, merged: listeners on this host, and every
-agent the dir-runtime at `--runtime` (default `localhost:8888`) reports:
+running agents from two sources, merged: listeners on this host that aren't
+announced (their leases), and every agent the dir-runtime at `--runtime`
+(default `localhost:8888`) reports:
 
 ```bash
 target/debug/agentbridge list
@@ -240,10 +241,11 @@ fake-harness  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [runtime (localh
 ```
 
 Each line says where the agent's record is: `local` for a listener on this
-host that isn't announced (its lease), `runtime (<addr>)` for an announced
-agent that dir-runtime reported, and `announced` for an announced listener on
-this host that no reachable dir-runtime reported (e.g. while the daemon is
-down). `agentbridge` runs `dirctl runtime list`
+host that isn't announced (its lease), and `runtime (<addr>)` for an agent
+that dir-runtime reported. An announced listener writes no lease, so it is
+found only through dir-runtime: while the daemon is down it isn't listed, and
+`agentbridge list --local` (leases only) never shows it. `agentbridge` runs
+`dirctl runtime list`
 itself, so it needs a `dirctl` with that command (1.8.0 or later, via
 `SHADI_DIRCTL_BINARY`); with an older one it says so and lists only local
 listeners.
@@ -262,9 +264,10 @@ Response from 'fake-harness' (488ms):
 [fake-harness] agent skill: code-review: Toolkit for performing structured code reviews. Covers identifying bugs, security issues, performance problems, and style violations. Use when asked to review code changes, pull requests, or individual files.
 ```
 
-The harness answered with the skill it was given. `--to fake-harness`
-resolves through `agentbridge list --local`, which shows the agent's DID and
-locator on this host.
+The harness answered with the skill it was given. `--to` takes an agent name
+or DID: a name that isn't a listener on this host is looked up at the
+dir-runtime (`--runtime`, default `localhost:8888`), which reports this
+announced agent with its DID and locator.
 
 Press **Ctrl-C** in Terminal R: the agent withdraws its announcement, and
 `dirctl runtime list` no longer shows it.
