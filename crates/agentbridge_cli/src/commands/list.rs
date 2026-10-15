@@ -35,16 +35,23 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
     }
 
     let mut found = Vec::new();
-    // Local listeners carry no skills to filter on, so a skill filter only
+    // Local records carry no skills to filter on, so a skill filter only
     // applies to what runtime discovery reports.
     if opts.skills.is_empty() {
-        let records = LocalAdapterRegistry::from_env()
-            .list_live()
+        let registry = LocalAdapterRegistry::from_env();
+        let leases = registry
+            .live_leases()
             .map_err(|e| anyhow::anyhow!("local discovery failed: {e}"))?;
         found.extend(
-            records
+            leases
                 .iter()
                 .map(|r| (r.to_candidate(), LOCAL_SOURCE.to_string())),
+        );
+        found.extend(
+            registry
+                .live_announced()
+                .iter()
+                .map(|r| (r.to_candidate(), ANNOUNCED_SOURCE.to_string())),
         );
     }
     for runtime in opts.runtimes {
@@ -54,7 +61,7 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
         };
         match source.resolve() {
             Ok(candidates) => {
-                let label = format!("runtime {runtime}");
+                let label = format!("{RUNTIME_SOURCE} ({runtime})");
                 found.extend(candidates.into_iter().map(|c| (c, label.clone())));
             }
             Err(e) => eprintln!("[agentbridge] skipping dir-runtime {runtime}: {e}"),
@@ -73,9 +80,15 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Where a listener on this host was found: its lease, or its dir-runtime
-/// descriptor if it was announced.
+/// A listener on this host that isn't announced: found through its lease.
 const LOCAL_SOURCE: &str = "local";
+
+/// An announced listener on this host that no reachable dir-runtime reported:
+/// found through its descriptor.
+const ANNOUNCED_SOURCE: &str = "announced";
+
+/// An agent a dir-runtime reported, followed by that runtime's address.
+const RUNTIME_SOURCE: &str = "runtime";
 
 fn list_published(opts: &ListOptions<'_>) -> anyhow::Result<()> {
     let server_addr = opts.dir_server;
@@ -108,8 +121,10 @@ fn lookup(server_addr: &str, gh_token: Option<&str>) -> DirLookupOptions {
     }
 }
 
-/// One entry per agent DID and locator, with every source that reported it:
-/// an announced listener is both a local listener and a running workload.
+/// One entry per agent DID and locator, with the sources that reported it. A
+/// listener is either leased (`local`) or announced; an announced one is
+/// labelled by the dir-runtimes that reported it, and `announced` only when
+/// none did.
 fn merge(found: Vec<(CandidateMember, String)>) -> Vec<(CandidateMember, Vec<String>)> {
     let mut out: Vec<(CandidateMember, Vec<String>)> = Vec::new();
     for (candidate, source) in found {
@@ -122,6 +137,11 @@ fn merge(found: Vec<(CandidateMember, String)>) -> Vec<(CandidateMember, Vec<Str
             Some((_, sources)) if !sources.contains(&source) => sources.push(source),
             Some(_) => {}
             None => out.push((candidate, vec![source])),
+        }
+    }
+    for (_, sources) in &mut out {
+        if sources.iter().any(|s| s.starts_with(RUNTIME_SOURCE)) {
+            sources.retain(|s| s != ANNOUNCED_SOURCE);
         }
     }
     out.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name).then(a.did.cmp(&b.did)));
@@ -184,22 +204,30 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_listed_by_both_sources_appears_once_with_both() {
-        let local = || LOCAL_SOURCE.to_string();
-        let runtime = || "runtime localhost:8888".to_string();
+    fn each_agent_is_labelled_by_where_its_record_is() {
+        let src = |s: &str| s.to_string();
+        let runtime = || format!("{RUNTIME_SOURCE} (localhost:8888)");
         let merged = merge(vec![
-            (
-                candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
-                local(),
-            ),
+            // Leased: only on this host.
             (
                 candidate("codex", "did:key:zB", "http://127.0.0.1:2"),
-                local(),
+                src(LOCAL_SOURCE),
+            ),
+            // Announced, and the runtime reported it too.
+            (
+                candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
+                src(ANNOUNCED_SOURCE),
             ),
             (
                 candidate("copilot", "did:key:zA", "http://127.0.0.1:1"),
                 runtime(),
             ),
+            // Announced, but no runtime reported it.
+            (
+                candidate("goose", "did:key:zC", "http://127.0.0.1:4"),
+                src(ANNOUNCED_SOURCE),
+            ),
+            // Reported by the runtime only (another host), twice.
             (
                 candidate("copilot", "did:key:zA", "http://127.0.0.1:3"),
                 runtime(),
@@ -209,24 +237,17 @@ mod tests {
                 runtime(),
             ),
         ]);
-        let rows: Vec<(&str, &str, String)> = merged
+        let rows: Vec<(&str, String)> = merged
             .iter()
-            .map(|(c, s)| (c.name.as_str(), c.a2a_url.as_deref().unwrap(), s.join(", ")))
+            .map(|(c, s)| (c.a2a_url.as_deref().unwrap(), s.join(", ")))
             .collect();
         assert_eq!(
             rows,
             vec![
-                ("codex", "http://127.0.0.1:2", "local".to_string()),
-                (
-                    "copilot",
-                    "http://127.0.0.1:1",
-                    "local, runtime localhost:8888".to_string()
-                ),
-                (
-                    "copilot",
-                    "http://127.0.0.1:3",
-                    "runtime localhost:8888".to_string()
-                ),
+                ("http://127.0.0.1:2", "local".to_string()),
+                ("http://127.0.0.1:1", "runtime (localhost:8888)".to_string()),
+                ("http://127.0.0.1:3", "runtime (localhost:8888)".to_string()),
+                ("http://127.0.0.1:4", "announced".to_string()),
             ]
         );
     }
