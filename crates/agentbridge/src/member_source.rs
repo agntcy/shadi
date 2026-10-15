@@ -178,9 +178,93 @@ fn running_candidates(stdout: &[u8]) -> Result<Vec<CandidateMember>, String> {
         .map_err(|e| format!("dirctl runtime list printed no workload list: {e}"))?;
     Ok(workloads
         .iter()
-        .filter_map(crate::local_registry::listener_from_workload)
-        .map(|listener| listener.to_candidate())
+        .filter_map(candidate_from_workload)
         .collect())
+}
+
+const AGENT_TYPE_LABEL: &str = "org.agntcy/agent-type";
+
+/// The agentbridge listener a dir-runtime workload describes: labelled
+/// `org.agntcy/agent-type=a2a`, with its DID and A2A binding in the
+/// annotations `register --dir-announce` writes.
+fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
+    let text = |map: &str, key: &str| {
+        workload
+            .get(map)
+            .and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+    };
+    if text("labels", AGENT_TYPE_LABEL) != Some("a2a") {
+        return None;
+    }
+    let did = text("annotations", crate::local_registry::IDENTITY_ANNOTATION)?;
+    let name = workload.get("name").and_then(Value::as_str)?;
+    let binding = text("annotations", crate::local_registry::A2A_BINDING_ANNOTATION)
+        .and_then(|b| A2ABinding::parse_unicast(b).ok());
+
+    let mut candidate = CandidateMember {
+        name: name.to_string(),
+        did: did.to_string(),
+        slim_endpoint: None,
+        a2a_url: None,
+        a2a_binding: None,
+    };
+    for locator in workload.get("locators").and_then(Value::as_array)? {
+        let protocol = locator.get("protocol").and_then(Value::as_str);
+        let Some(url) = locator.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        match protocol {
+            Some("slim") if candidate.slim_endpoint.is_none() => {
+                // slim://<endpoint>/<org>/<ns>/<name>
+                let rest = url.strip_prefix("slim://").unwrap_or(url);
+                candidate.slim_endpoint = Some(rest.split('/').next().unwrap_or(rest).to_string());
+            }
+            // The first unicast locator is the A2A listener; a later `http`
+            // one is the card listener.
+            Some(_) if candidate.a2a_url.is_none() && binding.is_some() => {
+                candidate.a2a_url = Some(url.to_string());
+                candidate.a2a_binding = binding;
+            }
+            _ => {}
+        }
+    }
+    if candidate.slim_endpoint.is_none() && candidate.a2a_url.is_none() {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// The running agent `query` (a DID, or an agent name as in `list`) names
+/// among what the dir-runtime at `runtime.server_addr` reports. `Ok(None)`
+/// when none matches; an error when several instances do, since a name alone
+/// doesn't say which.
+pub fn find_running_peer(
+    query: &str,
+    runtime: &DirLookupOptions,
+) -> Result<Option<CandidateMember>, String> {
+    let running = RunningAgentSource {
+        skills: Vec::new(),
+        runtime: runtime.clone(),
+    }
+    .resolve()?;
+    let did = parse_peer_did(query);
+    let matches: Vec<CandidateMember> = running
+        .into_iter()
+        .filter(|c| match &did {
+            Some(did) => &c.did == did,
+            None => matches_local_alias(&c.name, query),
+        })
+        .collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        n => Err(format!(
+            "ambiguous: {n} running agents match '{query}' at dir-runtime {}. \
+             Pass --a2a-url to pick an instance (the DID stays the name)",
+            runtime.server_addr
+        )),
+    }
 }
 
 /// Discover a candidate by an already-known DID: `dirctl search --author
@@ -1407,5 +1491,46 @@ esac
         assert_eq!(c.a2a_url.as_deref(), Some("http://127.0.0.1:19960"));
         assert_eq!(c.a2a_binding, Some(A2ABinding::HttpJson));
         assert!(running_candidates(b"not json").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_running_peer_matches_by_name_or_did_through_dir_runtime() {
+        let _guard = env_lock().lock().expect("lock");
+        let workload = |port: u16| {
+            serde_json::json!({
+                "name": "copilot",
+                "labels": { "org.agntcy/agent-type": "a2a" },
+                "annotations": {
+                    "agntcy.dir/identity": "did:key:zCopilot",
+                    "org.agntcy/a2a-binding": "HTTP+JSON"
+                },
+                "locators": [{ "protocol": "http", "url": format!("http://127.0.0.1:{port}") }]
+            })
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("dirctl");
+        let one = serde_json::json!([workload(1)]).to_string();
+        std::fs::write(&script, format!("#!/bin/sh\necho '{one}'\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&script);
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+
+        let by_name = find_running_peer("copilot", &test_dir()).unwrap().unwrap();
+        let by_did = find_running_peer("did:key:zCopilot", &test_dir())
+            .unwrap()
+            .unwrap();
+        let none = find_running_peer("codex", &test_dir()).unwrap();
+
+        let two = serde_json::json!([workload(1), workload(2)]).to_string();
+        std::fs::write(&script, format!("#!/bin/sh\necho '{two}'\n")).unwrap();
+        let ambiguous = find_running_peer("copilot", &test_dir()).unwrap_err();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert_eq!(by_name.a2a_url.as_deref(), Some("http://127.0.0.1:1"));
+        assert_eq!(by_did.did, "did:key:zCopilot");
+        assert!(none.is_none());
+        assert!(ambiguous.contains("ambiguous"), "{ambiguous}");
     }
 }

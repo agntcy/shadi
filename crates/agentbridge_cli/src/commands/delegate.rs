@@ -1,6 +1,6 @@
 use agentbridge::local_registry::LocalAdapterRegistry;
 use agentbridge::member_source::{
-    parse_peer_did, resolve_adapter_peer, CandidateMember, DirLookupOptions,
+    find_running_peer, parse_peer_did, resolve_adapter_peer, CandidateMember, DirLookupOptions,
 };
 use shadi_a2a::{A2ABinding, A2ALocator};
 use shadi_mas::{
@@ -31,8 +31,9 @@ pub fn run(
     endpoint: &str,
     a2a_url: Option<&str>,
     a2a_binding: Option<A2ABinding>,
+    runtime: &str,
 ) -> anyhow::Result<()> {
-    let peer = resolve_delegate_peer(to_agent_id, a2a_url, a2a_binding)?;
+    let peer = resolve_delegate_peer(to_agent_id, a2a_url, a2a_binding, runtime)?;
     let locator = peer.preferred_locator();
 
     let (slim_node, unicast) = match locator.as_ref() {
@@ -93,10 +94,14 @@ pub fn run(
     Ok(())
 }
 
+/// Find `to`: a listener on this host (its lease), else a running agent the
+/// dir-runtime at `runtime` reports (announced listeners), else, for a DID,
+/// a published record in DIR.
 fn resolve_delegate_peer(
     to: &str,
     a2a_url_override: Option<&str>,
     a2a_binding: Option<A2ABinding>,
+    runtime: &str,
 ) -> anyhow::Result<CandidateMember> {
     let registry = LocalAdapterRegistry::from_env();
     let dir = DirLookupOptions {
@@ -105,6 +110,27 @@ fn resolve_delegate_peer(
         gh_token: std::env::var("DIRECTORY_CLIENT_GITHUB_TOKEN").ok(),
         limit: 5,
     };
+
+    let leased = registry.resolve_live(to);
+    if let Err(err) = &leased {
+        if err.contains("ambiguous") {
+            return Err(anyhow::anyhow!("{err}"));
+        }
+        let runtime_opts = DirLookupOptions {
+            server_addr: runtime.to_string(),
+            gh_token: None,
+            limit: 0,
+        };
+        match find_running_peer(to, &runtime_opts) {
+            Ok(Some(peer)) => {
+                return apply_locator_override(to, Ok(peer), a2a_url_override, a2a_binding)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            }
+            Ok(None) => {}
+            Err(e) if e.contains("ambiguous") => return Err(anyhow::anyhow!("{e}")),
+            Err(e) => eprintln!("[agentbridge] dir-runtime {runtime} not asked: {e}"),
+        }
+    }
 
     match resolve_adapter_peer(to, &registry, Some(&dir)) {
         Ok(peer) => apply_locator_override(to, Ok(peer), a2a_url_override, a2a_binding)
