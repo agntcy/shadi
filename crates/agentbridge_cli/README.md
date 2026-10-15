@@ -66,11 +66,18 @@ agentbridge register --tool claude-code --dir-publish
 # Run an agent skill from a DIR record: pull it from a local dirctl daemon and
 # give its agent skills to a harness started without your own configuration
 # (needs a profile with `isolation` and `provision.skills`: claude-code, codex).
-# The isolated harness doesn't see your login: pass an API key (ANTHROPIC_API_KEY).
+# The isolated harness doesn't see your login: pass a credential it reads
+# (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for claude, OPENAI_API_KEY for
+# codex). Allow SHADI_TMP_DIR, which holds the run's config and the work dir,
+# and claude's install under ~/.local.
+mkdir -p "$SHADI_TMP_DIR/work"
 shadictl --net-block --net-allow 127.0.0.1:50051 --net-allow localhost:8888 \
-  --net-allow schema.oasf.outshift.com:443 --read ~/.dir --read ~/.config/dirctl -- \
-  agentbridge register --tool claude-code --record code-review:1.0.0 \
-    --record-server localhost:8888 --a2a-listen 127.0.0.1:50051 --a2a-binding http+json
+  --net-allow schema.oasf.outshift.com:443 --net-allow api.anthropic.com:443 \
+  --read ~/.dir --read ~/.config/dirctl --read ~/.local/bin --read ~/.local/share/claude \
+  --allow "$SHADI_TMP_DIR" -- \
+  agentbridge register --tool claude-code --command "$SHADI_TMP_DIR/work" \
+    --record code-review:1.0.0 --record-server localhost:8888 \
+    --a2a-listen 127.0.0.1:50051 --a2a-binding http+json
 ```
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,

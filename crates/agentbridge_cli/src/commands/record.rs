@@ -137,11 +137,32 @@ pub fn cleanup() {
 /// Per run: under `$SHADI_TMP_DIR` (writable in the SHADI sandbox), named by
 /// tool and PID so instances don't share one.
 fn config_root_for(tool: &str) -> PathBuf {
-    std::env::var_os("SHADI_TMP_DIR")
+    let base = std::env::var_os("SHADI_TMP_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("agentbridge-record")
-        .join(format!("{}-{}", sanitize(tool), std::process::id()))
+        .unwrap_or_else(std::env::temp_dir);
+    real_path(&base).join("agentbridge-record").join(format!(
+        "{}-{}",
+        sanitize(tool),
+        std::process::id()
+    ))
+}
+
+/// `path` without symlinks, so a harness that canonicalizes its config
+/// directory (codex does, for `CODEX_HOME`) needn't read a symlink the sandbox
+/// hides. On macOS the temp dir is under `/var`, a symlink to `/private/var`
+/// that the sandbox doesn't let a process resolve.
+fn real_path(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    if cfg!(target_os = "macos") {
+        for link in ["/var", "/tmp", "/etc"] {
+            if path == Path::new(link) || path.starts_with(format!("{link}/")) {
+                return Path::new("/private").join(path.strip_prefix("/").unwrap_or(path));
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 fn rebuild_dir(dir: &Path) -> anyhow::Result<()> {
@@ -150,8 +171,19 @@ fn rebuild_dir(dir: &Path) -> anyhow::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => anyhow::bail!("could not clear {}: {e}", dir.display()),
     }
-    std::fs::create_dir_all(dir)
-        .map_err(|e| anyhow::anyhow!("could not create {}: {e}", dir.display()))
+    std::fs::create_dir_all(dir).map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+            let parent = dir.parent().unwrap_or(dir);
+            format!(
+                ". Under `shadictl`, allow it with `--allow {}`, or leave SHADI_TMP_DIR unset \
+                 to use the temp dir",
+                parent.display()
+            )
+        } else {
+            String::new()
+        };
+        anyhow::anyhow!("could not create {}: {e}{hint}", dir.display())
+    })
 }
 
 fn dirctl() -> String {
@@ -518,6 +550,24 @@ mod tests {
 
         let err = write_skill(&module, dir.path()).unwrap_err().to_string();
         assert!(err.contains("has no SKILL.md"), "{err}");
+    }
+
+    #[test]
+    fn real_path_resolves_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(real_path(dir.path()), real);
+        assert!(!real_path(dir.path()).starts_with("/var/"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn real_path_falls_back_to_private_on_macos() {
+        assert_eq!(
+            real_path(Path::new("/var/does-not-exist/x")),
+            Path::new("/private/var/does-not-exist/x")
+        );
+        assert_eq!(real_path(Path::new("/variable")), Path::new("/variable"));
     }
 
     #[test]
