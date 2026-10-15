@@ -141,12 +141,27 @@ docker run -d --name my-agent -p 38443:8443 -p 38081:8081 \
 
 ## Using a local OASF server
 
-Point both sides at it. agentbridge validates against it and names the `discovery` extension after it; `dirctl daemon` must accept it, or it ignores the extension:
+Point both sides at it. agentbridge validates against it and names the `discovery` extension after it; `dirctl daemon` must accept it, or it ignores the extension. The sandbox must also reach it.
+
+A host process allows the server's port next to its listener:
 
 ```sh
-agentbridge register … --oasf-schema-url http://localhost:8080
-DIRECTORY_DAEMON_RUNTIME_OASF_SCHEMA_URLS=https://schema.oasf.outshift.com,http://localhost:8080 dirctl daemon start
-dirctl runtime list --oasf-schema-url https://schema.oasf.outshift.com --oasf-schema-url http://localhost:8080 --skill …
+shadictl --net-block --net-allow 127.0.0.1:19950 --net-allow localhost:8080 … \
+  -- agentbridge register … --oasf-schema-url http://localhost:8080
+```
+
+A container sees the host as `host.docker.internal` (on Linux, add `--add-host=host.docker.internal:host-gateway`), not `localhost`. Set `OASF_SCHEMA_URL`; the entrypoint passes it to `register` and allows it in the sandbox:
+
+```sh
+docker run … -e OASF_SCHEMA_URL=http://host.docker.internal:8080 agentbridge-fake …
+```
+
+The daemon and the listing then accept every URL the agents use:
+
+```sh
+DIRECTORY_DAEMON_RUNTIME_OASF_SCHEMA_URLS=https://schema.oasf.outshift.com,http://localhost:8080,http://host.docker.internal:8080 dirctl daemon start
+dirctl runtime list --oasf-schema-url https://schema.oasf.outshift.com --oasf-schema-url http://localhost:8080 \
+  --oasf-schema-url http://host.docker.internal:8080 --skill …
 ```
 
 ## Notes

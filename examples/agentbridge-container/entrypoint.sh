@@ -10,12 +10,23 @@
 # CARD_PORT, which runtime discovery reads (the container's discovery labels
 # are set by docker run / compose). Extra arguments are passed to register,
 # e.g. --skill / --domain / --version, and --advertise-url with the published
-# A2A port, so the card names an address clients can reach.
+# A2A port, so the card names an address clients can reach. Set the OASF
+# server with OASF_SCHEMA_URL rather than --oasf-schema-url, so the sandbox
+# allows it.
 set -eu
 
 A2A_PORT="${A2A_PORT:-8443}"
 CARD_PORT="${CARD_PORT:-8081}"
 TLS_DIR="${TLS_DIR:-$HOME/tls}"
+# The OASF server that validates skills and domains, which the sandbox must
+# reach: host[:port] from the URL, with the scheme's default port.
+OASF_SCHEMA_URL="${OASF_SCHEMA_URL:-https://schema.oasf.outshift.com}"
+oasf_authority="${OASF_SCHEMA_URL#*://}"
+oasf_authority="${oasf_authority%%/*}"
+case "$oasf_authority" in
+  *:*) ;;
+  *) case "$OASF_SCHEMA_URL" in http://*) oasf_authority="$oasf_authority:80" ;; *) oasf_authority="$oasf_authority:443" ;; esac ;;
+esac
 
 if [ -z "${A2A_TLS_CERT:-}" ]; then
   mkdir -p "$TLS_DIR"
@@ -31,7 +42,7 @@ exec shadictl --net-block \
   --read "$AGENTBRIDGE_PROFILES_DIR" --allow "$SHADI_TMP_DIR" \
   --read "$(dirname "$A2A_TLS_CERT")" --read "$(dirname "$A2A_TLS_KEY")" \
   --net-allow "0.0.0.0:${A2A_PORT}" --net-allow "0.0.0.0:${CARD_PORT}" \
-  --net-allow schema.oasf.outshift.com:443 \
+  --net-allow "$oasf_authority" \
   -- agentbridge register --tool fake-harness \
      --a2a-listen "0.0.0.0:${A2A_PORT}" --a2a-binding http+json \
-     --card-listen "0.0.0.0:${CARD_PORT}" "$@"
+     --card-listen "0.0.0.0:${CARD_PORT}" --oasf-schema-url "$OASF_SCHEMA_URL" "$@"
