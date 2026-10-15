@@ -178,8 +178,7 @@ target/debug/agentbridge list --published --dir-server "$SHADI_DIR_SERVER" \
 ```
 
 Without `--published`, `agentbridge list` lists *running* agents instead: this
-host's listeners, and agents announced to runtime discovery (see
-[Runtime Discovery Demo](dir-runtime-discovery.md)).
+host's listeners, and agents announced to runtime discovery.
 
 Listeners on this host (no DIR) are listed the same way after
 `register --slim-endpoint`:
