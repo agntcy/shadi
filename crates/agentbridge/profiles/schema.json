@@ -84,7 +84,7 @@
           "properties": {
             "dir": {
               "type": "string",
-              "description": "Agent skills go to `<dir>/<skill name>/SKILL.md`; `{config_root}` is substituted."
+              "description": "Agent skills go to `<dir>/<skill name>/SKILL.md`; `{config_root}` (isolated runs) and `{workdir}` are substituted."
             }
           }
         }

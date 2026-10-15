@@ -198,15 +198,23 @@ pub struct SkillsProvision {
 }
 
 impl CliProfile {
-    /// The directory agent skills are provisioned into under `config_root`, when
-    /// the profile can run isolated and declares one.
-    pub fn skills_dir(&self, config_root: &Path) -> Option<PathBuf> {
-        self.isolation.as_ref()?;
+    /// Whether the profile can start the harness without the user's own
+    /// configuration (its `isolation` section).
+    pub fn is_isolated(&self) -> bool {
+        self.isolation.is_some()
+    }
+
+    /// The directory agent skills are provisioned into, when the profile
+    /// declares one: under `config_root` for an isolated run, or under the
+    /// harness's `workdir` (e.g. a project's `.claude/skills`). `None` when the
+    /// template needs a config root and there is none.
+    pub fn skills_dir(&self, config_root: Option<&Path>, workdir: &Path) -> Option<PathBuf> {
         let spec = self.provision.as_ref()?.skills.as_ref()?;
-        Some(PathBuf::from(substitute_config_root(
-            &spec.dir,
-            config_root,
-        )))
+        let mut dir = spec.dir.replace("{workdir}", &workdir.to_string_lossy());
+        if dir.contains("{config_root}") {
+            dir = substitute_config_root(&dir, config_root?);
+        }
+        Some(PathBuf::from(dir))
     }
 }
 
@@ -791,15 +799,24 @@ mod tests {
     }
 
     #[test]
-    fn only_the_isolated_profiles_can_run_a_record() {
-        let root = Path::new("/r");
-        for id in ["claude-code", "codex", "copilot", "cursor-agent", "goose", "opencode"] {
-            assert!(load_bundled(id).skills_dir(root).is_none(), "{id}");
-        }
-        for id in ["claude-code-isolated", "codex-isolated"] {
+    fn where_each_bundled_profile_receives_a_records_skills() {
+        let (root, work) = (Path::new("/r"), Path::new("/w"));
+        for (id, isolated, dir) in [
+            ("claude-code-isolated", true, Some("/r/skills")),
+            ("codex-isolated", true, Some("/r/skills")),
+            ("claude-code", false, Some("/w/.claude/skills")),
+            ("codex", false, Some("/w/.agents/skills")),
+            ("copilot", false, None),
+            ("cursor-agent", false, None),
+            ("goose", false, None),
+            ("opencode", false, None),
+        ] {
+            let profile = load_bundled(id);
+            assert_eq!(profile.is_isolated(), isolated, "{id}");
+            let root = isolated.then_some(root);
             assert_eq!(
-                load_bundled(id).skills_dir(root),
-                Some(root.join("skills")),
+                profile.skills_dir(root, work),
+                dir.map(PathBuf::from),
                 "{id}"
             );
         }
@@ -1265,7 +1282,7 @@ echo '{"result":"ok","session_id":"sid-9"}'
 
         let profile = isolated_env_profile();
         assert_eq!(
-            profile.skills_dir(root.path()),
+            profile.skills_dir(Some(root.path()), Path::new("/w")),
             Some(root.path().join("skills"))
         );
         assert!(ProfileAdapter::new(profile, std::env::temp_dir())
@@ -1274,12 +1291,16 @@ echo '{"result":"ok","session_id":"sid-9"}'
     }
 
     #[test]
-    fn skills_dir_needs_isolation() {
+    fn a_config_root_skills_dir_needs_a_config_root() {
         let profile = parse_profile(
             r#"{"id":"x","bin":"x","provision":{"skills":{"dir":"{config_root}/s"}},"execute":{"args":[]}}"#,
         )
         .unwrap();
-        assert!(profile.skills_dir(Path::new("/r")).is_none());
+        assert!(profile.skills_dir(None, Path::new("/w")).is_none());
+        assert_eq!(
+            profile.skills_dir(Some(Path::new("/r")), Path::new("/w")),
+            Some(PathBuf::from("/r/s"))
+        );
     }
 
     #[test]
