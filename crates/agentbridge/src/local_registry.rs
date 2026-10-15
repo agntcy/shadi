@@ -35,6 +35,10 @@ pub const IDENTITY_ANNOTATION: &str = "agntcy.dir/identity";
 /// which the locator's protocol (`http`) doesn't tell apart.
 pub const A2A_BINDING_ANNOTATION: &str = "org.agntcy/a2a-binding";
 
+/// Descriptor annotation with the SLIM endpoint exactly as `--slim-endpoint`
+/// gave it, scheme included; the `slim://` locator names only the node.
+pub const SLIM_ENDPOINT_ANNOTATION: &str = "org.agntcy/slim-endpoint";
+
 /// One locally registered listener (SLIM and/or official A2A unicast).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalAdapterRecord {
