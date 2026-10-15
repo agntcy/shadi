@@ -15,8 +15,9 @@ use agent_secrets::SecretStore;
 use crate::store::{CredentialRecord, SqlCipherVault};
 use crate::CredentialError;
 
-/// Keychain items are named `credentials/<id>`; enumeration filters on this.
-pub const CREDENTIAL_KEY_PREFIX: &str = "credentials/";
+/// Keychain items are named `shadi/credentials/<id>`, under the same `shadi/`
+/// namespace as everything else SHADI keeps there; enumeration filters on this.
+pub const CREDENTIAL_KEY_PREFIX: &str = "shadi/credentials/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultBackend {
@@ -108,7 +109,9 @@ impl CredentialVault for KeychainVault {
             Ok(secret) => {
                 let bytes = secret.expose(|bytes| bytes.to_vec());
                 let record = serde_json::from_slice(&bytes).map_err(|err| {
-                    CredentialError::Storage(format!("stored record is unreadable: {err}"))
+                    CredentialError::Storage(format!(
+                        "stored record {id} is unreadable: {err}"
+                    ))
                 })?;
                 Ok(Some(record))
             }
@@ -405,17 +408,26 @@ pub(crate) mod tests {
         assert!(vault.list().is_err());
     }
 
-    /// Anything else that wrote under `credentials/` — an older schema, a
-    /// hand-edited item — is a reported error, not a silent skip.
+    /// Anything else that wrote under `shadi/credentials/` — an older schema, a
+    /// hand-edited item — is a reported error, not a silent skip, and names
+    /// the item so an operator can remove it.
     #[test]
     fn an_unreadable_stored_record_names_the_problem() {
         let store = FakeSecretStore::default();
-        store.put("credentials/cred-1", b"not json").unwrap();
+        store.put("shadi/credentials/cred-1", b"not json").unwrap();
         let vault = KeychainVault::new(Box::new(store));
 
         let err = vault.get("cred-1").expect_err("unreadable").to_string();
-        assert!(err.contains("stored record is unreadable"), "{err}");
+        assert!(err.contains("stored record cred-1 is unreadable"), "{err}");
         assert!(vault.list().is_err());
+    }
+
+    #[test]
+    fn an_item_outside_the_namespace_is_not_a_credential() {
+        let store = FakeSecretStore::default();
+        store.put("credentials/x", b"not json").unwrap();
+        let vault = KeychainVault::new(Box::new(store));
+        assert!(vault.list().expect("list").is_empty());
     }
 
     /// The bug behind `SecretStore::is_available`: choosing by probing the

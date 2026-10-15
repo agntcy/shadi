@@ -17,10 +17,11 @@ pub(crate) fn run_credential_command(cli: CredentialCli) -> ExitCode {
 }
 
 fn open_vault(cli: &CredentialCli) -> Result<Box<dyn CredentialVault>, String> {
-    let backend = match cli.backend.as_deref() {
-        Some(name) => name.parse::<VaultBackend>()?,
-        None => shadi_credential::default_backend(),
-    };
+    let backend = choose_backend(
+        cli.backend.as_deref(),
+        cli.db.is_some() || cli.key.is_some(),
+        shadi_credential::default_backend,
+    )?;
 
     // Resolving the key unlocks the database, so only do it for the backend
     // that needs one: on a machine with no secret store the keychain path
@@ -32,6 +33,22 @@ fn open_vault(cli: &CredentialCli) -> Result<Box<dyn CredentialVault>, String> {
 
     shadi_credential::default_vault(backend, cli.db.as_deref(), key.as_deref())
         .map_err(|err| err.to_string())
+}
+
+/// An explicit backend is an instruction and is never second-guessed. Without
+/// one, naming a database or key only makes sense for sqlcipher, so it must not
+/// be silently ignored in favour of the keychain. Both vars are vault-specific,
+/// so an exported one counts the same as a flag.
+fn choose_backend(
+    explicit: Option<&str>,
+    db_or_key_given: bool,
+    default: impl FnOnce() -> VaultBackend,
+) -> Result<VaultBackend, String> {
+    match explicit {
+        Some(name) => name.parse(),
+        None if db_or_key_given => Ok(VaultBackend::SqlCipher),
+        None => Ok(default()),
+    }
 }
 
 /// The vault's own key, never the memory one — the two databases are separate
@@ -657,6 +674,58 @@ mod tests {
                 Some("test-key"),
                 list(),
             )
+        };
+        assert!(open_vault(&cli).is_ok());
+    }
+
+    #[test]
+    fn a_db_or_key_without_a_backend_selects_sqlcipher() {
+        let keychain = || VaultBackend::Keychain;
+        assert_eq!(
+            choose_backend(None, true, keychain),
+            Ok(VaultBackend::SqlCipher)
+        );
+        let with_db = CredentialCli {
+            backend: None,
+            ..cli(Some(PathBuf::from("/tmp/x.db")), None, list())
+        };
+        let with_key = CredentialCli {
+            backend: None,
+            ..cli(None, Some("k"), list())
+        };
+        let neither = CredentialCli {
+            backend: None,
+            ..cli(None, None, list())
+        };
+        for (cli, expected) in [
+            (&with_db, VaultBackend::SqlCipher),
+            (&with_key, VaultBackend::SqlCipher),
+            (&neither, VaultBackend::Keychain),
+        ] {
+            assert_eq!(
+                choose_backend(
+                    cli.backend.as_deref(),
+                    cli.db.is_some() || cli.key.is_some(),
+                    keychain
+                ),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            choose_backend(None, false, || VaultBackend::SqlCipher),
+            Ok(VaultBackend::SqlCipher)
+        );
+    }
+
+    #[test]
+    fn an_explicit_backend_is_honoured_over_db_and_key() {
+        assert_eq!(
+            choose_backend(Some("keychain"), true, || VaultBackend::SqlCipher),
+            Ok(VaultBackend::Keychain)
+        );
+        let cli = CredentialCli {
+            backend: Some("keychain".to_string()),
+            ..cli(Some(PathBuf::from("/nonexistent/x.db")), Some("k"), list())
         };
         assert!(open_vault(&cli).is_ok());
     }
