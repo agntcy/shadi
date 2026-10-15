@@ -6,6 +6,11 @@
 //! where the agent can be reached (its locators), including an HTTP endpoint
 //! serving its A2A card, which dir-runtime fetches to learn the agent's name,
 //! skills and domains.
+//!
+//! The descriptor replaces the listener's local lease rather than sitting next
+//! to it: it carries the agent DID (`agntcy.dir/identity`) and A2A binding as
+//! annotations, so `list --local` and `delegate --to <name>` find announced
+//! listeners through it.
 
 use std::fs;
 use std::io::Write;
@@ -17,8 +22,8 @@ use a2a::AgentCard;
 use serde_json::{json, Value};
 use shadi_a2a::A2ABinding;
 
-/// dir-runtime's default descriptor directory.
-pub const DEFAULT_WORKLOADS_DIR: &str = "~/.agntcy/dir-runtime/workloads.d";
+pub use agentbridge::local_registry::DEFAULT_WORKLOADS_DIR;
+use agentbridge::local_registry::{A2A_BINDING_ANNOTATION, IDENTITY_ANNOTATION};
 
 /// Labels dir-runtime's process discovery and A2A resolver act on.
 const DISCOVER_LABEL: &str = "org.agntcy/discover";
@@ -79,6 +84,7 @@ impl Drop for Announcement {
 pub fn start(
     agent_id: &str,
     agent_did: Option<&str>,
+    a2a_binding: Option<A2ABinding>,
     mut locators: Vec<Locator>,
     serves_card: bool,
     card: impl Fn() -> AgentCard + Send + Sync + 'static,
@@ -117,7 +123,16 @@ pub fn start(
     let dir = expand_home(&opts.dir);
     let pid = std::process::id();
     let workload_id = workload_id(agent_id, agent_did, pid);
-    let descriptor = descriptor(agent_id, pid, &locators, opts.source_record.as_deref());
+    let descriptor = descriptor(
+        agent_id,
+        pid,
+        &locators,
+        &Annotations {
+            agent_did,
+            a2a_binding,
+            source_record: opts.source_record.as_deref(),
+        },
+    );
     let path = write_descriptor(&dir, &workload_id, &descriptor)?;
 
     remove_on_sigterm(path.clone());
@@ -189,24 +204,44 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn descriptor(
-    agent_id: &str,
-    pid: u32,
-    locators: &[Locator],
-    source_record: Option<&str>,
-) -> Value {
+/// What the descriptor says about the agent beyond its name and locators.
+struct Annotations<'a> {
+    agent_did: Option<&'a str>,
+    a2a_binding: Option<A2ABinding>,
+    source_record: Option<&'a str>,
+}
+
+/// Whether `--dir-announce` is on: then the descriptor stands in for the local
+/// lease.
+pub fn enabled() -> bool {
+    ANNOUNCE_OPTIONS.get().is_some_and(|o| o.enabled)
+}
+
+fn descriptor(agent_id: &str, pid: u32, locators: &[Locator], about: &Annotations<'_>) -> Value {
     let mut labels = serde_json::Map::new();
     labels.insert(DISCOVER_LABEL.to_string(), json!("true"));
     labels.insert(AGENT_TYPE_LABEL.to_string(), json!("a2a"));
 
-    if let Some(cid) = source_record.filter(|c| !c.is_empty()) {
+    if let Some(cid) = about.source_record.filter(|c| !c.is_empty()) {
         labels.insert(AGENT_RECORD_LABEL.to_string(), json!(cid));
+    }
+
+    let mut annotations = serde_json::Map::new();
+    if let Some(did) = about.agent_did.filter(|d| !d.is_empty()) {
+        annotations.insert(IDENTITY_ANNOTATION.to_string(), json!(did));
+    }
+    if let Some(binding) = about.a2a_binding {
+        annotations.insert(
+            A2A_BINDING_ANNOTATION.to_string(),
+            json!(binding.as_protocol_binding()),
+        );
     }
 
     json!({
         "name": agent_id,
         "pid": pid,
         "labels": labels,
+        "annotations": annotations,
         "locators": locators
             .iter()
             .map(|l| json!({ "protocol": l.protocol, "url": l.url }))
@@ -428,7 +463,16 @@ mod tests {
             protocol: "http".into(),
             url: "http://127.0.0.1:1".into(),
         }];
-        let d = descriptor("codex", 99, &locators, Some("bafy-skill"));
+        let d = descriptor(
+            "codex",
+            99,
+            &locators,
+            &Annotations {
+                agent_did: Some("did:key:zAgent"),
+                a2a_binding: Some(A2ABinding::Jsonrpc),
+                source_record: Some("bafy-skill"),
+            },
+        );
 
         assert_eq!(d["name"], json!("codex"));
         assert_eq!(d["pid"], json!(99));
@@ -440,9 +484,24 @@ mod tests {
             json!([{ "protocol": "http", "url": "http://127.0.0.1:1" }])
         );
 
-        assert!(descriptor("codex", 99, &locators, None)["labels"]
-            .get(AGENT_RECORD_LABEL)
-            .is_none());
+        assert_eq!(
+            d["annotations"][IDENTITY_ANNOTATION],
+            json!("did:key:zAgent")
+        );
+        assert_eq!(d["annotations"][A2A_BINDING_ANNOTATION], json!("JSONRPC"));
+
+        let bare = descriptor(
+            "codex",
+            99,
+            &locators,
+            &Annotations {
+                agent_did: None,
+                a2a_binding: None,
+                source_record: None,
+            },
+        );
+        assert!(bare["labels"].get(AGENT_RECORD_LABEL).is_none());
+        assert_eq!(bare["annotations"], json!({}));
     }
 
     #[test]

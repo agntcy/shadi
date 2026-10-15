@@ -4,10 +4,17 @@
 //! On-host registry of agentbridge listeners started by `register`.
 //!
 //! `list --local` cannot ask a dataplane SLIM client for "who is listening"
-//! (that needs the controller channel). Instead each `register --slim-endpoint`
-//! or `--a2a-listen` writes a lease under `$SHADI_TMP_DIR/agentbridge-local`
-//! (or the process temp dir). `list --local` reads those files and drops any
-//! whose pid is gone, so a killed listener does not stay listed.
+//! (that needs the controller channel). Instead each listener is recorded in
+//! exactly one place:
+//!
+//! - **not announced:** a lease under `$SHADI_TMP_DIR/agentbridge-local` (or
+//!   the process temp dir), private to that SHADI session;
+//! - **announced** (`register --dir-announce`): only dir-runtime's process
+//!   descriptor, in its descriptor directory, carrying the agent DID and A2A
+//!   binding as annotations.
+//!
+//! `list --local` reads both and drops any listener whose pid is gone, so a
+//! killed listener does not stay listed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +25,22 @@ use shadi_a2a::A2ABinding;
 use crate::member_source::{CandidateMember, MemberSource};
 
 const REGISTRY_DIRNAME: &str = "agentbridge-local";
+
+/// dir-runtime's default process descriptor directory.
+pub const DEFAULT_WORKLOADS_DIR: &str = "~/.agntcy/dir-runtime/workloads.d";
+
+/// Environment variable naming dir-runtime's descriptor directory.
+pub const WORKLOADS_DIR_ENV: &str = "DIR_RUNTIME_WORKLOADS_DIR";
+
+/// Descriptor annotation with the agent's own DID (DIR's name for a record's
+/// own identity). A claim, as a lease is, until signed cards prove it.
+pub const IDENTITY_ANNOTATION: &str = "agntcy.dir/identity";
+
+/// Descriptor annotation with the A2A binding of the agent's unicast locator,
+/// which the locator's protocol (`http`) doesn't tell apart.
+pub const A2A_BINDING_ANNOTATION: &str = "org.agntcy/a2a-binding";
+
+const AGENT_TYPE_LABEL: &str = "org.agntcy/agent-type";
 
 /// One locally registered listener (SLIM and/or official A2A unicast).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,10 +82,12 @@ impl LocalAdapterRecord {
     }
 }
 
-/// Directory of listener lease files.
+/// Directory of listener lease files, plus dir-runtime's descriptor directory
+/// for listeners that were announced instead.
 #[derive(Debug, Clone)]
 pub struct LocalAdapterRegistry {
     dir: PathBuf,
+    announced_dir: Option<PathBuf>,
 }
 
 /// Removes the lease file when the registering process exits cleanly.
@@ -84,11 +109,24 @@ impl LocalAdapterRegistry {
         let root = std::env::var_os("SHADI_TMP_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
-        Self::with_dir(root.join(REGISTRY_DIRNAME))
+        let announced =
+            std::env::var(WORKLOADS_DIR_ENV).unwrap_or_else(|_| DEFAULT_WORKLOADS_DIR.to_string());
+        Self::with_dir(root.join(REGISTRY_DIRNAME)).with_announced_dir(expand_home(&announced))
     }
 
+    /// Leases only, in `dir`.
     pub fn with_dir(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            announced_dir: None,
+        }
+    }
+
+    /// Also read listeners announced to dir-runtime from its descriptor
+    /// directory.
+    pub fn with_announced_dir(mut self, dir: PathBuf) -> Self {
+        self.announced_dir = Some(dir);
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -126,6 +164,15 @@ impl LocalAdapterRegistry {
     /// Live listeners only: skip unreadable files and delete leases whose
     /// process is gone.
     pub fn list_live(&self) -> Result<Vec<LocalAdapterRecord>, String> {
+        let mut records = self.live_leases()?;
+        if let Some(dir) = &self.announced_dir {
+            records.extend(announced_listeners(dir));
+        }
+        records.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
+        Ok(records)
+    }
+
+    fn live_leases(&self) -> Result<Vec<LocalAdapterRecord>, String> {
         let mut records = Vec::new();
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
@@ -165,7 +212,6 @@ impl LocalAdapterRegistry {
             }
             records.push(record);
         }
-        records.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
         Ok(records)
     }
 
@@ -219,6 +265,92 @@ impl MemberSource for LocalRegistrySource {
             .map(|record| record.to_candidate())
             .collect())
     }
+}
+
+/// Live agentbridge listeners among dir-runtime's process descriptors: those
+/// labelled `org.agntcy/agent-type=a2a` that carry an agent DID. Other
+/// descriptors, and ones whose pid is gone, are skipped and left for
+/// dir-runtime, which owns the directory.
+fn announced_listeners(dir: &Path) -> Vec<LocalAdapterRecord> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.ends_with(".json") && !n.starts_with('.'))
+        })
+        .filter_map(|e| fs::read(e.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter_map(|d| record_from_descriptor(&d))
+        .filter(|r| pid_is_alive(r.pid))
+        .collect()
+}
+
+fn record_from_descriptor(descriptor: &serde_json::Value) -> Option<LocalAdapterRecord> {
+    let text = |pointer: &str| {
+        descriptor
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+    };
+
+    if text(&format!("/labels/{}", AGENT_TYPE_LABEL.replace('/', "~1"))) != Some("a2a") {
+        return None;
+    }
+    let did = text(&format!(
+        "/annotations/{}",
+        IDENTITY_ANNOTATION.replace('/', "~1")
+    ))?;
+    let name = text("/name").filter(|n| is_safe_agent_name(n))?;
+    let pid = u32::try_from(descriptor.get("pid")?.as_u64()?).ok()?;
+    let binding = text(&format!(
+        "/annotations/{}",
+        A2A_BINDING_ANNOTATION.replace('/', "~1")
+    ))
+    .and_then(|b| A2ABinding::parse_unicast(b).ok());
+
+    let mut record = LocalAdapterRecord {
+        name: name.to_string(),
+        did: did.to_string(),
+        slim_endpoint: String::new(),
+        a2a_url: String::new(),
+        a2a_binding: binding.unwrap_or_default(),
+        pid,
+    };
+    for locator in descriptor.get("locators")?.as_array()? {
+        let protocol = locator.get("protocol").and_then(serde_json::Value::as_str);
+        let Some(url) = locator.get("url").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        match protocol {
+            Some("slim") if record.slim_endpoint.is_empty() => {
+                // slim://<endpoint>/<org>/<ns>/<name>
+                let rest = url.strip_prefix("slim://").unwrap_or(url);
+                record.slim_endpoint = rest.split('/').next().unwrap_or(rest).to_string();
+            }
+            // The first unicast locator is the A2A listener; a later `http`
+            // one is the card listener.
+            Some(_) if record.a2a_url.is_empty() && binding.is_some() => {
+                record.a2a_url = url.to_string();
+            }
+            _ => {}
+        }
+    }
+    if record.slim_endpoint.is_empty() && record.a2a_url.is_empty() {
+        return None;
+    }
+    Some(record)
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
 }
 
 fn is_safe_agent_name(name: &str) -> bool {
@@ -306,6 +438,84 @@ mod tests {
             a2a_binding: A2ABinding::Grpc,
             pid,
         }
+    }
+
+    fn descriptor(name: &str, pid: u32, binding: Option<&str>) -> serde_json::Value {
+        let mut annotations = serde_json::json!({ IDENTITY_ANNOTATION: "did:key:zAnnounced" });
+        if let Some(b) = binding {
+            annotations[A2A_BINDING_ANNOTATION] = serde_json::json!(b);
+        }
+        serde_json::json!({
+            "name": name,
+            "pid": pid,
+            "labels": { "org.agntcy/discover": "true", AGENT_TYPE_LABEL: "a2a" },
+            "annotations": annotations,
+            "locators": [
+                { "protocol": "slim", "url": "slim://127.0.0.1:47357/agntcy/shadi/copilot-a2a" },
+                { "protocol": "http", "url": "http://127.0.0.1:19960" },
+                { "protocol": "http", "url": "http://127.0.0.1:41234" },
+            ],
+        })
+    }
+
+    #[test]
+    fn announced_listeners_are_listed_from_their_descriptors() {
+        // No lease directory at all: an announced listener writes none.
+        let leases = tempfile::tempdir().unwrap();
+        let registry = LocalAdapterRegistry::with_dir(leases.path().join("absent"));
+        let announced = tempfile::tempdir().unwrap();
+        let registry = registry.with_announced_dir(announced.path().to_path_buf());
+        let pid = std::process::id();
+        std::fs::write(
+            announced.path().join("copilot-xyz-1.json"),
+            descriptor("copilot", pid, Some("HTTP+JSON")).to_string(),
+        )
+        .unwrap();
+        // Not an agentbridge listener: no agent-type label.
+        std::fs::write(
+            announced.path().join("other.json"),
+            serde_json::json!({ "name": "other", "pid": pid, "labels": {}, "locators": [] })
+                .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            registry.list_live().unwrap(),
+            vec![LocalAdapterRecord {
+                name: "copilot".into(),
+                did: "did:key:zAnnounced".into(),
+                slim_endpoint: "127.0.0.1:47357".into(),
+                a2a_url: "http://127.0.0.1:19960".into(),
+                a2a_binding: A2ABinding::HttpJson,
+                pid,
+            }]
+        );
+        assert_eq!(
+            registry.resolve_live("copilot").unwrap().did,
+            "did:key:zAnnounced"
+        );
+    }
+
+    #[test]
+    fn a_descriptor_without_a_did_or_a_live_pid_is_skipped() {
+        let mut no_did = descriptor("copilot", std::process::id(), None);
+        no_did["annotations"] = serde_json::json!({});
+        assert!(record_from_descriptor(&no_did).is_none());
+
+        let announced = tempfile::tempdir().unwrap();
+        std::fs::write(
+            announced.path().join("gone.json"),
+            descriptor("gone", 0, None).to_string(),
+        )
+        .unwrap();
+        assert!(announced_listeners(announced.path()).is_empty());
+    }
+
+    #[test]
+    fn without_a_binding_only_the_slim_locator_is_used() {
+        let record = record_from_descriptor(&descriptor("copilot", 1, None)).unwrap();
+        assert_eq!(record.slim_endpoint, "127.0.0.1:47357");
+        assert!(record.a2a_url.is_empty());
     }
 
     #[test]
