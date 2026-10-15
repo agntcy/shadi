@@ -172,12 +172,14 @@ impl MemberSource for RunningAgentSource {
     }
 }
 
-/// Candidates in `dirctl runtime list --output json` output.
+/// Candidates in `dirctl runtime list --output json` output: the workloads
+/// themselves, or (dirctl 1.8.0) summaries carrying each in `workload`.
 fn running_candidates(stdout: &[u8]) -> Result<Vec<CandidateMember>, String> {
     let workloads: Vec<Value> = serde_json::from_slice(stdout)
         .map_err(|e| format!("dirctl runtime list printed no workload list: {e}"))?;
     Ok(workloads
         .iter()
+        .map(|w| w.get("workload").filter(|w| w.is_object()).unwrap_or(w))
         .filter_map(candidate_from_workload)
         .collect())
 }
@@ -185,8 +187,8 @@ fn running_candidates(stdout: &[u8]) -> Result<Vec<CandidateMember>, String> {
 const AGENT_TYPE_LABEL: &str = "org.agntcy/agent-type";
 
 /// The agentbridge listener a dir-runtime workload describes: labelled
-/// `org.agntcy/agent-type=a2a`, with its DID and A2A binding in the
-/// annotations `register --dir-announce` writes.
+/// `org.agntcy/agent-type=a2a`, with its DID, A2A binding and SLIM endpoint in
+/// the annotations `register --dir-announce` writes.
 fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
     let text = |map: &str, key: &str| {
         workload
@@ -201,11 +203,17 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
     let name = workload.get("name").and_then(Value::as_str)?;
     let binding = text("annotations", crate::local_registry::A2A_BINDING_ANNOTATION)
         .and_then(|b| A2ABinding::parse_unicast(b).ok());
+    // The endpoint as given to register, scheme included; the `slim://`
+    // locator only keeps host:port.
+    let slim_endpoint = text(
+        "annotations",
+        crate::local_registry::SLIM_ENDPOINT_ANNOTATION,
+    );
 
     let mut candidate = CandidateMember {
         name: name.to_string(),
         did: did.to_string(),
-        slim_endpoint: None,
+        slim_endpoint: slim_endpoint.map(str::to_string),
         a2a_url: None,
         a2a_binding: None,
     };
@@ -1492,6 +1500,34 @@ esac
         assert_eq!(c.a2a_url.as_deref(), Some("http://127.0.0.1:19960"));
         assert_eq!(c.a2a_binding, Some(A2ABinding::HttpJson));
         assert!(running_candidates(b"not json").is_err());
+    }
+
+    #[test]
+    fn running_candidates_read_dirctl_1_8_summaries() {
+        // dirctl 1.8.0 prints a summary with the workload nested in `workload`.
+        let summaries = serde_json::json!([{
+            "id": "codex-1", "name": "codex", "runtime": "process", "type": "process",
+            "locators": [{ "protocol": "slim", "url": "slim://node:47357/agntcy/shadi/codex-a2a" }],
+            "agent": { "name": "codex" },
+            "workload": {
+                "id": "codex-1", "name": "codex", "runtime": "process",
+                "labels": { "org.agntcy/discover": "true", "org.agntcy/agent-type": "a2a" },
+                "annotations": {
+                    "agntcy.dir/identity": "did:key:zCodex",
+                    "org.agntcy/slim-endpoint": "http://node:47357"
+                },
+                "locators": [{ "protocol": "slim", "url": "slim://node:47357/agntcy/shadi/codex-a2a" }]
+            }
+        }]);
+
+        let candidates = running_candidates(summaries.to_string().as_bytes()).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].did, "did:key:zCodex");
+        assert_eq!(
+            candidates[0].slim_endpoint.as_deref(),
+            Some("http://node:47357"),
+            "the annotated endpoint keeps its scheme"
+        );
     }
 
     #[cfg(unix)]
