@@ -8,6 +8,11 @@
 //! or `--a2a-listen` writes a lease under `$SHADI_TMP_DIR/agentbridge-local`
 //! (or the process temp dir). `list --local` reads those files and drops any
 //! whose pid is gone, so a killed listener does not stay listed.
+//!
+//! A listener announced to runtime discovery (`register --dir-announce`)
+//! writes no lease: its record is dir-runtime's process descriptor, and it is
+//! found through dir-runtime. The descriptor names below are shared by the
+//! writer and by readers of the workloads dir-runtime makes from it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +23,21 @@ use shadi_a2a::A2ABinding;
 use crate::member_source::{CandidateMember, MemberSource};
 
 const REGISTRY_DIRNAME: &str = "agentbridge-local";
+
+/// dir-runtime's default process descriptor directory.
+pub const DEFAULT_WORKLOADS_DIR: &str = "~/.agntcy/dir-runtime/workloads.d";
+
+/// Descriptor annotation with the agent's own DID (DIR's name for a record's
+/// own identity). A claim, as a lease is, until signed cards prove it.
+pub const IDENTITY_ANNOTATION: &str = "agntcy.dir/identity";
+
+/// Descriptor annotation with the A2A binding of the agent's unicast locator,
+/// which the locator's protocol (`http`) doesn't tell apart.
+pub const A2A_BINDING_ANNOTATION: &str = "org.agntcy/a2a-binding";
+
+/// Descriptor annotation with the SLIM endpoint exactly as `--slim-endpoint`
+/// gave it, scheme included; the `slim://` locator names only the node.
+pub const SLIM_ENDPOINT_ANNOTATION: &str = "org.agntcy/slim-endpoint";
 
 /// One locally registered listener (SLIM and/or official A2A unicast).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

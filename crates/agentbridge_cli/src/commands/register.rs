@@ -185,6 +185,46 @@ fn start_listeners(
     dir_publish: Option<DirPublishOptions>,
     verbose: bool,
 ) -> anyhow::Result<()> {
+    // Don't announce an instance that can't start: the A2A address must be free.
+    if let Some(listen) = a2a_listen {
+        ensure_listen_address_free(listen)?;
+    }
+    let for_sigterm = Arc::clone(&adapter);
+    super::announce::before_sigterm_exit(move || for_sigterm.kill_in_flight());
+
+    // Announce before serving and withdraw when the listeners return (Ctrl-C,
+    // or a listener failing to start): the guard lives until this function ends.
+    let serves_card = a2a_listen.is_some()
+        && matches!(a2a_binding, A2ABinding::Jsonrpc | A2ABinding::HttpJson);
+    let locators = super::announce::listener_locators(
+        tool,
+        slim_endpoint,
+        a2a_listen,
+        a2a_binding,
+        card_interface_url,
+    );
+    let (card_tool, card_slim, card_listen) = (
+        tool.to_string(),
+        slim_endpoint.map(str::to_string),
+        a2a_listen.map(str::to_string),
+    );
+    let announcement = super::announce::start(
+        tool,
+        best_effort_did(tool).as_deref(),
+        slim_endpoint,
+        a2a_listen.map(|_| a2a_binding),
+        locators,
+        serves_card,
+        move || {
+            build_agent_card(
+                &card_tool,
+                card_slim.as_deref(),
+                card_listen.as_deref(),
+                a2a_binding,
+            )
+        },
+    )?;
+
     if let Some(listen) = a2a_listen {
         println!(
             "Starting A2A {} listener on {listen} ...",
@@ -194,6 +234,7 @@ fn start_listeners(
             let http_adapter = Arc::clone(&adapter);
             let http_tool = tool.to_string();
             let http_listen = listen.to_string();
+            let descriptor = announcement.as_ref().map(|a| a.path().to_path_buf());
             std::thread::spawn(move || {
                 if let Err(err) = run_unicast_listener(
                     &http_tool,
@@ -204,7 +245,15 @@ fn start_listeners(
                     false,
                     verbose,
                 ) {
-                    eprintln!("[agentbridge] {} listener: {err}", a2a_binding.as_protocol_binding());
+                    // Don't keep serving (and announcing) only half the agent.
+                    eprintln!(
+                        "[agentbridge] {} listener: {err}; stopping",
+                        a2a_binding.as_protocol_binding()
+                    );
+                    if let Some(path) = descriptor {
+                        super::announce::withdraw(&path);
+                    }
+                    std::process::exit(1);
                 }
             });
         } else {
@@ -910,9 +959,7 @@ fn agent_card_with(
         ));
     }
     if let Some(listen) = a2a_listen {
-        let url = card
-            .advertise_url()
-            .map_or_else(|| advertised_a2a_url(listen), str::to_string);
+        let url = interface_url(card, listen);
         supported_interfaces.push(AgentInterface::new(
             url,
             a2a_binding.as_protocol_binding(),
@@ -1019,7 +1066,9 @@ fn run_slim_listener(
         shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
         shadi_identity::SlimAuth::SharedSecret(_) => String::new(),
     };
-    let _local_lease = if did.is_empty() {
+    // An announced listener is found through its dir-runtime descriptor
+    // instead (one record per listener).
+    let _local_lease = if did.is_empty() || super::announce::enabled() {
         None
     } else {
         match agentbridge::local_registry::LocalAdapterRegistry::from_env().publish(
@@ -1330,6 +1379,17 @@ fn is_loopback_addr(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 
+/// The URL the card advertises for the `--a2a-listen` interface, which the
+/// dir-runtime locators repeat so the two agree.
+fn card_interface_url(listen: &str) -> String {
+    interface_url(&super::card::config(), listen)
+}
+
+fn interface_url(card: &super::card::CardConfig, listen: &str) -> String {
+    card.advertise_url()
+        .map_or_else(|| advertised_a2a_url(listen), str::to_string)
+}
+
 fn advertised_a2a_url(listen: &str) -> String {
     if listen.contains("://") {
         return listen.to_string();
@@ -1432,7 +1492,7 @@ fn run_unicast_listener(
         a2a_binding.as_protocol_binding()
     );
 
-    let _local_lease = if register_locally {
+    let _local_lease = if register_locally && !super::announce::enabled() {
         match LocalAdapterRegistry::from_env().publish(&LocalAdapterRecord {
             name: agent_id.to_string(),
             did: did.clone(),
@@ -1479,6 +1539,8 @@ fn run_unicast_listener(
         .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
 
     runtime.block_on(async move {
+        // Bind first, so "ready" is only printed for a listener that is up.
+        let listener = bind_listener(addr)?;
         println!(
             "[agentbridge] ready — A2A {} on {a2a_url}",
             a2a_binding.as_protocol_binding()
@@ -1492,8 +1554,7 @@ fn run_unicast_listener(
                 let grpc_service = A2aServiceServer::new(GrpcHandler::new(handler));
                 match grpc_server_tls_config(&addr)? {
                     Some(tls) => {
-                        let incoming = TcpIncoming::bind(addr)
-                            .map_err(|e| format!("bind A2A gRPC {addr}: {e}"))?;
+                        let incoming = TcpIncoming::from(tokio_listener(listener)?);
                         let incoming = tonic_tls::rustls::TlsIncoming::new(incoming, tls);
                         tokio::select! {
                             result = TonicServer::builder()
@@ -1509,10 +1570,11 @@ fn run_unicast_listener(
                         }
                     }
                     None => {
+                        let incoming = TcpIncoming::from(tokio_listener(listener)?);
                         tokio::select! {
                             result = TonicServer::builder()
                                 .add_service(grpc_service)
-                                .serve(addr) => {
+                                .serve_with_incoming(incoming) => {
                                 result.map_err(|e| format!("A2A gRPC server error: {e}"))
                             }
                             _ = tokio::signal::ctrl_c() => {
@@ -1532,7 +1594,7 @@ fn run_unicast_listener(
                 };
                 let router = with_agent_card(router, agent_id, listen, a2a_binding);
                 tokio::select! {
-                    result = serve_http_router(addr, router) => result,
+                    result = serve_http_router(addr, listener, router) => result,
                     _ = tokio::signal::ctrl_c() => {
                         println!("\n[agentbridge] shutting down...");
                         adapter_for_shutdown.kill_in_flight();
@@ -1561,12 +1623,53 @@ fn with_agent_card(
     ))
 }
 
-async fn serve_http_router(addr: SocketAddr, router: axum::Router) -> Result<(), String> {
+/// Bind the A2A listener's address, explaining an address already in use.
+fn bind_listener(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
+    let listener = std::net::TcpListener::bind(addr).map_err(|e| bind_error(addr, &e))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("A2A listener {addr}: {e}"))?;
+    Ok(listener)
+}
+
+fn tokio_listener(listener: std::net::TcpListener) -> Result<tokio::net::TcpListener, String> {
+    tokio::net::TcpListener::from_std(listener).map_err(|e| format!("A2A listener: {e}"))
+}
+
+fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!(
+            "{addr} is already in use. Is another listener (e.g. another instance of this \
+             agent) on it? Pick another --a2a-listen port"
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "binding {addr} is not permitted. Under `shadictl --net-block`, allow it with \
+             `--net-allow {addr}`: it must match --a2a-listen"
+        ),
+        _ => format!("bind A2A listener {addr}: {e}"),
+    }
+}
+
+/// Fail before announcing or serving anything when `listen` can't be bound.
+/// The address is released again right away; the listener binds it for real.
+fn ensure_listen_address_free(listen: &str) -> anyhow::Result<()> {
+    // An address that doesn't parse is reported by the listener itself.
+    let Ok(addr) = listen.parse::<SocketAddr>() else {
+        return Ok(());
+    };
+    std::net::TcpListener::bind(addr)
+        .map(drop)
+        .map_err(|e| anyhow::anyhow!("{}", bind_error(addr, &e)))
+}
+
+async fn serve_http_router(
+    addr: SocketAddr,
+    listener: std::net::TcpListener,
+    router: axum::Router,
+) -> Result<(), String> {
     match a2a_server_tls_paths(&addr)? {
         None => {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| format!("bind A2A HTTP {addr}: {e}"))?;
+            let listener = tokio_listener(listener)?;
             axum::serve(listener, router)
                 .await
                 .map_err(|e| format!("A2A HTTP server error: {e}"))
@@ -1582,7 +1685,8 @@ async fn serve_http_router(addr: SocketAddr, router: axum::Router) -> Result<(),
                         key.display()
                     )
                 })?;
-            axum_server::bind_rustls(addr, config)
+            axum_server::tls_rustls::from_tcp_rustls(listener, config)
+                .map_err(|e| format!("A2A listener {addr}: {e}"))?
                 .serve(router.into_make_service())
                 .await
                 .map_err(|e| format!("A2A HTTPS server error: {e}"))
@@ -2727,6 +2831,28 @@ test push ... FAILED
         );
         assert_eq!(card.supported_interfaces.len(), 2);
         assert_eq!(card.supported_interfaces[1].url, "https://127.0.0.1:28443");
+    }
+
+    #[test]
+    fn an_address_in_use_is_refused_with_an_explanation() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = taken.local_addr().unwrap().to_string();
+
+        let err = ensure_listen_address_free(&addr).unwrap_err().to_string();
+        assert!(err.contains("already in use"), "{err}");
+        assert!(err.contains("--a2a-listen"), "{err}");
+
+        drop(taken);
+        ensure_listen_address_free(&addr).expect("free once released");
+        ensure_listen_address_free("not an address").expect("left to the listener");
+    }
+
+    #[test]
+    fn a_refused_bind_points_at_the_sandbox_allow_list() {
+        let addr: SocketAddr = "127.0.0.1:19962".parse().unwrap();
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = bind_error(addr, &denied);
+        assert!(msg.contains("--net-allow 127.0.0.1:19962"), "{msg}");
     }
 
     #[test]
