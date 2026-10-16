@@ -7,6 +7,28 @@ workspace-wide view of each release.
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.2.0...agntcy-shadi-cli-v0.3.0) - 2026-10-16
+
+### Added
+
+- *(credential)* add local vault for issued credentials ([#474](https://github.com/agntcy/shadi/pull/474))
+- *(identity)* [**breaking**] sign channel-manager create and delete requests ([#471](https://github.com/agntcy/shadi/pull/471))
+- *(desktop)* [**breaking**] own rooms through a SLIM channel manager ([#449](https://github.com/agntcy/shadi/pull/449))
+- *(agentbridge)* [**breaking**] let the owner's standing rules decide removals ([#446](https://github.com/agntcy/shadi/pull/446))
+- *(desktop)* add the Agent Directory panel ([#453](https://github.com/agntcy/shadi/pull/453))
+
+### Fixed
+
+- *(shadictl)* let derive-agent-identity skip the secret store ([#445](https://github.com/agntcy/shadi/pull/445))
+
+### Other
+
+- *(deps)* move to SLIM 3.4.3, the A2A 0.4.2 set and rustls 0.23.46 ([#498](https://github.com/agntcy/shadi/pull/498))
+- *(deps)* move to SLIM 3.4.1 and a2a-slimrpc 0.3.3 ([#489](https://github.com/agntcy/shadi/pull/489))
+- *(deps)* [**breaking**] move to SLIM 3.2.1, a2a-slimrpc 0.3 and OpenTelemetry 0.33 ([#465](https://github.com/agntcy/shadi/pull/465))
+- *(deps)* move to SLIM 3.1 ([#443](https://github.com/agntcy/shadi/pull/443))
+- *(identity)* move the did:key document and OpenPGP key helpers into shadi_identity ([#450](https://github.com/agntcy/shadi/pull/450))
+
 ## [0.2.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-cli-v0.1.11...agntcy-shadi-cli-v0.2.0) - 2026-10-09
 
 ### Added
