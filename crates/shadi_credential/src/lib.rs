@@ -10,6 +10,7 @@
 //! credential format lands as a sibling of `sd_jwt`, not as a change to the
 //! storage.
 
+pub mod oid4vci;
 pub mod sd_jwt;
 pub mod store;
 pub mod vault;
@@ -24,8 +25,12 @@ pub enum CredentialError {
     Malformed(String),
     #[error("vault storage error: {0}")]
     Storage(String),
+    /// A response parsed fine but failed a check.
+    #[error("issuance refused: {0}")]
+    Refused(String),
 }
 
+pub use oid4vci::{check_id_token, proof_jwt, IdTokenClaims, IdpOrigin};
 pub use sd_jwt::{import, parse_sd_jwt, Disclosure, ParsedCredential, SD_JWT_FORMAT};
 pub use store::{CredentialRecord, SqlCipherVault};
 pub use vault::{
