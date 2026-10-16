@@ -51,7 +51,7 @@ fn decode_segment(segment: &str, what: &str) -> Result<Vec<u8>, CredentialError>
         .map_err(|_| CredentialError::Malformed(format!("{what} is not base64url")))
 }
 
-fn decode_json(segment: &str, what: &str) -> Result<Value, CredentialError> {
+pub(crate) fn decode_json(segment: &str, what: &str) -> Result<Value, CredentialError> {
     let bytes = decode_segment(segment, what)?;
     serde_json::from_slice(&bytes)
         .map_err(|err| CredentialError::Malformed(format!("{what} is not JSON: {err}")))
