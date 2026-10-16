@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.3.0...agntcy-shadi-identity-v0.4.0) - 2026-10-16
+
+### Added
+
+- *(identity)* [**breaking**] sign channel-manager create and delete requests ([#471](https://github.com/agntcy/shadi/pull/471))
+- *(agentbridge)* [**breaking**] let the owner's standing rules decide removals ([#446](https://github.com/agntcy/shadi/pull/446))
+
+### Other
+
+- *(deps)* move to SLIM 3.4.3, the A2A 0.4.2 set and rustls 0.23.46 ([#498](https://github.com/agntcy/shadi/pull/498))
+- *(deps)* move to SLIM 3.4.1 and a2a-slimrpc 0.3.3 ([#489](https://github.com/agntcy/shadi/pull/489))
+- *(deps)* [**breaking**] move to SLIM 3.2.1, a2a-slimrpc 0.3 and OpenTelemetry 0.33 ([#465](https://github.com/agntcy/shadi/pull/465))
+- *(deps)* move to SLIM 3.1 ([#443](https://github.com/agntcy/shadi/pull/443))
+- *(identity)* move the did:key document and OpenPGP key helpers into shadi_identity ([#450](https://github.com/agntcy/shadi/pull/450))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.2.2...agntcy-shadi-identity-v0.3.0) - 2026-10-09
 
 ### Added
