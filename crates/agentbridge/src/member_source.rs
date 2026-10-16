@@ -102,6 +102,25 @@ impl MemberSource for SkillSearchSource {
     }
 }
 
+/// Discover A2A agents in the Directory: records with an `integration/a2a`
+/// module, narrowed to those with any of `skills` when given (`dirctl search
+/// --module integration/a2a [--skill …]`). Nothing is assumed about which
+/// skills an agent has.
+pub struct A2AAgentSearchSource {
+    pub skills: Vec<String>,
+    pub dir: DirLookupOptions,
+}
+
+impl MemberSource for A2AAgentSearchSource {
+    fn resolve(&self) -> Result<Vec<CandidateMember>, String> {
+        let mut args = vec!["--module", "integration/a2a"];
+        for skill in &self.skills {
+            args.extend(["--skill", skill.as_str()]);
+        }
+        resolve_via_dirctl_query(&args, &self.dir)
+    }
+}
+
 /// Discover a candidate by an already-known DID: `dirctl search --author
 /// <did>` resolves its current name/skills/SLIM endpoint from the Directory
 /// without the moderator needing to know anything but the DID up front.
