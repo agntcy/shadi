@@ -1,51 +1,68 @@
-# Demo: run a DIR agent skill as a discoverable agent
+# Demo: run a Directory agent skill as a discoverable agent
 
 This walkthrough takes an agent skill stored in the
 [AGNTCY Agent Directory](https://github.com/agntcy/dir) (DIR), turns it into a
 running A2A agent with `agentbridge register --record`, and finds it again by
-skill through **runtime discovery**: the registry of *running* workloads that
-`dirctl daemon` keeps next to DIR's registry of records.
+skill through runtime discovery: the registry of running workloads that
+`dirctl daemon` keeps next to Directory's registry of records.
 
-It complements [Agent Directory Discovery Demo](dir-group-discovery.md). That
-one publishes agent cards as DIR records and forms a group from them; this one
-keeps DIR for what is built once (the skill record) and runtime discovery for
-what runs (the agent instance), so stopping an agent removes it from
-discovery.
+It complements the [Agent Directory Discovery Demo](dir-group-discovery.md),
+which publishes agent cards as Directory records and forms a group from them.
+This demo keeps Directory for what is built once (the skill record) and
+runtime discovery for what runs (the agent instance), so stopping an agent
+removes it from discovery.
 
 The agents use a stand-in harness, `fake-harness`
 (`examples/agentbridge-container`), which answers without a model and prints
 the skills it was given, so nothing here spends tokens.
 
-## What this shows
+## What this demo shows
 
-- **An agent built from a DIR record** — `register --record <ref>` pulls an
-  agent-skill record from a DIR node, writes its skills into a harness that
-  starts without your own configuration, and serves it over A2A inside the
-  SHADI sandbox.
-- **Skills from the record and the command line, nothing else** — the card
-  advertises the record's skills and domains plus `--skill` / `--domain` in
-  its OASF `discovery` extension, checked against the OASF schema server
-  before the listener starts. No skill is added automatically.
-- **Announced while it runs** — `--dir-announce` registers the running
-  instance with runtime discovery and withdraws it when it stops.
-  Containers are announced by their labels.
-- **Found by skill** — `dirctl runtime list --skill …` lists running agents,
-  with the record each was built from.
-- **What fails, and how** — invalid skills, unreachable servers, records that
-  can't run, and sandbox settings, each stopping before the agent is served.
+- An agent built from a Directory record
+
+    `register --record <ref>` pulls an
+    agent-skill record from a Directory node, writes its skills into a harness that
+    starts without your own configuration, and serves it over A2A inside the
+    SHADI sandbox.
+
+- Skills from the record and the command line, nothing else
+
+    The card advertises the record's skills and domains plus `--skill` / `--domain` in
+    its OASF `discovery` extension, checked against the OASF schema server
+    before the listener starts. No skill is added automatically.
+
+- Announced while it runs
+
+    `--dir-announce` registers the running
+    instance with runtime discovery and withdraws it when it stops.
+    Containers are announced by their labels.
+
+- Found by skill
+
+    `dirctl runtime list --skill …` lists running agents,
+    with the record each was built from.
+
+- What fails, and how
+
+    Invalid skills, unreachable servers, records that
+    can't run, and sandbox settings, each stopping before the agent is served.
 
 ## Prerequisites
 
-```bash
-# 1. Build the CLIs
-cargo build -p agntcy-shadi-cli -p agntcy-agentbridge-cli
+1. Build the CLIs
 
-# 2. Build dirctl with runtime discovery (dirctl daemon + dirctl runtime list)
-git clone --branch feat/runtime-stale-descriptors https://github.com/agntcy/dir.git ../dir
-(cd ../dir/cli && go build -o "$HOME/go/bin/dirctl-dev" .)
-```
+    ```bash
+    cargo build -p agntcy-shadi-cli -p agntcy-agentbridge-cli
+    ```
 
-`dirctl runtime list` and process discovery in `dirctl daemon` ship with DIR
+2. Build dirctl with runtime discovery (dirctl daemon + dirctl runtime list)
+
+    ```bash
+    git clone --branch feat/runtime-stale-descriptors https://github.com/agntcy/dir.git ../dir
+    (cd ../dir/cli && go build -o "$HOME/go/bin/dirctl-dev" .)
+    ```
+
+`dirctl runtime list` and process discovery in `dirctl daemon` ship with Directory
 1.8.0. The JSON output used here
 ([agntcy/dir#2366](https://github.com/agntcy/dir/pull/2366)) and the clean-up
 of stale descriptors ([agntcy/dir#2373](https://github.com/agntcy/dir/pull/2373))
@@ -53,7 +70,7 @@ aren't merged yet; #2373's branch carries both, so build `dirctl` from it as
 above. Once both are merged, build from `main` instead.
 
 !!! note "Runtime discovery is local for now"
-    The runtime discovery API is served by `dirctl daemon`, which runs DIR's
+    The runtime discovery API is served by `dirctl daemon`, which runs Directory's
     API server together with dir-runtime on your machine. A Directory deployed
     on Kubernetes (such as the public one) doesn't run dir-runtime yet
     ([agntcy/dir#2309](https://github.com/agntcy/dir/issues/2309)), so `dirctl runtime list` against it answers
@@ -63,21 +80,6 @@ above. Once both are merged, build from `main` instead.
     The SHADI sandbox refuses to run programs through the `/tmp` symlink, so a
     `dirctl` there fails inside `shadictl` with `Operation not permitted`. Use
     a path under `$HOME` (as above) or `/private/tmp/…`.
-
-### Start a local Agent Directory node with runtime discovery
-
-**Terminal D** (daemon):
-
-```bash
-source docs/content/demos/demo-env-runtime.sh
-DIRECTORY_DAEMON_RUNTIME_ENABLED=true "$DIRCTL" daemon start
-```
-
-The daemon serves DIR on `localhost:8888` and discovers workloads in two
-runtimes: Docker containers, and host processes that write a descriptor to
-`~/.agntcy/dir-runtime/workloads.d`. If pushes fail with `403 Forbidden` on
-macOS, see the
-[port 5000 note](dir-group-discovery.md#start-a-local-agent-directory-node).
 
 ## 1. Shared environment (every terminal)
 
@@ -108,11 +110,26 @@ In fish, start a shell that inherits it with
 `SHADI_DIRCTL_BINARY` picks the `dirctl` agentbridge runs inside the sandbox,
 where an older one (e.g. from Homebrew) can come first on `PATH`.
 
-## 2. Import an agent skill into DIR
+### Start a local Agent Directory node with runtime discovery
+
+**Terminal D** (daemon):
+
+```bash
+source docs/content/demos/demo-env-runtime.sh
+DIRECTORY_DAEMON_RUNTIME_ENABLED=true "$DIRCTL" daemon start
+```
+
+The daemon serves Directory on `localhost:8888` and discovers workloads in two
+runtimes: Docker containers, and host processes that write a descriptor to
+`~/.agntcy/dir-runtime/workloads.d`. If pushes fail with `403 Forbidden` on
+macOS, see the
+[port 5000 note](dir-group-discovery.md#start-a-local-agent-directory-node).
+
+## 2. Import an agent skill into Directory
 
 **Terminal C** (client):
 
-The sample `code-review` skill from DIR's test data, imported with OASF 1.1.0
+The sample `code-review` skill from Directory's test data, imported with OASF 1.1.0
 classes chosen by the static enricher (no LLM needed). 1.1.0 is the OASF
 version agentbridge advertises, so the record's classes join the agent's card.
 
@@ -170,10 +187,10 @@ Starting A2A HTTP+JSON listener on 127.0.0.1:19960 ...
 
 What happened before the listener started:
 
-1. `dirctl info` resolved `code-review` to a CID on the DIR node, `dirctl pull`
-   fetched the record, and `dirctl verify` reported its signature status. A
-   signature isn't required — which skill to run is your choice — but it is
-   logged so that choice is informed.
+1. `dirctl info` resolved `code-review` to a CID on the Directory node,
+   `dirctl pull` fetched the record, and `dirctl verify` reported its
+   signature status. A signature isn't required — which skill to run is your
+   choice — but it is logged so that choice is informed.
 2. Every agent skill in the record (its `core/language_model/agentskills`
    modules) was written into a fresh configuration directory for this run.
    The harness's profile points it there (`isolation` and `provision.skills`
@@ -186,7 +203,7 @@ What happened before the listener started:
    with the record's CID (`org.agntcy/agent-record`).
 
 The sandbox flags grant exactly that: the listener and the OASF server
-(`--net-allow`), the DIR node and `dirctl`'s own files for `--record`
+(`--net-allow`), the Directory node and `dirctl`'s own files for `--record`
 (`--net-allow localhost:8888 --read ~/.dir --read ~/.config/dirctl`), the
 demo's working state (`--allow "$SHADI_TMP_DIR"`), and the descriptor
 directory (`--write`).
@@ -218,7 +235,9 @@ Workloads are listed as announced; nothing here is verified.
 - The version, skill and domain come from the record; `authors` is the
   record's author. The card itself names no owner yet.
 - `--output raw` prints only workload IDs; `--output json` prints the
-  workloads as runtime discovery returns them, A2A card included:
+  workloads as runtime discovery returns them, A2A card included. `--label`
+  takes `key=regex`, so `org.agntcy/agent-record=.` keeps every workload
+  built from a record:
 
 ```bash
 "$DIRCTL" runtime list --label org.agntcy/agent-record=. --output raw
@@ -248,7 +267,7 @@ host that isn't announced (its lease), and `runtime (<addr>)` for an agent
 that dir-runtime reported. An announced listener writes no lease, so it is
 found only through dir-runtime, and `agentbridge list --local` (leases only)
 never shows it. Runtime discovery is optional: with no daemon running,
-`agentbridge list` lists the local listeners and ends with
+`agentbridge list` lists the local listeners and ends with the following message:
 
 ```text
 No dir-runtime is running at localhost:8888, so agents announced with --dir-announce aren't listed (start one with `dirctl daemon start`).
@@ -277,38 +296,43 @@ or DID: a name that isn't a listener on this host is looked up at the
 dir-runtime (`--runtime`, default `localhost:8888`), which reports this
 announced agent with its DID and locator.
 
-Press **Ctrl-C** in Terminal R: `dirctl runtime list` no longer shows the
-agent. Ctrl-C reaches `shadictl`, which kills `agentbridge` outright, so the
-descriptor is left behind and `dirctl daemon` removes it on its next scan,
-once it sees the process is gone. SIGTERM sent to `agentbridge` itself
-withdraws the announcement at once.
+Press **Ctrl-C** in Terminal R: after the next scan, `dirctl runtime list` no
+longer shows the agent. Ctrl-C reaches `shadictl`, which kills `agentbridge`
+outright, so the descriptor is left behind until `dirctl daemon` sees the
+process is gone and removes it. SIGTERM sent to `agentbridge` itself
+withdraws the announcement at once, with no scan to wait for.
 
 ## 6. With a real harness
 
 The bundled profiles under `crates/agentbridge/profiles/` drive real coding
 CLIs. For a record, prefer the isolated ones:
 
-- **`claude-code-isolated`, `codex-isolated`, `goose-isolated`,
-  `opencode-isolated`** run the same CLIs as their plain profiles with a fresh
-  `HOME` and configuration directory per run, holding only the record's
-  skills. The harness doesn't see your own skills (including user-level ones
-  in `~/.agents/skills` or `~/.claude/skills`), settings, MCP servers or login.
-- **`claude-code`, `codex`, `goose`, `opencode`** work too, with a warning:
-  the record's skills go into the working directory (`.claude/skills`,
-  `.agents/skills`, `.goose/skills`, `.opencode/skills`; an existing skill of
-  the same name is never replaced, and they are removed when `register`
-  stops), and the harness also reads your own configuration and login.
-  Whoever can send it a task can try to make it reveal or use them.
+- `claude-code-isolated`, `codex-isolated`, `goose-isolated`,
+  `opencode-isolated`
 
-That also means the harness doesn't see your login, so give it a credential
-it reads from its environment:
+    They run the same CLIs as their plain profiles with a fresh `HOME` and
+    configuration directory per run, holding only the record's skills. The
+    harness doesn't see your own skills (including user-level ones in
+    `~/.agents/skills` or `~/.claude/skills`), settings, MCP servers or login.
+
+- `claude-code`, `codex`, `goose`, `opencode`
+
+    These work too, with a warning: the record's skills go into the working
+    directory (`.claude/skills`, `.agents/skills`, `.goose/skills`,
+    `.opencode/skills`; an existing skill of the same name is never replaced,
+    and they are removed when `register` stops), and the harness also reads
+    your own configuration and login. Whoever can send it a task can try to
+    make it reveal or use them.
+
+An isolated profile's fresh `HOME` also means the harness doesn't see your
+login, so give it a credential it reads from its environment:
 
 | Harness | Install | Credential | Model API |
 | --- | --- | --- | --- |
 | `claude-code-isolated` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `api.anthropic.com:443` |
 | `codex-isolated` | [Codex CLI](https://github.com/openai/codex) (`codex`) | `CODEX_API_KEY` | `api.openai.com:443` |
-| `goose-isolated` | [goose](https://goose-docs.ai/) (`brew install block-goose-cli`) | `GOOSE_PROVIDER` and `GOOSE_MODEL` (passed as `--provider` / `--model`) and that provider's key, e.g. `ANTHROPIC_API_KEY` | the provider's API, e.g. `api.anthropic.com:443` |
-| `opencode-isolated` | [opencode](https://opencode.ai) (`brew install opencode`) | the provider's key, e.g. `ANTHROPIC_API_KEY`; the model via `OPENCODE_ARGS="--model anthropic/<model>"` | the provider's API, plus `models.dev:443` |
+| `goose-isolated` | [goose](https://goose-docs.ai/) (`brew install block-goose-cli`) | `GOOSE_PROVIDER` and `GOOSE_MODEL` (passed as `--provider` / `--model`) and that provider's key, e.g. `ANTHROPIC_API_KEY` | The provider's API, e.g. `api.anthropic.com:443` |
+| `opencode-isolated` | [opencode](https://opencode.ai) (`brew install opencode`) | The provider's key, e.g. `ANTHROPIC_API_KEY`; the model via `OPENCODE_ARGS="--model anthropic/<model>"` | The provider's API, plus `models.dev:443` |
 
 !!! warning "opencode doesn't run inside the SHADI sandbox yet"
     opencode 2.x starts a local server on a random port for every run, and
@@ -418,7 +442,7 @@ listener and allow its port: `--a2a-binding grpc --card-listen 127.0.0.1:19952`.
 ## 8. A group of running agents
 
 Agents announced to runtime discovery can form a SLIM group like the
-[Agent Directory Discovery Demo](dir-group-discovery.md) does with DIR
+[Agent Directory Discovery Demo](dir-group-discovery.md) does with Directory
 records: the `running:<skill>` member source finds them through
 `dirctl runtime list` instead of a record search. Use that demo's SLIM setup
 (mTLS material, `shadictl slim start-node`, and the moderator's DID in each
@@ -478,16 +502,16 @@ step 3 unless noted.
 | --- | --- | --- |
 | Invalid skill | `register … --skill software_engineering/not_a_skill` | `skills or domains are not in OASF 1.1.0: skills[0]: Unknown "name" value; no class is defined for not_a_skill.` |
 | Domain without a skill | `register … --domain technology/software_engineering` | `--domain needs at least one --skill: the OASF discovery object requires skills` |
-| OASF server blocked | step 7 without `--net-allow schema.oasf.outshift.com:443` | `could not reach the OASF server …`, naming the `--net-allow` to add, or `--skip-oasf-validation` |
+| OASF server blocked | Step 7 without `--net-allow schema.oasf.outshift.com:443` | `could not reach the OASF server …`, naming the `--net-allow` to add, or `--skip-oasf-validation` |
 | Announce without a listener | `agentbridge register --tool fake-harness --dir-announce` | `--dir-announce needs an A2A listener: pass --slim-endpoint or --a2a-listen` |
 | Unknown record | `register … --record no-such-skill …` | `could not find record 'no-such-skill' on localhost:8888: … no record found with name "no-such-skill"` |
-| `dirctl` blocked by the sandbox | step 3 without `--read ~/.dir --read ~/.config/dirctl` | `dirctl info code-review failed: panic: mkdir …/.dir: file exists`, with the flags to add |
+| `dirctl` blocked by the sandbox | Step 3 without `--read ~/.dir --read ~/.config/dirctl` | `dirctl info code-review failed: panic: mkdir …/.dir: file exists`, with the flags to add |
 | `dirctl` under `/tmp` | `SHADI_DIRCTL_BINARY=/tmp/dirctl …` | `could not run dirctl (/tmp/dirctl): Operation not permitted …` |
-| A record without an agent skill | an A2A-card record (`dirctl import --type=a2a`) as `--record` | `record '…' has no agent skill (core/language_model/agentskills module); only agent-skill records can be run` |
-| `$SHADI_TMP_DIR` not allowed | step 3 without `--allow "$SHADI_TMP_DIR"` | `could not create …/agentbridge-record/fake-harness-<pid>: Operation not permitted. Under shadictl, allow it with --allow …` |
-| A harness that isn't isolated | `register --tool claude-code … --record code-review …` | starts, with `warning: profile 'claude-code' isn't isolated. The harness also reads your own configuration …`; the skill goes into `<workdir>/.claude/skills` |
+| A record without an agent skill | An A2A-card record (`dirctl import --type=a2a`) as `--record` | `record '…' has no agent skill (core/language_model/agentskills module); only agent-skill records can be run` |
+| `$SHADI_TMP_DIR` not allowed | Step 3 without `--allow "$SHADI_TMP_DIR"` | `could not create …/agentbridge-record/fake-harness-<pid>: Operation not permitted. Under shadictl, allow it with --allow …` |
+| A harness that isn't isolated | `register --tool claude-code … --record code-review …` | Starts, with `warning: profile 'claude-code' isn't isolated. The harness also reads your own configuration …`; the skill goes into `<workdir>/.claude/skills` |
 | A harness with nowhere to put skills | `register --tool copilot … --record code-review …` | `profile 'copilot' can't run a DIR record: it has no provision.skills section, so there is nowhere to put the record's skills` |
-| A record in another OASF version | a record imported with `schema_version: "1.0.0"` | starts, but `warning: record … uses OASF 1.0.0, the card OASF 1.1.0; its skills and domains are not advertised` |
+| A record in another OASF version | A record imported with `schema_version: "1.0.0"` | Starts, but `warning: record … uses OASF 1.0.0, the card OASF 1.1.0; its skills and domains are not advertised` |
 
 An agent without any skill (no `--skill`, no `--record`) starts, but its card
 has no `discovery` extension, so `--skill` filters don't find it.
