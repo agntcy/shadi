@@ -34,19 +34,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 agentbridge = { package = "agntcy-agentbridge", version = "0.4.0", path = "../../../crates/agentbridge" }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.3.0", path = "../../../crates/shadi_a2a" }
-a2a-server = { package = "a2a-server-lf", version = "0.5.2" }
+a2a-server = { package = "a2a-server-lf", version = "0.5.3" }
 shadi_mas = { package = "agntcy-shadi-mas", version = "0.5.0", path = "../../../crates/shadi_mas" }
 uuid = { version = "1", features = ["v4"] }
 
 # Kept in step with the root SHADI workspace. The `=` pins these carried are
 # gone: they existed because a2a-slimrpc required older
 # agntcy-slim-service/agntcy-slim-proto, which 0.2.5 no longer does.
-slim = { package = "agntcy-slim", version = "3.4.2" }
-slim_rpc = { package = "agntcy-slim-rpc", version = "3.4.2" }
-slim_bindings = { package = "agntcy-slim-bindings", version = "3.4.2" }
-slim_proto = { package = "agntcy-slim-proto", version = "0.8.4" }
-slim_config = { package = "agntcy-slim-config", version = "0.17.6" }
-slim_auth = { package = "agntcy-slim-auth", version = "0.17.6" }
+slim = { package = "agntcy-slim", version = "3.4.3" }
+slim_rpc = { package = "agntcy-slim-rpc", version = "3.4.3" }
+slim_bindings = { package = "agntcy-slim-bindings", version = "3.4.3" }
+slim_proto = { package = "agntcy-slim-proto", version = "0.8.5" }
+slim_config = { package = "agntcy-slim-config", version = "0.17.7" }
+slim_auth = { package = "agntcy-slim-auth", version = "0.17.7" }
 # The channel manager's gRPC client and messages (agntcy/shadi#442).
 prost = "0.14"
 tonic = "0.14"
