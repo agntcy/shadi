@@ -1,6 +1,8 @@
 {
   "id": "opencode-isolated",
   "bin": "opencode",
+  "pass_env_prefixes": ["OPENCODE_"],
+  "pass_env_suffixes": ["_API_KEY"],
   "pin_tmpdir": true,
   "env": {
     "TMPDIR": "{workdir}",

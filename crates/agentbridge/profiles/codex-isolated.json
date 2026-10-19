@@ -1,6 +1,8 @@
 {
   "id": "codex-isolated",
   "bin": "codex",
+  "require_sandbox": true,
+  "pass_env_prefixes": ["CODEX_", "OPENAI_"],
   "pin_tmpdir": true,
   "env": {
     "TMPDIR": "{workdir}",
