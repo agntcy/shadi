@@ -150,7 +150,7 @@ impl MemberSource for RunningAgentSource {
         cmd.args(["--server-addr", &self.runtime.server_addr]);
         apply_dir_auth(&mut cmd, &self.runtime);
 
-        let output = match cmd.output() {
+        let output = match run_bounded(cmd, RUNTIME_LIST_TIMEOUT, RUNTIME_LIST_MAX_BYTES) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err("dirctl not found in PATH".to_string());
             }
@@ -168,8 +168,86 @@ impl MemberSource for RunningAgentSource {
         if !output.status.success() {
             return Err(stderr.trim().to_string());
         }
-        running_candidates(&output.stdout)
+        let mut candidates = running_candidates(&output.stdout)?;
+        if self.runtime.limit > 0 {
+            candidates.truncate(self.runtime.limit);
+        }
+        Ok(candidates)
     }
+}
+
+/// How long a dir-runtime may take to answer, and how much it may print: a
+/// blackholed `--runtime` must not hang `delegate`, which asks it before DIR.
+const RUNTIME_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const RUNTIME_LIST_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Run `cmd`, killing it after `timeout`, keeping at most `max_bytes` of
+/// stdout (more is an error) and of stderr.
+fn run_bounded(
+    mut cmd: Command,
+    timeout: std::time::Duration,
+    max_bytes: u64,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(max_bytes + 1).read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("no answer within {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if stdout.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("printed more than {max_bytes} bytes"),
+        ));
+    }
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// True when asking a dir-runtime failed only because none is listening there
+/// (it's optional). A TLS or certificate failure is a real error, even though
+/// gRPC reports it as `Unavailable` too.
+pub fn runtime_not_running(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let refused = lower.contains("connection refused") || lower.contains("connect: no such file");
+    let tls = ["tls", "certificate", "handshake", "x509"]
+        .iter()
+        .any(|w| lower.contains(w));
+    refused && !tls
 }
 
 /// Candidates in `dirctl runtime list --output json` output: the workloads
@@ -199,8 +277,15 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
     if text("labels", AGENT_TYPE_LABEL) != Some("a2a") {
         return None;
     }
-    let did = text("annotations", crate::local_registry::IDENTITY_ANNOTATION)?;
-    let name = workload.get("name").and_then(Value::as_str)?;
+    // Everything here is written by the workload about itself: take only
+    // what can't smuggle extra entries into SLIM_MEMBER_DIDS, rows into
+    // `list`, or a NUL into the environment.
+    let did = text("annotations", crate::local_registry::IDENTITY_ANNOTATION)
+        .filter(|did| is_plain_did(did))?;
+    let name = workload
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| crate::local_registry::is_safe_agent_name(name))?;
     let binding = text("annotations", crate::local_registry::A2A_BINDING_ANNOTATION)
         .and_then(|b| A2ABinding::parse_unicast(b).ok());
     // The endpoint as given to register, scheme included; the `slim://`
@@ -208,7 +293,8 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
     let slim_endpoint = text(
         "annotations",
         crate::local_registry::SLIM_ENDPOINT_ANNOTATION,
-    );
+    )
+    .filter(|endpoint| is_plain_endpoint(endpoint));
 
     let mut candidate = CandidateMember {
         name: name.to_string(),
@@ -228,13 +314,15 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
             Some("slim") => {
                 if candidate.slim_endpoint.is_none() {
                     let rest = url.strip_prefix("slim://").unwrap_or(url);
-                    candidate.slim_endpoint =
-                        Some(rest.split('/').next().unwrap_or(rest).to_string());
+                    let node = rest.split('/').next().unwrap_or(rest);
+                    if is_plain_endpoint(node) {
+                        candidate.slim_endpoint = Some(node.to_string());
+                    }
                 }
             }
             // The first unicast locator is the A2A listener; a later `http`
             // one is the card listener.
-            Some(_) if candidate.a2a_url.is_none() && binding.is_some() => {
+            Some(_) if candidate.a2a_url.is_none() && binding.is_some() && is_http_url(url) => {
                 candidate.a2a_url = Some(url.to_string());
                 candidate.a2a_binding = binding;
             }
@@ -245,6 +333,29 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
         return None;
     }
     Some(candidate)
+}
+
+/// A DID with nothing that would split or end it once joined into a list.
+fn is_plain_did(did: &str) -> bool {
+    parse_peer_did(did).as_deref() == Some(did)
+        && !did
+            .chars()
+            .any(|c| c == ',' || c.is_whitespace() || c.is_control())
+}
+
+/// A `host:port` (or scheme://host:port) endpoint without separators.
+fn is_plain_endpoint(endpoint: &str) -> bool {
+    !endpoint.is_empty()
+        && !endpoint
+            .chars()
+            .any(|c| c == ',' || c.is_whitespace() || c.is_control())
+}
+
+/// An absolute http(s) URL with a host.
+fn is_http_url(url: &str) -> bool {
+    !url.chars().any(|c| c.is_whitespace() || c.is_control())
+        && url::Url::parse(url)
+            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
 }
 
 /// The running agent `query` (a DID, or an agent name as in `list`) names
@@ -271,11 +382,32 @@ pub fn find_running_peer(
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.into_iter().next()),
-        n => Err(format!(
-            "ambiguous: {n} running agents match '{query}' at dir-runtime {}. \
-             Pass --a2a-url to pick an instance (the DID stays the name)",
-            runtime.server_addr
-        )),
+        n => {
+            let rows: Vec<String> = matches
+                .iter()
+                .map(|c| {
+                    format!(
+                        "  {}  {}  {}",
+                        c.name,
+                        c.did,
+                        c.a2a_url
+                            .as_deref()
+                            .or(c.slim_endpoint.as_deref())
+                            .unwrap_or("-")
+                    )
+                })
+                .collect();
+            let hint = if did.is_some() {
+                "Pass --a2a-url with one of these URLs to pick an instance"
+            } else {
+                "Pass --to <did> to pick one (and --a2a-url if a DID runs twice)"
+            };
+            Err(format!(
+                "ambiguous: {n} running agents match '{query}' at dir-runtime {}:\n{}\n{hint}",
+                runtime.server_addr,
+                rows.join("\n")
+            ))
+        }
     }
 }
 
@@ -312,14 +444,30 @@ impl MemberSource for ExplicitListSource {
 // (`shadictl slim create-group --members ...`, `/slim invite-from <spec>`).
 // ---------------------------------------------------------------------------
 
-/// Parse one `--members`/`invite-from` spec into the `MemberSource` it names:
-/// `skill:<skill>` → [`SkillSearchSource`] (DIR records), `running:<skill>` →
-/// [`RunningAgentSource`] (running agents, through runtime discovery on the
-/// same server), `did:<did>` → [`DidLookupSource`],
-/// `explicit:<name>=<did>[@<endpoint>]` → [`ExplicitListSource`].
+/// Where `running:` asks by default: a local `dirctl daemon`.
+pub const DEFAULT_RUNTIME_ADDR: &str = "localhost:8888";
+
+/// [`parse_member_spec_at`] with `running:` asking [`DEFAULT_RUNTIME_ADDR`].
 pub fn parse_member_spec(
     spec: &str,
     dir: &DirLookupOptions,
+) -> Result<Box<dyn MemberSource>, String> {
+    parse_member_spec_at(spec, dir, DEFAULT_RUNTIME_ADDR)
+}
+
+/// Parse one `--members`/`invite-from` spec into the `MemberSource` it names:
+/// `skill:<skill>` → [`SkillSearchSource`] (DIR records), `running:<skill>` →
+/// [`RunningAgentSource`] (running agents, through the dir-runtime at
+/// `runtime`, without the DIR token), `did:<did>` → [`DidLookupSource`],
+/// `explicit:<name>=<did>[@<endpoint>]` → [`ExplicitListSource`].
+///
+/// A `running:` agent's skills and DID are what it says about itself, so any
+/// workload that claims a matching skill gets its DID into the group's trust
+/// set: use it only where every workload the runtime reports is trusted.
+pub fn parse_member_spec_at(
+    spec: &str,
+    dir: &DirLookupOptions,
+    runtime: &str,
 ) -> Result<Box<dyn MemberSource>, String> {
     if let Some(skill) = spec.strip_prefix("skill:") {
         if skill.is_empty() {
@@ -341,7 +489,11 @@ pub fn parse_member_spec(
         }
         return Ok(Box::new(RunningAgentSource {
             skills: vec![skill.to_string()],
-            runtime: dir.clone(),
+            runtime: DirLookupOptions {
+                server_addr: runtime.to_string(),
+                gh_token: None,
+                limit: dir.limit,
+            },
         }));
     }
 
@@ -396,9 +548,19 @@ pub fn resolve_members(
     specs: &[String],
     dir: &DirLookupOptions,
 ) -> Result<Vec<CandidateMember>, String> {
+    resolve_members_at(specs, dir, DEFAULT_RUNTIME_ADDR)
+}
+
+/// [`resolve_members`] with `running:` specs asking the dir-runtime at
+/// `runtime`.
+pub fn resolve_members_at(
+    specs: &[String],
+    dir: &DirLookupOptions,
+    runtime: &str,
+) -> Result<Vec<CandidateMember>, String> {
     let mut resolved = Vec::new();
     for spec in specs {
-        let source = parse_member_spec(spec, dir)?;
+        let source = parse_member_spec_at(spec, dir, runtime)?;
         resolved.extend(source.resolve()?);
     }
     Ok(resolved)
@@ -1532,6 +1694,104 @@ esac
             Some("http://node:47357"),
             "the annotated endpoint keeps its scheme"
         );
+    }
+
+    #[test]
+    fn workload_fields_that_could_forge_entries_are_dropped() {
+        let workload = |name: &str, did: &str, url: &str| {
+            serde_json::json!({
+                "name": name,
+                "labels": { "org.agntcy/agent-type": "a2a" },
+                "annotations": {
+                    "agntcy.dir/identity": did,
+                    "org.agntcy/a2a-binding": "HTTP+JSON"
+                },
+                "locators": [{ "protocol": "http", "url": url }]
+            })
+        };
+        let ok = "http://127.0.0.1:1";
+        let cases = [
+            ("comma in DID", workload("a", "did:key:zA,did:key:zB", ok)),
+            ("NUL in DID", workload("a", "did:key:zA\u{0}", ok)),
+            ("not a DID", workload("a", "zA", ok)),
+            ("newline in name", workload("a\nb  did:key:zFake", "did:key:zA", ok)),
+            ("unsafe name", workload("-a", "did:key:zA", ok)),
+        ];
+        for (what, w) in cases {
+            assert!(candidate_from_workload(&w).is_none(), "{what}");
+        }
+
+        // A non-http locator is ignored, leaving nothing to reach.
+        assert!(candidate_from_workload(&workload("a", "did:key:zA", "file:///etc/x")).is_none());
+        assert!(candidate_from_workload(&workload("a", "did:key:zA", ok)).is_some());
+    }
+
+    #[test]
+    fn only_a_refused_connection_means_no_runtime_is_running() {
+        assert!(runtime_not_running(
+            "rpc error: code = Unavailable desc = connection error: dial tcp 127.0.0.1:8888: \
+             connect: connection refused"
+        ));
+        assert!(!runtime_not_running(
+            "rpc error: code = Unavailable desc = connection error: desc = \"transport: \
+             authentication handshake failed: tls: failed to verify certificate\""
+        ));
+        assert!(!runtime_not_running("rpc error: code = Unavailable desc = no answer"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_that_doesnt_answer_is_given_up_on() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let started = std::time::Instant::now();
+        let err = run_bounded(cmd, std::time::Duration::from_millis(200), 1024).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "head -c 4096 /dev/zero"]);
+        let err = run_bounded(cmd, std::time::Duration::from_secs(5), 1024).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn running_specs_ask_the_runtime_without_the_dir_token() {
+        let _guard = crate::dir_registry::dirctl_env_lock().lock().expect("lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("args.log");
+        let path = dir.path().join("fake_dirctl.sh");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nenv | grep -c GITHUB_TOKEN >> '{}'\necho '[]'\n",
+                log.display(),
+                log.display()
+            ),
+        )
+        .expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+
+        let dir_opts = DirLookupOptions {
+            server_addr: "prod.example:443".to_string(),
+            gh_token: Some("ghp_secret".to_string()),
+            limit: 10,
+        };
+        let result = parse_member_spec_at("running:*", &dir_opts, "lab:8888")
+            .expect("parse")
+            .resolve();
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert!(result.expect("resolve").is_empty());
+        let logged = std::fs::read_to_string(&log).expect("dirctl was called");
+        let args: Vec<&str> = logged.lines().skip_while(|a| *a != "runtime").collect();
+        assert!(args.windows(2).any(|w| w == ["--server-addr", "lab:8888"]), "{args:?}");
+        assert!(!logged.contains("prod.example"), "{logged}");
+        assert!(!logged.contains("ghp_secret"), "{logged}");
     }
 
     #[test]

@@ -51,7 +51,8 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
     for runtime in opts.runtimes {
         let source = RunningAgentSource {
             skills: opts.skills.to_vec(),
-            runtime: lookup(runtime, opts.gh_token),
+            // The DIR token is for DIR, not for whatever answers --runtime.
+            runtime: lookup(runtime, None),
         };
         match source.resolve() {
             Ok(candidates) => {
@@ -85,7 +86,7 @@ fn runtime_note(runtime: &str, error: &str) -> String {
     if error.contains("has no `runtime` command") {
         return format!("Agents announced to dir-runtime aren't listed: {error}.");
     }
-    if error.contains("connection refused") || error.contains("Unavailable") {
+    if agentbridge::member_source::runtime_not_running(error) {
         return format!(
             "No dir-runtime is running at {runtime}, so agents announced with --dir-announce \
              aren't listed (start one with `dirctl daemon start`)."
