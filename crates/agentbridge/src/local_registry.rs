@@ -241,7 +241,7 @@ impl MemberSource for LocalRegistrySource {
     }
 }
 
-fn is_safe_agent_name(name: &str) -> bool {
+pub(crate) fn is_safe_agent_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('-')

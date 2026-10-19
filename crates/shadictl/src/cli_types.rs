@@ -421,11 +421,13 @@ pub(crate) struct SlimCreateGroupArgs {
     pub(crate) channel: String,
 
     /// Member source spec, repeatable: skill:<skill> (DIR records) |
-    /// running:<skill> (running agents, through runtime discovery on
-    /// --dir-server) | did:<did> | explicit:<name>=<did>[@<endpoint>]. Resolved candidates' DIDs are
+    /// running:<skill> (running agents, through the dir-runtime at --runtime)
+    /// | did:<did> | explicit:<name>=<did>[@<endpoint>]. Resolved candidates' DIDs are
     /// unioned into this group's trust set (SLIM_MEMBER_DIDS) — resolving a
     /// candidate does not by itself invite it into the live session; use
-    /// `/slim invite <name>` or `/slim invite-from <spec>` for that.
+    /// `/slim invite <name>` or `/slim invite-from <spec>` for that. A
+    /// running: agent's skills and DID are its own claims: any workload that
+    /// claims a matching skill joins the trust set.
     #[arg(long = "members", value_name = "SPEC")]
     pub(crate) members: Vec<String>,
 
@@ -433,11 +435,16 @@ pub(crate) struct SlimCreateGroupArgs {
     #[arg(long, default_value = "prod.gateway.ads.outshift.io:443")]
     pub(crate) dir_server: String,
 
+    /// dir-runtime address for running: member specs (a local `dirctl
+    /// daemon`); it gets no GitHub token.
+    #[arg(long, default_value = agentbridge::member_source::DEFAULT_RUNTIME_ADDR)]
+    pub(crate) runtime: String,
+
     /// GitHub token for DIR authentication (or set DIRECTORY_CLIENT_GITHUB_TOKEN).
     #[arg(long)]
     pub(crate) gh_token: Option<String>,
 
-    /// Max results per resolved skill:/did: member source.
+    /// Max results per resolved skill:/did:/running: member source.
     #[arg(long, default_value_t = 20)]
     pub(crate) limit: usize,
 

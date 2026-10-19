@@ -1,6 +1,6 @@
 use agentbridge::local_registry::LocalAdapterRegistry;
 use agentbridge::member_source::{
-    find_running_peer, parse_peer_did, resolve_adapter_peer, CandidateMember, DirLookupOptions,
+    find_running_peer, parse_peer_did, runtime_not_running, resolve_adapter_peer, CandidateMember, DirLookupOptions,
 };
 use shadi_a2a::{A2ABinding, A2ALocator};
 use shadi_mas::{
@@ -118,7 +118,7 @@ fn resolve_delegate_peer(
     };
     resolve_peer_with(
         to,
-        registry.resolve_live(to).map(|_| ()),
+        registry.resolve_live(to).map(|r| r.did),
         || find_running_peer(to, &runtime_opts),
         || resolve_adapter_peer(to, &registry, Some(&dir)),
         a2a_url_override,
@@ -128,13 +128,15 @@ fn resolve_delegate_peer(
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Pick the peer from a local lease (`leased` says whether one matches), else from dir-runtime
-/// (`running`), else from `fallback` (a lease again, or the Directory), and
-/// apply `--a2a-url` / `--a2a-binding`. Several matching instances are an
-/// error unless `to` is a DID and `--a2a-url` picks the instance.
+/// Pick the peer from a local lease (`leased`: its DID, if one matches), else
+/// from dir-runtime (`running`), else from `fallback` (a lease again, or the
+/// Directory), and apply `--a2a-url` / `--a2a-binding`. Several matching
+/// instances are an error unless `to` is a DID and `--a2a-url` picks the
+/// instance; so is a name that a lease and a running agent with another DID
+/// share.
 fn resolve_peer_with(
     to: &str,
-    leased: Result<(), String>,
+    leased: Result<String, String>,
     running: impl FnOnce() -> Result<Option<CandidateMember>, String>,
     fallback: impl FnOnce() -> Result<CandidateMember, String>,
     a2a_url_override: Option<&str>,
@@ -149,11 +151,20 @@ fn resolve_peer_with(
             Err(e) if e.contains("ambiguous") => Err(e),
             // No dir-runtime running is normal (it's optional); report
             // anything else.
-            Err(e) if e.contains("connection refused") || e.contains("Unavailable") => fallback(),
+            Err(e) if runtime_not_running(&e) => fallback(),
             Err(e) => {
                 eprintln!("[agentbridge] couldn't ask dir-runtime {runtime}: {e}");
                 fallback()
             }
+        },
+        Ok(lease_did) if parse_peer_did(to).is_none() => match running() {
+            Ok(Some(other)) if other.did != lease_did => Err(format!(
+                "ambiguous: '{to}' is a local listener ({lease_did}) and a running agent at \
+                 dir-runtime {runtime} ({}). Pass --to <did> to pick one",
+                other.did
+            )),
+            Err(e) if e.contains("ambiguous") => Err(e),
+            _ => fallback(),
         },
         Ok(_) => fallback(),
     };
@@ -252,6 +263,31 @@ mod tests {
         assert!(resolve("copilot", Some("http://127.0.0.1:2"))
             .unwrap_err()
             .contains("ambiguous"));
+    }
+
+    #[test]
+    fn a_name_shared_by_a_lease_and_another_running_agent_is_ambiguous() {
+        let resolve = |running_did: &'static str| {
+            resolve_peer_with(
+                "copilot",
+                Ok("did:key:zLease".to_string()),
+                move || {
+                    Ok(Some(CandidateMember {
+                        did: running_did.to_string(),
+                        ..instance(1)
+                    }))
+                },
+                || Ok(instance(2)),
+                None,
+                None,
+                "localhost:8888",
+            )
+        };
+
+        let err = resolve("did:key:zOther").unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("did:key:zLease") && err.contains("did:key:zOther"), "{err}");
+        assert!(resolve("did:key:zLease").is_ok(), "the same agent, announced");
     }
 
     #[test]
