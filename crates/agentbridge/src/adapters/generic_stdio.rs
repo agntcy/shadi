@@ -375,6 +375,31 @@ mod tests {
         assert_eq!(adapter.agent_id().0, "test");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_spawned_harness_does_not_inherit_shadis_secrets() {
+        let _guard = crate::env_lock().lock().unwrap();
+        let prior = std::env::var_os("SLIM_HUMAN_SEED");
+        std::env::set_var("SLIM_HUMAN_SEED", "root-secret");
+        // A child speaking the protocol: answer one request with the
+        // variable as it sees it.
+        let adapter = GenericStdioAdapter::spawn(
+            "env-probe",
+            "/bin/sh",
+            &[
+                "-c",
+                r#"read -r _; printf '{"ok":true,"data":"seed=%s"}\n' "${SLIM_HUMAN_SEED-unset}""#,
+            ],
+        );
+        match prior {
+            Some(value) => std::env::set_var("SLIM_HUMAN_SEED", value),
+            None => std::env::remove_var("SLIM_HUMAN_SEED"),
+        }
+
+        let out = adapter.unwrap().execute_prompt("ignored").unwrap();
+        assert_eq!(out, "seed=unset");
+    }
+
     #[test]
     fn spawn_with_real_process_succeeds() {
         // Spawn a real subprocess (cat) to exercise the production spawn path.
