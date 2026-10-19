@@ -36,6 +36,10 @@ static CONFIG_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// run ends. Nothing it didn't create is in here.
 static CREATED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+/// Parents created on the way to a skills directory (e.g. `.claude/skills` in
+/// the work directory), removed only if they are empty again.
+static CREATED_PARENTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
 /// `--record` settings from the command line.
 #[derive(Clone, Debug, Default)]
 pub struct RecordOptions {
@@ -79,10 +83,13 @@ pub fn prepare(
     let profile = load_profile(tool)
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("--record needs a harness profile; '{tool}' has none"))?;
-    let config_root = profile.is_isolated().then(|| config_root_for(tool));
-
     // Remove what was provisioned on SIGTERM, with or without --dir-announce.
     super::announce::on_sigterm();
+    let config_root = if profile.is_isolated() {
+        Some(config_root_for(tool)?)
+    } else {
+        None
+    };
     let source = provision(
         reference,
         &opts.server,
@@ -133,8 +140,8 @@ fn provision(
 
     eprintln!(
         "[agentbridge] running DIR record {} {} ({}) from {}; signature: {}",
-        source.name,
-        source.version,
+        printable(&source.name),
+        printable(&source.version),
         source.cid,
         server,
         signature_status(&cid, server)
@@ -166,7 +173,7 @@ fn provision(
         let dir = write_skill(module, &skills_dir)?;
         eprintln!(
             "[agentbridge] provisioned agent skill '{}' into {}",
-            module.name,
+            printable(&module.name),
             dir.display()
         );
     }
@@ -194,19 +201,117 @@ pub fn cleanup() {
     for dir in created.drain(..).rev() {
         let _ = std::fs::remove_dir_all(dir);
     }
+    drop(created);
+    if let Ok(mut parents) = CREATED_PARENTS.lock() {
+        for dir in parents.drain(..).rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
 }
 
-/// Per run: under `$SHADI_TMP_DIR` (writable in the SHADI sandbox), named by
-/// tool and PID so instances don't share one.
-fn config_root_for(tool: &str) -> PathBuf {
+/// `create_dir_all(dir)`, recording the directories it had to create.
+fn create_parents(dir: &Path) -> std::io::Result<()> {
+    let missing: Vec<PathBuf> = dir
+        .ancestors()
+        .take_while(|d| !d.as_os_str().is_empty() && !d.exists())
+        .map(Path::to_path_buf)
+        .collect();
+    std::fs::create_dir_all(dir)?;
+    if let Ok(mut parents) = CREATED_PARENTS.lock() {
+        // Outermost first, so cleanup removes the innermost first.
+        parents.extend(missing.into_iter().rev());
+    }
+    Ok(())
+}
+
+/// A record's text for the log, with control characters (a `\r`, ANSI
+/// escapes) shown escaped instead of acting on the terminal.
+fn printable(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// Per run: a fresh, private (0700) directory with a random name under
+/// `$SHADI_TMP_DIR/agentbridge-record` (writable in the SHADI sandbox), or the
+/// temp dir's. The parent must be this user's own real directory, so nobody
+/// else can plant configuration (hooks, skills) the harness would load.
+fn config_root_for(tool: &str) -> anyhow::Result<PathBuf> {
     let base = std::env::var_os("SHADI_TMP_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    real_path(&base).join("agentbridge-record").join(format!(
-        "{}-{}",
-        sanitize(tool),
-        std::process::id()
-    ))
+    let parent = real_path(&base).join("agentbridge-record");
+    private_parent(&parent)?;
+
+    let prefix = format!("{}-{}-", sanitize(tool), std::process::id());
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let root = builder
+        .tempdir_in(&parent)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not create a config root in {}: {e}. Under `shadictl`, allow it with \
+                 `--allow {}`, or leave SHADI_TMP_DIR unset to use the temp dir",
+                parent.display(),
+                base.display()
+            )
+        })?
+        .keep();
+    created(&root);
+    Ok(root)
+}
+
+/// Create `dir` (0700) if missing, and refuse one that is a symlink or
+/// belongs to another user.
+fn private_parent(dir: &Path) -> anyhow::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(dir) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => anyhow::bail!(
+            "could not create {}: {e}. Under `shadictl`, allow its parent with `--allow`",
+            dir.display()
+        ),
+    }
+
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| anyhow::anyhow!("could not inspect {}: {e}", dir.display()))?;
+    if !meta.is_dir() {
+        anyhow::bail!(
+            "{} is not a directory (a symlink?); not putting a config root there",
+            dir.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        if meta.uid() != me {
+            anyhow::bail!(
+                "{} belongs to another user (uid {}); not putting a config root there",
+                dir.display(),
+                meta.uid()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `path` without symlinks, so a harness that canonicalizes its config
@@ -233,7 +338,14 @@ fn rebuild_dir(dir: &Path) -> anyhow::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => anyhow::bail!("could not clear {}: {e}", dir.display()),
     }
-    std::fs::create_dir_all(dir).map_err(|e| {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir).map_err(|e| {
         let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
             let parent = dir.parent().unwrap_or(dir);
             format!(
@@ -252,11 +364,22 @@ fn dirctl() -> String {
     std::env::var("SHADI_DIRCTL_BINARY").unwrap_or_else(|_| "dirctl".to_string())
 }
 
-/// Run `dirctl <args> --server-addr <server> --output json` and parse stdout.
+/// Run `dirctl <command> --server-addr <server> --output json -- <operands>`
+/// and parse stdout.
 fn dirctl_json(args: &[&str], server: &str) -> anyhow::Result<Value> {
-    let output = Command::new(dirctl())
-        .args(args)
-        .args(["--server-addr", server, "--output", "json"])
+    let (command, operands) = args.split_first().unwrap_or((&"", &[]));
+    let mut cmd = Command::new(dirctl());
+    cmd.arg(command)
+        .args(["--server-addr", server, "--output", "json", "--"])
+        .args(operands);
+    // dirctl needs none of SHADI's or SLIM's settings, seeds included.
+    for (key, _) in std::env::vars_os() {
+        let key_str = key.to_string_lossy();
+        if key_str.starts_with("SHADI_") || key_str.starts_with("SLIM_") {
+            cmd.env_remove(&key);
+        }
+    }
+    let output = cmd
         .output()
         .map_err(|e| {
             let binary = dirctl();
@@ -306,10 +429,23 @@ fn resolve_cid(reference: &str, server: &str) -> anyhow::Result<String> {
         )
     })?;
 
-    info.get("cid")
+    let cid = info
+        .get("cid")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("dirctl info '{reference}' returned no CID"))
+        .ok_or_else(|| anyhow::anyhow!("dirctl info '{reference}' returned no CID"))?;
+    if !is_cid(cid) {
+        anyhow::bail!(
+            "dirctl info '{reference}' returned {}, which isn't a CID",
+            printable(cid)
+        );
+    }
+    Ok(cid.to_string())
+}
+
+/// A CID as DIR prints it (multibase, letters and digits only), so it can't
+/// pass for a flag or carry anything else into dirctl's arguments.
+fn is_cid(cid: &str) -> bool {
+    (8..=128).contains(&cid.len()) && cid.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 fn pull(cid: &str, server: &str) -> anyhow::Result<Value> {
@@ -429,7 +565,7 @@ fn skill_modules(record: &Value) -> anyhow::Result<Vec<SkillModule>> {
 /// that directory.
 fn write_skill(module: &SkillModule, skills_dir: &Path) -> anyhow::Result<PathBuf> {
     let dir = skills_dir.join(sanitize(&module.name));
-    std::fs::create_dir_all(skills_dir)
+    create_parents(skills_dir)
         .map_err(|e| anyhow::anyhow!("could not create {}: {e}", skills_dir.display()))?;
     match std::fs::create_dir(&dir) {
         Ok(()) => created(&dir),
@@ -459,13 +595,60 @@ fn write_skill(module: &SkillModule, skills_dir: &Path) -> anyhow::Result<PathBu
     Ok(dir)
 }
 
-/// Unpack a gzip-compressed tar of the skill folder into `dir`. Entries that
-/// would land outside it (absolute paths, `..`) are refused by `tar`.
+/// Most a bundle may unpack to, and how many entries it may have: a skill is
+/// a few files, and a small gzip can expand to fill the disk.
+const MAX_BUNDLE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_BUNDLE_ENTRIES: usize = 1000;
+
+/// Unpack a gzip-compressed tar of the skill folder into `dir`. Only regular
+/// files and directories are taken, each inside `dir` (no absolute paths, no
+/// `..`), within [`MAX_BUNDLE_BYTES`] and [`MAX_BUNDLE_ENTRIES`].
 fn unpack_bundle(archive: &[u8], dir: &Path) -> std::io::Result<()> {
-    let mut decoder = flate2::read::GzDecoder::new(archive);
+    let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
+    // One byte over the limit tells an oversize bundle from one that fits.
+    let decoder = flate2::read::GzDecoder::new(archive).take(MAX_BUNDLE_BYTES + 1);
     let mut tar_bytes = Vec::new();
-    decoder.read_to_end(&mut tar_bytes)?;
-    tar::Archive::new(tar_bytes.as_slice()).unpack(dir)
+    std::io::BufReader::new(decoder).read_to_end(&mut tar_bytes)?;
+    if tar_bytes.len() as u64 > MAX_BUNDLE_BYTES {
+        return Err(invalid(format!(
+            "bundle unpacks to more than {MAX_BUNDLE_BYTES} bytes"
+        )));
+    }
+
+    let mut archive = tar::Archive::new(tar_bytes.as_slice());
+    for (count, entry) in archive.entries()?.enumerate() {
+        if count >= MAX_BUNDLE_ENTRIES {
+            return Err(invalid(format!(
+                "bundle has more than {MAX_BUNDLE_ENTRIES} entries"
+            )));
+        }
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            return Err(invalid(format!(
+                "bundle entry {} is not a regular file or directory",
+                path.display()
+            )));
+        }
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+        {
+            return Err(invalid(format!(
+                "bundle entry {} would land outside the skill folder",
+                path.display()
+            )));
+        }
+        if !entry.unpack_in(dir)? {
+            return Err(invalid(format!(
+                "bundle entry {} would land outside the skill folder",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A directory name from a skill or tool name.
@@ -690,7 +873,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafy-test\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"errorMessage\":\"no signatures found\"}}' ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafytestcid\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"errorMessage\":\"no signatures found\"}}' ;;\nesac\n",
                 bin.path().join("record.json").display()
             ),
         )
@@ -723,7 +906,7 @@ mod tests {
             CREATED.lock().unwrap().contains(&root.path().to_path_buf()),
             "an isolated run removes its root"
         );
-        assert_eq!(source.cid, "bafy-test");
+        assert_eq!(source.cid, "bafytestcid");
         assert_eq!(
             source.skills,
             vec!["software_engineering/code_debugging/error_handling"]
@@ -848,6 +1031,173 @@ mod tests {
         assert!(!root.path().exists());
     }
 
+    /// A gzip'd tar with `entries` written as given, bypassing the `tar`
+    /// crate's own path checks: (name, entry type, content, link target).
+    fn raw_bundle(entries: &[(&str, tar::EntryType, &str, &str)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, kind, content, link) in entries {
+            let mut header = tar::Header::new_gnu();
+            {
+                let gnu = header.as_gnu_mut().unwrap();
+                gnu.name[..name.len()].copy_from_slice(name.as_bytes());
+                gnu.linkname[..link.len()].copy_from_slice(link.as_bytes());
+            }
+            header.set_entry_type(*kind);
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, content.as_bytes()).unwrap();
+        }
+        let tar_bytes = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, &tar_bytes).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn a_bundle_cannot_escape_or_link_out_of_the_skill_folder() {
+        let regular = tar::EntryType::Regular;
+        for (what, entries) in [
+            ("..", vec![("../escape.md", regular, "x", "")]),
+            ("absolute", vec![("/tmp/escape.md", regular, "x", "")]),
+            (
+                "symlink",
+                vec![("SKILL.md", tar::EntryType::Symlink, "", "/etc/passwd")],
+            ),
+            (
+                "hard link",
+                vec![("SKILL.md", tar::EntryType::Link, "", "/etc/passwd")],
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let err = unpack_bundle(&raw_bundle(&entries), dir.path())
+                .expect_err(what)
+                .to_string();
+            assert!(
+                err.contains("outside the skill folder") || err.contains("not a regular file"),
+                "{what}: {err}"
+            );
+            assert!(!dir.path().join("SKILL.md").exists(), "{what}");
+        }
+    }
+
+    #[test]
+    fn an_oversize_or_crowded_bundle_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "x".repeat(MAX_BUNDLE_BYTES as usize + 1);
+        let err = unpack_bundle(&bundle(&[("SKILL.md", big.as_str())]), dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than"), "{err}");
+
+        let names: Vec<String> = (0..=MAX_BUNDLE_ENTRIES).map(|i| format!("f{i}")).collect();
+        let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "")).collect();
+        let err = unpack_bundle(&bundle(&files), dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("entries"), "{err}");
+    }
+
+    #[test]
+    fn record_text_is_logged_without_control_characters() {
+        assert_eq!(
+            printable("code-review\r\u{1b}[2Ksignature: trusted"),
+            "code-review\\r\\u{1b}[2Ksignature: trusted"
+        );
+        assert_eq!(printable("plain 1.0.0"), "plain 1.0.0");
+    }
+
+    #[test]
+    fn only_a_cid_shaped_value_is_passed_to_dirctl() {
+        assert!(is_cid("baeareiackl4kjbdnpw2fxofkujd4y5q4akumi6f6jczrb7s26hz5nj636m"));
+        assert!(!is_cid("--output=yaml"));
+        assert!(!is_cid("bafy test"));
+        assert!(!is_cid(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parents_made_for_skills_are_removed_when_empty_again() {
+        let _guard = dirctl_env_lock();
+        let work = tempfile::tempdir().unwrap();
+        let skills = work.path().join(".claude/skills");
+
+        create_parents(&skills).unwrap();
+        assert!(skills.is_dir());
+        cleanup();
+        assert!(!work.path().join(".claude").exists());
+
+        // A directory that was already there stays.
+        std::fs::create_dir_all(&skills).unwrap();
+        create_parents(&skills).unwrap();
+        cleanup();
+        assert!(skills.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_config_root_is_private_and_only_in_a_parent_of_ours() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let base = tempfile::tempdir().unwrap();
+        std::env::set_var("SHADI_TMP_DIR", base.path());
+
+        let root = config_root_for("codex-isolated").unwrap();
+        let other = config_root_for("codex-isolated").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_ne!(root, other, "a random name per run");
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(root.parent().unwrap()), 0o700);
+        cleanup();
+
+        // A symlinked parent is refused.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link_base = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), link_base.path().join("agentbridge-record"))
+            .unwrap();
+        std::env::set_var("SHADI_TMP_DIR", link_base.path());
+        let err = config_root_for("codex-isolated").unwrap_err().to_string();
+        std::env::remove_var("SHADI_TMP_DIR");
+        assert!(err.contains("not a directory"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirctl_gets_the_cid_after_dashes_and_none_of_shadis_settings() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("log");
+        let script = bin.path().join("dirctl");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{log}'\nenv | grep -c '^SLIM_HUMAN_SEED=' >> '{log}'\necho '{{}}'\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        std::env::set_var("SLIM_HUMAN_SEED", "secret-seed");
+
+        let result = pull("bafytestcid", "localhost:1");
+
+        std::env::remove_var("SLIM_HUMAN_SEED");
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        result.unwrap();
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            lines,
+            ["pull", "--server-addr", "localhost:1", "--output", "json", "--", "bafytestcid", "0"],
+            "the last line counts SLIM_HUMAN_SEED in dirctl's environment"
+        );
+    }
+
     /// A `dirctl` stand-in serving one agent-skill record named `name`.
     #[cfg(unix)]
     fn fake_dirctl(name: &str) -> (PathBuf, tempfile::TempDir) {
@@ -868,7 +1218,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafy-test\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{}}' ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafytestcid\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{}}' ;;\nesac\n",
                 bin.path().join("record.json").display()
             ),
         )
