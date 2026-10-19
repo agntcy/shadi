@@ -461,11 +461,26 @@ fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
             .find(|(key, _)| *key == "PATH")
             .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
             .or_else(|| std::env::var_os("PATH"))?;
+        // As exec looks it up: relative entries against the command's working
+        // directory, and only files it may execute.
+        let cwd = command
+            .get_current_dir()
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok());
         std::env::split_paths(&path)
+            .map(|dir| match &cwd {
+                Some(cwd) if dir.is_relative() => cwd.join(dir),
+                _ => dir,
+            })
             .map(|dir| dir.join(program))
-            .find(|p| p.is_file())?
+            .find(|p| is_executable_file(p))?
     };
     std::fs::canonicalize(candidate).ok()
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 fn seatbelt_spellings(path: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -875,14 +890,31 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("my-tool");
         std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A non-executable file of the same name earlier on PATH is skipped,
+        // as exec skips it.
+        let earlier = dir.join("earlier");
+        std::fs::create_dir_all(&earlier).unwrap();
+        std::fs::write(earlier.join("my-tool"), "not executable").unwrap();
         let mut cmd = Command::new("my-tool");
-        cmd.env("PATH", &dir);
+        cmd.env("PATH", std::env::join_paths([&earlier, &dir]).unwrap());
         assert_eq!(
             resolve_program(&cmd),
             Some(std::fs::canonicalize(&exe).unwrap())
         );
         let mut cmd = Command::new("./my-tool");
         cmd.current_dir(&dir);
+        assert_eq!(
+            resolve_program(&cmd),
+            Some(std::fs::canonicalize(&exe).unwrap())
+        );
+        // A relative PATH entry is taken from the command's working directory.
+        let mut cmd = Command::new("my-tool");
+        cmd.current_dir(dir.parent().unwrap()).env(
+            "PATH",
+            dir.file_name().unwrap(),
+        );
         assert_eq!(
             resolve_program(&cmd),
             Some(std::fs::canonicalize(&exe).unwrap())
