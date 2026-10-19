@@ -1,0 +1,52 @@
+# Copyright AGNTCY Contributors (https://github.com/agntcy)
+# SPDX-License-Identifier: Apache-2.0
+#
+# Two agentbridge agents with the fake harness, announced to runtime discovery
+# by their Docker labels. dirctl daemon (runtime discovery on, Docker adapter)
+# lists them; see README.md.
+
+x-agent: &agent
+  image: agentbridge-fake
+  build:
+    context: ../..
+    dockerfile: examples/agentbridge-container/Dockerfile
+  labels:
+    org.agntcy/discover: "true"
+    org.agntcy/agent-type: "a2a"
+  environment: &agent-env
+    SHADI_SLIM_AUTH: did
+    # A demo-only seed, never your shell's SLIM_HUMAN_SEED: it would show in
+    # `docker inspect` and reach the harness.
+    SLIM_HUMAN_SEED: demo-human-seed
+    # The avatar DID demo-human-seed derives (what `agentbridge delegate`
+    # signs as with that seed).
+    SLIM_MEMBER_DIDS: ${DEMO_MEMBER_DIDS:-did:key:z6MkrhcocVRv9BLgeheEArx536VjSoRFz1x91djJhkmviwUs}
+
+services:
+  debugger:
+    <<: *agent
+    # Loopback only, as the cards advertise 127.0.0.1: a published port on
+    # every interface would be reachable from the LAN (and on Linux bypasses
+    # ufw/firewalld).
+    ports: ["127.0.0.1:18443:8443", "127.0.0.1:18081:8081"]
+    environment:
+      <<: *agent-env
+      FAKE_HARNESS_NAME: debugger
+      FAKE_HARNESS_SKILLS: software_engineering/code_debugging/error_handling
+    command:
+      - --skill=software_engineering/code_debugging/error_handling
+      - --domain=technology/networking/network_security
+      - --version=1.0.0
+      - --advertise-url=https://127.0.0.1:18443
+
+  summarizer:
+    <<: *agent
+    ports: ["127.0.0.1:28443:8443", "127.0.0.1:28081:8081"]
+    environment:
+      <<: *agent-env
+      FAKE_HARNESS_NAME: summarizer
+      FAKE_HARNESS_SKILLS: language_processing/language_generation/summarization
+    command:
+      - --skill=language_processing/language_generation/summarization
+      - --version=2.0.0
+      - --advertise-url=https://127.0.0.1:28443

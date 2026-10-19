@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+# Copyright AGNTCY Contributors (https://github.com/agntcy)
+# SPDX-License-Identifier: Apache-2.0
+"""A stand-in coding harness for trying agentbridge without a model.
+
+agentbridge runs it once per A2A task with the prompt as the only argument and
+returns what it prints. It answers deterministically, naming the agent, the
+skills it advertises (FAKE_HARNESS_SKILLS) and the agent skills it was given
+(`register --record` puts them under $FAKE_HARNESS_HOME/skills), so a delegated
+task shows which agent handled it without spending tokens.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+
+def provisioned_skills():
+    """(name, description) of each SKILL.md under $FAKE_HARNESS_HOME/skills."""
+    home = os.environ.get("FAKE_HARNESS_HOME")
+    if not home:
+        return []
+    found = []
+    for skill_md in sorted(Path(home, "skills").glob("*/SKILL.md")):
+        meta = {}
+        lines = skill_md.read_text(encoding="utf-8").splitlines()
+        if lines and lines[0].strip() == "---":
+            for line in lines[1:]:
+                if line.strip() == "---":
+                    break
+                key, _, value = line.partition(":")
+                meta[key.strip()] = value.strip()
+        found.append((meta.get("name", skill_md.parent.name), meta.get("description", "")))
+    return found
+
+
+prompt = " ".join(sys.argv[1:]).strip() or "(empty prompt)"
+agent = os.environ.get("FAKE_HARNESS_NAME", "fake-harness")
+skills = os.environ.get("FAKE_HARNESS_SKILLS", "")
+
+print(f"[{agent}] fake harness: no model was called")
+print(f"[{agent}] received: {prompt}")
+if skills:
+    print(f"[{agent}] skills: {skills}")
+for name, description in provisioned_skills():
+    print(f"[{agent}] agent skill: {name}: {description}")

@@ -1,0 +1,5 @@
+target
+**/target
+**/node_modules
+apps/shadi_desktop/src-tauri/target
+.git

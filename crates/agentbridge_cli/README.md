@@ -30,10 +30,15 @@ unicast (gRPC, JSON-RPC, or HTTP+JSON).
 > `/tmp` is a symlink to `/private/tmp`, and Seatbelt's sandbox rules don't
 > match a path reached through the symlink if the rule was generated for the
 > canonicalized form. See [Environment variables](#environment-variables).
+>
+> Listeners record themselves in `$SHADI_TMP_DIR/agentbridge-local` for
+> `list --local`; create it first (`mkdir -p "$SHADI_TMP_DIR/agentbridge-local"`)
+> and grant only it (`--allow`), so the rest of `$SHADI_TMP_DIR` stays
+> read-only.
 
 ```bash
 # Wrap any subprocess that speaks the agentbridge JSON protocol
-shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   agentbridge register \
   --tool generic-stdio \
   --command my-tool \
@@ -41,23 +46,23 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   --slim-endpoint 127.0.0.1:47357
 
 # Start a Claude Code adapter
-shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   agentbridge register --tool claude-code --slim-endpoint 127.0.0.1:47357
 
 # Start a Copilot adapter
-shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   agentbridge register --tool copilot --slim-endpoint 127.0.0.1:47357
 
 # Start a Codex adapter
-shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   agentbridge register --tool codex --slim-endpoint 127.0.0.1:47357
 
 # Goose / OpenCode use the operator's existing CLI config. Host
 # GOOSE_PROVIDER / GOOSE_MODEL are passed as goose run --provider / --model.
 # Host GOOSE_*, OPENAI_*, and *_API_KEY env vars are forwarded to goose.
-shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   agentbridge register --tool goose --slim-endpoint 127.0.0.1:47357
-shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
+shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   agentbridge register --tool opencode --slim-endpoint 127.0.0.1:47357
 
 # Publish an OASF record to the Agent Directory after registering
@@ -71,7 +76,7 @@ agentbridge register --tool claude-code \
 # configuration; plain claude-code / codex work too, with a warning, and get the
 # skills in the work directory's .claude/skills or .agents/skills).
 # The isolated harness doesn't see your login: pass a credential it reads
-# (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for claude, OPENAI_API_KEY for
+# (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for claude, CODEX_API_KEY for
 # codex). Allow SHADI_TMP_DIR, which holds the run's config and the work dir,
 # and claude's install under ~/.local.
 mkdir -p "$SHADI_TMP_DIR/work"
