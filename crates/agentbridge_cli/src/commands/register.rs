@@ -1715,7 +1715,7 @@ fn ensure_listen_address_free(listen: &str) -> anyhow::Result<()> {
 
 /// A listening socket on `addr` with `SO_REUSEADDR` on Unix, as Tokio's bind
 /// sets it: a restart can bind while the old connections sit in TIME_WAIT.
-fn reusable_listener(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+pub(super) fn reusable_listener(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(addr),
         socket2::Type::STREAM,

@@ -525,7 +525,10 @@ fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
                 };
 
                 if term.recv().await.is_some() {
-                    if let Some(p) = path.lock().ok().and_then(|mut p| p.take()) {
+                    // Held until exit: a listener becoming ready meanwhile
+                    // waits on this slot instead of publishing after cleanup.
+                    let mut slot = path.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(p) = slot.take() {
                         remove_descriptor(&p);
                     }
                     stop_in_flight();
@@ -572,7 +575,7 @@ fn serve_card(
 ) -> anyhow::Result<SocketAddr> {
     let chosen = listen.is_some();
     let listen = listen.unwrap_or("127.0.0.1:0");
-    let std_listener = TcpListener::bind(listen).map_err(|e| {
+    let std_listener = bind_reusable(listen).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             let hint = if chosen {
                 format!("allow it with `shadictl --net-allow {listen}`")
@@ -631,6 +634,16 @@ fn serve_card(
     }
 }
 
+/// Bind `listen` with `SO_REUSEADDR` on Unix, so a restart on the same fixed
+/// `--card-listen` port isn't refused while old connections sit in TIME_WAIT.
+fn bind_reusable(listen: &str) -> std::io::Result<TcpListener> {
+    use std::net::ToSocketAddrs;
+    let addr = listen.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no address to bind")
+    })?;
+    super::register::reusable_listener(addr)
+}
+
 /// The card listener stopped while the agent runs. Announced, the agent can't
 /// be found by skill any more, so withdraw and stop rather than stay listed
 /// without its card; otherwise say so and keep serving.
@@ -653,6 +666,50 @@ fn card_listener_stopped(error: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_waits_while_the_sigterm_path_holds_the_slot() {
+        let _guard = pending_lock();
+        let dir = std::env::temp_dir().join(format!("agentbridge-held-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let slot: Written = Arc::new(Mutex::new(None));
+        *PENDING.lock().unwrap() = Some(Pending {
+            dir: dir.join("workloads.d"),
+            workload_id: "held-test".to_string(),
+            descriptor: json!({ "name": "held-test" }),
+            listeners: 1,
+            written: Arc::new(Mutex::new(None)),
+            on_sigterm: Arc::clone(&slot),
+        });
+        let path = dir.join("workloads.d/held-test.json");
+
+        // The SIGTERM handler holds the slot until the process exits.
+        let held = slot.lock().unwrap();
+        let ready = std::thread::spawn(listener_ready);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!path.exists(), "nothing is published after cleanup began");
+
+        drop(held);
+        ready.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fixed_card_port_can_be_bound_again_after_a_connection() {
+        use std::io::Read;
+        let first = bind_reusable("127.0.0.1:0").unwrap();
+        let addr = first.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server_side, _) = first.accept().unwrap();
+        // The server closes first, leaving its end in TIME_WAIT.
+        drop(server_side);
+        let mut buf = [0u8; 1];
+        let _ = (&client).read(&mut buf);
+        drop(first);
+        drop(client);
+
+        bind_reusable(&addr.to_string()).expect("rebinding the same port");
+    }
 
     /// PENDING is process-wide.
     fn pending_lock() -> std::sync::MutexGuard<'static, ()> {
