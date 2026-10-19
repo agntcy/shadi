@@ -92,11 +92,14 @@ enum Cmd {
         #[arg(long, value_name = "URL", value_parser = parse_http_url)]
         advertise_url: Option<String>,
 
-        /// OASF server that checks skills and domains, once at startup (plain
-        /// http only on loopback). The card names the canonical schema
-        /// (`https://schema.oasf.outshift.com/<version>/objects/discovery`)
-        /// whichever server checks them. Under `shadictl --net-block`, use
-        /// `--skip-oasf-validation` to keep the server off the allowlist.
+        /// OASF schema the skills and domains come from: the card names it
+        /// (`<url>/<version>/objects/discovery`), and its server checks them
+        /// once at startup (plain http only on loopback). Consumers such as
+        /// dir-runtime read the extension only for schema servers they accept,
+        /// so a private schema is found only where it is accepted. To test
+        /// offline, use --skip-oasf-validation rather than a local copy of the
+        /// public schema; under `shadictl --net-block` it also keeps the server
+        /// off the allowlist.
         #[arg(long, env = "OASF_SCHEMA_URL", default_value = commands::card::DEFAULT_OASF_SCHEMA_URL,
               value_parser = parse_validator_url)]
         oasf_schema_url: String,
@@ -297,7 +300,11 @@ fn parse_http_url(raw: &str) -> Result<String, String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("must be an http:// or https:// URL with a host".to_string());
     }
-    Ok(raw.to_string())
+    // The scheme as `Url` normalizes it (`HTTPS://` → `https://`), since
+    // locators compare it as is; the rest as given, without the trailing `/`
+    // `Url` would add.
+    let rest = raw.split_once(':').map_or("", |(_, rest)| rest);
+    Ok(format!("{}:{rest}", url.scheme()))
 }
 
 /// An OASF validator: https, or http on loopback, since a plain-http answer
@@ -820,5 +827,10 @@ mod tests {
         assert!(parse(&["--advertise-url", "ftp://host:21"]).is_err());
         assert!(parse(&["--advertise-url", ""]).is_err());
         assert!(parse(&["--advertise-url", "https://127.0.0.1:28443"]).is_ok());
+        assert_eq!(
+            parse_http_url("HTTPS://agent.example:8443").as_deref(),
+            Ok("https://agent.example:8443"),
+            "the scheme is lower-cased, the rest kept"
+        );
     }
 }
