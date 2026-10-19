@@ -235,12 +235,14 @@ fn start_listeners(
             let http_adapter = Arc::clone(&adapter);
             let http_tool = tool.to_string();
             let http_listen = listen.to_string();
+            let http_slim = slim_endpoint.map(str::to_string);
             let announced = announcement.as_ref().map(|a| a.written());
             std::thread::spawn(move || {
                 if let Err(err) = run_unicast_listener(
                     &http_tool,
                     http_adapter,
                     &http_listen,
+                    http_slim.as_deref(),
                     a2a_binding,
                     None,
                     false,
@@ -264,6 +266,7 @@ fn start_listeners(
                 tool,
                 adapter,
                 listen,
+                None,
                 a2a_binding,
                 dir_publish.as_ref(),
                 true,
@@ -1515,6 +1518,8 @@ fn run_unicast_listener(
     agent_id: &str,
     adapter: Arc<dyn CliAdapter>,
     listen: &str,
+    // The SLIM endpoint served next to this listener, for the card.
+    slim_endpoint: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<&DirPublishOptions>,
     register_locally: bool,
@@ -1629,7 +1634,7 @@ fn run_unicast_listener(
                     A2ABinding::HttpJson => a2a_server::rest::rest_router(handler),
                     A2ABinding::Grpc | A2ABinding::Slim => unreachable!(),
                 };
-                let router = with_agent_card(router, agent_id, listen, a2a_binding);
+                let router = with_agent_card(router, agent_id, slim_endpoint, listen, a2a_binding);
                 http_server(addr, listener, router).await?
             }
         };
@@ -1659,10 +1664,11 @@ fn run_unicast_listener(
 fn with_agent_card(
     router: axum::Router,
     agent_id: &str,
+    slim_endpoint: Option<&str>,
     listen: &str,
     a2a_binding: A2ABinding,
 ) -> axum::Router {
-    let card = build_agent_card(agent_id, None, Some(listen), a2a_binding);
+    let card = build_agent_card(agent_id, slim_endpoint, Some(listen), a2a_binding);
     router.merge(a2a_server::agent_card::agent_card_router(
         std::sync::Arc::new(a2a_server::StaticAgentCard::new(card)),
     ))
@@ -1670,7 +1676,7 @@ fn with_agent_card(
 
 /// Bind the A2A listener's address, explaining an address already in use.
 fn bind_listener(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
-    let listener = std::net::TcpListener::bind(addr).map_err(|e| bind_error(addr, &e))?;
+    let listener = reusable_listener(addr).map_err(|e| bind_error(addr, &e))?;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("A2A listener {addr}: {e}"))?;
@@ -1702,9 +1708,24 @@ fn ensure_listen_address_free(listen: &str) -> anyhow::Result<()> {
     let Ok(addr) = listen.parse::<SocketAddr>() else {
         return Ok(());
     };
-    std::net::TcpListener::bind(addr)
+    reusable_listener(addr)
         .map(drop)
         .map_err(|e| anyhow::anyhow!("{}", bind_error(addr, &e)))
+}
+
+/// A listening socket on `addr` with `SO_REUSEADDR` on Unix, as Tokio's bind
+/// sets it: a restart can bind while the old connections sit in TIME_WAIT.
+fn reusable_listener(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
 }
 
 /// The HTTP(S) server for `router` on `listener`, with its TLS set up: what
@@ -2713,6 +2734,37 @@ test push ... FAILED
     }
 
     #[tokio::test]
+    async fn the_http_card_lists_the_slim_endpoint_served_next_to_it() {
+        use tower::ServiceExt;
+
+        let router = with_agent_card(
+            axum::Router::new(),
+            "claude-code",
+            Some("127.0.0.1:47357"),
+            "127.0.0.1:4310",
+            A2ABinding::HttpJson,
+        );
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(a2a_server::WELL_KNOWN_AGENT_CARD_PATH)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router responds");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("card body");
+        let card = String::from_utf8_lossy(&body);
+        assert!(
+            card.contains("slim://127.0.0.1:47357/agntcy/shadi/claude-code-a2a"),
+            "{card}"
+        );
+        assert!(card.contains("http://127.0.0.1:4310"), "{card}");
+    }
+
+    #[tokio::test]
     async fn well_known_agent_card_matches_the_rpc_card() {
         use tower::ServiceExt;
 
@@ -2722,7 +2774,7 @@ test push ... FAILED
 
         // Through with_agent_card, which is what the listener calls, so this
         // fails if the mount is dropped rather than only if the library breaks.
-        let router = with_agent_card(axum::Router::new(), "claude-code", listen, binding);
+        let router = with_agent_card(axum::Router::new(), "claude-code", None, listen, binding);
 
         let response = router
             .oneshot(

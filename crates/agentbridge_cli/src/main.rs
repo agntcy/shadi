@@ -359,11 +359,12 @@ fn parse_validator_url(raw: &str) -> Result<String, String> {
 }
 
 /// `--advertise-url` only replaces the `--a2a-listen` address, and a
-/// wildcard address can't be reached at, so it isn't published as is.
+/// wildcard address can't be reached at, so it isn't published (`advertised_by`
+/// names the flag that would: `--dir-publish` or `--dir-announce`) as is.
 fn advertisable(
     a2a_listen: Option<&str>,
     advertise_url: Option<&str>,
-    dir_publish: bool,
+    advertised_by: Option<&str>,
 ) -> anyhow::Result<()> {
     let Some(listen) = a2a_listen else {
         if advertise_url.is_some() {
@@ -374,9 +375,9 @@ fn advertisable(
     let wildcard = listen
         .parse::<std::net::SocketAddr>()
         .is_ok_and(|a| a.ip().is_unspecified());
-    if dir_publish && wildcard && advertise_url.is_none() {
+    if let Some(flag) = advertised_by.filter(|_| wildcard && advertise_url.is_none()) {
         anyhow::bail!(
-            "--dir-publish would publish {listen}, which clients can't connect to; \
+            "{flag} would advertise {listen}, which clients can't connect to; \
              pass --advertise-url with the address they reach the listener at"
         );
     }
@@ -464,7 +465,13 @@ fn main() {
                 advertisable(
                     a2a_listen.as_deref(),
                     card_opts.advertise_url.as_deref(),
-                    dir_publish,
+                    if dir_publish {
+                        Some("--dir-publish")
+                    } else if dir_announce {
+                        Some("--dir-announce")
+                    } else {
+                        None
+                    },
                 )
             })
             // A bad tool or a missing sandbox fails before the OASF server is
@@ -694,12 +701,16 @@ mod tests {
     #[test]
     fn advertise_url_needs_a_listener_and_a_wildcard_needs_one_to_publish() {
         let url = Some("https://agent.example:8443");
-        assert!(advertisable(None, url, false).is_err());
-        assert!(advertisable(None, None, true).is_ok());
-        assert!(advertisable(Some("0.0.0.0:8443"), None, true).is_err());
-        assert!(advertisable(Some("0.0.0.0:8443"), url, true).is_ok());
-        assert!(advertisable(Some("0.0.0.0:8443"), None, false).is_ok());
-        assert!(advertisable(Some("127.0.0.1:8443"), None, true).is_ok());
+        let publish = Some("--dir-publish");
+        let announce = Some("--dir-announce");
+        assert!(advertisable(None, url, None).is_err());
+        assert!(advertisable(None, None, publish).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, publish).is_err());
+        let err = advertisable(Some("0.0.0.0:8443"), None, announce).unwrap_err();
+        assert!(err.to_string().starts_with("--dir-announce"), "{err}");
+        assert!(advertisable(Some("0.0.0.0:8443"), url, announce).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, None).is_ok());
+        assert!(advertisable(Some("127.0.0.1:8443"), None, publish).is_ok());
     }
 
     #[test]
