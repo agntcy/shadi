@@ -55,6 +55,41 @@
       "description": "Copy every host env var whose name ends with one of these suffixes (e.g. `_API_KEY`)."
     },
     "stdin_null": { "type": "boolean", "default": false },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How to start the harness without the host user's configuration, when it runs a DIR record (`register --record`). `{config_root}` is a per-run directory under $SHADI_TMP_DIR, rebuilt on every start.",
+      "properties": {
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Set on the child; `{config_root}` and `{workdir}` are substituted."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Put before `execute.args`; `{config_root}` is substituted."
+        }
+      }
+    },
+    "provision": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where an isolated harness reads what `register --record` gives it.",
+      "properties": {
+        "skills": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dir"],
+          "properties": {
+            "dir": {
+              "type": "string",
+              "description": "Agent skills go to `<dir>/<skill name>/SKILL.md`; `{config_root}` (isolated runs) and `{workdir}` are substituted."
+            }
+          }
+        }
+      }
+    },
     "execute": {
       "type": "object",
       "required": ["args"],

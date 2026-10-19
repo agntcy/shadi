@@ -137,10 +137,39 @@ enum Cmd {
         card_listen: Option<String>,
 
         /// CID of the OASF record the agent was built from, put on the announced
-        /// workload as org.agntcy/agent-record. Unchecked: any agent can name
-        /// any record, including another agent's verified one.
+        /// workload as org.agntcy/agent-record. Defaults to the --record CID.
+        /// Unchecked: any agent can name any record, including another agent's
+        /// verified one.
         #[arg(long, value_name = "CID")]
         source_record: Option<String>,
+
+        /// Don't put the --record CID on the announced workload.
+        #[arg(long, conflicts_with = "source_record")]
+        no_source_record: bool,
+
+        /// Run an agent skill from a DIR record (CID or name[:version][@digest]):
+        /// pull it from --record-server and give its agent skills to the harness,
+        /// which starts without the host user's own configuration. Needs a
+        /// profile with `isolation` and `provision.skills`. The record's skills
+        /// and domains are advertised next to --skill / --domain.
+        #[arg(long, value_name = "REF")]
+        record: Option<String>,
+
+        /// DIR node holding the --record (e.g. a local `dirctl daemon`).
+        #[arg(long, value_name = "ADDR", default_value = commands::record::DEFAULT_RECORD_SERVER)]
+        record_server: String,
+
+        /// OIDC issuer the --record's signature must come from (a pattern, as
+        /// `dirctl verify --oidc-issuer`). With --record-oidc-subject, a record
+        /// not signed by that identity doesn't run; without them a valid
+        /// signature is reported as unchecked.
+        #[arg(long, value_name = "ISSUER", requires = "record_oidc_subject")]
+        record_oidc_issuer: Option<String>,
+
+        /// OIDC subject the --record's signature must come from (a pattern, as
+        /// `dirctl verify --oidc-subject`).
+        #[arg(long, value_name = "SUBJECT", requires = "record_oidc_issuer")]
+        record_oidc_subject: Option<String>,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -423,6 +452,11 @@ fn main() {
             dir_announce_dir,
             card_listen,
             source_record,
+            no_source_record,
+            record,
+            record_server,
+            record_oidc_issuer,
+            record_oidc_subject,
         } => {
             // Both serve or announce a listener, so they need one.
             let needs_listener = slim_endpoint.is_none()
@@ -433,13 +467,20 @@ fn main() {
             } else {
                 "--card-listen"
             };
-            let announce_opts = commands::announce::AnnounceOptions {
+            let mut announce_opts = commands::announce::AnnounceOptions {
                 enabled: dir_announce,
                 dir: dir_announce_dir,
                 card_listen,
                 source_record,
             };
-            let card_opts = commands::card::CardOptions {
+            let record_opts = commands::record::RecordOptions {
+                reference: record,
+                server: record_server,
+                signer: record_oidc_issuer.zip(record_oidc_subject).map(|(issuer, subject)| {
+                    commands::record::Signer { issuer, subject }
+                }),
+            };
+            let mut card_opts = commands::card::CardOptions {
                 skills,
                 domains,
                 version: agent_version,
@@ -452,15 +493,13 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            if needs_listener {
+            let result = if needs_listener {
                 Err(anyhow::anyhow!(
                     "{listener_flag} needs an A2A listener: pass --slim-endpoint or --a2a-listen"
                 ))
             } else {
                 Ok(())
             }
-            .and_then(|()| commands::announce::configure(announce_opts))
-            .and_then(|()| publishable(dir_publish, &card_opts.skills))
             .and_then(|()| {
                 advertisable(
                     a2a_listen.as_deref(),
@@ -474,8 +513,8 @@ fn main() {
                     },
                 )
             })
-            // A bad tool or a missing sandbox fails before the OASF server is
-            // asked.
+            // A bad tool or a missing sandbox fails before DIR or the OASF
+            // server is asked.
             .and_then(|()| {
                 commands::register::preflight(
                     &tool,
@@ -484,6 +523,23 @@ fn main() {
                     a2a_listen.as_deref(),
                 )
             })
+            .and_then(|()| {
+                commands::record::prepare(
+                    &record_opts,
+                    &tool,
+                    &commands::register::work_dir(command.as_deref()),
+                )
+            })
+            .and_then(|source| {
+                if let Some(source) = source {
+                    card_opts.add_record(&source);
+                    if !no_source_record && announce_opts.source_record.is_none() {
+                        announce_opts.source_record = Some(source.cid);
+                    }
+                }
+                commands::announce::configure(announce_opts)
+            })
+            .and_then(|()| publishable(dir_publish, &card_opts.skills))
             .and_then(|()| commands::card::configure(&card_opts))
             .and_then(|()| {
                 commands::register::run(
@@ -496,7 +552,10 @@ fn main() {
                     publish_opts,
                     verbose,
                 )
-            })
+            });
+            // Also when configuring the card failed after provisioning.
+            commands::record::cleanup();
+            result
         }
         Cmd::List {
             local,

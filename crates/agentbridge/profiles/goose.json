@@ -17,6 +17,7 @@
   "pass_env_prefixes": ["GOOSE_", "OPENAI_"],
   "pass_env_suffixes": ["_API_KEY"],
   "stdin_null": true,
+  "provision": { "skills": { "dir": "{workdir}/.goose/skills" } },
   "execute": {
     "args": [
       "run",

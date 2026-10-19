@@ -118,7 +118,7 @@ struct Pending {
     descriptor: Value,
     listeners: usize,
     written: Written,
-    on_sigterm: Written,
+    on_sigterm: &'static Mutex<Option<PathBuf>>,
 }
 
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
@@ -237,7 +237,7 @@ pub fn start(
     create_private_dir(&dir)?;
 
     // Ready to withdraw on SIGTERM before the descriptor can be visible.
-    let on_sigterm = remove_on_sigterm();
+    let on_sigterm = on_sigterm();
     let written: Written = Arc::new(Mutex::new(None));
     *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pending {
         dir,
@@ -496,52 +496,55 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Delete the descriptor put in the returned slot on SIGTERM, then exit as
-/// SIGTERM would. Ctrl-C (SIGINT) already returns through the listeners, which
-/// drops the [`Announcement`]. Returns once the handler is registered, so a
-/// SIGTERM right after the descriptor is written still withdraws it.
-fn remove_on_sigterm() -> Arc<Mutex<Option<PathBuf>>> {
-    let path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+/// The descriptor to delete on SIGTERM. The first call registers the handler,
+/// which deletes it (and what `--record` provisioned), then exits as SIGTERM
+/// would. Ctrl-C (SIGINT) already returns through the listeners, which drops
+/// the [`Announcement`]. Returns once the handler is registered, so a SIGTERM
+/// right after the descriptor is written still withdraws it.
+pub fn on_sigterm() -> &'static Mutex<Option<PathBuf>> {
+    static PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static HANDLER: OnceLock<()> = OnceLock::new();
 
-    #[cfg(unix)]
-    {
-        let slot = Arc::clone(&path);
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let path = slot;
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-
-            runtime.block_on(async {
-                let term =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
-                let _ = ready_tx.send(());
-                let Ok(mut term) = term else {
+    HANDLER.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
                     return;
                 };
 
-                if term.recv().await.is_some() {
-                    // Held until exit: a listener becoming ready meanwhile
-                    // waits on this slot instead of publishing after cleanup.
-                    let mut slot = path.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(p) = slot.take() {
-                        remove_descriptor(&p);
+                runtime.block_on(async {
+                    let term =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+                    let _ = ready_tx.send(());
+                    let Ok(mut term) = term else {
+                        return;
+                    };
+
+                    if term.recv().await.is_some() {
+                        // Held until exit: a listener becoming ready meanwhile
+                        // waits on this slot instead of publishing after cleanup.
+                        let mut slot = PATH.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(p) = slot.take() {
+                            remove_descriptor(&p);
+                        }
+                        stop_in_flight();
+                        super::record::cleanup();
+
+                        std::process::exit(143);
                     }
-                    stop_in_flight();
-
-                    std::process::exit(143);
-                }
+                });
             });
-        });
-        // A runtime that can't start never registers a handler; don't wait for it.
-        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
-    }
+            // A runtime that can't start never registers a handler; don't wait for it.
+            let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    });
 
-    path
+    &PATH
 }
 
 type StopHook = Box<dyn Fn() + Send>;
@@ -672,14 +675,14 @@ mod tests {
         let _guard = pending_lock();
         let dir = std::env::temp_dir().join(format!("agentbridge-held-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let slot: Written = Arc::new(Mutex::new(None));
+        let slot: &'static Mutex<Option<PathBuf>> = Box::leak(Box::new(Mutex::new(None)));
         *PENDING.lock().unwrap() = Some(Pending {
             dir: dir.join("workloads.d"),
             workload_id: "held-test".to_string(),
             descriptor: json!({ "name": "held-test" }),
             listeners: 1,
             written: Arc::new(Mutex::new(None)),
-            on_sigterm: Arc::clone(&slot),
+            on_sigterm: slot,
         });
         let path = dir.join("workloads.d/held-test.json");
 
@@ -729,7 +732,7 @@ mod tests {
             descriptor: json!({ "name": "cancel-test" }),
             listeners: 1,
             written: Arc::clone(&written),
-            on_sigterm: Arc::new(Mutex::new(None)),
+            on_sigterm: Box::leak(Box::new(Mutex::new(None))),
         });
 
         withdraw(&written);
@@ -752,7 +755,7 @@ mod tests {
             descriptor: json!({ "name": "ready-test" }),
             listeners: 2,
             written: Arc::clone(&written),
-            on_sigterm: Arc::new(Mutex::new(None)),
+            on_sigterm: Box::leak(Box::new(Mutex::new(None))),
         });
         let path = dir.join("workloads.d/ready-test.json");
 

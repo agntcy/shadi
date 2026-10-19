@@ -64,6 +64,24 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
 # (a record needs at least one OASF skill)
 agentbridge register --tool claude-code \
   --skill software_engineering/code_generation --dir-publish
+
+# Run an agent skill from a DIR record: pull it from a local dirctl daemon and
+# give its agent skills to a harness started without your own configuration
+# (claude-code-isolated / codex-isolated start the harness without your own
+# configuration; plain claude-code / codex work too, with a warning, and get the
+# skills in the work directory's .claude/skills or .agents/skills).
+# The isolated harness doesn't see your login: pass a credential it reads
+# (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for claude, OPENAI_API_KEY for
+# codex). Allow SHADI_TMP_DIR, which holds the run's config and the work dir,
+# and claude's install under ~/.local.
+mkdir -p "$SHADI_TMP_DIR/work"
+shadictl --net-block --net-allow 127.0.0.1:50051 --net-allow localhost:8888 \
+  --net-allow schema.oasf.outshift.com:443 --net-allow api.anthropic.com:443 \
+  --read ~/.dir --read ~/.config/dirctl --read ~/.local/bin --read ~/.local/share/claude \
+  --allow "$SHADI_TMP_DIR" -- \
+  agentbridge register --tool claude-code-isolated --command "$SHADI_TMP_DIR/work" \
+    --record code-review:1.0.0 --record-server localhost:8888 \
+    --a2a-listen 127.0.0.1:50051 --a2a-binding http+json
 ```
 
 What the agent card advertises:
@@ -87,7 +105,10 @@ What the agent card advertises:
   way to test offline.
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
-`cursor-agent`, `goose`, `opencode`.
+`cursor-agent`, `goose`, `opencode`, and `claude-code-isolated` / `codex-isolated` /
+`goose-isolated` / `opencode-isolated` (the same harnesses started with a fresh
+`HOME` and configuration per run, so they read none of your own skills or
+settings, for `--record`).
 
 ### `list` — discover registered adapters
 
