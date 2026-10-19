@@ -113,13 +113,17 @@ enum Cmd {
         skip_oasf_validation: bool,
 
         /// Announce this agent to runtime discovery (dir-runtime) while it runs:
-        /// write a process descriptor, and delete it on Ctrl-C or SIGTERM. Needs
-        /// --slim-endpoint or --a2a-listen.
+        /// write a process descriptor once the listeners are up, and delete it
+        /// on Ctrl-C or SIGTERM. Needs --slim-endpoint or --a2a-listen. What it
+        /// says (DID, locators, source record) is a claim nothing checks yet,
+        /// and the sandbox's `--write` on the descriptor directory is inherited
+        /// by the harness, which could rewrite any agent's descriptor.
         #[arg(long)]
         dir_announce: bool,
 
-        /// dir-runtime's descriptor directory (used with --dir-announce).
-        #[arg(long, env = "DIR_RUNTIME_WORKLOADS_DIR", default_value = commands::announce::DEFAULT_WORKLOADS_DIR)]
+        /// dir-runtime's descriptor directory (used with --dir-announce); the
+        /// same variable dir-runtime reads.
+        #[arg(long, env = "DISCOVERY_RUNTIME_PROCESS_DIR", default_value = commands::announce::DEFAULT_WORKLOADS_DIR)]
         dir_announce_dir: String,
 
         /// Address for an HTTP listener serving only the agent card at
@@ -133,7 +137,8 @@ enum Cmd {
         card_listen: Option<String>,
 
         /// CID of the OASF record the agent was built from, put on the announced
-        /// workload as org.agntcy/agent-record.
+        /// workload as org.agntcy/agent-record. Unchecked: any agent can name
+        /// any record, including another agent's verified one.
         #[arg(long, value_name = "CID")]
         source_record: Option<String>,
     },
