@@ -77,9 +77,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup Rust
         if: needs.changes.outputs.workspace == 'true'
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - name: Setup Python
         if: needs.changes.outputs.workspace == 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -96,7 +96,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install just
         if: runner.os == 'Windows' && needs.changes.outputs.workspace == 'true'
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: just
       - name: Set OpenSSL env vars (Windows)
@@ -144,9 +144,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup Rust
         if: needs.changes.outputs.workspace == 'true'
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: clippy
       - name: Setup Python
         if: needs.changes.outputs.workspace == 'true'
@@ -180,9 +180,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       # `cargo test` below does not pass --locked, so a PR that changes a
       # dependency without committing the lock would pass silently and leave
       # main to resolve it. `cargo metadata` resolves without compiling, so
