@@ -47,6 +47,16 @@ pub struct RecordOptions {
     pub reference: Option<String>,
     /// `--record-server`: the DIR node holding the record.
     pub server: String,
+    /// `--record-oidc-issuer` / `--record-oidc-subject`: whose signature counts.
+    pub signer: Option<Signer>,
+}
+
+/// The identity a record must be signed by (`dirctl verify --oidc-issuer
+/// --oidc-subject`; both are patterns dirctl matches).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signer {
+    pub issuer: String,
+    pub subject: String,
 }
 
 /// What the agent advertises and announces about the record it runs.
@@ -96,6 +106,7 @@ pub fn prepare(
         &profile,
         config_root.as_deref(),
         workdir,
+        opts.signer.as_ref(),
     )
     .inspect_err(|_| cleanup())?;
 
@@ -113,6 +124,7 @@ fn provision(
     profile: &CliProfile,
     config_root: Option<&Path>,
     workdir: &Path,
+    signer: Option<&Signer>,
 ) -> anyhow::Result<SourceRecord> {
     let tool = &profile.id;
     let skills_dir = profile.skills_dir(config_root, workdir).ok_or_else(|| {
@@ -134,18 +146,24 @@ fn provision(
     }
 
     let cid = resolve_cid(reference, server)?;
+    let signature = check_signature(&cid, server, signer)?;
     let record = pull(&cid, server)?;
     let modules = skill_modules(&record)?;
     let source = source_record(&cid, &record);
 
     eprintln!(
-        "[agentbridge] running DIR record {} {} ({}) from {}; signature: {}",
+        "[agentbridge] running DIR record {} {} ({}) from {}; signature: {signature}",
         printable(&source.name),
         printable(&source.version),
         source.cid,
         server,
-        signature_status(&cid, server)
     );
+    if reference != cid {
+        eprintln!(
+            "[agentbridge] '{}' resolved to {cid}; pass --record {cid} to run exactly this record",
+            printable(reference)
+        );
+    }
 
     match config_root {
         Some(root) => {
@@ -367,9 +385,15 @@ fn dirctl() -> String {
 /// Run `dirctl <command> --server-addr <server> --output json -- <operands>`
 /// and parse stdout.
 fn dirctl_json(args: &[&str], server: &str) -> anyhow::Result<Value> {
+    dirctl_json_with(args, &[], server)
+}
+
+/// [`dirctl_json`] with `flags` before the `--`.
+fn dirctl_json_with(args: &[&str], flags: &[&str], server: &str) -> anyhow::Result<Value> {
     let (command, operands) = args.split_first().unwrap_or((&"", &[]));
     let mut cmd = Command::new(dirctl());
     cmd.arg(command)
+        .args(flags)
         .args(["--server-addr", server, "--output", "json", "--"])
         .args(operands);
     // dirctl needs none of SHADI's or SLIM's settings, seeds included.
@@ -452,33 +476,63 @@ fn pull(cid: &str, server: &str) -> anyhow::Result<Value> {
     dirctl_json(&["pull", cid], server)
 }
 
-/// "unsigned (…)" or "trusted, signed by …", for the start-up log. Never fails:
-/// the signature is informative, not required.
-fn signature_status(cid: &str, server: &str) -> String {
-    match dirctl_json(&["verify", cid], server) {
-        Ok(value) => describe_verification(&value),
-        Err(e) => format!("unknown ({e})"),
+/// Check the record's signature and say what it shows, for the log. An
+/// unsigned record runs (signing is optional), but a signature that doesn't
+/// verify stops it. Without `signer`, a valid signature only shows *someone*
+/// signed the record, which the label says; with it, the signature must be
+/// that identity's.
+fn check_signature(cid: &str, server: &str, signer: Option<&Signer>) -> anyhow::Result<String> {
+    let mut flags = Vec::new();
+    if let Some(signer) = signer {
+        flags.extend(["--oidc-issuer", signer.issuer.as_str()]);
+        flags.extend(["--oidc-subject", signer.subject.as_str()]);
     }
+    let value = match dirctl_json_with(&["verify", cid], &flags, server) {
+        Ok(value) => value,
+        Err(e) if signer.is_some() => {
+            anyhow::bail!("could not check record {cid}'s signature against the pinned signer: {e}")
+        }
+        Err(e) => return Ok(format!("unknown ({e})")),
+    };
+    describe_verification(&value, signer).map_err(|e| anyhow::anyhow!("record {cid}: {e}"))
 }
 
-fn describe_verification(value: &Value) -> String {
+fn describe_verification(value: &Value, signer: Option<&Signer>) -> Result<String, String> {
     if value.get("success").and_then(Value::as_bool) == Some(true) {
+        if let Some(signer) = signer {
+            return Ok(format!(
+                "verified, signed by issuer {} subject {}",
+                printable(&signer.issuer),
+                printable(&signer.subject)
+            ));
+        }
         let signers: Vec<String> = value
             .get("signers")
             .and_then(Value::as_array)
-            .map(|signers| signers.iter().map(Value::to_string).collect())
+            .map(|signers| signers.iter().map(|s| printable(&s.to_string())).collect())
             .unwrap_or_default();
-        if signers.is_empty() {
-            return "trusted".to_string();
-        }
-        return format!("trusted, signed by {}", signers.join(", "));
+        let by = if signers.is_empty() {
+            "someone".to_string()
+        } else {
+            signers.join(", ")
+        };
+        return Ok(format!(
+            "signed by {by} (identity not checked; pin it with --record-oidc-issuer and \
+             --record-oidc-subject)"
+        ));
     }
 
     let reason = value
         .get("errorMessage")
         .and_then(Value::as_str)
         .unwrap_or("not verified");
-    format!("not trusted ({reason})")
+    if reason.contains("no signature") {
+        if signer.is_some() {
+            return Err("it is unsigned, but a signer was pinned".to_string());
+        }
+        return Ok("unsigned".to_string());
+    }
+    Err(format!("its signature doesn't verify: {}", printable(reason)))
 }
 
 fn class_names(record: &Value, key: &str) -> Vec<String> {
@@ -835,13 +889,73 @@ mod tests {
 
     #[test]
     fn verification_is_described_for_the_log() {
+        let unsigned = json!({ "errorMessage": "no signatures found" });
+        let signed = json!({ "success": true, "signers": ["someone@example.com"] });
+        let broken = json!({ "errorMessage": "signature verification failed" });
+        let pinned = Signer {
+            issuer: "https://github.com/login/oauth".into(),
+            subject: "me@example.com".into(),
+        };
+
+        assert_eq!(describe_verification(&unsigned, None).unwrap(), "unsigned");
+        let label = describe_verification(&signed, None).unwrap();
+        assert!(label.contains("identity not checked"), "{label}");
+        assert!(!label.contains("trusted"), "{label}");
+        assert!(describe_verification(&broken, None)
+            .unwrap_err()
+            .contains("doesn't verify"));
+
+        let label = describe_verification(&signed, Some(&pinned)).unwrap();
+        assert!(label.starts_with("verified"), "{label}");
+        assert!(describe_verification(&unsigned, Some(&pinned))
+            .unwrap_err()
+            .contains("signer was pinned"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_signer_is_passed_to_dirctl_verify() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("log");
+        let script = bin.path().join("dirctl");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho '{{\"success\":true}}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let signer = Signer {
+            issuer: "https://issuer".into(),
+            subject: "me@example.com".into(),
+        };
+
+        let label = check_signature("bafytestcid", "localhost:1", Some(&signer));
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert!(label.unwrap().starts_with("verified"));
+        let args = std::fs::read_to_string(&log).unwrap();
+        let args: Vec<&str> = args.lines().collect();
         assert_eq!(
-            describe_verification(&json!({ "errorMessage": "no signatures found" })),
-            "not trusted (no signatures found)"
-        );
-        assert_eq!(
-            describe_verification(&json!({ "success": true })),
-            "trusted"
+            args,
+            [
+                "verify",
+                "--oidc-issuer",
+                "https://issuer",
+                "--oidc-subject",
+                "me@example.com",
+                "--server-addr",
+                "localhost:1",
+                "--output",
+                "json",
+                "--",
+                "bafytestcid"
+            ]
         );
     }
 
@@ -897,7 +1011,7 @@ mod tests {
             "localhost:1",
             &profile,
             Some(root.path()),
-            Path::new("/unused"),
+            Path::new("/unused"), None
         );
         std::env::remove_var("SHADI_DIRCTL_BINARY");
 
@@ -920,7 +1034,7 @@ mod tests {
         let profile: CliProfile =
             serde_json::from_str(r#"{"id":"plain","bin":"true","execute":{"args":[]}}"#).unwrap();
 
-        let err = provision("x", "localhost:1", &profile, None, Path::new("/w"))
+        let err = provision("x", "localhost:1", &profile, None, Path::new("/w"), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("nowhere to put the record's skills"), "{err}");
@@ -940,8 +1054,8 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
 
         std::env::set_var("SHADI_DIRCTL_BINARY", &script);
-        let first = provision("code-review", "localhost:1", &profile, None, work.path());
-        let again = provision("code-review", "localhost:1", &profile, None, work.path());
+        let first = provision("code-review", "localhost:1", &profile, None, work.path(), None);
+        let again = provision("code-review", "localhost:1", &profile, None, work.path(), None);
         std::env::remove_var("SHADI_DIRCTL_BINARY");
 
         first.unwrap();
@@ -983,7 +1097,7 @@ mod tests {
         std::fs::create_dir_all(&mine).unwrap();
 
         std::env::set_var("SHADI_DIRCTL_BINARY", &script);
-        let err = provision("two", "localhost:1", &profile, None, work.path()).unwrap_err();
+        let err = provision("two", "localhost:1", &profile, None, work.path(), None).unwrap_err();
         std::env::remove_var("SHADI_DIRCTL_BINARY");
 
         assert!(err.to_string().contains("has no SKILL.md"), "{err}");
@@ -1020,7 +1134,7 @@ mod tests {
             "localhost:1",
             &profile,
             Some(root.path()),
-            Path::new("/w"),
+            Path::new("/w"), None
         )
         .unwrap_err()
         .to_string();
@@ -1218,7 +1332,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafytestcid\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{}}' ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafytestcid\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"errorMessage\":\"no signatures found\"}}' ;;\nesac\n",
                 bin.path().join("record.json").display()
             ),
         )

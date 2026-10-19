@@ -156,6 +156,10 @@ pub struct CliProfile {
     /// Copy every host env var whose name ends with one of these suffixes.
     #[serde(default)]
     pub pass_env_suffixes: Vec<String>,
+    /// Refuse to run outside an enforced SHADI sandbox (e.g. a harness run
+    /// without its own approvals or sandbox).
+    #[serde(default)]
+    pub require_sandbox: bool,
     #[serde(default)]
     pub stdin_null: bool,
     /// How to start the harness without the host user's configuration, for
@@ -397,7 +401,25 @@ impl ProfileAdapter {
             )));
         }
 
+        if self.profile.require_sandbox && !shadi_sandbox::sandbox_enforced() {
+            return Err(CliAdapterError::Subprocess(format!(
+                "profile '{}' runs {} without its own approvals or sandbox, so it only runs \
+                 under the SHADI sandbox (shadictl --net-block)",
+                self.profile.id, self.profile.bin
+            )));
+        }
+
         let mut cmd = Command::new(&self.profile.bin);
+        if self.isolation().is_some() {
+            // Isolated: none of the user's environment (tokens, agent
+            // sockets) but the basics and what the profile names.
+            cmd.env_clear();
+            for (key, value) in std::env::vars_os() {
+                if key.to_str().is_some_and(is_basic_env) {
+                    cmd.env(key, value);
+                }
+            }
+        }
         if self.profile.pin_tmpdir {
             pin_tmpdir(&mut cmd, &self.work_dir);
         }
@@ -479,9 +501,22 @@ fn split_large_prompt(
 }
 
 /// Host env vars this profile should copy onto the child. Values are not logged.
+/// What an isolated harness gets from the environment besides what its
+/// profile names: how to find programs, the locale and terminal, who the user
+/// is, temp, TLS trust and proxy settings.
+fn is_basic_env(key: &str) -> bool {
+    const BASIC: &[&str] = &[
+        "PATH", "LANG", "LANGUAGE", "TERM", "COLORTERM", "TZ", "USER", "LOGNAME", "SHELL",
+        "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "HTTP_PROXY",
+        "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "all_proxy", "__CF_USER_TEXT_ENCODING",
+    ];
+    BASIC.contains(&key) || key.starts_with("LC_")
+}
+
 fn collect_pass_env(profile: &CliProfile) -> BTreeMap<String, String> {
     let mut names: Vec<String> = profile.pass_env.clone();
-    if profile.id == "goose" {
+    if profile.bin == "goose" {
         names.extend(goose_provider_api_key_env_names());
     }
     let mut out = BTreeMap::new();
@@ -1286,6 +1321,61 @@ echo '{"result":"ok","session_id":"sid-9"}'
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[test]
+    fn an_isolated_harness_gets_only_the_basics_and_what_its_profile_names() {
+        let profile = parse_profile(
+            r#"{
+              "id": "iso-env",
+              "bin": "/bin/sh",
+              "current_dir_workdir": false,
+              "pass_env": ["ISO_TEST_API_KEY"],
+              "isolation": { "env": { "HOME": "{config_root}" } },
+              "execute": { "args": ["-c", "env", "sh", "{prompt}"] }
+            }"#,
+        )
+        .unwrap();
+        std::env::set_var("ISO_TEST_API_KEY", "kept");
+        std::env::set_var("ISO_TEST_GITHUB_TOKEN", "dropped");
+        let root = tempfile::tempdir().unwrap();
+
+        let isolated = ProfileAdapter::new(profile.clone(), std::env::temp_dir())
+            .with_config_root(root.path());
+        let env = isolated.execute_prompt("x").unwrap();
+        let plain = ProfileAdapter::new(
+            CliProfile {
+                isolation: None,
+                ..profile
+            },
+            std::env::temp_dir(),
+        )
+        .execute_prompt("x")
+        .unwrap();
+
+        std::env::remove_var("ISO_TEST_API_KEY");
+        std::env::remove_var("ISO_TEST_GITHUB_TOKEN");
+        assert!(env.contains("ISO_TEST_API_KEY=kept"), "{env}");
+        assert!(env.contains("PATH="), "{env}");
+        assert!(!env.contains("ISO_TEST_GITHUB_TOKEN"), "{env}");
+        assert!(plain.contains("ISO_TEST_GITHUB_TOKEN=dropped"), "a plain profile is unchanged");
+    }
+
+    #[test]
+    fn a_profile_that_requires_the_sandbox_refuses_to_run_without_it() {
+        let profile = parse_profile(
+            r#"{"id":"needs-sandbox","bin":"/bin/echo","require_sandbox":true,
+                "execute":{"args":["{prompt}"]}}"#,
+        )
+        .unwrap();
+        // Tests don't run under shadictl.
+        assert!(!shadi_sandbox::sandbox_enforced());
+        let err = ProfileAdapter::new(profile, std::env::temp_dir())
+            .execute_prompt("x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only runs under the SHADI sandbox"), "{err}");
+    }
+
     fn isolated_env_profile() -> CliProfile {
         parse_profile(
             r#"{

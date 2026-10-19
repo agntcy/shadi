@@ -1,6 +1,7 @@
 {
   "id": "claude-code-isolated",
   "bin": "claude",
+  "pass_env_prefixes": ["ANTHROPIC_", "CLAUDE_CODE_"],
   "pin_tmpdir": true,
   "env": {
     "TMPDIR": "{workdir}",

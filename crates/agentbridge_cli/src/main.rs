@@ -158,6 +158,18 @@ enum Cmd {
         /// DIR node holding the --record (e.g. a local `dirctl daemon`).
         #[arg(long, value_name = "ADDR", default_value = commands::record::DEFAULT_RECORD_SERVER)]
         record_server: String,
+
+        /// OIDC issuer the --record's signature must come from (a pattern, as
+        /// `dirctl verify --oidc-issuer`). With --record-oidc-subject, a record
+        /// not signed by that identity doesn't run; without them a valid
+        /// signature is reported as unchecked.
+        #[arg(long, value_name = "ISSUER", requires = "record_oidc_subject")]
+        record_oidc_issuer: Option<String>,
+
+        /// OIDC subject the --record's signature must come from (a pattern, as
+        /// `dirctl verify --oidc-subject`).
+        #[arg(long, value_name = "SUBJECT", requires = "record_oidc_issuer")]
+        record_oidc_subject: Option<String>,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -443,6 +455,8 @@ fn main() {
             no_source_record,
             record,
             record_server,
+            record_oidc_issuer,
+            record_oidc_subject,
         } => {
             // Both serve or announce a listener, so they need one.
             let needs_listener = slim_endpoint.is_none()
@@ -462,6 +476,9 @@ fn main() {
             let record_opts = commands::record::RecordOptions {
                 reference: record,
                 server: record_server,
+                signer: record_oidc_issuer.zip(record_oidc_subject).map(|(issuer, subject)| {
+                    commands::record::Signer { issuer, subject }
+                }),
             };
             let mut card_opts = commands::card::CardOptions {
                 skills,
