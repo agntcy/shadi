@@ -174,8 +174,9 @@ impl CardConfig {
     }
 
     /// The card extensions: the OASF `discovery` extension, when the agent has
-    /// a skill. It is named after the canonical OASF schema whichever server
-    /// checked it, since that is the name dir-runtime indexes.
+    /// a skill. It names the schema its classes come from (`--oasf-schema-url`,
+    /// agntcy/oasf#549), which is also the server that checks them; consumers
+    /// read it only from schema servers they accept.
     pub fn extensions(&self) -> Vec<AgentExtension> {
         if self.skills.is_empty() {
             return Vec::new();
@@ -183,8 +184,8 @@ impl CardConfig {
 
         vec![AgentExtension {
             uri: format!(
-                "{DEFAULT_OASF_SCHEMA_URL}/{}/objects/discovery",
-                self.schema_version
+                "{}/{}/objects/discovery",
+                self.schema_url, self.schema_version
             ),
             description: Some("OASF skills and domains".to_string()),
             required: Some(false),
@@ -242,8 +243,11 @@ fn without_tls_panics(
 fn ask_validator(config: &CardConfig, url: &str) -> anyhow::Result<()> {
     let url = url.to_string();
 
+    // No redirects: one could lead from an accepted server to plain http,
+    // where anyone on the path could answer that everything is valid.
     let client = reqwest::blocking::Client::builder()
         .timeout(VALIDATION_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let response = client
@@ -404,8 +408,8 @@ mod tests {
         assert_eq!(extensions.len(), 1);
         assert_eq!(
             extensions[0].uri,
-            "https://schema.oasf.outshift.com/1.1.0/objects/discovery",
-            "named after the canonical schema, not the server that checked it"
+            "http://localhost:8080/1.1.0/objects/discovery",
+            "named after the schema the classes come from"
         );
 
         let params = extensions[0].params.as_ref().expect("params");
@@ -549,6 +553,26 @@ mod tests {
         assert!(err.contains("--skip-oasf-validation"), "{err}");
 
         assert!(without_tls_panics("u", || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn a_redirect_from_the_validator_is_not_followed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://attacker.example/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let err = validate(&config_for(format!("http://{addr}")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HTTP 307"), "{err}");
     }
 
     #[test]

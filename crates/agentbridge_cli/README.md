@@ -75,12 +75,16 @@ What the agent card advertises:
 - `--advertise-url <url>` is the address clients use for `--a2a-listen` when
   it differs from the listen address, e.g. a published container port.
   Publishing a wildcard listen address (`0.0.0.0`) to DIR needs it.
-- Skills and domains are checked against the OASF server
-  (`--oasf-schema-url`, `--oasf-schema-version`, default
-  `https://schema.oasf.outshift.com` 1.1.0) once at startup. Under
-  `shadictl --net-block` that needs `--net-allow schema.oasf.outshift.com:443`
-  for the listener's lifetime; `--skip-oasf-validation` advertises them
-  unchecked instead. A plain-http server is accepted only on loopback.
+- `--oasf-schema-url` and `--oasf-schema-version` (default
+  `https://schema.oasf.outshift.com` 1.1.0) name the schema the skills and
+  domains come from: the card's extension is
+  `<url>/<version>/objects/discovery`, and that server checks them once at
+  startup (plain http only on loopback). Consumers such as dir-runtime read the
+  extension only for schema servers they accept, so a private schema is found
+  only where it is accepted. Under `shadictl --net-block` validation needs
+  `--net-allow schema.oasf.outshift.com:443` for the listener's lifetime;
+  `--skip-oasf-validation` advertises them unchecked instead, which is also the
+  way to test offline.
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 `cursor-agent`, `goose`, `opencode`.

@@ -1093,6 +1093,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn fake_dirctl_script(cid: &str, record_json: &str) -> (std::path::PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("fake_dirctl.sh");
