@@ -111,6 +111,36 @@ enum Cmd {
         /// Advertise skills and domains without checking them against the OASF server.
         #[arg(long)]
         skip_oasf_validation: bool,
+
+        /// Announce this agent to runtime discovery (dir-runtime) while it runs:
+        /// write a process descriptor once the listeners are up, and delete it
+        /// on Ctrl-C or SIGTERM. Needs --slim-endpoint or --a2a-listen. What it
+        /// says (DID, locators, source record) is a claim nothing checks yet,
+        /// and the sandbox's `--write` on the descriptor directory is inherited
+        /// by the harness, which could rewrite any agent's descriptor.
+        #[arg(long)]
+        dir_announce: bool,
+
+        /// dir-runtime's descriptor directory (used with --dir-announce); the
+        /// same variable dir-runtime reads.
+        #[arg(long, env = "DISCOVERY_RUNTIME_PROCESS_DIR", default_value = commands::announce::DEFAULT_WORKLOADS_DIR)]
+        dir_announce_dir: String,
+
+        /// Address for an HTTP listener serving only the agent card at
+        /// /.well-known/agent-card.json, so runtime discovery can read it. With
+        /// --dir-announce and a SLIM or gRPC binding, a free loopback port is used
+        /// when unset (under `shadictl --net-block`, set one and allow it). Set it
+        /// to publish the card from a container (e.g. 0.0.0.0:8081) labelled
+        /// `org.agntcy/discover=true` and `org.agntcy/agent-type=a2a`; it works
+        /// without --dir-announce too, but needs --slim-endpoint or --a2a-listen.
+        #[arg(long)]
+        card_listen: Option<String>,
+
+        /// CID of the OASF record the agent was built from, put on the announced
+        /// workload as org.agntcy/agent-record. Unchecked: any agent can name
+        /// any record, including another agent's verified one.
+        #[arg(long, value_name = "CID")]
+        source_record: Option<String>,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -329,11 +359,12 @@ fn parse_validator_url(raw: &str) -> Result<String, String> {
 }
 
 /// `--advertise-url` only replaces the `--a2a-listen` address, and a
-/// wildcard address can't be reached at, so it isn't published as is.
+/// wildcard address can't be reached at, so it isn't published (`advertised_by`
+/// names the flag that would: `--dir-publish` or `--dir-announce`) as is.
 fn advertisable(
     a2a_listen: Option<&str>,
     advertise_url: Option<&str>,
-    dir_publish: bool,
+    advertised_by: Option<&str>,
 ) -> anyhow::Result<()> {
     let Some(listen) = a2a_listen else {
         if advertise_url.is_some() {
@@ -344,9 +375,9 @@ fn advertisable(
     let wildcard = listen
         .parse::<std::net::SocketAddr>()
         .is_ok_and(|a| a.ip().is_unspecified());
-    if dir_publish && wildcard && advertise_url.is_none() {
+    if let Some(flag) = advertised_by.filter(|_| wildcard && advertise_url.is_none()) {
         anyhow::bail!(
-            "--dir-publish would publish {listen}, which clients can't connect to; \
+            "{flag} would advertise {listen}, which clients can't connect to; \
              pass --advertise-url with the address they reach the listener at"
         );
     }
@@ -388,7 +419,26 @@ fn main() {
             oasf_schema_url,
             oasf_schema_version,
             skip_oasf_validation,
+            dir_announce,
+            dir_announce_dir,
+            card_listen,
+            source_record,
         } => {
+            // Both serve or announce a listener, so they need one.
+            let needs_listener = slim_endpoint.is_none()
+                && a2a_listen.is_none()
+                && (dir_announce || card_listen.is_some());
+            let listener_flag = if dir_announce {
+                "--dir-announce"
+            } else {
+                "--card-listen"
+            };
+            let announce_opts = commands::announce::AnnounceOptions {
+                enabled: dir_announce,
+                dir: dir_announce_dir,
+                card_listen,
+                source_record,
+            };
             let card_opts = commands::card::CardOptions {
                 skills,
                 domains,
@@ -402,37 +452,51 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            publishable(dir_publish, &card_opts.skills)
-                .and_then(|()| {
-                    advertisable(
-                        a2a_listen.as_deref(),
-                        card_opts.advertise_url.as_deref(),
-                        dir_publish,
-                    )
-                })
-                // A bad tool or a missing sandbox fails before the OASF
-                // server is asked.
-                .and_then(|()| {
-                    commands::register::preflight(
-                        &tool,
-                        command.as_deref(),
-                        slim_endpoint.as_deref(),
-                        a2a_listen.as_deref(),
-                    )
-                })
-                .and_then(|()| commands::card::configure(&card_opts))
-                .and_then(|()| {
-                    commands::register::run(
-                        &tool,
-                        command.as_deref(),
-                        &args,
-                        slim_endpoint.as_deref(),
-                        a2a_listen.as_deref(),
-                        a2a_binding,
-                        publish_opts,
-                        verbose,
-                    )
-                })
+            if needs_listener {
+                Err(anyhow::anyhow!(
+                    "{listener_flag} needs an A2A listener: pass --slim-endpoint or --a2a-listen"
+                ))
+            } else {
+                Ok(())
+            }
+            .and_then(|()| commands::announce::configure(announce_opts))
+            .and_then(|()| publishable(dir_publish, &card_opts.skills))
+            .and_then(|()| {
+                advertisable(
+                    a2a_listen.as_deref(),
+                    card_opts.advertise_url.as_deref(),
+                    if dir_publish {
+                        Some("--dir-publish")
+                    } else if dir_announce {
+                        Some("--dir-announce")
+                    } else {
+                        None
+                    },
+                )
+            })
+            // A bad tool or a missing sandbox fails before the OASF server is
+            // asked.
+            .and_then(|()| {
+                commands::register::preflight(
+                    &tool,
+                    command.as_deref(),
+                    slim_endpoint.as_deref(),
+                    a2a_listen.as_deref(),
+                )
+            })
+            .and_then(|()| commands::card::configure(&card_opts))
+            .and_then(|()| {
+                commands::register::run(
+                    &tool,
+                    command.as_deref(),
+                    &args,
+                    slim_endpoint.as_deref(),
+                    a2a_listen.as_deref(),
+                    a2a_binding,
+                    publish_opts,
+                    verbose,
+                )
+            })
         }
         Cmd::List {
             local,
@@ -637,12 +701,16 @@ mod tests {
     #[test]
     fn advertise_url_needs_a_listener_and_a_wildcard_needs_one_to_publish() {
         let url = Some("https://agent.example:8443");
-        assert!(advertisable(None, url, false).is_err());
-        assert!(advertisable(None, None, true).is_ok());
-        assert!(advertisable(Some("0.0.0.0:8443"), None, true).is_err());
-        assert!(advertisable(Some("0.0.0.0:8443"), url, true).is_ok());
-        assert!(advertisable(Some("0.0.0.0:8443"), None, false).is_ok());
-        assert!(advertisable(Some("127.0.0.1:8443"), None, true).is_ok());
+        let publish = Some("--dir-publish");
+        let announce = Some("--dir-announce");
+        assert!(advertisable(None, url, None).is_err());
+        assert!(advertisable(None, None, publish).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, publish).is_err());
+        let err = advertisable(Some("0.0.0.0:8443"), None, announce).unwrap_err();
+        assert!(err.to_string().starts_with("--dir-announce"), "{err}");
+        assert!(advertisable(Some("0.0.0.0:8443"), url, announce).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, None).is_ok());
+        assert!(advertisable(Some("127.0.0.1:8443"), None, publish).is_ok());
     }
 
     #[test]
