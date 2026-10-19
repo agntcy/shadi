@@ -484,6 +484,29 @@ fn main() {
                 Ok(())
             }
             .and_then(|()| {
+                advertisable(
+                    a2a_listen.as_deref(),
+                    card_opts.advertise_url.as_deref(),
+                    if dir_publish {
+                        Some("--dir-publish")
+                    } else if dir_announce {
+                        Some("--dir-announce")
+                    } else {
+                        None
+                    },
+                )
+            })
+            // A bad tool or a missing sandbox fails before DIR or the OASF
+            // server is asked.
+            .and_then(|()| {
+                commands::register::preflight(
+                    &tool,
+                    command.as_deref(),
+                    slim_endpoint.as_deref(),
+                    a2a_listen.as_deref(),
+                )
+            })
+            .and_then(|()| {
                 commands::record::prepare(
                     &record_opts,
                     &tool,
@@ -500,29 +523,6 @@ fn main() {
                 commands::announce::configure(announce_opts)
             })
             .and_then(|()| publishable(dir_publish, &card_opts.skills))
-            .and_then(|()| {
-                advertisable(
-                    a2a_listen.as_deref(),
-                    card_opts.advertise_url.as_deref(),
-                    if dir_publish {
-                        Some("--dir-publish")
-                    } else if dir_announce {
-                        Some("--dir-announce")
-                    } else {
-                        None
-                    },
-                )
-            })
-            // A bad tool or a missing sandbox fails before the OASF server is
-            // asked.
-            .and_then(|()| {
-                commands::register::preflight(
-                    &tool,
-                    command.as_deref(),
-                    slim_endpoint.as_deref(),
-                    a2a_listen.as_deref(),
-                )
-            })
             .and_then(|()| commands::card::configure(&card_opts))
             .and_then(|()| {
                 commands::register::run(

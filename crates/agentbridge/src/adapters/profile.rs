@@ -387,6 +387,16 @@ impl ProfileAdapter {
             include_workdir_flags,
         );
 
+        // An isolated profile without its config root would run the harness
+        // with the user's own configuration, which is what it promises not to.
+        if self.profile.isolation.is_some() && self.config_root.is_none() {
+            return Err(CliAdapterError::Subprocess(format!(
+                "profile '{}' runs isolated and needs a config root, which only \
+                 `register --record` provisions; use the plain profile here",
+                self.profile.id
+            )));
+        }
+
         let mut cmd = Command::new(&self.profile.bin);
         if self.profile.pin_tmpdir {
             pin_tmpdir(&mut cmd, &self.work_dir);
@@ -1309,9 +1319,10 @@ echo '{"result":"ok","session_id":"sid-9"}'
             profile.skills_dir(Some(root.path()), Path::new("/w")),
             Some(root.path().join("skills"))
         );
-        assert!(ProfileAdapter::new(profile, std::env::temp_dir())
-            .isolation()
-            .is_none());
+        let unrooted = ProfileAdapter::new(profile, std::env::temp_dir());
+        assert!(unrooted.isolation().is_none());
+        let err = unrooted.execute_prompt("ignored").unwrap_err().to_string();
+        assert!(err.contains("needs a config root"), "{err}");
     }
 
     #[test]

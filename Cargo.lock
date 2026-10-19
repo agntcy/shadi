@@ -232,6 +232,7 @@ dependencies = [
  "clap",
  "flate2",
  "futures",
+ "libc",
  "opentelemetry",
  "opentelemetry_sdk",
  "reqwest",
