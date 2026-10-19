@@ -65,6 +65,7 @@ const ESSENTIAL_MACH_SERVICES: &[&str] = &[
 #[cfg(not(any(test, feature = "coverage")))]
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
+    let profile = with_program_readable(profile, resolve_program(command).as_deref(), policy)?;
     let profile_cstr = CString::new(profile).map_err(|_| SandboxError::InvalidConfig)?;
 
     unsafe {
@@ -87,6 +88,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
 #[cfg(any(test, feature = "coverage"))]
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
+    let profile = with_program_readable(profile, resolve_program(command).as_deref(), policy)?;
     let profile_cstr = CString::new(profile).map_err(|_| SandboxError::InvalidConfig)?;
     apply_profile(profile_cstr.as_c_str())?;
     let child = command.spawn().map_err(|err| SandboxError::SpawnFailed(err.to_string()))?;
@@ -399,6 +401,73 @@ fn swap_prefix(path: &std::path::Path, from: &str, to: &str) -> Option<std::path
 
 /// Lexical path plus the `/private` symlink alias, so `/tmp` and
 /// `/private/tmp` (and the same pair for `/etc` and `/var`) both match.
+/// Let the sandboxed program read its own executable. macOS's Security
+/// framework reads it when building a TLS policy: without this,
+/// `SecPolicyCreateSSL` returns NULL for a program outside the granted paths
+/// and HTTPS fails (security-framework panics on the NULL). Only that one
+/// file is granted, and not when the policy denies it.
+fn with_program_readable(
+    mut profile: String,
+    program: Option<&std::path::Path>,
+    policy: &SandboxPolicy,
+) -> Result<String, SandboxError> {
+    let Some(program) = program else {
+        return Ok(profile);
+    };
+    let denied = policy.deny().iter().any(|deny| {
+        seatbelt_spellings(deny)
+            .iter()
+            .any(|d| seatbelt_spellings(program).iter().any(|p| p.starts_with(d)))
+    });
+    if denied {
+        return Ok(profile);
+    }
+    for spelling in seatbelt_spellings(program) {
+        let Some(s) = spelling.to_str() else {
+            return Err(SandboxError::InvalidConfig);
+        };
+        let s = escape_profile_string(s)?;
+        profile.push_str(&format!("\n(allow file-read* (literal \"{s}\"))"));
+        // The framework resolves the path, so it stats each parent too:
+        // metadata only, as for --read.
+        let mut ancestor = spelling.parent();
+        while let Some(dir) = ancestor {
+            if dir == std::path::Path::new("/") {
+                break;
+            }
+            let Some(d) = dir.to_str() else { break };
+            let d = escape_profile_string(d)?;
+            profile.push_str(&format!("\n(allow file-read-metadata (literal \"{d}\"))"));
+            ancestor = dir.parent();
+        }
+    }
+    Ok(profile)
+}
+
+/// The executable `command` will run: a path as given (relative to its
+/// working directory), or the first match on its `PATH`, with symlinks
+/// resolved. `None` when it can't be found; the spawn then reports that.
+fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
+    let program = std::path::Path::new(command.get_program());
+    let candidate = if program.components().count() > 1 || program.is_absolute() {
+        let base = command
+            .get_current_dir()
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())?;
+        base.join(program)
+    } else {
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+            .or_else(|| std::env::var_os("PATH"))?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|p| p.is_file())?
+    };
+    std::fs::canonicalize(candidate).ok()
+}
+
 fn seatbelt_spellings(path: &std::path::Path) -> Vec<std::path::PathBuf> {
     let lexical = resolve_path(path);
     let mut out = Vec::new();
@@ -774,6 +843,52 @@ mod tests {
         } else {
             std::env::remove_var("TMPDIR");
         }
+    }
+
+    #[test]
+    fn the_program_can_read_its_own_executable() {
+        let policy = SandboxPolicy::default();
+        let program = std::path::Path::new("/Users/someone/bin/agentbridge");
+        let profile = with_program_readable(String::new(), Some(program), &policy).unwrap();
+        assert!(
+            profile.contains("(allow file-read* (literal \"/Users/someone/bin/agentbridge\"))"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains("(allow file-read-metadata (literal \"/Users/someone/bin\"))"),
+            "{profile}"
+        );
+        assert!(!profile.contains("subpath"), "only the file: {profile}");
+    }
+
+    #[test]
+    fn a_denied_program_stays_unreadable() {
+        let policy = SandboxPolicy::default().deny_path("/Users/someone/bin");
+        let program = std::path::Path::new("/Users/someone/bin/agentbridge");
+        let profile = with_program_readable(String::new(), Some(program), &policy).unwrap();
+        assert!(profile.is_empty(), "{profile}");
+    }
+
+    #[test]
+    fn the_program_is_found_on_the_commands_path() {
+        let dir = std::env::temp_dir().join(format!("shadi-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("my-tool");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        let mut cmd = Command::new("my-tool");
+        cmd.env("PATH", &dir);
+        assert_eq!(
+            resolve_program(&cmd),
+            Some(std::fs::canonicalize(&exe).unwrap())
+        );
+        let mut cmd = Command::new("./my-tool");
+        cmd.current_dir(&dir);
+        assert_eq!(
+            resolve_program(&cmd),
+            Some(std::fs::canonicalize(&exe).unwrap())
+        );
+        assert_eq!(resolve_program(&Command::new("no-such-tool-xyz")), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── mach-lookup gating tests ───────────────────────────────────────────
