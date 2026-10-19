@@ -234,7 +234,7 @@ fn start_listeners(
             let http_adapter = Arc::clone(&adapter);
             let http_tool = tool.to_string();
             let http_listen = listen.to_string();
-            let descriptor = announcement.as_ref().map(|a| a.path().to_path_buf());
+            let announced = announcement.as_ref().map(|a| a.written());
             std::thread::spawn(move || {
                 if let Err(err) = run_unicast_listener(
                     &http_tool,
@@ -245,14 +245,16 @@ fn start_listeners(
                     false,
                     verbose,
                 ) {
-                    // Don't keep serving (and announcing) only half the agent.
-                    eprintln!(
-                        "[agentbridge] {} listener: {err}; stopping",
-                        a2a_binding.as_protocol_binding()
-                    );
-                    if let Some(path) = descriptor {
-                        super::announce::withdraw(&path);
-                    }
+                    let binding = a2a_binding.as_protocol_binding();
+                    // Announced, don't keep serving (and announcing) only half
+                    // the agent; otherwise SLIM carries on, as before.
+                    let Some(written) = announced else {
+                        eprintln!("[agentbridge] {binding} listener: {err}");
+                        return;
+                    };
+                    eprintln!("[agentbridge] {binding} listener: {err}; stopping");
+                    super::announce::withdraw(&written);
+                    super::announce::stop_in_flight();
                     std::process::exit(1);
                 }
             });
@@ -1169,6 +1171,7 @@ fn run_slim_listener(
 
         tokio::time::sleep(Duration::from_millis(300)).await;
         println!("[agentbridge] ready — listening on {agent_name}");
+        super::announce::listener_ready();
         println!("[agentbridge] Press Ctrl-C to stop.");
 
         tokio::signal::ctrl_c()
@@ -1574,6 +1577,7 @@ fn run_unicast_listener(
             "[agentbridge] ready — A2A {} on {a2a_url}",
             a2a_binding.as_protocol_binding()
         );
+        super::announce::listener_ready();
         println!("[agentbridge] Press Ctrl-C to stop.");
         match a2a_binding {
             A2ABinding::Slim => {
@@ -1583,7 +1587,8 @@ fn run_unicast_listener(
                 let grpc_service = A2aServiceServer::new(GrpcHandler::new(handler));
                 match grpc_server_tls_config(&addr)? {
                     Some(tls) => {
-                        let incoming = TcpIncoming::from(tokio_listener(listener)?);
+                        let incoming =
+                            TcpIncoming::from(tokio_listener(listener)?).with_nodelay(Some(true));
                         let incoming = tonic_tls::rustls::TlsIncoming::new(incoming, tls);
                         tokio::select! {
                             result = TonicServer::builder()
@@ -1599,7 +1604,8 @@ fn run_unicast_listener(
                         }
                     }
                     None => {
-                        let incoming = TcpIncoming::from(tokio_listener(listener)?);
+                        let incoming =
+                            TcpIncoming::from(tokio_listener(listener)?).with_nodelay(Some(true));
                         tokio::select! {
                             result = TonicServer::builder()
                                 .add_service(grpc_service)

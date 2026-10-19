@@ -65,36 +65,100 @@ pub struct Locator {
     pub url: String,
 }
 
-/// A written descriptor. Dropping it deletes the file; a SIGTERM deletes it
-/// too, and a crash leaves it to dir-runtime's PID check.
+/// An announcement. The descriptor is written once every listener is ready
+/// ([`listener_ready`]); dropping this deletes it, a SIGTERM deletes it too,
+/// and a crash leaves it to dir-runtime's PID check.
 pub struct Announcement {
-    path: PathBuf,
+    path: Written,
 }
 
+/// Where the descriptor was written, once it is.
+pub type Written = Arc<Mutex<Option<PathBuf>>>;
+
 impl Announcement {
-    /// The descriptor, for [`withdraw`] from a thread that outlives this guard.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The descriptor's slot, for [`withdraw`] from a thread that outlives
+    /// this guard.
+    pub fn written(&self) -> Written {
+        Arc::clone(&self.path)
     }
 }
 
 impl Drop for Announcement {
     fn drop(&mut self) {
-        remove_descriptor(&self.path);
+        withdraw(&self.path);
     }
 }
 
-/// Delete an announcement's descriptor before exiting without unwinding.
-pub fn withdraw(path: &Path) {
-    remove_descriptor(path);
+/// Delete an announcement's descriptor, if written, before exiting without
+/// unwinding.
+pub fn withdraw(written: &Written) {
+    if let Some(path) = written.lock().ok().and_then(|mut p| p.take()) {
+        remove_descriptor(&path);
+    }
+}
+
+/// A descriptor waiting for its listeners.
+struct Pending {
+    dir: PathBuf,
+    workload_id: String,
+    descriptor: Value,
+    listeners: usize,
+    written: Written,
+    on_sigterm: Written,
+}
+
+static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
+
+/// Called by each listener once it serves (SLIM connected, unicast bound).
+/// When the last one is ready, the descriptor is written, so dir-runtime never
+/// lists a locator that doesn't answer yet. Without `--dir-announce`, nothing.
+pub fn listener_ready() {
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(p) = pending.as_mut() else {
+        return;
+    };
+    p.listeners = p.listeners.saturating_sub(1);
+    if p.listeners > 0 {
+        return;
+    }
+    let Some(p) = pending.take() else {
+        return;
+    };
+
+    // The SIGTERM slot is held while the file appears: a SIGTERM meanwhile
+    // waits for the path.
+    let mut slot = p.on_sigterm.lock().unwrap_or_else(|e| e.into_inner());
+    match write_descriptor(&p.dir, &p.workload_id, &p.descriptor) {
+        Ok(path) => {
+            *slot = Some(path.clone());
+            if let Ok(mut written) = p.written.lock() {
+                *written = Some(path.clone());
+            }
+            let _ = writeln!(
+                std::io::stdout(),
+                "[agentbridge] announced to dir-runtime as {} ({})",
+                p.workload_id,
+                path.display()
+            );
+        }
+        Err(e) => {
+            // --dir-announce was asked for: an agent nobody can discover isn't
+            // what was started.
+            let _ = writeln!(std::io::stderr(), "[agentbridge] {e}; stopping");
+            stop_in_flight();
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Start announcing this `register`, if `--dir-announce` is set.
 ///
 /// `card` builds the agent card that the card listener serves; `locators` are
-/// the A2A endpoints the listeners are about to serve. When `serves_card` is
-/// false (SLIM and gRPC don't serve `/.well-known/agent-card.json`), an HTTP
-/// listener just for the card is started first.
+/// the A2A endpoints the listeners are about to serve, one per listener. When
+/// `serves_card` is false (SLIM and gRPC don't serve
+/// `/.well-known/agent-card.json`), an HTTP listener just for the card is
+/// started first. The descriptor itself is written when every listener has
+/// called [`listener_ready`].
 pub fn start(
     agent_id: &str,
     agent_did: Option<&str>,
@@ -126,9 +190,10 @@ pub fn start(
     }
     if opts.dir.trim().is_empty() {
         anyhow::bail!(
-            "the descriptor directory (--dir-announce-dir / DIR_RUNTIME_WORKLOADS_DIR) is empty"
+            "the descriptor directory (--dir-announce-dir / DISCOVERY_RUNTIME_PROCESS_DIR) is empty"
         );
     }
+    let listeners = locators.len();
 
     if !serves_card || opts.card_listen.is_some() {
         let addr = serve_card(opts.card_listen.as_deref(), card)?;
@@ -154,22 +219,22 @@ pub fn start(
             source_record: opts.source_record.as_deref(),
         },
     );
-    // Ready to withdraw on SIGTERM before the descriptor is visible, and the
-    // slot held while it is published: a SIGTERM meanwhile waits for the path.
+    // Fail now, not once the listeners are up, if the directory can't be made.
+    create_private_dir(&dir)?;
+
+    // Ready to withdraw on SIGTERM before the descriptor can be visible.
     let on_sigterm = remove_on_sigterm();
-    let path = {
-        let mut slot = on_sigterm.lock().unwrap_or_else(|e| e.into_inner());
-        let path = write_descriptor(&dir, &workload_id, &descriptor)?;
-        *slot = Some(path.clone());
-        path
-    };
+    let written: Written = Arc::new(Mutex::new(None));
+    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pending {
+        dir,
+        workload_id,
+        descriptor,
+        listeners,
+        written: Arc::clone(&written),
+        on_sigterm,
+    });
 
-    println!(
-        "[agentbridge] announced to dir-runtime as {workload_id} ({})",
-        path.display()
-    );
-
-    Ok(Some(Announcement { path }))
+    Ok(Some(Announcement { path: written }))
 }
 
 /// Locators for the listeners `register` starts.
@@ -298,21 +363,50 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
-/// Write `<dir>/<id>.json` atomically: a hidden temporary file renamed into
+/// Write `<dir>/<id>.json` atomically: a hidden temporary file, created new
+/// (never through an existing file or symlink) and private, renamed into
 /// place, so dir-runtime never reads half a descriptor.
 fn write_descriptor(dir: &Path, workload_id: &str, descriptor: &Value) -> anyhow::Result<PathBuf> {
     create_private_dir(dir)?;
 
     let path = dir.join(format!("{workload_id}.json"));
-    let tmp = dir.join(format!(".{workload_id}.json.tmp"));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let tmp = dir.join(format!(".{workload_id}.{nonce}.json.tmp"));
+    let refused = |e: std::io::Error| {
+        let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "; under shadictl, allow it with `--write {}`",
+                dir.display()
+            )
+        } else {
+            String::new()
+        };
+        anyhow::anyhow!("could not write the descriptor {}: {e}{hint}", path.display())
+    };
 
-    {
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(serde_json::to_string_pretty(descriptor)?.as_bytes())?;
+    let written = (|| -> std::io::Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(
+            serde_json::to_string_pretty(descriptor)
+                .unwrap_or_default()
+                .as_bytes(),
+        )?;
         file.sync_all()?;
+        fs::rename(&tmp, &path)
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(refused(e));
     }
-
-    fs::rename(&tmp, &path)?;
 
     Ok(path)
 }
@@ -341,6 +435,11 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
 
             create_private_dir(dir)
         }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
+            "create descriptor directory {}: {e}; under shadictl, allow it with `--write {}`",
+            dir.display(),
+            dir.display()
+        )),
         Err(e) => Err(anyhow::anyhow!(
             "create descriptor directory {}: {e}",
             dir.display()
@@ -348,11 +447,24 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     }
 }
 
+/// Also runs in the SIGTERM thread, so it never panics on a closed stdout or
+/// stderr (`println!` would, and skip the rest of the shutdown).
 fn remove_descriptor(path: &Path) {
     match fs::remove_file(path) {
-        Ok(()) => println!("[agentbridge] withdrew the dir-runtime announcement"),
+        Ok(()) => {
+            let _ = writeln!(
+                std::io::stdout(),
+                "[agentbridge] withdrew the dir-runtime announcement"
+            );
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => eprintln!("[agentbridge] could not remove {}: {e}", path.display()),
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[agentbridge] could not remove {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -423,7 +535,8 @@ pub fn before_sigterm_exit(stop: impl Fn() + Send + 'static) {
     }
 }
 
-fn stop_in_flight() {
+/// Run the hooks [`before_sigterm_exit`] registered.
+pub fn stop_in_flight() {
     if let Ok(hooks) = STOP_HOOKS.lock() {
         for stop in hooks.iter() {
             stop();
@@ -491,6 +604,34 @@ fn serve_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_descriptor_is_written_once_every_listener_is_ready() {
+        let dir = std::env::temp_dir().join(format!("agentbridge-ready-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let written: Written = Arc::new(Mutex::new(None));
+        *PENDING.lock().unwrap() = Some(Pending {
+            dir: dir.join("workloads.d"),
+            workload_id: "ready-test".to_string(),
+            descriptor: json!({ "name": "ready-test" }),
+            listeners: 2,
+            written: Arc::clone(&written),
+            on_sigterm: Arc::new(Mutex::new(None)),
+        });
+        let path = dir.join("workloads.d/ready-test.json");
+
+        listener_ready();
+        assert!(!path.exists(), "one of two listeners is ready");
+        assert!(written.lock().unwrap().is_none());
+
+        listener_ready();
+        assert!(path.is_file(), "both are ready");
+        assert_eq!(written.lock().unwrap().as_deref(), Some(path.as_path()));
+
+        withdraw(&written);
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn workload_id_tells_instances_of_one_agent_apart() {
@@ -628,7 +769,9 @@ mod tests {
             );
         }
 
-        drop(Announcement { path: path.clone() });
+        drop(Announcement {
+            path: Arc::new(Mutex::new(Some(path.clone()))),
+        });
         assert!(!path.exists());
 
         let _ = fs::remove_dir_all(&dir);
