@@ -675,14 +675,14 @@ mod tests {
         let _guard = pending_lock();
         let dir = std::env::temp_dir().join(format!("agentbridge-held-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let slot: Written = Arc::new(Mutex::new(None));
+        let slot: &'static Mutex<Option<PathBuf>> = Box::leak(Box::new(Mutex::new(None)));
         *PENDING.lock().unwrap() = Some(Pending {
             dir: dir.join("workloads.d"),
             workload_id: "held-test".to_string(),
             descriptor: json!({ "name": "held-test" }),
             listeners: 1,
             written: Arc::new(Mutex::new(None)),
-            on_sigterm: Arc::clone(&slot),
+            on_sigterm: slot,
         });
         let path = dir.join("workloads.d/held-test.json");
 
