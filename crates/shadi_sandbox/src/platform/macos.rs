@@ -444,6 +444,9 @@ fn with_program_readable(
     Ok(profile)
 }
 
+/// macOS's `_PATH_DEFPATH`: what `execvp` searches when `PATH` is unset.
+const DEFAULT_EXEC_PATH: &str = "/usr/bin:/bin";
+
 /// The executable `command` will run: a path as given (relative to its
 /// working directory), or the first match on its `PATH`, with symlinks
 /// resolved. `None` when it can't be found; the spawn then reports that.
@@ -456,11 +459,13 @@ fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
             .or_else(|| std::env::current_dir().ok())?;
         base.join(program)
     } else {
-        let path = command
-            .get_envs()
-            .find(|(key, _)| *key == "PATH")
-            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
-            .or_else(|| std::env::var_os("PATH"))?;
+        // The command's PATH if it sets one; the system default when it
+        // removes it (what execvp searches without a PATH); else the parent's.
+        let path = match command.get_envs().find(|(key, _)| *key == "PATH") {
+            Some((_, Some(value))) => value.to_os_string(),
+            Some((_, None)) => std::ffi::OsString::from(DEFAULT_EXEC_PATH),
+            None => std::env::var_os("PATH")?,
+        };
         // As exec looks it up: relative entries against the command's working
         // directory, and only files it may execute.
         let cwd = command
@@ -920,6 +925,26 @@ mod tests {
             Some(std::fs::canonicalize(&exe).unwrap())
         );
         assert_eq!(resolve_program(&Command::new("no-such-tool-xyz")), None);
+
+        // With PATH removed, exec searches the system default, not the
+        // parent's PATH, so a tool only on the inherited PATH isn't the one.
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let mut with_tool = vec![dir.clone()];
+        with_tool.extend(std::env::split_paths(&inherited));
+        std::env::set_var("PATH", std::env::join_paths(with_tool).unwrap());
+        let mut cmd = Command::new("my-tool");
+        let on_inherited = resolve_program(&cmd);
+        cmd.env_remove("PATH");
+        let removed = resolve_program(&cmd);
+        std::env::set_var("PATH", &inherited);
+        assert_eq!(on_inherited, Some(std::fs::canonicalize(&exe).unwrap()));
+        assert_eq!(removed, None, "my-tool is only on the inherited PATH");
+        let mut cmd = Command::new("sh");
+        cmd.env_remove("PATH");
+        assert_eq!(
+            resolve_program(&cmd),
+            Some(std::fs::canonicalize("/bin/sh").unwrap())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
