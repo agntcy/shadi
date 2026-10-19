@@ -30,6 +30,11 @@ pub const WITHHELD_FROM_HARNESS: &[&str] = &[
     "SLIM_TLS_KEY",
     "A2A_TLS_KEY",
     "SLIM_AUTH_TOKEN_FILE",
+    // The 1Password service account token SHADI's 1Password backend uses:
+    // it can read the whole vault.
+    "OP_SERVICE_ACCOUNT_TOKEN",
+    // The key of SHADI's credential vault (#474).
+    "SHADI_CREDENTIAL_KEY",
 ];
 
 /// Remove [`WITHHELD_FROM_HARNESS`] from `cmd`'s environment, whether inherited
