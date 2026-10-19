@@ -181,7 +181,8 @@ target/debug/shadictl --net-block \
 ```
 
 ```text
-[agentbridge] running DIR record code-review 1.0.0 (baeareigguj5x…) from localhost:8888; signature: not trusted (no signatures found)
+[agentbridge] running DIR record code-review 1.0.0 (baeareigguj5x…) from localhost:8888; signature: unsigned
+[agentbridge] 'code-review' resolved to baeareigguj5x…; pass --record baeareigguj5x… to run exactly this record
 [agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/fake-harness-21162/skills/code-review
 Registered fake-harness adapter from profile (agent id: fake-harness, dir: …)
 [agentbridge] announced to dir-runtime as fake-harness-<DID suffix>-21162 (…/workloads.d/fake-harness-<DID suffix>-21162.json)
@@ -192,9 +193,14 @@ Starting A2A HTTP+JSON listener on 127.0.0.1:19960 ...
 What happened before the listener started:
 
 1. `dirctl info` resolved `code-review` to a CID on the Directory node,
-   `dirctl pull` fetched the record, and `dirctl verify` reported its
-   signature status. A signature isn't required — which skill to run is your
-   choice — but it is logged so that choice is informed.
+   `dirctl pull` fetched the record, and `dirctl verify` checked its
+   signature. An unsigned record runs, logged as unsigned; a signature that
+   doesn't verify stops `register`. A valid signature only shows that
+   *someone* signed the record, so it is logged as "identity not checked"
+   unless you name the signer with `--record-oidc-issuer` and
+   `--record-oidc-subject` (patterns, as `dirctl verify` takes them): then
+   only a record signed by that identity runs. A name resolves to the
+   highest version; pin the CID it prints to run exactly that record.
 2. Every agent skill in the record (its `core/language_model/agentskills`
    modules) was written into a fresh configuration directory for this run.
    The harness's profile points it there (`isolation` and `provision.skills`
@@ -290,6 +296,7 @@ target/debug/agentbridge delegate --to fake-harness "Review: return a / b"
 ```
 
 ```text
+[agentbridge] 'fake-harness' (did:key:z6Mk…) was found through dir-runtime localhost:8888: its DID and address are what it announced about itself, and nothing checks that the DID answers there yet (agntcy/shadi#504)
 Response from 'fake-harness' (488ms):
 [fake-harness] received: Review: return a / b
 [fake-harness] agent skill: code-review: Toolkit for performing structured code reviews. Covers identifying bugs, security issues, performance problems, and style violations. Use when asked to review code changes, pull requests, or individual files.
@@ -298,7 +305,10 @@ Response from 'fake-harness' (488ms):
 The harness answered with the skill it was given. `--to` takes an agent name
 or DID: a name that isn't a listener on this host is looked up at the
 dir-runtime (`--runtime`, default `localhost:8888`), which reports this
-announced agent with its DID and locator.
+announced agent with its DID and locator. A DID is looked up in its signed
+DIR record first. Whatever dir-runtime reports is what the agent says about
+itself, so `delegate` marks it as unverified
+([shadi#504](https://github.com/agntcy/shadi/issues/504)).
 
 Press **Ctrl-C** in Terminal R: after the next scan, `dirctl runtime list` no
 longer shows the agent. Ctrl-C reaches `shadictl`, which kills `agentbridge`
@@ -318,6 +328,12 @@ CLIs. For a record, prefer the isolated ones:
     configuration directory per run, holding only the record's skills. The
     harness doesn't see your own skills (including user-level ones in
     `~/.agents/skills` or `~/.claude/skills`), settings, MCP servers or login.
+    It starts from an empty environment too: only the basics (`PATH`, locale,
+    terminal, user, temp, TLS trust and proxy settings) and its tool's
+    credential variables (table below) reach it, not your tokens or agent
+    sockets. Files the sandbox grants stay readable by absolute path.
+    `codex-isolated` runs codex without its own approvals or sandbox, so it
+    refuses to run outside `shadictl`.
 
 - `claude-code`, `codex`, `goose`, `opencode`
 
@@ -398,9 +414,10 @@ target/debug/agentbridge delegate --to claude-code-isolated \
 
 !!! warning "The harness can read its credential"
     Whatever credential you pass, the harness and the tools it runs can read
-    it, and a task's reply goes back to whoever sent it. This was already
-    true before `--record`: a harness always inherited agentbridge's
-    environment. Use a key you can revoke, ideally with a spending limit.
+    it, and a task's reply goes back to whoever sent it. An isolated profile
+    passes only its tool's credential variables; a plain profile still
+    inherits agentbridge's whole environment. Use a key you can revoke,
+    ideally with a spending limit.
     `SLIM_MEMBER_DIDS` limits who can send over SLIM; on unicast only the DID
     proof is checked ([shadi#500](https://github.com/agntcy/shadi/issues/500)),
     so bind to loopback or set `SHADI_MEMBER_HUMAN_DIDS`. Keeping the credential
