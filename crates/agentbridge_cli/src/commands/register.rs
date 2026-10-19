@@ -185,8 +185,9 @@ fn start_listeners(
     dir_publish: Option<DirPublishOptions>,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    // Don't announce an instance that can't start: the A2A address must be free.
-    if let Some(listen) = a2a_listen {
+    // Don't announce an instance that can't start: the A2A address must be
+    // free. Unannounced, SLIM still serves when a second listener fails.
+    if let Some(listen) = a2a_listen.filter(|_| super::announce::enabled()) {
         ensure_listen_address_free(listen)?;
     }
     let for_sigterm = Arc::clone(&adapter);
@@ -1163,20 +1164,40 @@ fn run_slim_listener(
 
     let result = runtime.block_on(async move {
         let srv = server.clone();
-        let server_task = tokio::spawn(async move {
+        let mut server_task = tokio::spawn(async move {
             srv.serve()
                 .await
                 .map_err(|e| format!("A2A SLIMRPC server error: {e}"))
         });
+        let stopped = |result: Result<Result<(), String>, tokio::task::JoinError>| match result {
+            Ok(Ok(())) => "it stopped".to_string(),
+            Ok(Err(e)) => e,
+            Err(e) => format!("it panicked: {e}"),
+        };
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // A server that fails at once is not ready (nor announced).
+        tokio::select! {
+            result = &mut server_task => {
+                return Err(format!("SLIM A2A server didn't start: {}", stopped(result)));
+            }
+            () = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
         println!("[agentbridge] ready — listening on {agent_name}");
         super::announce::listener_ready();
         println!("[agentbridge] Press Ctrl-C to stop.");
 
-        tokio::signal::ctrl_c()
-            .await
-            .map_err(|e| format!("ctrl_c error: {e}"))?;
+        // Serve until Ctrl-C, or until the server stops on its own: then stop
+        // the task in flight and return, so the announcement is withdrawn
+        // rather than left up while this process lives on.
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.map_err(|e| format!("ctrl_c error: {e}"))?;
+            }
+            result = &mut server_task => {
+                adapter_for_shutdown.kill_in_flight();
+                return Err(format!("SLIM A2A server stopped: {}", stopped(result)));
+            }
+        }
 
         println!("\n[agentbridge] shutting down...");
         // Proactively kill whatever child process the adapter's current
@@ -1571,54 +1592,35 @@ fn run_unicast_listener(
         .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
 
     runtime.block_on(async move {
-        // Bind first, so "ready" is only printed for a listener that is up.
+        // Bind and set up TLS first, so "ready" (and the announcement) only
+        // come for a listener that is up.
         let listener = bind_listener(addr)?;
-        println!(
-            "[agentbridge] ready — A2A {} on {a2a_url}",
-            a2a_binding.as_protocol_binding()
-        );
-        super::announce::listener_ready();
-        println!("[agentbridge] Press Ctrl-C to stop.");
-        match a2a_binding {
+        let serve: futures::future::BoxFuture<'static, Result<(), String>> = match a2a_binding {
             A2ABinding::Slim => {
-                Err("SLIM uses --slim-endpoint, not --a2a-listen".to_string())
+                return Err("SLIM uses --slim-endpoint, not --a2a-listen".to_string());
             }
             A2ABinding::Grpc => {
                 let grpc_service = A2aServiceServer::new(GrpcHandler::new(handler));
+                let incoming =
+                    TcpIncoming::from(tokio_listener(listener)?).with_nodelay(Some(true));
                 match grpc_server_tls_config(&addr)? {
                     Some(tls) => {
-                        let incoming =
-                            TcpIncoming::from(tokio_listener(listener)?).with_nodelay(Some(true));
                         let incoming = tonic_tls::rustls::TlsIncoming::new(incoming, tls);
-                        tokio::select! {
-                            result = TonicServer::builder()
+                        Box::pin(async move {
+                            TonicServer::builder()
                                 .add_service(grpc_service)
-                                .serve_with_incoming(incoming) => {
-                                result.map_err(|e| format!("A2A gRPC server error: {e}"))
-                            }
-                            _ = tokio::signal::ctrl_c() => {
-                                println!("\n[agentbridge] shutting down...");
-                                adapter_for_shutdown.kill_in_flight();
-                                Ok(())
-                            }
-                        }
+                                .serve_with_incoming(incoming)
+                                .await
+                                .map_err(|e| format!("A2A gRPC server error: {e}"))
+                        })
                     }
-                    None => {
-                        let incoming =
-                            TcpIncoming::from(tokio_listener(listener)?).with_nodelay(Some(true));
-                        tokio::select! {
-                            result = TonicServer::builder()
-                                .add_service(grpc_service)
-                                .serve_with_incoming(incoming) => {
-                                result.map_err(|e| format!("A2A gRPC server error: {e}"))
-                            }
-                            _ = tokio::signal::ctrl_c() => {
-                                println!("\n[agentbridge] shutting down...");
-                                adapter_for_shutdown.kill_in_flight();
-                                Ok(())
-                            }
-                        }
-                    }
+                    None => Box::pin(async move {
+                        TonicServer::builder()
+                            .add_service(grpc_service)
+                            .serve_with_incoming(incoming)
+                            .await
+                            .map_err(|e| format!("A2A gRPC server error: {e}"))
+                    }),
                 }
             }
             A2ABinding::Jsonrpc | A2ABinding::HttpJson => {
@@ -1628,14 +1630,22 @@ fn run_unicast_listener(
                     A2ABinding::Grpc | A2ABinding::Slim => unreachable!(),
                 };
                 let router = with_agent_card(router, agent_id, listen, a2a_binding);
-                tokio::select! {
-                    result = serve_http_router(addr, listener, router) => result,
-                    _ = tokio::signal::ctrl_c() => {
-                        println!("\n[agentbridge] shutting down...");
-                        adapter_for_shutdown.kill_in_flight();
-                        Ok(())
-                    }
-                }
+                http_server(addr, listener, router).await?
+            }
+        };
+
+        println!(
+            "[agentbridge] ready — A2A {} on {a2a_url}",
+            a2a_binding.as_protocol_binding()
+        );
+        super::announce::listener_ready();
+        println!("[agentbridge] Press Ctrl-C to stop.");
+        tokio::select! {
+            result = serve => result,
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n[agentbridge] shutting down...");
+                adapter_for_shutdown.kill_in_flight();
+                Ok(())
             }
         }
     })
@@ -1697,17 +1707,21 @@ fn ensure_listen_address_free(listen: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", bind_error(addr, &e)))
 }
 
-async fn serve_http_router(
+/// The HTTP(S) server for `router` on `listener`, with its TLS set up: what
+/// can fail before serving fails here, so the caller reports ready only after.
+async fn http_server(
     addr: SocketAddr,
     listener: std::net::TcpListener,
     router: axum::Router,
-) -> Result<(), String> {
+) -> Result<futures::future::BoxFuture<'static, Result<(), String>>, String> {
     match a2a_server_tls_paths(&addr)? {
         None => {
             let listener = tokio_listener(listener)?;
-            axum::serve(listener, router)
-                .await
-                .map_err(|e| format!("A2A HTTP server error: {e}"))
+            Ok(Box::pin(async move {
+                axum::serve(listener, router)
+                    .await
+                    .map_err(|e| format!("A2A HTTP server error: {e}"))
+            }))
         }
         Some((cert, key)) => {
             use a2a_server::tls::axum_server;
@@ -1720,11 +1734,14 @@ async fn serve_http_router(
                         key.display()
                     )
                 })?;
-            axum_server::tls_rustls::from_tcp_rustls(listener, config)
-                .map_err(|e| format!("A2A listener {addr}: {e}"))?
-                .serve(router.into_make_service())
-                .await
-                .map_err(|e| format!("A2A HTTPS server error: {e}"))
+            let server = axum_server::tls_rustls::from_tcp_rustls(listener, config)
+                .map_err(|e| format!("A2A listener {addr}: {e}"))?;
+            Ok(Box::pin(async move {
+                server
+                    .serve(router.into_make_service())
+                    .await
+                    .map_err(|e| format!("A2A HTTPS server error: {e}"))
+            }))
         }
     }
 }

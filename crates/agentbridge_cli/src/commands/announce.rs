@@ -92,10 +92,24 @@ impl Drop for Announcement {
 /// Delete an announcement's descriptor, if written, before exiting without
 /// unwinding.
 pub fn withdraw(written: &Written) {
+    // Serialized with publication (listener_ready holds PENDING while it
+    // writes): cancel a descriptor still waiting for its listeners, or remove
+    // the one just written.
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    if pending
+        .as_ref()
+        .is_some_and(|p| Arc::ptr_eq(&p.written, written))
+    {
+        *pending = None;
+    }
     if let Some(path) = written.lock().ok().and_then(|mut p| p.take()) {
         remove_descriptor(&path);
     }
 }
+
+/// The current announcement's slot, for withdrawing it from a listener thread
+/// that fails (the card listener).
+static ANNOUNCED: Mutex<Option<Written>> = Mutex::new(None);
 
 /// A descriptor waiting for its listeners.
 struct Pending {
@@ -233,6 +247,10 @@ pub fn start(
         written: Arc::clone(&written),
         on_sigterm,
     });
+
+    if let Ok(mut announced) = ANNOUNCED.lock() {
+        *announced = Some(Arc::clone(&written));
+    }
 
     Ok(Some(Announcement { path: written }))
 }
@@ -572,41 +590,102 @@ fn serve_card(
 
     let addr = std_listener.local_addr()?;
     let card = card();
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
     std::thread::spawn(move || {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        else {
-            eprintln!("[agentbridge] card listener: could not start a runtime");
-            return;
+        {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                let _ = started_tx.send(Err(format!("could not start a runtime: {e}")));
+                return;
+            }
         };
 
         runtime.block_on(async move {
-            let Ok(listener) = tokio::net::TcpListener::from_std(std_listener) else {
-                eprintln!("[agentbridge] card listener: could not adopt the socket");
-                return;
+            let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    let _ = started_tx.send(Err(format!("could not adopt the socket: {e}")));
+                    return;
+                }
             };
+            let _ = started_tx.send(Ok(()));
 
             let router = a2a_server::agent_card::agent_card_router(Arc::new(
                 a2a_server::StaticAgentCard::new(card),
             ));
 
-            if let Err(e) = axum::serve(listener, router).await {
-                eprintln!("[agentbridge] card listener error: {e}");
-            }
+            let result = axum::serve(listener, router).await;
+            card_listener_stopped(result.err().map(|e| e.to_string()));
         });
     });
 
-    Ok(addr)
+    // Only a card that is served is announced.
+    match started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(())) => Ok(addr),
+        Ok(Err(e)) => Err(anyhow::anyhow!("card listener {addr}: {e}")),
+        Err(_) => Err(anyhow::anyhow!("card listener {addr} didn't start")),
+    }
+}
+
+/// The card listener stopped while the agent runs. Announced, the agent can't
+/// be found by skill any more, so withdraw and stop rather than stay listed
+/// without its card; otherwise say so and keep serving.
+fn card_listener_stopped(error: Option<String>) {
+    let reason = error.unwrap_or_else(|| "it stopped".to_string());
+    let announced = ANNOUNCED.lock().ok().and_then(|a| a.clone());
+    let Some(written) = announced else {
+        let _ = writeln!(std::io::stderr(), "[agentbridge] card listener: {reason}");
+        return;
+    };
+    let _ = writeln!(
+        std::io::stderr(),
+        "[agentbridge] card listener: {reason}; stopping"
+    );
+    withdraw(&written);
+    stop_in_flight();
+    std::process::exit(1);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// PENDING is process-wide.
+    fn pending_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn withdrawing_before_the_listeners_are_ready_cancels_the_descriptor() {
+        let _guard = pending_lock();
+        let dir = std::env::temp_dir().join(format!("agentbridge-cancel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let written: Written = Arc::new(Mutex::new(None));
+        *PENDING.lock().unwrap() = Some(Pending {
+            dir: dir.join("workloads.d"),
+            workload_id: "cancel-test".to_string(),
+            descriptor: json!({ "name": "cancel-test" }),
+            listeners: 1,
+            written: Arc::clone(&written),
+            on_sigterm: Arc::new(Mutex::new(None)),
+        });
+
+        withdraw(&written);
+        listener_ready();
+
+        assert!(!dir.join("workloads.d/cancel-test.json").exists());
+        assert!(PENDING.lock().unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_descriptor_is_written_once_every_listener_is_ready() {
+        let _guard = pending_lock();
         let dir = std::env::temp_dir().join(format!("agentbridge-ready-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let written: Written = Arc::new(Mutex::new(None));
