@@ -124,6 +124,7 @@ function AdapterList() {
   const [ghToken, setGhToken] = useState("");
   const [localOnly, setLocalOnly] = useState(false);
   const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null);
+  const [more, setMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -131,15 +132,20 @@ function AdapterList() {
     setLoading(true);
     setError(null);
     try {
-      const result = await invoke<AdapterInfo[]>("agentbridge_list_adapters", {
-        localOnly,
-        dirServer,
-        ghToken: ghToken || null,
-      });
-      setAdapters(result);
+      const result = await invoke<{ adapters: AdapterInfo[]; more: boolean }>(
+        "agentbridge_list_adapters",
+        {
+          localOnly,
+          dirServer,
+          ghToken: ghToken || null,
+        },
+      );
+      setAdapters(result.adapters);
+      setMore(result.more);
     } catch (e) {
       setError(String(e));
       setAdapters(null);
+      setMore(false);
     } finally {
       setLoading(false);
     }
@@ -205,6 +211,13 @@ function AdapterList() {
             )}
           </tbody>
         </table>
+      )}
+      {adapters && more && (
+        <p className="ab-hint">
+          Showing the first {adapters.length}: this Directory has more A2A
+          agents, and anyone can publish one. Narrow the list by skill with{" "}
+          <code>agentbridge list --skill &lt;skill&gt;</code>.
+        </p>
       )}
     </section>
   );
