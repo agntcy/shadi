@@ -17,6 +17,8 @@ struct Cli {
     command: Cmd,
 }
 
+// Parsed once per process; boxing the large `Register` variant would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Register and start a CLI tool adapter.
@@ -66,6 +68,49 @@ enum Cmd {
         /// truncated one-line preview.
         #[arg(long)]
         verbose: bool,
+
+        /// OASF skill the agent offers, by name (repeatable), advertised in the
+        /// card's OASF discovery extension and checked against the OASF schema
+        /// version below. Nothing is advertised by default: an agent without a
+        /// skill has no discovery extension and isn't found by skill.
+        #[arg(long = "skill", value_name = "OASF_SKILL")]
+        skills: Vec<String>,
+
+        /// OASF domain the agent applies to, by name (repeatable).
+        #[arg(long = "domain", value_name = "OASF_DOMAIN")]
+        domains: Vec<String>,
+
+        /// The agent's version (semantic version, e.g. 1.2.0), shown in its card.
+        /// Defaults to agentbridge's.
+        #[arg(long = "version", value_name = "VERSION", value_parser = parse_semver)]
+        agent_version: Option<String>,
+
+        /// URL to advertise in the card for `--a2a-listen`, when clients reach
+        /// the listener at another address (e.g. a published container port).
+        /// Defaults to the listen address: http on loopback, https elsewhere.
+        /// Needs `--a2a-listen`; `--dir-publish` of a wildcard address needs it.
+        #[arg(long, value_name = "URL", value_parser = parse_http_url)]
+        advertise_url: Option<String>,
+
+        /// OASF schema the skills and domains come from: the card names it
+        /// (`<url>/<version>/objects/discovery`), and its server checks them
+        /// once at startup (plain http only on loopback). Consumers such as
+        /// dir-runtime read the extension only for schema servers they accept,
+        /// so a private schema is found only where it is accepted. To test
+        /// offline, use --skip-oasf-validation rather than a local copy of the
+        /// public schema; under `shadictl --net-block` it also keeps the server
+        /// off the allowlist.
+        #[arg(long, env = "OASF_SCHEMA_URL", default_value = commands::card::DEFAULT_OASF_SCHEMA_URL,
+              value_parser = parse_validator_url)]
+        oasf_schema_url: String,
+
+        /// OASF schema version to validate against and advertise.
+        #[arg(long, env = "OASF_SCHEMA_VERSION", default_value = commands::card::DEFAULT_OASF_SCHEMA_VERSION)]
+        oasf_schema_version: String,
+
+        /// Advertise skills and domains without checking them against the OASF server.
+        #[arg(long)]
+        skip_oasf_validation: bool,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -73,6 +118,11 @@ enum Cmd {
         /// List listeners started by `register --slim-endpoint` / `--a2a-listen` on this host.
         #[arg(long)]
         local: bool,
+
+        /// Only agents with this OASF skill (repeatable: any of them). Without
+        /// it, every A2A agent in the Directory.
+        #[arg(long = "skill", value_name = "OASF_SKILL", conflicts_with = "local")]
+        skills: Vec<String>,
 
         /// Agent Directory server address.
         #[arg(long, default_value = "prod.gateway.ads.outshift.io:443")]
@@ -237,6 +287,81 @@ fn subscriber() -> impl tracing::Subscriber + Send + Sync {
         .with(shadi_telemetry::layers("agentbridge").with_filter(LevelFilter::INFO))
 }
 
+/// `--version`: a semantic version, as the card and DIR record expect.
+fn parse_semver(raw: &str) -> Result<String, String> {
+    semver::Version::parse(raw)
+        .map(|v| v.to_string())
+        .map_err(|e| format!("not a semantic version (e.g. 1.2.0): {e}"))
+}
+
+/// `--advertise-url`: an absolute http(s) URL clients can connect to.
+fn parse_http_url(raw: &str) -> Result<String, String> {
+    let url = url::Url::parse(raw).map_err(|e| format!("not an absolute URL: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("must be an http:// or https:// URL with a host".to_string());
+    }
+    // As `Url` normalizes it (`HTTPS://` → `https://`, `https:host` →
+    // `https://host`), since locators compare the scheme as is; without the
+    // root `/` it adds when none was given.
+    let mut normalized = url.to_string();
+    if url.path() == "/" && url.query().is_none() && url.fragment().is_none() && !raw.ends_with('/')
+    {
+        normalized.pop();
+    }
+    Ok(normalized)
+}
+
+/// An OASF validator: https, or http on loopback, since a plain-http answer
+/// from elsewhere could come from anyone on the path.
+fn parse_validator_url(raw: &str) -> Result<String, String> {
+    parse_http_url(raw)?;
+    let url = url::Url::parse(raw).map_err(|e| e.to_string())?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "http" && !loopback {
+        return Err("a plain-http OASF server is accepted only on loopback; use https".to_string());
+    }
+    Ok(raw.to_string())
+}
+
+/// `--advertise-url` only replaces the `--a2a-listen` address, and a
+/// wildcard address can't be reached at, so it isn't published as is.
+fn advertisable(
+    a2a_listen: Option<&str>,
+    advertise_url: Option<&str>,
+    dir_publish: bool,
+) -> anyhow::Result<()> {
+    let Some(listen) = a2a_listen else {
+        if advertise_url.is_some() {
+            anyhow::bail!("--advertise-url needs --a2a-listen: it is the address clients use for it");
+        }
+        return Ok(());
+    };
+    let wildcard = listen
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().is_unspecified());
+    if dir_publish && wildcard && advertise_url.is_none() {
+        anyhow::bail!(
+            "--dir-publish would publish {listen}, which clients can't connect to; \
+             pass --advertise-url with the address they reach the listener at"
+        );
+    }
+    Ok(())
+}
+
+/// An OASF record needs at least one skill, so `--dir-publish` without one
+/// would only fail once the listener is up.
+fn publishable(dir_publish: bool, skills: &[String]) -> anyhow::Result<()> {
+    if dir_publish && skills.is_empty() {
+        anyhow::bail!("--dir-publish needs at least one --skill: an OASF record must list a skill");
+    }
+    Ok(())
+}
+
 fn main() {
     subscriber().init();
     // Same as shadictl: a2a-grpc enables rustls `ring` beside SLIM aws-lc-rs.
@@ -256,27 +381,65 @@ fn main() {
             a2a_listen,
             a2a_binding,
             verbose,
+            skills,
+            domains,
+            agent_version,
+            advertise_url,
+            oasf_schema_url,
+            oasf_schema_version,
+            skip_oasf_validation,
         } => {
+            let card_opts = commands::card::CardOptions {
+                skills,
+                domains,
+                version: agent_version,
+                advertise_url,
+                oasf_schema_url,
+                oasf_schema_version,
+                skip_validation: skip_oasf_validation,
+            };
             let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            commands::register::run(
-                &tool,
-                command.as_deref(),
-                &args,
-                slim_endpoint.as_deref(),
-                a2a_listen.as_deref(),
-                a2a_binding,
-                publish_opts,
-                verbose,
-            )
+            publishable(dir_publish, &card_opts.skills)
+                .and_then(|()| {
+                    advertisable(
+                        a2a_listen.as_deref(),
+                        card_opts.advertise_url.as_deref(),
+                        dir_publish,
+                    )
+                })
+                // A bad tool or a missing sandbox fails before the OASF
+                // server is asked.
+                .and_then(|()| {
+                    commands::register::preflight(
+                        &tool,
+                        command.as_deref(),
+                        slim_endpoint.as_deref(),
+                        a2a_listen.as_deref(),
+                    )
+                })
+                .and_then(|()| commands::card::configure(&card_opts))
+                .and_then(|()| {
+                    commands::register::run(
+                        &tool,
+                        command.as_deref(),
+                        &args,
+                        slim_endpoint.as_deref(),
+                        a2a_listen.as_deref(),
+                        a2a_binding,
+                        publish_opts,
+                        verbose,
+                    )
+                })
         }
         Cmd::List {
             local,
+            skills,
             dir_server,
             gh_token,
-        } => commands::list::run(local, &dir_server, gh_token.as_deref()),
+        } => commands::list::run(local, &skills, &dir_server, gh_token.as_deref()),
         Cmd::Handoff {
             from,
             to,
@@ -462,6 +625,35 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_http_oasf_server_must_be_on_loopback() {
+        assert!(parse_validator_url("https://schema.oasf.outshift.com").is_ok());
+        assert!(parse_validator_url("http://localhost:8080").is_ok());
+        assert!(parse_validator_url("http://127.0.0.1:8080").is_ok());
+        assert!(parse_validator_url("http://[::1]:8080").is_ok());
+        assert!(parse_validator_url("http://schema.example.com").is_err());
+        assert!(parse_validator_url("http://192.168.1.5:8080").is_err());
+    }
+
+    #[test]
+    fn advertise_url_needs_a_listener_and_a_wildcard_needs_one_to_publish() {
+        let url = Some("https://agent.example:8443");
+        assert!(advertisable(None, url, false).is_err());
+        assert!(advertisable(None, None, true).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, true).is_err());
+        assert!(advertisable(Some("0.0.0.0:8443"), url, true).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, false).is_ok());
+        assert!(advertisable(Some("127.0.0.1:8443"), None, true).is_ok());
+    }
+
+    #[test]
+    fn dir_publish_needs_a_skill() {
+        let skill = vec!["software_engineering/code_generation".to_string()];
+        assert!(publishable(true, &[]).is_err());
+        assert!(publishable(true, &skill).is_ok());
+        assert!(publishable(false, &[]).is_ok(), "skill-less without publishing is fine");
+    }
+
+    #[test]
     fn parses_native_handoff_specs() {
         let cli = Cli::try_parse_from([
             "agentbridge",
@@ -537,6 +729,42 @@ mod tests {
             _ => panic!("expected register subcommand"),
         }
 
+        let card = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "copilot",
+            "--skill",
+            "software_engineering/code_debugging/error_handling",
+            "--skill",
+            "software_engineering/code_generation",
+            "--domain",
+            "technology/networking/network_security",
+            "--version",
+            "2.1.0",
+            "--skip-oasf-validation",
+        ])
+        .expect("parse register card flags");
+        match card.command {
+            Cmd::Register {
+                skills,
+                domains,
+                agent_version,
+                oasf_schema_url,
+                oasf_schema_version,
+                skip_oasf_validation,
+                ..
+            } => {
+                assert_eq!(skills.len(), 2);
+                assert_eq!(domains, vec!["technology/networking/network_security"]);
+                assert_eq!(agent_version.as_deref(), Some("2.1.0"));
+                assert_eq!(oasf_schema_url, commands::card::DEFAULT_OASF_SCHEMA_URL);
+                assert_eq!(oasf_schema_version, commands::card::DEFAULT_OASF_SCHEMA_VERSION);
+                assert!(skip_oasf_validation);
+            }
+            _ => panic!("expected register subcommand"),
+        }
+
         let delegate = Cli::try_parse_from([
             "agentbridge",
             "delegate",
@@ -586,5 +814,36 @@ mod tests {
             ),
             _ => panic!("expected request-invite subcommand"),
         }
+    }
+
+    #[test]
+    fn register_rejects_a_non_semver_version_and_a_non_http_advertise_url() {
+        let base = ["agentbridge", "register", "--tool", "x"];
+        let parse = |extra: &[&str]| {
+            let mut args = base.to_vec();
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+
+        assert!(parse(&["--version", "latest"]).is_err());
+        assert!(parse(&["--version", "1.2.0"]).is_ok());
+        assert!(parse(&["--advertise-url", "not-a-url"]).is_err());
+        assert!(parse(&["--advertise-url", "ftp://host:21"]).is_err());
+        assert!(parse(&["--advertise-url", ""]).is_err());
+        assert!(parse(&["--advertise-url", "https://127.0.0.1:28443"]).is_ok());
+        assert_eq!(
+            parse_http_url("HTTPS://agent.example:8443").as_deref(),
+            Ok("https://agent.example:8443"),
+            "the scheme is lower-cased"
+        );
+        assert_eq!(
+            parse_http_url("https:agent.example:8443").as_deref(),
+            Ok("https://agent.example:8443"),
+            "a slashless URL gets its //"
+        );
+        assert_eq!(
+            parse_http_url("https://agent.example:8443/a2a").as_deref(),
+            Ok("https://agent.example:8443/a2a")
+        );
     }
 }

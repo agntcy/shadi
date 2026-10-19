@@ -886,6 +886,22 @@ fn build_agent_card(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
 ) -> AgentCard {
+    agent_card_with(
+        &super::card::config(),
+        agent_id,
+        slim_endpoint,
+        a2a_listen,
+        a2a_binding,
+    )
+}
+
+fn agent_card_with(
+    card: &super::card::CardConfig,
+    agent_id: &str,
+    slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+    a2a_binding: A2ABinding,
+) -> AgentCard {
     let mut supported_interfaces = Vec::new();
     if let Some(endpoint) = slim_endpoint {
         supported_interfaces.push(AgentInterface::new(
@@ -894,11 +910,9 @@ fn build_agent_card(
         ));
     }
     if let Some(listen) = a2a_listen {
-        let url = if listen.contains("://") {
-            listen.to_string()
-        } else {
-            format!("http://{listen}")
-        };
+        let url = card
+            .advertise_url()
+            .map_or_else(|| advertised_a2a_url(listen), str::to_string);
         supported_interfaces.push(AgentInterface::new(
             url,
             a2a_binding.as_protocol_binding(),
@@ -911,17 +925,17 @@ fn build_agent_card(
             "agentbridge adapter for '{agent_id}'. Supports context handoff, \
              task delegation, and autonomous code coordination."
         ),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: card.version().to_string(),
         supported_interfaces,
         capabilities: AgentCapabilities {
             streaming: Some(true),
             push_notifications: Some(false),
-            extensions: None,
+            extensions: Some(card.extensions()),
             extended_agent_card: Some(false),
         },
         default_input_modes: vec!["text/plain".to_string()],
         default_output_modes: vec!["text/plain".to_string()],
-        skills: default_skills(),
+        skills: Vec::new(),
         provider: None,
         documentation_url: None,
         icon_url: None,
@@ -931,37 +945,33 @@ fn build_agent_card(
     }
 }
 
-/// The standard agentbridge skill set: task delegation, agent coordination,
-/// and generating output. Shared by every adapter's `AgentCard`. Each `id` is
-/// a real OASF skill taxonomy class (confirmed against a live Directory's
-/// schema validator) — arbitrary strings are rejected by `dirctl push`.
-fn default_skills() -> Vec<AgentSkill> {
-    [
-        (
-            "agent_orchestration/task_decomposition",
-            "Breaks down and delegates coding tasks to other coding agents.",
-        ),
-        (
-            "agent_orchestration/agent_coordination",
-            "Coordinates and hands off task context between coding agents.",
-        ),
-        (
-            "natural_language_processing/natural_language_generation/text_completion",
-            "Generates code and text completions on request.",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, description)| AgentSkill {
-        id: id.to_string(),
-        name: id.to_string(),
-        description: description.to_string(),
-        tags: Vec::new(),
-        examples: None,
-        input_modes: None,
-        output_modes: None,
-        security_requirements: None,
-    })
-    .collect()
+/// What `run` would refuse anyway, checked before anything is contacted: an
+/// unknown tool, `generic-stdio` without a command, a listener outside the
+/// SHADI sandbox.
+pub fn preflight(
+    tool: &str,
+    command: Option<&str>,
+    slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+) -> anyhow::Result<()> {
+    if tool == "generic-stdio" {
+        if command.is_none() {
+            anyhow::bail!("--command is required for tool type 'generic-stdio'");
+        }
+    } else if load_profile(tool)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .is_none()
+    {
+        anyhow::bail!(
+            "Unknown tool type '{tool}'. Bundled profiles: {}. Also: generic-stdio. \
+             Or drop {{name}}.json in AGENTBRIDGE_PROFILES_DIR.",
+            bundled_profile_ids().join(", ")
+        );
+    }
+    if let Some(endpoint) = slim_endpoint.or(a2a_listen) {
+        require_sandbox_enforced(tool, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(())
 }
 
 /// Require that this process is running under a SHADI sandbox with network
@@ -2685,18 +2695,11 @@ test push ... FAILED
     }
 
     #[test]
-    fn build_agent_card_includes_default_skills() {
+    fn build_agent_card_has_no_hardcoded_skills() {
         let card = build_agent_card("codex", None, None, A2ABinding::Grpc);
-        assert_eq!(card.skills.len(), 3);
-        assert!(card
-            .skills
-            .iter()
-            .any(|s| s.id.contains("task_decomposition")));
-        assert!(card
-            .skills
-            .iter()
-            .any(|s| s.id.contains("agent_coordination")));
-        assert!(card.skills.iter().any(|s| s.id.contains("text_completion")));
+        assert!(card.skills.is_empty());
+        let extensions = card.capabilities.extensions.unwrap_or_default();
+        assert!(extensions.is_empty(), "no skill given, no discovery extension");
     }
 
     #[test]
@@ -2725,6 +2728,34 @@ test push ... FAILED
         let iface = &card.supported_interfaces[0];
         assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_JSONRPC);
         assert!(iface.url.contains("127.0.0.1:8080"), "{}", iface.url);
+    }
+
+    #[test]
+    fn build_agent_card_advertises_https_for_a_non_loopback_listener() {
+        let card = build_agent_card(
+            "copilot",
+            None,
+            Some("0.0.0.0:8443"),
+            A2ABinding::HttpJson,
+        );
+        assert_eq!(card.supported_interfaces[0].url, "https://0.0.0.0:8443");
+    }
+
+    #[test]
+    fn build_agent_card_uses_the_advertise_url_override() {
+        let config = super::super::card::CardConfig::from_options(&super::super::card::CardOptions {
+            advertise_url: Some("https://127.0.0.1:28443".into()),
+            ..Default::default()
+        });
+        let card = agent_card_with(
+            &config,
+            "copilot",
+            Some("127.0.0.1:47357"),
+            Some("0.0.0.0:8443"),
+            A2ABinding::HttpJson,
+        );
+        assert_eq!(card.supported_interfaces.len(), 2);
+        assert_eq!(card.supported_interfaces[1].url, "https://127.0.0.1:28443");
     }
 
     #[test]

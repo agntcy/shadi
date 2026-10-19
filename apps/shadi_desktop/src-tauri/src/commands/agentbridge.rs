@@ -26,7 +26,7 @@ use agentbridge::mas::{
     EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
     SemanticPayload,
 };
-use agentbridge::member_source::{DirLookupOptions, MemberSource, SkillSearchSource};
+use agentbridge::member_source::{A2AAgentSearchSource, DirLookupOptions, MemberSource};
 use agentbridge::{CliAdapter, ContextPacket};
 use serde::{Deserialize, Serialize};
 use shadi_mas::experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig};
@@ -108,41 +108,71 @@ pub struct CoordinateResult {
     pub deferred: u64,
 }
 
-/// List registered adapters. DIR-backed discovery (`local_only = false`)
-/// resolves candidates advertising the standard agentbridge skills, same
-/// technique a SLIM group moderator uses to pull in members. Local SLIM-node
-/// discovery (`local_only = true`) isn't wired yet in the CLI either — see
+/// How many A2A agents the list shows.
+const LIST_LIMIT: usize = 20;
+
+/// One page of [`agentbridge_list_adapters`]: the agents shown, and whether
+/// the Directory has more than [`LIST_LIMIT`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdapterListing {
+    pub adapters: Vec<AdapterInfo>,
+    pub more: bool,
+}
+
+/// List A2A agents in the Directory (`dirctl search --module integration/a2a`).
+/// Anyone can publish such a record, so the list shows the first
+/// [`LIST_LIMIT`] and says when there are more. Local SLIM-node discovery
+/// (`local_only = true`) isn't wired yet in the CLI either — see
 /// `agentbridge_cli::commands::list`.
 #[tauri::command]
 pub async fn agentbridge_list_adapters(
     local_only: bool,
     dir_server: String,
     gh_token: Option<String>,
-) -> Result<Vec<AdapterInfo>, String> {
+) -> Result<AdapterListing, String> {
     if local_only {
-        return Ok(Vec::new());
+        return Ok(AdapterListing {
+            adapters: Vec::new(),
+            more: false,
+        });
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let source = SkillSearchSource {
-            skill: "agent_orchestration/agent_coordination".to_string(),
+        let source = A2AAgentSearchSource {
+            skills: Vec::new(),
             dir: DirLookupOptions {
                 server_addr: dir_server,
                 gh_token,
-                limit: 20,
+                // One more than shown, to tell whether there are more.
+                limit: LIST_LIMIT + 1,
             },
         };
-        let candidates = source.resolve()?;
-        Ok(candidates
+        let (candidates, found) = source.resolve_counted()?;
+        Ok(listing(candidates, found))
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// The page to show from `candidates`, out of `found` records the search
+/// returned: more exist when the search came back full, even if some of those
+/// records were skipped as unusable.
+fn listing(
+    candidates: Vec<agentbridge::member_source::CandidateMember>,
+    found: usize,
+) -> AdapterListing {
+    let more = found > LIST_LIMIT || candidates.len() > LIST_LIMIT;
+    AdapterListing {
+        adapters: candidates
             .into_iter()
+            .take(LIST_LIMIT)
             .map(|c| AdapterInfo {
                 agent_id: c.name,
                 tool: c.did,
                 endpoint: c.slim_endpoint,
             })
-            .collect())
-    })
-    .await
-    .map_err(|e| format!("task failed: {e}"))?
+            .collect(),
+        more,
+    }
 }
 
 /// Snapshot context from `from` and inject it into `to`. Phase-1 parity with
@@ -564,4 +594,37 @@ pub async fn agentbridge_coordinate(
     })
     .await
     .map_err(|e| format!("task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidates(n: usize) -> Vec<agentbridge::member_source::CandidateMember> {
+        (0..n)
+            .map(|i| agentbridge::member_source::CandidateMember {
+                name: format!("agent-{i}"),
+                did: format!("did:key:z{i}"),
+                slim_endpoint: None,
+                a2a_url: None,
+                a2a_binding: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_list_says_when_the_directory_has_more_agents() {
+        let full = listing(candidates(LIST_LIMIT + 1), LIST_LIMIT + 1);
+        assert_eq!(full.adapters.len(), LIST_LIMIT);
+        assert!(full.more);
+
+        let fits = listing(candidates(LIST_LIMIT), LIST_LIMIT);
+        assert_eq!(fits.adapters.len(), LIST_LIMIT);
+        assert!(!fits.more);
+
+        // The search came back full, but some records weren't usable.
+        let skipped = listing(candidates(LIST_LIMIT - 3), LIST_LIMIT + 1);
+        assert_eq!(skipped.adapters.len(), LIST_LIMIT - 3);
+        assert!(skipped.more, "a full search means there may be more");
+    }
 }
