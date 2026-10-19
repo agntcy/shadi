@@ -945,6 +945,35 @@ fn agent_card_with(
     }
 }
 
+/// What `run` would refuse anyway, checked before anything is contacted: an
+/// unknown tool, `generic-stdio` without a command, a listener outside the
+/// SHADI sandbox.
+pub fn preflight(
+    tool: &str,
+    command: Option<&str>,
+    slim_endpoint: Option<&str>,
+    a2a_listen: Option<&str>,
+) -> anyhow::Result<()> {
+    if tool == "generic-stdio" {
+        if command.is_none() {
+            anyhow::bail!("--command is required for tool type 'generic-stdio'");
+        }
+    } else if load_profile(tool)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .is_none()
+    {
+        anyhow::bail!(
+            "Unknown tool type '{tool}'. Bundled profiles: {}. Also: generic-stdio. \
+             Or drop {{name}}.json in AGENTBRIDGE_PROFILES_DIR.",
+            bundled_profile_ids().join(", ")
+        );
+    }
+    if let Some(endpoint) = slim_endpoint.or(a2a_listen) {
+        require_sandbox_enforced(tool, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(())
+}
+
 /// Require that this process is running under a SHADI sandbox with network
 /// blocked by default before it may expose a remote-reachable listener.
 ///

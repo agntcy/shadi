@@ -40,7 +40,9 @@ pub fn run(
 
     if candidates.is_empty() {
         println!("No A2A agents found in DIR.");
-        println!("Register one with: agentbridge register --tool <name> --dir-publish");
+        println!(
+            "Register one with: agentbridge register --tool <name> --skill <OASF skill> --dir-publish"
+        );
     } else {
         for c in &candidates {
             println!("{}", render_candidate(c));

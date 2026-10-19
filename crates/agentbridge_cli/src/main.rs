@@ -72,8 +72,7 @@ enum Cmd {
         /// OASF skill the agent offers, by name (repeatable), advertised in the
         /// card's OASF discovery extension and checked against the OASF schema
         /// version below. Nothing is advertised by default: an agent without a
-        /// skill (here or from --record) has no discovery extension and isn't
-        /// found by skill.
+        /// skill has no discovery extension and isn't found by skill.
         #[arg(long = "skill", value_name = "OASF_SKILL")]
         skills: Vec<String>,
 
@@ -89,12 +88,17 @@ enum Cmd {
         /// URL to advertise in the card for `--a2a-listen`, when clients reach
         /// the listener at another address (e.g. a published container port).
         /// Defaults to the listen address: http on loopback, https elsewhere.
+        /// Needs `--a2a-listen`; `--dir-publish` of a wildcard address needs it.
         #[arg(long, value_name = "URL", value_parser = parse_http_url)]
         advertise_url: Option<String>,
 
-        /// OASF schema server that checks skills and domains and names the card
-        /// extensions (`<url>/<version>/objects/discovery`).
-        #[arg(long, env = "OASF_SCHEMA_URL", default_value = commands::card::DEFAULT_OASF_SCHEMA_URL)]
+        /// OASF server that checks skills and domains, once at startup (plain
+        /// http only on loopback). The card names the canonical schema
+        /// (`https://schema.oasf.outshift.com/<version>/objects/discovery`)
+        /// whichever server checks them. Under `shadictl --net-block`, use
+        /// `--skip-oasf-validation` to keep the server off the allowlist.
+        #[arg(long, env = "OASF_SCHEMA_URL", default_value = commands::card::DEFAULT_OASF_SCHEMA_URL,
+              value_parser = parse_validator_url)]
         oasf_schema_url: String,
 
         /// OASF schema version to validate against and advertise.
@@ -296,6 +300,48 @@ fn parse_http_url(raw: &str) -> Result<String, String> {
     Ok(raw.to_string())
 }
 
+/// An OASF validator: https, or http on loopback, since a plain-http answer
+/// from elsewhere could come from anyone on the path.
+fn parse_validator_url(raw: &str) -> Result<String, String> {
+    parse_http_url(raw)?;
+    let url = url::Url::parse(raw).map_err(|e| e.to_string())?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "http" && !loopback {
+        return Err("a plain-http OASF server is accepted only on loopback; use https".to_string());
+    }
+    Ok(raw.to_string())
+}
+
+/// `--advertise-url` only replaces the `--a2a-listen` address, and a
+/// wildcard address can't be reached at, so it isn't published as is.
+fn advertisable(
+    a2a_listen: Option<&str>,
+    advertise_url: Option<&str>,
+    dir_publish: bool,
+) -> anyhow::Result<()> {
+    let Some(listen) = a2a_listen else {
+        if advertise_url.is_some() {
+            anyhow::bail!("--advertise-url needs --a2a-listen: it is the address clients use for it");
+        }
+        return Ok(());
+    };
+    let wildcard = listen
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().is_unspecified());
+    if dir_publish && wildcard && advertise_url.is_none() {
+        anyhow::bail!(
+            "--dir-publish would publish {listen}, which clients can't connect to; \
+             pass --advertise-url with the address they reach the listener at"
+        );
+    }
+    Ok(())
+}
+
 /// An OASF record needs at least one skill, so `--dir-publish` without one
 /// would only fail once the listener is up.
 fn publishable(dir_publish: bool, skills: &[String]) -> anyhow::Result<()> {
@@ -346,6 +392,23 @@ fn main() {
                 gh_token: gh_token.as_deref(),
             });
             publishable(dir_publish, &card_opts.skills)
+                .and_then(|()| {
+                    advertisable(
+                        a2a_listen.as_deref(),
+                        card_opts.advertise_url.as_deref(),
+                        dir_publish,
+                    )
+                })
+                // A bad tool or a missing sandbox fails before the OASF
+                // server is asked.
+                .and_then(|()| {
+                    commands::register::preflight(
+                        &tool,
+                        command.as_deref(),
+                        slim_endpoint.as_deref(),
+                        a2a_listen.as_deref(),
+                    )
+                })
                 .and_then(|()| commands::card::configure(&card_opts))
                 .and_then(|()| {
                     commands::register::run(
@@ -548,6 +611,27 @@ mod tests {
     #[test]
     fn rejects_unknown_subcommand() {
         assert!(Cli::try_parse_from(["agentbridge", "nope"]).is_err());
+    }
+
+    #[test]
+    fn a_plain_http_oasf_server_must_be_on_loopback() {
+        assert!(parse_validator_url("https://schema.oasf.outshift.com").is_ok());
+        assert!(parse_validator_url("http://localhost:8080").is_ok());
+        assert!(parse_validator_url("http://127.0.0.1:8080").is_ok());
+        assert!(parse_validator_url("http://[::1]:8080").is_ok());
+        assert!(parse_validator_url("http://schema.example.com").is_err());
+        assert!(parse_validator_url("http://192.168.1.5:8080").is_err());
+    }
+
+    #[test]
+    fn advertise_url_needs_a_listener_and_a_wildcard_needs_one_to_publish() {
+        let url = Some("https://agent.example:8443");
+        assert!(advertisable(None, url, false).is_err());
+        assert!(advertisable(None, None, true).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, true).is_err());
+        assert!(advertisable(Some("0.0.0.0:8443"), url, true).is_ok());
+        assert!(advertisable(Some("0.0.0.0:8443"), None, false).is_ok());
+        assert!(advertisable(Some("127.0.0.1:8443"), None, true).is_ok());
     }
 
     #[test]

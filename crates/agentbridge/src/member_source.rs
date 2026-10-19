@@ -1046,6 +1046,53 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    #[cfg(unix)]
+    fn a2a_agent_search_asks_dirctl_for_the_a2a_module_and_each_skill() {
+        let _guard = crate::dir_registry::dirctl_env_lock().lock().expect("lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("args.log");
+        let path = dir.path().join("fake_dirctl.sh");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n", log.display()),
+        )
+        .expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+
+        let result = A2AAgentSearchSource {
+            skills: vec![
+                "software_engineering/code_generation".to_string(),
+                "language_processing/language_generation/summarization".to_string(),
+            ],
+            dir: test_dir(),
+        }
+        .resolve();
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert!(result.expect("no records").is_empty());
+        let args: Vec<String> = std::fs::read_to_string(&log)
+            .expect("dirctl was called")
+            .lines()
+            .skip_while(|a| *a != "search") // after wait_until_executable's probe
+            .map(str::to_string)
+            .collect();
+        let pair = |flag: &str, value: &str| {
+            args.windows(2).any(|w| w[0] == flag && w[1] == value)
+        };
+        assert_eq!(args.first().map(String::as_str), Some("search"), "{args:?}");
+        assert!(pair("--module", "integration/a2a"), "{args:?}");
+        assert!(pair("--skill", "software_engineering/code_generation"), "{args:?}");
+        assert!(
+            pair("--skill", "language_processing/language_generation/summarization"),
+            "{args:?}"
+        );
+    }
+
     fn fake_dirctl_script(cid: &str, record_json: &str) -> (std::path::PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("fake_dirctl.sh");
