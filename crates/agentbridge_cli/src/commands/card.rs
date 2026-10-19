@@ -74,6 +74,15 @@ static CARD_CONFIG: OnceLock<CardConfig> = OnceLock::new();
 /// against the OASF server unless validation is skipped, so `register` fails
 /// before any listener starts. Call once, before serving.
 pub fn configure(opts: &CardOptions) -> anyhow::Result<()> {
+    let config = checked(opts)?;
+    CARD_CONFIG
+        .set(config)
+        .map_err(|_| anyhow::anyhow!("card settings were already configured"))
+}
+
+/// The card settings from `opts`, validated against the OASF server unless
+/// there is nothing to check or validation is skipped.
+fn checked(opts: &CardOptions) -> anyhow::Result<CardConfig> {
     let config = CardConfig::from_options(opts);
     require_skill_for_domains(&config)?;
 
@@ -87,9 +96,7 @@ pub fn configure(opts: &CardOptions) -> anyhow::Result<()> {
         validate(&config)?;
     }
 
-    CARD_CONFIG
-        .set(config)
-        .map_err(|_| anyhow::anyhow!("card settings were already configured"))
+    Ok(config)
 }
 
 /// The OASF `discovery` object requires skills, so domains alone can't be
@@ -167,7 +174,8 @@ impl CardConfig {
     }
 
     /// The card extensions: the OASF `discovery` extension, when the agent has
-    /// a skill.
+    /// a skill. It is named after the canonical OASF schema whichever server
+    /// checked it, since that is the name dir-runtime indexes.
     pub fn extensions(&self) -> Vec<AgentExtension> {
         if self.skills.is_empty() {
             return Vec::new();
@@ -175,8 +183,8 @@ impl CardConfig {
 
         vec![AgentExtension {
             uri: format!(
-                "{}/{}/objects/discovery",
-                self.schema_url, self.schema_version
+                "{DEFAULT_OASF_SCHEMA_URL}/{}/objects/discovery",
+                self.schema_version
             ),
             description: Some("OASF skills and domains".to_string()),
             required: Some(false),
@@ -366,7 +374,8 @@ mod tests {
         assert_eq!(extensions.len(), 1);
         assert_eq!(
             extensions[0].uri,
-            "http://localhost:8080/1.1.0/objects/discovery"
+            "https://schema.oasf.outshift.com/1.1.0/objects/discovery",
+            "named after the canonical schema, not the server that checked it"
         );
 
         let params = extensions[0].params.as_ref().expect("params");
@@ -460,6 +469,42 @@ mod tests {
                 "{body}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn without_a_skill_nothing_is_validated() {
+        // An unreachable server would fail validation, so passing shows it
+        // wasn't asked.
+        let config = checked(&CardOptions {
+            oasf_schema_url: "http://127.0.0.1:9".into(),
+            ..options()
+        })
+        .expect("nothing to check");
+        assert!(config.extensions().is_empty());
+    }
+
+    #[test]
+    fn skipping_validation_advertises_the_skills_unchecked() {
+        let config = checked(&CardOptions {
+            skills: vec!["not/a/real/skill".into()],
+            oasf_schema_url: "http://127.0.0.1:9".into(),
+            skip_validation: true,
+            ..options()
+        })
+        .expect("validation skipped");
+        assert_eq!(config.extensions().len(), 1);
+    }
+
+    #[test]
+    fn a_domain_without_a_skill_is_refused_even_when_skipping_validation() {
+        let err = checked(&CardOptions {
+            domains: vec!["technology/networking/network_security".into()],
+            skip_validation: true,
+            ..options()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--domain needs at least one --skill"), "{err}");
     }
 
     #[test]

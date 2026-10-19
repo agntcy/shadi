@@ -61,8 +61,26 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register --tool opencode --slim-endpoint 127.0.0.1:47357
 
 # Publish an OASF record to the Agent Directory after registering
-agentbridge register --tool claude-code --dir-publish
+# (a record needs at least one OASF skill)
+agentbridge register --tool claude-code \
+  --skill software_engineering/code_generation --dir-publish
 ```
+
+What the agent card advertises:
+
+- `--skill <OASF skill>` (repeatable) and `--domain <OASF domain>` (repeatable,
+  needs a skill) go into the card's OASF `discovery` extension. Nothing is
+  advertised by default; an agent without a skill isn't found by skill.
+- `--version <semver>` is the agent's version (default: agentbridge's).
+- `--advertise-url <url>` is the address clients use for `--a2a-listen` when
+  it differs from the listen address, e.g. a published container port.
+  Publishing a wildcard listen address (`0.0.0.0`) to DIR needs it.
+- Skills and domains are checked against the OASF server
+  (`--oasf-schema-url`, `--oasf-schema-version`, default
+  `https://schema.oasf.outshift.com` 1.1.0) once at startup. Under
+  `shadictl --net-block` that needs `--net-allow schema.oasf.outshift.com:443`
+  for the listener's lifetime; `--skip-oasf-validation` advertises them
+  unchecked instead. A plain-http server is accepted only on loopback.
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 `cursor-agent`, `goose`, `opencode`.
