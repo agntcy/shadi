@@ -178,12 +178,23 @@ enum Cmd {
         #[arg(long)]
         local: bool,
 
-        /// Only agents with this OASF skill (repeatable: any of them). Without
-        /// it, every A2A agent in the Directory.
+        /// Only agents with this OASF skill (repeatable: any of them). Applies
+        /// to running agents runtime discovery reports, and to --published;
+        /// listeners that aren't announced carry no skills, so they are left out.
         #[arg(long = "skill", value_name = "OASF_SKILL", conflicts_with = "local")]
         skills: Vec<String>,
 
-        /// Agent Directory server address.
+        /// dir-runtime to ask for running agents (repeatable), e.g. a local
+        /// `dirctl daemon`. An unreachable one is reported and skipped.
+        #[arg(long = "runtime", value_name = "ADDR", default_value = "localhost:8888", conflicts_with_all = ["local", "published"])]
+        runtimes: Vec<String>,
+
+        /// Search DIR records (`register --dir-publish`) instead of running
+        /// agents: what was published, not what runs.
+        #[arg(long, conflicts_with = "local")]
+        published: bool,
+
+        /// Agent Directory server address (for --published).
         #[arg(long, default_value = "prod.gateway.ads.outshift.io:443")]
         dir_server: String,
 
@@ -249,6 +260,11 @@ enum Cmd {
         /// already has a locator scheme). Default is grpc.
         #[arg(long, value_parser = shadi_a2a::A2ABinding::parse_unicast)]
         a2a_binding: Option<shadi_a2a::A2ABinding>,
+
+        /// dir-runtime to look `--to` up in when it isn't a listener on this
+        /// host (agents announced with `register --dir-announce`).
+        #[arg(long, value_name = "ADDR", default_value = "localhost:8888")]
+        runtime: String,
     },
 
     /// Ask a channel's owner over A2A to let someone into the channel.
@@ -560,9 +576,18 @@ fn main() {
         Cmd::List {
             local,
             skills,
+            runtimes,
+            published,
             dir_server,
             gh_token,
-        } => commands::list::run(local, &skills, &dir_server, gh_token.as_deref()),
+        } => commands::list::run(&commands::list::ListOptions {
+            local,
+            published,
+            skills: &skills,
+            runtimes: &runtimes,
+            dir_server: &dir_server,
+            gh_token: gh_token.as_deref(),
+        }),
         Cmd::Handoff {
             from,
             to,
@@ -583,6 +608,7 @@ fn main() {
             endpoint,
             a2a_url,
             a2a_binding,
+            runtime,
         } => commands::delegate::run(
             &prompt,
             &to,
@@ -590,6 +616,7 @@ fn main() {
             &endpoint,
             a2a_url.as_deref(),
             a2a_binding,
+            &runtime,
         ),
         Cmd::RequestInvite {
             owner,

@@ -715,6 +715,8 @@ cargo run -p agntcy-shadi-cli -- slim create-group \
 ```
 
 - `--members SPEC` (repeatable): `skill:<skill>` (Directory search by skill),
+  `running:<skill>` (running agents announced with `register --dir-announce`,
+  through runtime discovery on `--dir-server`, e.g. a local `dirctl daemon`),
   `did:<did>` (Directory search by author DID), or
   `explicit:<name>=<did>[@<endpoint>]` (no Directory round trip). Every
   resolved candidate's DID is unioned into the group's trust set.
@@ -735,7 +737,7 @@ hands off *into* this same shell once its discovered group is created):
 
 - `/slim create <org/namespace/app>`: creates a channel; the caller becomes its moderator.
 - `/slim invite <org/namespace/app>`: moderator-only, invites a participant into the channel.
-- `/slim invite-from <spec>`: moderator-only, re-resolves one `skill:`/`did:`/`explicit:` spec
+- `/slim invite-from <spec>`: moderator-only, re-resolves one `skill:`/`running:`/`did:`/`explicit:` spec
   live and invites whichever matches are already in the group's trust set — the way to pull a
   newly-discovered agent into an already-running group.
 - `/slim join <org/namespace/app> [--timeout SECONDS]`: blocks until invited; caller becomes a participant.

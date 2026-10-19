@@ -1010,13 +1010,16 @@ fn describe_proto_name(name: &ProtoName) -> String {
 // --- Member resolution -------------------------------------------------------
 
 fn is_member_spec(spec: &str) -> bool {
-    spec.starts_with("skill:") || spec.starts_with("did:") || spec.starts_with("explicit:")
+    spec.starts_with("skill:")
+        || spec.starts_with("running:")
+        || spec.starts_with("did:")
+        || spec.starts_with("explicit:")
 }
 
 /// Whether a spec has to be resolved against the Agent Directory. `explicit:`
 /// already names `{name, did, endpoint}`, so it resolves without a server.
 fn spec_needs_directory(spec: &str) -> bool {
-    spec.starts_with("skill:") || spec.starts_with("did:")
+    spec.starts_with("skill:") || spec.starts_with("running:") || spec.starts_with("did:")
 }
 
 

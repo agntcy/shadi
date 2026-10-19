@@ -194,7 +194,7 @@ Examples:
     /slim invite agntcy/shadi/avatar
     /slim invite acme/ops/oncall-bot"),
         ("/slim invite-from", "\
-Usage: /slim invite-from <skill:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>
+Usage: /slim invite-from <skill:<skill>|running:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>
 
 Re-resolve one member-source spec live (same syntax as `shadictl slim
 create-group --members`) and invite whichever resolved candidates are already
@@ -1166,7 +1166,7 @@ impl ShellSession {
     fn cmd_slim_invite_from(&mut self, args: &[&str]) -> LoopAction {
         if args.len() != 1 {
             eprintln!(
-                "usage: /slim invite-from <skill:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>"
+                "usage: /slim invite-from <skill:<skill>|running:<skill>|did:<did>|explicit:<name>=<did>[@<endpoint>]>"
             );
             return LoopAction::Continue;
         }
@@ -1179,7 +1179,9 @@ impl ShellSession {
             limit: 20,
         };
 
-        let source = match agentbridge::member_source::parse_member_spec(spec, &dir) {
+        let runtime = std::env::var("SHADI_DIR_RUNTIME")
+            .unwrap_or_else(|_| agentbridge::member_source::DEFAULT_RUNTIME_ADDR.to_string());
+        let source = match agentbridge::member_source::parse_member_spec_at(spec, &dir, &runtime) {
             Ok(source) => source,
             Err(err) => {
                 eprintln!("{}", err);
@@ -1687,8 +1689,10 @@ fn resolve_and_persist_group_trust(args: &SlimCreateGroupArgs) -> Result<(), Str
     // so a later `/slim invite-from` in this same session defaults to it too
     // instead of silently falling back to the production gateway.
     std::env::set_var("SHADI_DIR_SERVER", &args.dir_server);
+    std::env::set_var("SHADI_DIR_RUNTIME", &args.runtime);
 
-    let candidates = agentbridge::member_source::resolve_members(&args.members, &dir)
+    let candidates =
+        agentbridge::member_source::resolve_members_at(&args.members, &dir, &args.runtime)
         .map_err(|err| format!("error resolving --members: {}", err))?;
 
     println!("Resolved {} candidate member(s):", candidates.len());
@@ -2291,6 +2295,7 @@ mod tests {
             channel: "agntcy/shadi/room".to_string(),
             members: vec![],
             dir_server: "localhost:9999".to_string(),
+            runtime: "localhost:9999".to_string(),
             gh_token: None,
             limit: 10,
             write_config: None,
@@ -2314,6 +2319,7 @@ mod tests {
                 "explicit:claude-code=did:key:agent@127.0.0.1:47560".to_string(),
             ],
             dir_server: "localhost:8888".to_string(),
+            runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
             write_config: None,
@@ -2336,6 +2342,7 @@ mod tests {
             channel: "agntcy/shadi/room".to_string(),
             members: vec!["explicit:avatar=did:key:human".to_string()],
             dir_server: "localhost:8888".to_string(),
+            runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
             write_config: None,
@@ -2357,6 +2364,7 @@ mod tests {
             channel: "agntcy/shadi/room".to_string(),
             members: vec![],
             dir_server: "localhost:8888".to_string(),
+            runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
             write_config: None,
@@ -2375,6 +2383,7 @@ mod tests {
             channel: "agntcy/shadi/room".to_string(),
             members: vec!["bogus:whatever".to_string()],
             dir_server: "localhost:8888".to_string(),
+            runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
             write_config: None,
@@ -2399,6 +2408,7 @@ mod tests {
             channel: "agntcy/shadi/room".to_string(),
             members: vec!["explicit:copilot=did:key:agent".to_string()],
             dir_server: "localhost:8888".to_string(),
+            runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
             write_config: Some(path.clone()),
