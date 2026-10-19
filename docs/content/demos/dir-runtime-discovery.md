@@ -94,8 +94,12 @@ In fish, start a shell that inherits it with
 [`demo-env-runtime.sh`](demo-env-runtime.sh) sets:
 
 - **DID auth** (`SHADI_SLIM_AUTH=did`, `SLIM_HUMAN_SEED`), and
-  `SLIM_MEMBER_DIDS` with the one DID the demo agents accept tasks from: the
-  `avatar` agent `agentbridge delegate` signs as.
+  `SLIM_MEMBER_DIDS` with the `avatar` DID `agentbridge delegate` signs as.
+  It restricts SLIM sessions only: an `--a2a-listen` listener checks just the
+  DID proof on a message, so it runs a task from any self-signed `did:key`
+  ([shadi#500](https://github.com/agntcy/shadi/issues/500)). Keep unicast
+  listeners on loopback, as here, or set `SHADI_MEMBER_HUMAN_DIDS` to require a
+  binding from a listed human.
 - **`SHADI_TMP_DIR`**, the demo's working state, as a real path: each run's
   harness configuration (`agentbridge-record/`), the registry of local
   listeners (`agentbridge-local/`) and the harnesses' work directory
@@ -396,8 +400,10 @@ target/debug/agentbridge delegate --to claude-code-isolated \
     Whatever credential you pass, the harness and the tools it runs can read
     it, and a task's reply goes back to whoever sent it. This was already
     true before `--record`: a harness always inherited agentbridge's
-    environment. Use a key you can revoke, ideally with a spending limit, and
-    only admit DIDs you trust (`SLIM_MEMBER_DIDS`). Keeping the credential
+    environment. Use a key you can revoke, ideally with a spending limit.
+    `SLIM_MEMBER_DIDS` limits who can send over SLIM; on unicast only the DID
+    proof is checked ([shadi#500](https://github.com/agntcy/shadi/issues/500)),
+    so bind to loopback or set `SHADI_MEMBER_HUMAN_DIDS`. Keeping the credential
     out of the harness is [shadi#486](https://github.com/agntcy/shadi/issues/486); SHADI's own secrets (such as
     `SLIM_HUMAN_SEED`) are kept out of its environment by [shadi#487](https://github.com/agntcy/shadi/issues/487).
 
@@ -444,21 +450,28 @@ listener and allow its port: `--a2a-binding grpc --card-listen 127.0.0.1:19952`.
 Agents announced to runtime discovery can form a SLIM group like the
 [Agent Directory Discovery Demo](dir-group-discovery.md) does with Directory
 records: the `running:<skill>` member source finds them through
-`dirctl runtime list` instead of a record search. Use that demo's SLIM setup
-(mTLS material, `shadictl slim start-node`, and the moderator's DID in each
-agent's `SLIM_MEMBER_DIDS`), and announce each agent with a skill and a SLIM
-endpoint:
+`dirctl runtime list` instead of a record search. This step uses that demo's
+environment and SLIM setup, not `demo-env-runtime.sh`: in each terminal
+`source docs/content/demos/demo-env-dir.sh` (it sets `SLIM_ENDPOINT` and the
+mTLS material), start the node with `shadictl slim start-node`, and put the
+moderator's DID in each agent's `SLIM_MEMBER_DIDS`, as that demo does. Then
+announce each agent with a skill and a SLIM endpoint:
 
 ```bash
+source docs/content/demos/demo-env-dir.sh
 target/debug/shadictl --net-block \
   --net-allow "$SLIM_ENDPOINT" --net-allow schema.oasf.outshift.com:443 \
   --net-allow 127.0.0.1:19953 \
-  --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
+  --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" \
+  --write ~/.agntcy/dir-runtime/workloads.d \
   -- target/debug/agentbridge register --tool codex \
-     --command "$SHADI_TMP_DIR/work" --slim-endpoint "$SLIM_ENDPOINT" \
+     --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT" \
      --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination \
      --card-listen 127.0.0.1:19953 --dir-announce
 ```
+
+`--read "$SHADI_TMP_DIR"` keeps the mTLS material read-only for the harness;
+only the lease directory is writable.
 
 SLIM doesn't serve the agent card, so `--dir-announce` adds a card listener
 for dir-runtime to read. The sandbox only allows listed ports, so give it a
@@ -470,9 +483,13 @@ Then the moderator resolves the group from running agents:
 ```bash
 target/debug/shadictl slim create-group \
   --members "running:ai_ml_engineering/agent_orchestration/multi_agent_coordination" \
-  --dir-server localhost:8888 \
+  --runtime localhost:8888 \
   agntcy/shadi/runtime-room
 ```
+
+`running:` trusts what the agents say about themselves: any workload the
+runtime reports with a matching skill gets its DID into the group's trust set.
+Use it only on a runtime whose workloads you trust.
 
 and continues as in that demo's steps 6–7 (`/slim join`, `/slim invite`,
 `/slim invite-from running:…`). Only agents that announced their DID
