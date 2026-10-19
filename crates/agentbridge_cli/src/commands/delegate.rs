@@ -33,7 +33,15 @@ pub fn run(
     a2a_binding: Option<A2ABinding>,
     runtime: &str,
 ) -> anyhow::Result<()> {
-    let peer = resolve_delegate_peer(to_agent_id, a2a_url, a2a_binding, runtime)?;
+    let (peer, found) = resolve_delegate_peer(to_agent_id, a2a_url, a2a_binding, runtime)?;
+    if found == Found::Runtime {
+        eprintln!(
+            "[agentbridge] '{}' ({}) was found through dir-runtime {runtime}: its DID and \
+             address are what it announced about itself, and nothing checks that the DID \
+             answers there yet (agntcy/shadi#504)",
+            peer.name, peer.did
+        );
+    }
     let locator = peer.preferred_locator();
 
     let (slim_node, unicast) = match locator.as_ref() {
@@ -94,15 +102,27 @@ pub fn run(
     Ok(())
 }
 
-/// Find `to`: a listener on this host (its lease), else a running agent the
-/// dir-runtime at `runtime` reports (announced listeners), else, for a DID,
-/// a published record in DIR.
+/// Where a delegate peer was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Found {
+    /// A listener on this host, through its lease.
+    Local,
+    /// A published, signed record in DIR.
+    Directory,
+    /// A workload dir-runtime reports, as the agent announced itself:
+    /// unverified.
+    Runtime,
+}
+
+/// Find `to`: a listener on this host (its lease); for a DID, else its signed
+/// record in DIR, else what dir-runtime reports; for a name, else dir-runtime,
+/// else DIR.
 fn resolve_delegate_peer(
     to: &str,
     a2a_url_override: Option<&str>,
     a2a_binding: Option<A2ABinding>,
     runtime: &str,
-) -> anyhow::Result<CandidateMember> {
+) -> anyhow::Result<(CandidateMember, Found)> {
     let registry = LocalAdapterRegistry::from_env();
     let dir = DirLookupOptions {
         server_addr: std::env::var("DIRECTORY_SERVER")
@@ -116,7 +136,7 @@ fn resolve_delegate_peer(
         gh_token: None,
         limit: 0,
     };
-    resolve_peer_with(
+    resolve_peer_found(
         to,
         registry.resolve_live(to).map(|r| r.did),
         || find_running_peer(to, &runtime_opts),
@@ -128,12 +148,8 @@ fn resolve_delegate_peer(
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Pick the peer from a local lease (`leased`: its DID, if one matches), else
-/// from dir-runtime (`running`), else from `fallback` (a lease again, or the
-/// Directory), and apply `--a2a-url` / `--a2a-binding`. Several matching
-/// instances are an error unless `to` is a DID and `--a2a-url` picks the
-/// instance; so is a name that a lease and a running agent with another DID
-/// share.
+/// [`resolve_peer_found`] without saying where the peer was found.
+#[cfg(test)]
 fn resolve_peer_with(
     to: &str,
     leased: Result<String, String>,
@@ -143,32 +159,85 @@ fn resolve_peer_with(
     a2a_binding: Option<A2ABinding>,
     runtime: &str,
 ) -> Result<CandidateMember, String> {
-    let resolved = match leased {
-        Err(err) if err.contains("ambiguous") => Err(err),
-        Err(_) => match running() {
-            Ok(Some(peer)) => Ok(peer),
-            Ok(None) => fallback(),
+    resolve_peer_found(
+        to,
+        leased,
+        running,
+        fallback,
+        a2a_url_override,
+        a2a_binding,
+        runtime,
+    )
+    .map(|(peer, _)| peer)
+}
+
+/// Pick the peer and say where it was found: a local lease (`leased`: its
+/// DID, if one matches); then, for a DID, `fallback` (the lease again, or the
+/// signed DIR record) before `running` (dir-runtime), and for a name,
+/// `running` before `fallback`. Then apply `--a2a-url` / `--a2a-binding`.
+/// Several matching instances are an error unless `to` is a DID and
+/// `--a2a-url` picks the instance; so is a name that a lease and a running
+/// agent with another DID share.
+fn resolve_peer_found(
+    to: &str,
+    leased: Result<String, String>,
+    running: impl FnOnce() -> Result<Option<CandidateMember>, String>,
+    fallback: impl FnOnce() -> Result<CandidateMember, String>,
+    a2a_url_override: Option<&str>,
+    a2a_binding: Option<A2ABinding>,
+    runtime: &str,
+) -> Result<(CandidateMember, Found), String> {
+    let is_did = parse_peer_did(to).is_some();
+    // dir-runtime's answer, or why there is none to use.
+    let ask_runtime = |running: Box<dyn FnOnce() -> Result<Option<CandidateMember>, String> + '_>| {
+        match running() {
+            Ok(found) => Ok(found),
             Err(e) if e.contains("ambiguous") => Err(e),
             // No dir-runtime running is normal (it's optional); report
             // anything else.
-            Err(e) if runtime_not_running(&e) => fallback(),
+            Err(e) if runtime_not_running(&e) => Ok(None),
             Err(e) => {
                 eprintln!("[agentbridge] couldn't ask dir-runtime {runtime}: {e}");
-                fallback()
+                Ok(None)
             }
+        }
+    };
+
+    let resolved = match leased {
+        Err(err) if err.contains("ambiguous") => Err(err),
+        // A DID: its signed record before what dir-runtime reports.
+        Err(_) if is_did => match fallback() {
+            Ok(peer) => Ok((peer, Found::Directory)),
+            Err(not_in_dir) => match ask_runtime(Box::new(running)) {
+                Ok(Some(peer)) => Ok((peer, Found::Runtime)),
+                Ok(None) => Err(not_in_dir),
+                Err(e) => Err(e),
+            },
         },
-        Ok(lease_did) if parse_peer_did(to).is_none() => match running() {
+        Err(_) => match ask_runtime(Box::new(running)) {
+            Ok(Some(peer)) => Ok((peer, Found::Runtime)),
+            Ok(None) => fallback().map(|peer| (peer, Found::Directory)),
+            Err(e) => Err(e),
+        },
+        Ok(lease_did) if !is_did => match running() {
             Ok(Some(other)) if other.did != lease_did => Err(format!(
                 "ambiguous: '{to}' is a local listener ({lease_did}) and a running agent at \
                  dir-runtime {runtime} ({}). Pass --to <did> to pick one",
                 other.did
             )),
             Err(e) if e.contains("ambiguous") => Err(e),
-            _ => fallback(),
+            _ => fallback().map(|peer| (peer, Found::Local)),
         },
-        Ok(_) => fallback(),
+        Ok(_) => fallback().map(|peer| (peer, Found::Local)),
     };
-    apply_locator_override(to, resolved, a2a_url_override, a2a_binding)
+    let found = resolved.as_ref().map_or(Found::Local, |(_, found)| *found);
+    apply_locator_override(
+        to,
+        resolved.map(|(peer, _)| peer),
+        a2a_url_override,
+        a2a_binding,
+    )
+    .map(|peer| (peer, found))
 }
 
 fn apply_parsed_locator(peer: &mut CandidateMember, locator: A2ALocator) {
@@ -291,13 +360,56 @@ mod tests {
     }
 
     #[test]
+    fn a_did_is_taken_from_its_signed_record_before_dir_runtime() {
+        let (peer, found) = resolve_peer_found(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || panic!("DIR knows the DID, so dir-runtime isn't asked"),
+            || Ok(instance(7)),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Directory);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:7"));
+
+        let (_, found) = resolve_peer_found(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(1))),
+            || Err("DID not found in DIR".to_string()),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Runtime, "only dir-runtime has it: unverified");
+    }
+
+    #[test]
+    fn a_name_found_through_dir_runtime_is_marked_unverified() {
+        let (_, found) = resolve_peer_found(
+            "copilot",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(1))),
+            || panic!("found in dir-runtime"),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Runtime);
+    }
+
+    #[test]
     fn a_locator_picks_one_of_several_running_instances_of_a_did() {
         let resolve = |to: &str, url: Option<&str>| {
             resolve_peer_with(
                 to,
                 Err("no live adapter".to_string()),
                 || Err("ambiguous: 2 running agents match".to_string()),
-                || panic!("an ambiguous dir-runtime match doesn't fall back"),
+                || Err("DID not found in DIR".to_string()),
                 url,
                 Some(A2ABinding::HttpJson),
                 "localhost:8888",
