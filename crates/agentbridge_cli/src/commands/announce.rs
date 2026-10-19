@@ -732,7 +732,7 @@ mod tests {
             descriptor: json!({ "name": "cancel-test" }),
             listeners: 1,
             written: Arc::clone(&written),
-            on_sigterm: Arc::new(Mutex::new(None)),
+            on_sigterm: Box::leak(Box::new(Mutex::new(None))),
         });
 
         withdraw(&written);
