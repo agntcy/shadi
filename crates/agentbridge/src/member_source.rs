@@ -111,13 +111,22 @@ pub struct A2AAgentSearchSource {
     pub dir: DirLookupOptions,
 }
 
-impl MemberSource for A2AAgentSearchSource {
-    fn resolve(&self) -> Result<Vec<CandidateMember>, String> {
+impl A2AAgentSearchSource {
+    /// The candidates, and how many records the search returned (at most
+    /// `dir.limit`), including ones skipped as unusable: a full page means
+    /// there may be more.
+    pub fn resolve_counted(&self) -> Result<(Vec<CandidateMember>, usize), String> {
         let mut args = vec!["--module", "integration/a2a"];
         for skill in &self.skills {
             args.extend(["--skill", skill.as_str()]);
         }
-        resolve_via_dirctl_query(&args, &self.dir)
+        resolve_via_dirctl_query_counted(&args, &self.dir)
+    }
+}
+
+impl MemberSource for A2AAgentSearchSource {
+    fn resolve(&self) -> Result<Vec<CandidateMember>, String> {
+        self.resolve_counted().map(|(members, _)| members)
     }
 }
 
@@ -346,7 +355,17 @@ fn resolve_via_dirctl_query(
     query_args: &[&str],
     dir: &DirLookupOptions,
 ) -> Result<Vec<CandidateMember>, String> {
+    resolve_via_dirctl_query_counted(query_args, dir).map(|(members, _)| members)
+}
+
+/// [`resolve_via_dirctl_query`], with how many records the search returned
+/// before unusable ones were skipped.
+fn resolve_via_dirctl_query_counted(
+    query_args: &[&str],
+    dir: &DirLookupOptions,
+) -> Result<(Vec<CandidateMember>, usize), String> {
     let cids = search_cids(query_args, dir)?;
+    let found = cids.len();
     let mut members = Vec::with_capacity(cids.len());
     for cid in cids {
         match pull_record_json(&cid, dir) {
@@ -362,7 +381,7 @@ fn resolve_via_dirctl_query(
             Err(e) => eprintln!("[member_source] failed to pull {cid}: {e}"),
         }
     }
-    Ok(members)
+    Ok((members, found))
 }
 
 /// The CIDs `dirctl search <query_args>` finds.

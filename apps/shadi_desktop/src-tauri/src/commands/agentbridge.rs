@@ -146,14 +146,21 @@ pub async fn agentbridge_list_adapters(
                 limit: LIST_LIMIT + 1,
             },
         };
-        Ok(listing(source.resolve()?))
+        let (candidates, found) = source.resolve_counted()?;
+        Ok(listing(candidates, found))
     })
     .await
     .map_err(|e| format!("task failed: {e}"))?
 }
 
-fn listing(candidates: Vec<agentbridge::member_source::CandidateMember>) -> AdapterListing {
-    let more = candidates.len() > LIST_LIMIT;
+/// The page to show from `candidates`, out of `found` records the search
+/// returned: more exist when the search came back full, even if some of those
+/// records were skipped as unusable.
+fn listing(
+    candidates: Vec<agentbridge::member_source::CandidateMember>,
+    found: usize,
+) -> AdapterListing {
+    let more = found > LIST_LIMIT || candidates.len() > LIST_LIMIT;
     AdapterListing {
         adapters: candidates
             .into_iter()
@@ -607,12 +614,17 @@ mod tests {
 
     #[test]
     fn the_list_says_when_the_directory_has_more_agents() {
-        let full = listing(candidates(LIST_LIMIT + 1));
+        let full = listing(candidates(LIST_LIMIT + 1), LIST_LIMIT + 1);
         assert_eq!(full.adapters.len(), LIST_LIMIT);
         assert!(full.more);
 
-        let fits = listing(candidates(LIST_LIMIT));
+        let fits = listing(candidates(LIST_LIMIT), LIST_LIMIT);
         assert_eq!(fits.adapters.len(), LIST_LIMIT);
         assert!(!fits.more);
+
+        // The search came back full, but some records weren't usable.
+        let skipped = listing(candidates(LIST_LIMIT - 3), LIST_LIMIT + 1);
+        assert_eq!(skipped.adapters.len(), LIST_LIMIT - 3);
+        assert!(skipped.more, "a full search means there may be more");
     }
 }
