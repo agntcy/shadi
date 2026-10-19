@@ -15,13 +15,20 @@ x-agent: &agent
     org.agntcy/agent-type: "a2a"
   environment: &agent-env
     SHADI_SLIM_AUTH: did
-    SLIM_HUMAN_SEED: ${SLIM_HUMAN_SEED:-demo-human-seed}
-    SLIM_MEMBER_DIDS: ${SLIM_MEMBER_DIDS:-did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK}
+    # A demo-only seed, never your shell's SLIM_HUMAN_SEED: it would show in
+    # `docker inspect` and reach the harness.
+    SLIM_HUMAN_SEED: demo-human-seed
+    # The avatar DID demo-human-seed derives (what `agentbridge delegate`
+    # signs as with that seed).
+    SLIM_MEMBER_DIDS: ${DEMO_MEMBER_DIDS:-did:key:z6MkrhcocVRv9BLgeheEArx536VjSoRFz1x91djJhkmviwUs}
 
 services:
   debugger:
     <<: *agent
-    ports: ["18443:8443", "18081:8081"]
+    # Loopback only, as the cards advertise 127.0.0.1: a published port on
+    # every interface would be reachable from the LAN (and on Linux bypasses
+    # ufw/firewalld).
+    ports: ["127.0.0.1:18443:8443", "127.0.0.1:18081:8081"]
     environment:
       <<: *agent-env
       FAKE_HARNESS_NAME: debugger
@@ -34,7 +41,7 @@ services:
 
   summarizer:
     <<: *agent
-    ports: ["28443:8443", "28081:8081"]
+    ports: ["127.0.0.1:28443:8443", "127.0.0.1:28081:8081"]
     environment:
       <<: *agent-env
       FAKE_HARNESS_NAME: summarizer

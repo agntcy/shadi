@@ -32,7 +32,7 @@ Run agentbridge agents as host processes and as Docker containers, and find them
 
   ```sh
   export SHADI_SLIM_AUTH=did SLIM_HUMAN_SEED=demo-human-seed \
-         SLIM_MEMBER_DIDS=did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK
+         SLIM_MEMBER_DIDS=did:key:z6MkrhcocVRv9BLgeheEArx536VjSoRFz1x91djJhkmviwUs
   ```
 
 ## A host process
@@ -130,10 +130,10 @@ The container runs as uid 10001 and must be able to read the key. Docker Desktop
 To run one container by hand, pass the labels and any `register` flags:
 
 ```sh
-docker run -d --name my-agent -p 38443:8443 -p 38081:8081 \
+docker run -d --name my-agent -p 127.0.0.1:38443:8443 -p 127.0.0.1:38081:8081 \
   --label org.agntcy/discover=true --label org.agntcy/agent-type=a2a \
   -e SHADI_SLIM_AUTH=did -e SLIM_HUMAN_SEED=demo-human-seed \
-  -e SLIM_MEMBER_DIDS=did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK \
+  -e SLIM_MEMBER_DIDS=did:key:z6MkrhcocVRv9BLgeheEArx536VjSoRFz1x91djJhkmviwUs \
   -e FAKE_HARNESS_SKILLS=software_engineering/code_generation \
   agentbridge-fake --skill software_engineering/code_generation \
   --advertise-url https://127.0.0.1:38443
@@ -141,7 +141,7 @@ docker run -d --name my-agent -p 38443:8443 -p 38081:8081 \
 
 ## Using a local OASF server
 
-Point both sides at it. agentbridge validates against it and names the `discovery` extension after it; `dirctl daemon` must accept it, or it ignores the extension. The sandbox must also reach it.
+agentbridge only validates against it: the card still names the canonical schema (`https://schema.oasf.outshift.com/1.1.0/objects/discovery`), so `dirctl daemon` needs no change. The sandbox must reach the server, and a plain-http one is accepted only on loopback.
 
 A host process allows the server's port next to its listener:
 
@@ -150,18 +150,10 @@ shadictl --net-block --net-allow 127.0.0.1:19950 --net-allow localhost:8080 … 
   -- agentbridge register … --oasf-schema-url http://localhost:8080
 ```
 
-A container sees the host as `host.docker.internal` (on Linux, add `--add-host=host.docker.internal:host-gateway`), not `localhost`. Set `OASF_SCHEMA_URL`; the entrypoint passes it to `register` and allows it in the sandbox:
+A container doesn't reach the host on loopback, so it needs an https server: set `OASF_SCHEMA_URL`, which the entrypoint passes to `register` and allows in the sandbox. Or validate on the host and start the container with `--skip-oasf-validation`.
 
 ```sh
-docker run … -e OASF_SCHEMA_URL=http://host.docker.internal:8080 agentbridge-fake …
-```
-
-The daemon and the listing then accept every URL the agents use:
-
-```sh
-DIRECTORY_DAEMON_RUNTIME_OASF_SCHEMA_URLS=https://schema.oasf.outshift.com,http://localhost:8080,http://host.docker.internal:8080 dirctl daemon start
-dirctl runtime list --oasf-schema-url https://schema.oasf.outshift.com --oasf-schema-url http://localhost:8080 \
-  --oasf-schema-url http://host.docker.internal:8080 --skill …
+docker run … -e OASF_SCHEMA_URL=https://oasf.example.internal agentbridge-fake …
 ```
 
 ## Notes

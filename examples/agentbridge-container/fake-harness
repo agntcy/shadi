@@ -38,6 +38,7 @@ prompt = " ".join(sys.argv[1:]).strip() or "(empty prompt)"
 agent = os.environ.get("FAKE_HARNESS_NAME", "fake-harness")
 skills = os.environ.get("FAKE_HARNESS_SKILLS", "")
 
+print(f"[{agent}] fake harness: no model was called")
 print(f"[{agent}] received: {prompt}")
 if skills:
     print(f"[{agent}] skills: {skills}")

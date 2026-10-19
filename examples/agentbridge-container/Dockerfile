@@ -5,8 +5,11 @@
 # with containers. Build from the repository root:
 #
 #   docker build -f examples/agentbridge-container/Dockerfile -t agentbridge-fake .
+#
+# Base images are pinned by digest, and Renovate doesn't update this file:
+# keep the rust tag in step with rust-toolchain.toml.
 
-FROM rust:1.98.1-bookworm AS build
+FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS build
 WORKDIR /src
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake clang protobuf-compiler \
@@ -17,7 +20,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p agntcy-agentbridge-cli -p agntcy-shadi-cli \
  && cp target/release/agentbridge target/release/shadictl /usr/local/bin/
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates openssl python3 \
  && rm -rf /var/lib/apt/lists/*
