@@ -211,6 +211,36 @@ fn to_params(value: Value) -> HashMap<String, Value> {
 /// configured schema version.
 fn validate(config: &CardConfig) -> anyhow::Result<()> {
     let url = config.validation_url();
+    without_tls_panics(&url, || ask_validator(config, &url))
+}
+
+/// Run `ask`, turning a panic into an error. On macOS the TLS stack panics
+/// ("Attempted to create a NULL object", in security-framework) when the
+/// Security framework can't build an SSL policy, as under a SHADI sandbox
+/// that doesn't let agentbridge read its own executable.
+fn without_tls_panics(
+    url: &str,
+    ask: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ask));
+    std::panic::set_hook(hook);
+    result.unwrap_or_else(|_| {
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<path to agentbridge>".to_string());
+        Err(anyhow::anyhow!(
+            "could not set up TLS to validate skills and domains with the OASF server ({url}). \
+             On macOS under shadictl, the sandbox must let agentbridge read its own executable: \
+             add `--read {exe}`, run it from a directory the sandbox grants, or pass \
+             --skip-oasf-validation to advertise them unchecked."
+        ))
+    })
+}
+
+fn ask_validator(config: &CardConfig, url: &str) -> anyhow::Result<()> {
+    let url = url.to_string();
 
     let client = reqwest::blocking::Client::builder()
         .timeout(VALIDATION_TIMEOUT)
@@ -505,6 +535,20 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("--domain needs at least one --skill"), "{err}");
+    }
+
+    #[test]
+    fn a_tls_panic_is_reported_as_an_error() {
+        let err = without_tls_panics("https://schema.example/api", || {
+            panic!("Attempted to create a NULL object.")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("could not set up TLS"), "{err}");
+        assert!(err.contains("--read "), "{err}");
+        assert!(err.contains("--skip-oasf-validation"), "{err}");
+
+        assert!(without_tls_panics("u", || Ok(())).is_ok());
     }
 
     #[test]
