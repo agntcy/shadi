@@ -139,22 +139,24 @@ docker run -d --name my-agent -p 127.0.0.1:38443:8443 -p 127.0.0.1:38081:8081 \
   --advertise-url https://127.0.0.1:38443
 ```
 
-## Using a local OASF server
+## Using another OASF schema
 
-agentbridge only validates against it: the card still names the canonical schema (`https://schema.oasf.outshift.com/1.1.0/objects/discovery`), so `dirctl daemon` needs no change. The sandbox must reach the server, and a plain-http one is accepted only on loopback.
-
-A host process allows the server's port next to its listener:
+`--oasf-schema-url` names the schema the skills and domains come from: the card's extension is `<url>/<version>/objects/discovery`, and that server checks them. `dirctl daemon` reads the extension only for schema servers it accepts, so add it there, and to the listing:
 
 ```sh
 shadictl --net-block --net-allow 127.0.0.1:19950 --net-allow localhost:8080 … \
   -- agentbridge register … --oasf-schema-url http://localhost:8080
+DIRECTORY_DAEMON_RUNTIME_OASF_SCHEMA_URLS=https://schema.oasf.outshift.com,http://localhost:8080 dirctl daemon start
+dirctl runtime list --oasf-schema-url https://schema.oasf.outshift.com --oasf-schema-url http://localhost:8080 --skill …
 ```
 
-A container doesn't reach the host on loopback, so it needs an https server: set `OASF_SCHEMA_URL`, which the entrypoint passes to `register` and allows in the sandbox. Or validate on the host and start the container with `--skip-oasf-validation`.
+The sandbox must reach the server, and a plain-http one is accepted only on loopback, so a container needs an https server: set `OASF_SCHEMA_URL`, which the entrypoint passes to `register` and allows in the sandbox.
 
 ```sh
 docker run … -e OASF_SCHEMA_URL=https://oasf.example.internal agentbridge-fake …
 ```
+
+To try the public schema's classes offline, pass `--skip-oasf-validation` rather than running a copy of it: a copy is another schema, and the card would name it.
 
 ## Notes
 
