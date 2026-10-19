@@ -300,11 +300,15 @@ fn parse_http_url(raw: &str) -> Result<String, String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("must be an http:// or https:// URL with a host".to_string());
     }
-    // The scheme as `Url` normalizes it (`HTTPS://` → `https://`), since
-    // locators compare it as is; the rest as given, without the trailing `/`
-    // `Url` would add.
-    let rest = raw.split_once(':').map_or("", |(_, rest)| rest);
-    Ok(format!("{}:{rest}", url.scheme()))
+    // As `Url` normalizes it (`HTTPS://` → `https://`, `https:host` →
+    // `https://host`), since locators compare the scheme as is; without the
+    // root `/` it adds when none was given.
+    let mut normalized = url.to_string();
+    if url.path() == "/" && url.query().is_none() && url.fragment().is_none() && !raw.ends_with('/')
+    {
+        normalized.pop();
+    }
+    Ok(normalized)
 }
 
 /// An OASF validator: https, or http on loopback, since a plain-http answer
@@ -830,7 +834,16 @@ mod tests {
         assert_eq!(
             parse_http_url("HTTPS://agent.example:8443").as_deref(),
             Ok("https://agent.example:8443"),
-            "the scheme is lower-cased, the rest kept"
+            "the scheme is lower-cased"
+        );
+        assert_eq!(
+            parse_http_url("https:agent.example:8443").as_deref(),
+            Ok("https://agent.example:8443"),
+            "a slashless URL gets its //"
+        );
+        assert_eq!(
+            parse_http_url("https://agent.example:8443/a2a").as_deref(),
+            Ok("https://agent.example:8443/a2a")
         );
     }
 }
