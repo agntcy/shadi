@@ -17,6 +17,36 @@ use std::io;
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
+/// Environment variables holding SHADI's own secrets, or paths to its private
+/// keys. agentbridge needs them; the harness it starts does not, and a harness
+/// runs prompts from remote peers and replies to them, so it must not inherit
+/// them (#484).
+pub const WITHHELD_FROM_HARNESS: &[&str] = &[
+    // The human root secret every agent key is derived from.
+    "SLIM_HUMAN_SEED",
+    "SLIM_SHARED_SECRET",
+    "SHADI_SSH_PASSPHRASE",
+    "SHADI_MEMORY_KEY",
+    "SLIM_TLS_KEY",
+    "A2A_TLS_KEY",
+    "SLIM_AUTH_TOKEN_FILE",
+    // The 1Password service account token SHADI's 1Password backend uses:
+    // it can read the whole vault.
+    "OP_SERVICE_ACCOUNT_TOKEN",
+    // The key of SHADI's credential vault (#474).
+    "SHADI_CREDENTIAL_KEY",
+];
+
+/// Remove [`WITHHELD_FROM_HARNESS`] from `cmd`'s environment, whether inherited
+/// or set on `cmd`. Call it last, after the adapter's own `env` calls, so no
+/// profile setting can put them back.
+pub fn withhold_shadi_secrets(cmd: &mut Command) -> &mut Command {
+    for name in WITHHELD_FROM_HARNESS {
+        cmd.env_remove(name);
+    }
+    cmd
+}
+
 /// Tracks the PIDs of subprocesses for as long as they are running, so they
 /// can be killed on demand from anywhere holding a reference to this struct.
 ///
@@ -101,6 +131,24 @@ fn terminate(pid: u32) {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[test]
+    fn withheld_secrets_dont_reach_the_child() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("SLIM_HUMAN_SEED", "root-secret")
+            .env("A2A_TLS_KEY", "/keys/a2a.key")
+            .env("HARNESS_OK", "kept")
+            .arg("-c")
+            .arg("echo ${SLIM_HUMAN_SEED-unset} ${A2A_TLS_KEY-unset} ${HARNESS_OK-unset}");
+        withhold_shadi_secrets(&mut cmd);
+
+        let out = cmd.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "unset unset kept"
+        );
+    }
 
     /// Exits successfully straight away.
     #[cfg(unix)]
