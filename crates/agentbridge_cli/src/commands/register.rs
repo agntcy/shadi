@@ -20,6 +20,7 @@ use agentbridge::{
         profile::{bundled_profile_ids, load_profile, ProfileAdapter},
     },
     dir_registry::DirError,
+    member_source::{CandidateMember, DirLookupOptions},
     local_registry::{LocalAdapterRecord, LocalAdapterRegistry},
     CliAdapter,
 };
@@ -452,12 +453,24 @@ struct HandoffTarget {
     slim_endpoint: Option<String>,
 }
 
-/// Resolve a `NEXT` peer from on-host leases. Prefer the unicast locator when
-/// the lease has one so an HTTP-only collab can token-pass without a SLIM node.
+/// [`resolve_handoff_target_with`] without dir-runtime.
+#[cfg(test)]
 fn resolve_handoff_target(
     to: &str,
     slim_fallback: Option<&str>,
     registry: &LocalAdapterRegistry,
+) -> Result<HandoffTarget, String> {
+    resolve_handoff_target_with(to, slim_fallback, registry, || Ok(None))
+}
+
+/// Resolve a `NEXT` peer: an on-host lease, else an announced agent dir-runtime
+/// reports (`running`), else `slim_fallback`. Prefer the unicast locator when
+/// there is one so an HTTP-only collab can token-pass without a SLIM node.
+fn resolve_handoff_target_with(
+    to: &str,
+    slim_fallback: Option<&str>,
+    registry: &LocalAdapterRegistry,
+    running: impl FnOnce() -> Result<Option<CandidateMember>, String>,
 ) -> Result<HandoffTarget, String> {
     match registry.resolve_live(to) {
         Ok(record) => {
@@ -490,7 +503,31 @@ fn resolve_handoff_target(
             })
         }
         Err(err) if err.contains("ambiguous") => Err(err),
-        Err(_) => match slim_fallback {
+        Err(_) => match running() {
+            // An announced listener has no lease; dir-runtime has it.
+            Ok(Some(peer)) => {
+                eprintln!(
+                    "[agentbridge] NEXT: '{}' ({}) was found through dir-runtime: its DID and \
+                     address are what it announced about itself (agntcy/shadi#504)",
+                    peer.name, peer.did
+                );
+                let a2a_binding = peer.a2a_url.as_ref().and(peer.a2a_binding);
+                Ok(HandoffTarget {
+                    peer_agent_id: peer.name,
+                    peer_did: Some(peer.did),
+                    a2a_url: peer.a2a_url,
+                    a2a_binding,
+                    slim_endpoint: peer.slim_endpoint.or(slim_fallback.map(str::to_string)),
+                })
+            }
+            Err(e) if e.contains("ambiguous") => Err(e),
+            _ => handoff_slim_fallback(to, slim_fallback),
+        },
+    }
+}
+
+fn handoff_slim_fallback(to: &str, slim_fallback: Option<&str>) -> Result<HandoffTarget, String> {
+    match slim_fallback {
             Some(endpoint) => Ok(HandoffTarget {
                 peer_agent_id: to.to_string(),
                 peer_did: None,
@@ -499,10 +536,11 @@ fn resolve_handoff_target(
                 slim_endpoint: Some(endpoint.to_string()),
             }),
             None => Err(format!(
-                "no live locator for '{to}'; peer must appear in `list --local` \
-                 (A2A locator or SLIM endpoint) so NEXT can be dispatched without a SLIM node"
+                "no live locator for '{to}'; peer must appear in `list --local` or at \
+                 dir-runtime (AGENTBRIDGE_RUNTIME, default {}), with an A2A locator or SLIM \
+                 endpoint, so NEXT can be dispatched without a SLIM node",
+                agentbridge::member_source::DEFAULT_RUNTIME_ADDR
             )),
-        },
     }
 }
 
@@ -519,7 +557,16 @@ fn dispatch_peer_handoff(
     reply: &str,
 ) -> Result<(), String> {
     let registry = LocalAdapterRegistry::from_env();
-    let target = resolve_handoff_target(to, slim_fallback, &registry)?;
+    let runtime = DirLookupOptions {
+        server_addr: std::env::var("AGENTBRIDGE_RUNTIME").unwrap_or_else(|_| {
+            agentbridge::member_source::DEFAULT_RUNTIME_ADDR.to_string()
+        }),
+        gh_token: None,
+        limit: 0,
+    };
+    let target = resolve_handoff_target_with(to, slim_fallback, &registry, || {
+        agentbridge::member_source::find_running_peer(to, &runtime)
+    })?;
     let adapter = super::egress::live_adapter(LiveA2ATaskAdapterConfig {
         endpoint: target.slim_endpoint.clone().unwrap_or_default(),
         agent_id: from.to_string(),
@@ -2048,6 +2095,37 @@ test push ... FAILED
         );
         assert_eq!(target.slim_endpoint, None);
         drop(_lease);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_announced_peer_is_found_through_dir_runtime_for_next() {
+        let (dir, registry) = scratch_registry();
+        let peer = |a2a_url: Option<&str>, slim: Option<&str>| CandidateMember {
+            name: "codex".to_string(),
+            did: "did:key:zCodex".to_string(),
+            slim_endpoint: slim.map(str::to_string),
+            a2a_url: a2a_url.map(str::to_string),
+            a2a_binding: a2a_url.map(|_| A2ABinding::HttpJson),
+        };
+
+        let unicast = resolve_handoff_target_with("codex", None, &registry, || {
+            Ok(Some(peer(Some("http://127.0.0.1:19960"), None)))
+        })
+        .expect("unicast peer from dir-runtime");
+        assert_eq!(unicast.a2a_url.as_deref(), Some("http://127.0.0.1:19960"));
+        assert_eq!(unicast.a2a_binding, Some(A2ABinding::HttpJson));
+        assert_eq!(unicast.peer_did.as_deref(), Some("did:key:zCodex"));
+
+        let slim = resolve_handoff_target_with("codex", None, &registry, || {
+            Ok(Some(peer(None, Some("127.0.0.1:47357"))))
+        })
+        .expect("SLIM peer from dir-runtime");
+        assert_eq!(slim.a2a_url, None);
+        assert_eq!(slim.slim_endpoint.as_deref(), Some("127.0.0.1:47357"));
+
+        let err = resolve_handoff_target_with("codex", None, &registry, || Ok(None)).unwrap_err();
+        assert!(err.contains("dir-runtime"), "{err}");
         let _ = fs::remove_dir_all(dir);
     }
 
