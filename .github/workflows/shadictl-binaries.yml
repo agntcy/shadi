@@ -91,9 +91,9 @@ jobs:
 
       - name: Setup Rust
         if: needs.changes.outputs.workspace == 'true'
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           targets: ${{ matrix.target }}
 
       - name: Setup Python
@@ -104,7 +104,7 @@ jobs:
 
       - name: Restore Rust cache
         if: needs.changes.outputs.workspace == 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
           # Only main writes the cache. PRs still restore from it; letting each
