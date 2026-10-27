@@ -10,10 +10,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OpenFlags, Row};
+use rusqlite::{params, Connection, OpenFlags, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::vault::CredentialVault;
+use crate::vault::{pin_email, CredentialVault};
 use crate::CredentialError;
 
 /// One stored credential. `raw` is the issued credential verbatim, disclosures
@@ -208,24 +208,41 @@ impl CredentialVault for SqlCipherVault {
         Ok(records)
     }
 
-    fn pin_subject(&self, issuer: &str, email: &str, subject: &str) -> Result<(), CredentialError> {
+    /// The read and the insert share one immediate transaction: the in-process
+    /// lock does not stop another process holding the same file.
+    fn pin_subject(
+        &self,
+        issuer: &str,
+        email: &str,
+        subject: &str,
+    ) -> Result<String, CredentialError> {
+        let email = pin_email(email);
         let pinned_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_secs() as i64)
             .unwrap_or_default();
-        self.conn()?.execute(
-            "INSERT OR REPLACE INTO issuer_subjects (issuer, email, subject, pinned_at)
+
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO issuer_subjects (issuer, email, subject, pinned_at)
              VALUES (?1, ?2, ?3, ?4)",
             params![issuer, email, subject, pinned_at],
         )?;
-        Ok(())
+        let pinned: String = tx.query_row(
+            "SELECT subject FROM issuer_subjects WHERE issuer = ?1 AND email = ?2",
+            params![issuer, email],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(pinned)
     }
 
     fn pinned_subject(&self, issuer: &str, email: &str) -> Result<Option<String>, CredentialError> {
         let conn = self.conn()?;
         let mut stmt =
             conn.prepare("SELECT subject FROM issuer_subjects WHERE issuer = ?1 AND email = ?2")?;
-        let mut rows = stmt.query(params![issuer, email])?;
+        let mut rows = stmt.query(params![issuer, pin_email(email)])?;
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),
@@ -297,15 +314,22 @@ mod tests {
     }
 
     #[test]
-    fn re_pinning_a_subject_replaces_the_row() {
+    fn re_pinning_a_subject_keeps_the_first() {
         let file = tempfile::NamedTempFile::new().expect("tempfile");
         let vault = SqlCipherVault::open(file.path(), "credential-key").expect("open");
-        vault
-            .pin_subject("https://idp.example", "a@x.example", "sub-1")
-            .expect("pin");
-        vault
-            .pin_subject("https://idp.example", "a@x.example", "sub-2")
-            .expect("pin");
+        assert_eq!(
+            vault
+                .pin_subject("https://idp.example", "a@x.example", "sub-1")
+                .expect("pin"),
+            "sub-1"
+        );
+        // A second subject for that pair is refused by returning the first.
+        assert_eq!(
+            vault
+                .pin_subject("https://idp.example", "a@x.example", "sub-2")
+                .expect("pin"),
+            "sub-1"
+        );
 
         let rows: i64 = vault
             .conn()
@@ -318,7 +342,7 @@ mod tests {
                 .pinned_subject("https://idp.example", "a@x.example")
                 .expect("pinned")
                 .as_deref(),
-            Some("sub-2")
+            Some("sub-1")
         );
     }
 

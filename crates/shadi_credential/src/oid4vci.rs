@@ -112,18 +112,21 @@ pub fn check_id_token(
         Some(_) => return Err(refused("ID token has expired")),
         None => return Err(refused("ID token has no exp")),
     }
+    let azp = claims.get("azp");
+    let azp_ok = azp.is_some_and(|azp| azp.as_str() == Some(client_id));
     let aud_ok = match claims.get("aud") {
         Some(Value::String(a)) => a == client_id,
-        Some(Value::Array(a)) => a.iter().any(|v| v.as_str() == Some(client_id)),
+        // A token for several audiences must say which party it was issued to.
+        Some(Value::Array(a)) => {
+            a.iter().any(|v| v.as_str() == Some(client_id)) && (a.len() == 1 || azp_ok)
+        }
         _ => false,
     };
     if !aud_ok {
-        return Err(refused("ID token aud does not contain the client id"));
+        return Err(refused("ID token aud is not trusted for the client id"));
     }
-    if let Some(azp) = claims.get("azp") {
-        if azp.as_str() != Some(client_id) {
-            return Err(refused("ID token azp is not the client id"));
-        }
+    if azp.is_some() && !azp_ok {
+        return Err(refused("ID token azp is not the client id"));
     }
     if claims.get("email_verified") != Some(&Value::Bool(true)) {
         return Err(refused("ID token email is not verified"));
@@ -300,8 +303,20 @@ mod tests {
 
     #[test]
     fn id_token_aud_forms() {
-        assert!(run(&with("aud", json!([CLIENT, "other"]))).is_ok());
+        let multi = with("aud", json!([CLIENT, "other"]));
+        assert_refused(&multi);
+        assert!(run(&with("azp", json!(CLIENT))).is_ok());
+        let mut ok = multi.clone();
+        ok["azp"] = json!(CLIENT);
+        assert!(run(&ok).is_ok());
+        ok["azp"] = json!("other");
+        assert_refused(&ok);
         assert_refused(&with("aud", json!(["other"])));
+        let mut other = with("aud", json!(["other", "third"]));
+        other["azp"] = json!(CLIENT);
+        assert_refused(&other);
+        assert!(run(&with("aud", json!([CLIENT]))).is_ok());
+        assert_refused(&with("azp", json!(7)));
         assert_refused(&with("aud", json!("other")));
         assert_refused(&without("aud"));
     }
