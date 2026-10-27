@@ -10,4 +10,12 @@ ignore = [
 	# performs no RSA decryption, so the vulnerable path is never entered. Drop
 	# this entry once rsa ships a constant-time release.
 	"RUSTSEC-2023-0071",
+	# Timing variability in crypto-bigint operations meant to be constant-time.
+	# Only the 0.5.5 copy is left, pinned by cx448 — which has one published
+	# version — through sequoia-openpgp's crypto-rust backend. It sits behind
+	# shadi_identity's opt-in openpgp feature, whose one entry point
+	# (openpgp::ed25519_public_key) parses a certificate and returns Ed25519
+	# public key bytes, so no secret operand ever reaches crypto-bigint and a
+	# timing sidechannel needs one. Drop this entry once cx448 takes 0.7.6.
+	"RUSTSEC-2026-0387",
 ]
