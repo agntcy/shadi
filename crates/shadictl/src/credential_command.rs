@@ -133,7 +133,60 @@ pub(crate) fn handle_credential_command(
             })
             .to_string())
         }
+        CredentialCommand::Issue {
+            idp,
+            client_id,
+            email,
+            configuration_id,
+            agent,
+            key_prefix,
+        } => {
+            span.record("credential.command", &"issue");
+            let identity = agent_identity(key_prefix, agent)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "system clock is before the unix epoch".to_string())?
+                .as_secs() as i64;
+            let http = crate::credential_issue::client()?;
+            let record = crate::credential_issue::issue(
+                &http,
+                vault,
+                &identity,
+                &crate::credential_issue::IssueArgs {
+                    idp,
+                    client_id,
+                    email,
+                    configuration_id,
+                },
+                now,
+            )?;
+            span.record("credential.id", &field::display(&record.id));
+            Ok(json!({
+                "status": "issued",
+                "id": record.id,
+                "credential_type": record.credential_type,
+                "format": record.format,
+                "issuer": record.issuer,
+                "agent_did": record.agent_did,
+                "expires_at": record.expires_at,
+            })
+            .to_string())
+        }
     }
+}
+
+/// The derived agent key that signs the proof of possession.
+fn agent_identity(prefix: &str, agent: &str) -> Result<shadi_identity::AgentIdentity, String> {
+    let name = format!("{prefix}/{agent}/private");
+    let secret = default_secret_store()
+        .get(&name)
+        .map_err(|_| format!("missing SHADI key: {name}"))?;
+    let encoded = secret.expose(|bytes| bytes.to_vec());
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| format!("the secret {name} is not base64"))?;
+    shadi_identity::AgentIdentity::from_signing_key_slice(&bytes)
+        .map_err(|_| format!("the secret {name} is not a 32-byte signing key"))
 }
 
 /// What may be printed about a credential. Never the credential itself, and
@@ -619,6 +672,59 @@ mod tests {
             "SHADI_CREDENTIAL_DB",
             "SHADI_CREDENTIAL_KEY",
             "SHADI_CREDENTIAL_KEY_NAME",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+        assert!(
+            !names.iter().any(|name| name.starts_with("SHADI_MEMORY")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn agent_identity_names_a_missing_secret() {
+        let err = agent_identity("absent_prefix", "nobody").err().expect("missing");
+        assert!(err.contains("absent_prefix/nobody/private"), "{err}");
+    }
+
+    #[test]
+    fn agent_identity_rejects_a_malformed_secret_without_echoing_it() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("bad_b64/a/private", b"not base64 !!SECRET");
+        test_store_put("short/a/private", b64.encode([9u8; 16]).as_bytes());
+
+        let err = agent_identity("bad_b64", "a").err().expect("not base64");
+        assert!(err.contains("bad_b64/a/private") && err.contains("base64"), "{err}");
+        assert!(!err.contains("SECRET"), "{err}");
+
+        let err = agent_identity("short", "a").err().expect("wrong length");
+        assert!(err.contains("short/a/private") && err.contains("32-byte"), "{err}");
+    }
+
+    #[test]
+    fn agent_identity_loads_a_stored_key() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("good/a/private", b64.encode([7u8; 32]).as_bytes());
+        assert!(agent_identity("good", "a").is_ok());
+    }
+
+    #[test]
+    fn the_issue_arguments_are_reachable_from_the_environment() {
+        use clap::CommandFactory;
+
+        let command = CredentialCli::command();
+        let issue = command.find_subcommand("issue").expect("issue subcommand");
+        let names: Vec<String> = issue
+            .get_arguments()
+            .filter_map(|arg| arg.get_env())
+            .map(|env| env.to_string_lossy().into_owned())
+            .collect();
+
+        for expected in [
+            "SHADI_CREDENTIAL_IDP",
+            "SHADI_CREDENTIAL_CLIENT_ID",
+            "SHADI_CREDENTIAL_EMAIL",
+            "SHADI_CREDENTIAL_CONFIGURATION_ID",
         ] {
             assert!(names.contains(&expected.to_string()), "{names:?}");
         }

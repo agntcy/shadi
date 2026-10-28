@@ -179,6 +179,25 @@ pub(crate) enum CredentialCommand {
         #[arg(long, value_name = "PATH")]
         file: PathBuf,
     },
+    /// Get a credential from the IdP by logging in on another device.
+    Issue {
+        /// The IdP base URL; every URL it hands back is pinned to this origin.
+        #[arg(long, env = "SHADI_CREDENTIAL_IDP", value_name = "URL")]
+        idp: String,
+        #[arg(long = "client-id", env = "SHADI_CREDENTIAL_CLIENT_ID")]
+        client_id: String,
+        /// The account expected to log in; a mismatch refuses the credential.
+        #[arg(long, env = "SHADI_CREDENTIAL_EMAIL")]
+        email: String,
+        #[arg(long = "configuration-id", env = "SHADI_CREDENTIAL_CONFIGURATION_ID")]
+        configuration_id: String,
+        /// Which derived agent identity signs the proof of possession.
+        #[arg(long, env = "SHADI_AGENT_ID", default_value = "agent")]
+        agent: String,
+        /// Secret-store prefix the agent keys were derived under.
+        #[arg(long = "key-prefix", default_value = "agent_keys")]
+        key_prefix: String,
+    },
 }
 
 #[derive(Parser, Debug)]
