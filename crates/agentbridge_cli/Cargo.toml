@@ -1,6 +1,6 @@
 [package]
 name = "agntcy-agentbridge-cli"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version.workspace = true
 description = "CLI binary for the agentbridge general-purpose agent interconnect."
@@ -12,9 +12,9 @@ name = "agentbridge"
 path = "src/main.rs"
 
 [dependencies]
-agentbridge = { package = "agntcy-agentbridge", version = "0.5.0", path = "../agentbridge" }
-agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.5.0", path = "../agent_transport_slim" }
-shadi_mas = { package = "agntcy-shadi-mas", version = "0.6.0", path = "../shadi_mas" }
+agentbridge = { package = "agntcy-agentbridge", version = "0.5.1", path = "../agentbridge" }
+agent_transport_slim = { package = "agntcy-shadi-agent-transport-slim", version = "0.5.1", path = "../agent_transport_slim" }
+shadi_mas = { package = "agntcy-shadi-mas", version = "0.6.1", path = "../shadi_mas" }
 shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.4.0", path = "../shadi_a2a" }
 shadi_telemetry = { package = "agntcy-shadi-telemetry", version = "0.2.0", path = "../shadi_telemetry" }
 slim_bindings = { package = "agntcy-slim-bindings", version = "3.4.3" }
