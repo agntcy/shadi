@@ -25,6 +25,7 @@ pub const SD_JWT_FORMAT: &str = "dc+sd-jwt";
 /// One disclosure: `[salt, name, value]`, or `[salt, value]` for an array
 /// element, which has no name.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Disclosure {
     pub name: Option<String>,
     pub value: Value,
@@ -32,6 +33,7 @@ pub struct Disclosure {
 
 /// What the vault lifts out of a credential at import.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ParsedCredential {
     pub issuer: String,
     pub credential_type: String,
@@ -51,7 +53,7 @@ fn decode_segment(segment: &str, what: &str) -> Result<Vec<u8>, CredentialError>
         .map_err(|_| CredentialError::Malformed(format!("{what} is not base64url")))
 }
 
-fn decode_json(segment: &str, what: &str) -> Result<Value, CredentialError> {
+pub(crate) fn decode_json(segment: &str, what: &str) -> Result<Value, CredentialError> {
     let bytes = decode_segment(segment, what)?;
     serde_json::from_slice(&bytes)
         .map_err(|err| CredentialError::Malformed(format!("{what} is not JSON: {err}")))

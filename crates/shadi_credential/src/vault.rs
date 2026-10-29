@@ -11,6 +11,8 @@
 use std::path::Path;
 
 use agent_secrets::SecretStore;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 
 use crate::store::{CredentialRecord, SqlCipherVault};
 use crate::CredentialError;
@@ -18,6 +20,9 @@ use crate::CredentialError;
 /// Keychain items are named `shadi/credentials/<id>`, under the same `shadi/`
 /// namespace as everything else SHADI keeps there; enumeration filters on this.
 pub const CREDENTIAL_KEY_PREFIX: &str = "shadi/credentials/";
+
+/// Subject pins are named `shadi/credential-subjects/<encoded issuer+email>`.
+const SUBJECT_KEY_PREFIX: &str = "shadi/credential-subjects/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultBackend {
@@ -55,6 +60,12 @@ fn backend_for(store_available: bool) -> VaultBackend {
     }
 }
 
+/// One normalisation for both backends, matching the case-insensitive email
+/// comparison at login.
+pub(crate) fn pin_email(email: &str) -> String {
+    email.to_ascii_lowercase()
+}
+
 pub trait CredentialVault: Send + Sync {
     fn put(&self, record: &CredentialRecord) -> Result<(), CredentialError>;
     fn get(&self, id: &str) -> Result<Option<CredentialRecord>, CredentialError>;
@@ -71,6 +82,16 @@ pub trait CredentialVault: Send + Sync {
         credential_type: &str,
         now: i64,
     ) -> Result<Vec<CredentialRecord>, CredentialError>;
+    /// Pin `subject` for `email` at `issuer` unless the pair is already pinned,
+    /// and return the subject pinned after the call. Email case is ignored.
+    fn pin_subject(
+        &self,
+        issuer: &str,
+        email: &str,
+        subject: &str,
+    ) -> Result<String, CredentialError>;
+    /// The subject pinned for that pair, if any.
+    fn pinned_subject(&self, issuer: &str, email: &str) -> Result<Option<String>, CredentialError>;
 }
 
 // --- Keychain ----------------------------------------------------------------
@@ -79,11 +100,15 @@ pub trait CredentialVault: Send + Sync {
 /// own key registry; listing does not self-heal it, so `list` skips a stale entry.
 pub struct KeychainVault {
     store: Box<dyn SecretStore>,
+    pin_lock: std::sync::Mutex<()>,
 }
 
 impl KeychainVault {
     pub fn new(store: Box<dyn SecretStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            pin_lock: std::sync::Mutex::new(()),
+        }
     }
 
     pub fn with_default_store() -> Self {
@@ -92,6 +117,13 @@ impl KeychainVault {
 
     fn item_key(id: &str) -> String {
         format!("{CREDENTIAL_KEY_PREFIX}{id}")
+    }
+
+    /// Encoded, not concatenated: both parts are free-form, and a separator
+    /// appearing inside one would make two pairs share a name.
+    fn subject_key(issuer: &str, email: &str) -> String {
+        let pair = URL_SAFE_NO_PAD.encode(format!("{issuer}\0{email}"));
+        format!("{SUBJECT_KEY_PREFIX}{pair}")
     }
 }
 
@@ -165,6 +197,46 @@ impl CredentialVault for KeychainVault {
                     && record.expires_at.is_none_or(|exp| exp > now)
             })
             .collect())
+    }
+
+    /// `SecretStore` has no compare-and-swap, so this read-then-write is atomic
+    /// only within the process.
+    fn pin_subject(
+        &self,
+        issuer: &str,
+        email: &str,
+        subject: &str,
+    ) -> Result<String, CredentialError> {
+        let _guard = self
+            .pin_lock
+            .lock()
+            .map_err(|_| CredentialError::Storage("subject pin lock poisoned".to_string()))?;
+        if let Some(pinned) = self.pinned_subject(issuer, email)? {
+            return Ok(pinned);
+        }
+        self.store
+            .put(
+                &Self::subject_key(issuer, &pin_email(email)),
+                subject.as_bytes(),
+            )
+            .map_err(|err| CredentialError::Storage(err.to_string()))?;
+        Ok(subject.to_string())
+    }
+
+    fn pinned_subject(&self, issuer: &str, email: &str) -> Result<Option<String>, CredentialError> {
+        match self
+            .store
+            .get(&Self::subject_key(issuer, &pin_email(email)))
+        {
+            Ok(secret) => {
+                let bytes = secret.expose(|bytes| bytes.to_vec());
+                String::from_utf8(bytes).map(Some).map_err(|_| {
+                    CredentialError::Storage("stored subject pin is unreadable".to_string())
+                })
+            }
+            Err(agent_secrets::SecretError::InvalidInput) => Ok(None),
+            Err(err) => Err(CredentialError::Storage(err.to_string())),
+        }
     }
 }
 
@@ -399,6 +471,62 @@ pub(crate) mod tests {
     fn storing_over_an_existing_id_replaces() {
         replaces_in_place(&sqlcipher_vault());
         replaces_in_place(&keychain_vault());
+    }
+
+    fn pins_a_subject(vault: &dyn CredentialVault) {
+        let pinned =
+            |issuer: &str, email: &str| vault.pinned_subject(issuer, email).expect("pinned");
+
+        assert_eq!(pinned("https://idp", "a@x"), None);
+        assert_eq!(
+            vault
+                .pin_subject("https://idp", "a@x", "sub-1")
+                .expect("pin"),
+            "sub-1"
+        );
+        assert_eq!(pinned("https://idp", "a@x").as_deref(), Some("sub-1"));
+
+        // A different subject, even under another spelling of the email,
+        // leaves the first pin in place and returns it.
+        assert_eq!(
+            vault
+                .pin_subject("https://idp", "A@X", "sub-2")
+                .expect("pin"),
+            "sub-1"
+        );
+        assert_eq!(pinned("https://idp", "a@x").as_deref(), Some("sub-1"));
+        assert_eq!(pinned("https://idp", "A@x").as_deref(), Some("sub-1"));
+
+        // Another email at the same issuer is a different identity, and so is
+        // the same email at another issuer.
+        assert_eq!(pinned("https://idp", "b@x"), None);
+        assert_eq!(pinned("https://other-idp", "a@x"), None);
+
+        // Pairs that concatenate to the same string must stay distinct.
+        vault
+            .pin_subject("https://idp/a", "b@x", "sub-a")
+            .expect("pin");
+        vault
+            .pin_subject("https://idp", "a/b@x", "sub-b")
+            .expect("pin");
+        assert_eq!(pinned("https://idp/a", "b@x").as_deref(), Some("sub-a"));
+        assert_eq!(pinned("https://idp", "a/b@x").as_deref(), Some("sub-b"));
+    }
+
+    #[test]
+    fn both_backends_pin_a_subject() {
+        pins_a_subject(&sqlcipher_vault());
+        pins_a_subject(&keychain_vault());
+    }
+
+    /// Pins are not credentials, and must not show up as one.
+    #[test]
+    fn keychain_subject_pins_are_outside_the_credential_namespace() {
+        let vault = keychain_vault();
+        vault
+            .pin_subject("https://idp", "a@x", "sub-1")
+            .expect("pin");
+        assert!(vault.list().expect("list").is_empty());
     }
 
     #[test]
