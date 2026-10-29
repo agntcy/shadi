@@ -25,6 +25,7 @@ pub const SD_JWT_FORMAT: &str = "dc+sd-jwt";
 /// One disclosure: `[salt, name, value]`, or `[salt, value]` for an array
 /// element, which has no name.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Disclosure {
     pub name: Option<String>,
     pub value: Value,
@@ -32,6 +33,7 @@ pub struct Disclosure {
 
 /// What the vault lifts out of a credential at import.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ParsedCredential {
     pub issuer: String,
     pub credential_type: String,
