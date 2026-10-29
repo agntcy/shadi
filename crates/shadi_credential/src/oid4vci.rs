@@ -3,8 +3,6 @@
 
 //! Pure OID4VCI pieces: origin pinning, the proof JWT and ID-token checks.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde_json::{json, Value};
@@ -57,7 +55,13 @@ impl IdpOrigin {
 }
 
 /// Build the OID4VCI proof-of-possession JWT, with a `kid`-less JWK in the header.
-pub fn proof_jwt(identity: &AgentIdentity, client_id: &str, audience: &str, nonce: &str) -> String {
+pub fn proof_jwt(
+    identity: &AgentIdentity,
+    client_id: &str,
+    audience: &str,
+    nonce: &str,
+    now: i64,
+) -> String {
     let header = json!({
         "alg": "EdDSA",
         "typ": "openid4vci-proof+jwt",
@@ -67,10 +71,7 @@ pub fn proof_jwt(identity: &AgentIdentity, client_id: &str, audience: &str, nonc
             "x": URL_SAFE_NO_PAD.encode(identity.verifying_key_bytes()),
         },
     });
-    let iat = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let payload = json!({ "iss": client_id, "aud": audience, "iat": iat, "nonce": nonce });
+    let payload = json!({ "iss": client_id, "aud": audience, "iat": now, "nonce": nonce });
     let input = format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(header.to_string()),
@@ -216,7 +217,7 @@ mod tests {
     #[test]
     fn proof_jwt_shape_and_signature() {
         let id = AgentIdentity::generate().unwrap();
-        let jwt = proof_jwt(&id, "client", "https://issuer", "n-1");
+        let jwt = proof_jwt(&id, "client", "https://issuer", "n-1", 1_700_000_000);
         let parts: Vec<&str> = jwt.split('.').collect();
         assert_eq!(parts.len(), 3);
 
@@ -234,7 +235,7 @@ mod tests {
         assert_eq!(payload["iss"], "client");
         assert_eq!(payload["aud"], "https://issuer");
         assert_eq!(payload["nonce"], "n-1");
-        assert!(payload["iat"].as_u64().unwrap() > 0);
+        assert_eq!(payload["iat"], 1_700_000_000);
 
         let sig = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
         let sig = Signature::from_slice(&sig).unwrap();
