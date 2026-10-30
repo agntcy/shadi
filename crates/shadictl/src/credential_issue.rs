@@ -114,7 +114,7 @@ fn issuer_metadata(http: &dyn Http, idp: &str) -> Result<Value, String> {
 
 /// Exact match apart from one trailing slash.
 fn same_id(a: &str, b: &str) -> bool {
-    a.strip_suffix('/').unwrap_or(a) == b.strip_suffix('/').unwrap_or(b)
+    shadi_credential::pin_issuer(a) == shadi_credential::pin_issuer(b)
 }
 
 fn endpoint(origin: &IdpOrigin, doc: &Value, name: &str) -> Result<Url, String> {
@@ -833,6 +833,42 @@ mod tests {
         );
         assert!(fake.requests_to("/realms/eng/credential").is_empty());
         assert!(vault.list().expect("list").is_empty());
+    }
+
+    #[test]
+    fn a_slashed_issuer_cannot_dodge_an_existing_pin() {
+        let fake = fake();
+        fake.set(
+            "/realms/eng/.well-known/openid-configuration",
+            vec![json!({
+                "issuer": format!("{IDP}/"),
+                "token_endpoint": "https://idp.example/realms/eng/token",
+                "device_authorization_endpoint": "https://idp.example/realms/eng/device",
+            })],
+        );
+        let payload = json!({
+            "iss": format!("{IDP}/"), "aud": "agent-cli", "sub": "sub-1", "exp": 5_000,
+            "email": "dev@example.com", "email_verified": true,
+        });
+        let token = format!(
+            "{}.{}.c2ln",
+            b64(b"{}"),
+            b64(payload.to_string().as_bytes())
+        );
+        fake.set(
+            TOKEN,
+            vec![
+                json!({ "access_token": "at", "id_token": token, "c_nonce": "n-first" }),
+                second_token(),
+            ],
+        );
+        let vault = vault();
+        vault
+            .pin_subject(IDP, "dev@example.com", "someone-else")
+            .expect("pin");
+        let err = run(&fake, &vault).expect_err("refused");
+        assert!(err.contains("already pinned"), "{err}");
+        assert!(fake.requests_to("/realms/eng/credential").is_empty());
     }
 
     #[test]
