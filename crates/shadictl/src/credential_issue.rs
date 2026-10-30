@@ -277,13 +277,24 @@ fn extract_credential(body: &Value) -> Result<String, String> {
         .ok_or_else(|| "the credential response held no credential".to_string())
 }
 
-pub(crate) fn issue(
+/// What the shared login leg yields; each agent's issuance runs from it.
+struct Session {
+    origin: IdpOrigin,
+    credential_issuer: String,
+    credential_endpoint: Url,
+    nonce_endpoint: Option<Url>,
+    token_url: Url,
+    access_token: String,
+    now: i64,
+}
+
+fn login(
     http: &dyn Http,
     vault: &dyn CredentialVault,
-    identity: &AgentIdentity,
     args: &IssueArgs<'_>,
+    agents: &[&str],
     now: i64,
-) -> Result<CredentialRecord, String> {
+) -> Result<Session, String> {
     let origin = IdpOrigin::new(args.idp).map_err(|err| err.to_string())?;
 
     let meta = issuer_metadata(http, args.idp)?;
@@ -325,14 +336,17 @@ pub(crate) fn issue(
     let verification_uri = origin
         .check(str_field(&device, "verification_uri")?)
         .map_err(|err| format!("verification_uri: {err}"))?;
+    if !agents.is_empty() {
+        eprintln!("Issuing for {}.", agents.join(", "));
+    }
     match device["verification_uri_complete"].as_str() {
         Some(complete) => {
             let complete = origin
                 .check(complete)
                 .map_err(|err| format!("verification_uri_complete: {err}"))?;
-            println!("Open {complete} to approve this login.");
+            eprintln!("Open {complete} to approve this login.");
         }
-        None => println!("Open {verification_uri} and enter the code {user_code}."),
+        None => eprintln!("Open {verification_uri} and enter the code {user_code}."),
     }
 
     let token = poll_token(http, &token_url, args.client_id, &device)?;
@@ -353,36 +367,93 @@ pub(crate) fn issue(
         return Err("this email is already pinned to a different account at this IdP".to_string());
     }
 
-    let offer_ref = mint_offer(http, args.idp, args.configuration_id, &token.access_token)?;
-    let offer = resolve_offer(http, &origin, &offer_ref)?;
-    let code = pre_authorized_code(&offer)?;
-    let (access_token, c_nonce) = redeem_code(http, &token_url, args.client_id, &code)?;
+    Ok(Session {
+        origin,
+        credential_issuer: credential_issuer.to_string(),
+        credential_endpoint,
+        nonce_endpoint,
+        token_url,
+        access_token: token.access_token,
+        now,
+    })
+}
 
-    let nonce = match (c_nonce, nonce_endpoint) {
+fn issue_for(
+    http: &dyn Http,
+    vault: &dyn CredentialVault,
+    identity: &AgentIdentity,
+    session: &Session,
+    args: &IssueArgs<'_>,
+) -> Result<CredentialRecord, String> {
+    let offer_ref = mint_offer(http, args.idp, args.configuration_id, &session.access_token)?;
+    let offer = resolve_offer(http, &session.origin, &offer_ref)?;
+    let code = pre_authorized_code(&offer)?;
+    let (access_token, c_nonce) = redeem_code(http, &session.token_url, args.client_id, &code)?;
+
+    let nonce = match (c_nonce, session.nonce_endpoint.as_ref()) {
         (Some(nonce), _) => nonce,
         (None, Some(url)) => {
-            str_field(&http.post_json(&url, &json!({}), &access_token)?, "c_nonce")?.to_string()
+            str_field(&http.post_json(url, &json!({}), &access_token)?, "c_nonce")?.to_string()
         }
         (None, None) => return Err("the IdP offered no c_nonce".to_string()),
     };
 
-    let proof = shadi_credential::proof_jwt(identity, args.client_id, credential_issuer, &nonce);
+    let proof = shadi_credential::proof_jwt(
+        identity,
+        args.client_id,
+        &session.credential_issuer,
+        &nonce,
+        session.now,
+    );
     let proofs = json!({ "jwt": [proof] });
     let body = match credential_identifier(&access_token) {
         Some(id) => json!({ "credential_identifier": id, "proofs": proofs }),
         None => json!({ "credential_configuration_id": args.configuration_id, "proofs": proofs }),
     };
-    let response = http.post_json(&credential_endpoint, &body, &access_token)?;
+    let response = http.post_json(&session.credential_endpoint, &body, &access_token)?;
     let raw = extract_credential(&response)?;
 
     let parsed = shadi_credential::parse_sd_jwt(&raw).map_err(|err| err.to_string())?;
     if parsed.agent_did != identity.did() {
         return Err("the issued credential is bound to another key".to_string());
     }
-    if !same_id(&parsed.issuer, credential_issuer) {
+    if !same_id(&parsed.issuer, &session.credential_issuer) {
         return Err("the issued credential names another issuer".to_string());
     }
-    shadi_credential::import(vault, &raw, now).map_err(|err| err.to_string())
+    shadi_credential::import(vault, &raw, session.now).map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn issue(
+    http: &dyn Http,
+    vault: &dyn CredentialVault,
+    identity: &AgentIdentity,
+    args: &IssueArgs<'_>,
+    now: i64,
+) -> Result<CredentialRecord, String> {
+    let session = login(http, vault, args, &[], now)?;
+    issue_for(http, vault, identity, &session, args)
+}
+
+/// `Err` means the shared login failed and no agent was tried.
+pub(crate) fn issue_all(
+    http: &dyn Http,
+    vault: &dyn CredentialVault,
+    identities: &[(String, AgentIdentity)],
+    args: &IssueArgs<'_>,
+    now: i64,
+) -> Result<Vec<(String, Result<CredentialRecord, String>)>, String> {
+    let names: Vec<&str> = identities.iter().map(|(name, _)| name.as_str()).collect();
+    let session = login(http, vault, args, &names, now)?;
+    Ok(identities
+        .iter()
+        .map(|(name, identity)| {
+            (
+                name.clone(),
+                issue_for(http, vault, identity, &session, args),
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -581,6 +652,63 @@ mod tests {
             },
             NOW,
         )
+    }
+
+    fn args() -> IssueArgs<'static> {
+        IssueArgs {
+            idp: IDP,
+            client_id: "agent-cli",
+            email: "dev@example.com",
+            configuration_id: "agent-admission",
+        }
+    }
+
+    fn named(name: &str) -> (String, AgentIdentity) {
+        (
+            name.to_string(),
+            AgentIdentity::generate().expect("identity"),
+        )
+    }
+
+    #[test]
+    fn two_agents_issue_from_one_device_login() {
+        let fake = fake();
+        let vault = vault();
+        let ids = [named("worker"), named("planner")];
+        fake.set(
+            "/realms/eng/credential",
+            ids.iter()
+                .map(|(_, id)| json!({ "credential": sd_jwt(id, IDP) }))
+                .collect(),
+        );
+        let results = issue_all(&fake, &vault, &ids, &args(), NOW).expect("login");
+
+        assert_eq!(fake.requests_to("/realms/eng/device").len(), 1);
+        assert_eq!(results.len(), 2);
+        let a = results[0].1.as_ref().expect("first");
+        let b = results[1].1.as_ref().expect("second");
+        assert_ne!(a.id, b.id);
+        assert_eq!(vault.list().expect("list").len(), 2);
+    }
+
+    #[test]
+    fn a_failing_agent_does_not_lose_the_one_before_it() {
+        let fake = fake();
+        let vault = vault();
+        let ids = [named("worker"), named("planner")];
+        fake.set(
+            "/realms/eng/credential",
+            vec![
+                json!({ "credential": sd_jwt(&ids[0].1, IDP) }),
+                json!({ "error": "invalid_proof" }),
+            ],
+        );
+        let results = issue_all(&fake, &vault, &ids, &args(), NOW).expect("login");
+
+        assert!(results[0].1.is_ok());
+        let err = results[1].1.as_ref().expect_err("second fails");
+        assert!(err.contains("no credential"), "{err}");
+        assert_eq!(vault.list().expect("list").len(), 1);
     }
 
     fn pending() -> Value {

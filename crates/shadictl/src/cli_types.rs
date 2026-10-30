@@ -191,9 +191,10 @@ pub(crate) enum CredentialCommand {
         email: String,
         #[arg(long = "configuration-id", env = "SHADI_CREDENTIAL_CONFIGURATION_ID")]
         configuration_id: String,
-        /// Which derived agent identity signs the proof of possession.
-        #[arg(long, env = "SHADI_AGENT_ID", default_value = "agent")]
-        agent: String,
+        /// Which derived agent identities sign the proof of possession; repeat
+        /// or comma-separate to issue for several from one login.
+        #[arg(long, env = "SHADI_AGENT_ID", default_value = "agent", value_delimiter = ',')]
+        agent: Vec<String>,
         /// Secret-store prefix the agent keys were derived under.
         #[arg(long = "key-prefix", default_value = "agent_keys")]
         key_prefix: String,
