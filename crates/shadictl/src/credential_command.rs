@@ -3,16 +3,25 @@ use super::*;
 use shadi_credential::{CredentialRecord, CredentialVault, Disclosure, VaultBackend};
 
 pub(crate) fn run_credential_command(cli: CredentialCli) -> ExitCode {
-    match open_vault(&cli).and_then(|vault| handle_credential_command(&cli.command, vault.as_ref()))
-    {
-        Ok(output) => {
-            println!("{}", output);
-            ExitCode::SUCCESS
-        }
+    let vault = match open_vault(&cli) {
+        Ok(vault) => vault,
         Err(err) => {
             eprintln!("{}", err);
-            ExitCode::from(1)
+            return ExitCode::from(1);
         }
+    };
+    match &cli.command {
+        CredentialCommand::Issue { .. } => run_issue(&cli.command, vault.as_ref()),
+        other => match handle_credential_command(other, vault.as_ref()) {
+            Ok(output) => {
+                println!("{}", output);
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("{}", err);
+                ExitCode::from(1)
+            }
+        },
     }
 }
 
@@ -133,7 +142,116 @@ pub(crate) fn handle_credential_command(
             })
             .to_string())
         }
+        CredentialCommand::Issue { .. } => Err("issue is handled by run_issue".to_string()),
     }
+}
+
+/// Always a JSON array, one entry per agent; any failure is a nonzero exit.
+fn run_issue(command: &CredentialCommand, vault: &dyn CredentialVault) -> ExitCode {
+    let CredentialCommand::Issue {
+        idp,
+        client_id,
+        email,
+        configuration_id,
+        agent,
+        key_prefix,
+    } = command
+    else {
+        return ExitCode::from(1);
+    };
+    let span = info_span!(
+        "shadi.credential.command",
+        credential.command = "issue",
+        credential.agents = field::Empty,
+    );
+    let _guard = span.enter();
+
+    let result = (|| {
+        let identities = agent_identities(key_prefix, agent)?;
+        span.record("credential.agents", identities.len());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "system clock is before the unix epoch".to_string())?
+            .as_secs() as i64;
+        let http = crate::credential_issue::client()?;
+        crate::credential_issue::issue_all(
+            &http,
+            vault,
+            &identities,
+            &crate::credential_issue::IssueArgs {
+                idp,
+                client_id,
+                email,
+                configuration_id,
+            },
+            now,
+        )
+    })();
+
+    match result {
+        Ok(results) => {
+            let failed = results.iter().any(|(_, outcome)| outcome.is_err());
+            println!("{}", issue_report(&results));
+            if failed {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(err) => {
+            eprintln!("{}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Deduplicated in order, since nothing replaces a stored credential. Loaded
+/// up front so a missing key costs no interactive login.
+fn agent_identities(
+    prefix: &str,
+    agents: &[String],
+) -> Result<Vec<(String, shadi_identity::AgentIdentity)>, String> {
+    let mut identities: Vec<(String, shadi_identity::AgentIdentity)> = Vec::new();
+    for name in agents {
+        if identities.iter().all(|(seen, _)| seen != name) {
+            identities.push((name.clone(), agent_identity(prefix, name)?));
+        }
+    }
+    Ok(identities)
+}
+
+fn issue_report(results: &[(String, Result<CredentialRecord, String>)]) -> String {
+    let entries: Vec<Value> = results
+        .iter()
+        .map(|(agent, outcome)| match outcome {
+            Ok(record) => json!({
+                "agent": agent,
+                "status": "issued",
+                "id": record.id,
+                "credential_type": record.credential_type,
+                "format": record.format,
+                "issuer": record.issuer,
+                "agent_did": record.agent_did,
+                "expires_at": record.expires_at,
+            }),
+            Err(error) => json!({ "agent": agent, "status": "failed", "error": error }),
+        })
+        .collect();
+    Value::Array(entries).to_string()
+}
+
+/// The derived agent key that signs the proof of possession.
+fn agent_identity(prefix: &str, agent: &str) -> Result<shadi_identity::AgentIdentity, String> {
+    let name = format!("{prefix}/{agent}/private");
+    let secret = default_secret_store()
+        .get(&name)
+        .map_err(|_| format!("missing SHADI key: {name}"))?;
+    let encoded = secret.expose(|bytes| bytes.to_vec());
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| format!("the secret {name} is not base64"))?;
+    shadi_identity::AgentIdentity::from_signing_key_slice(&bytes)
+        .map_err(|_| format!("the secret {name} is not a 32-byte signing key"))
 }
 
 /// What may be printed about a credential. Never the credential itself, and
@@ -629,6 +747,59 @@ mod tests {
     }
 
     #[test]
+    fn agent_identity_names_a_missing_secret() {
+        let err = agent_identity("absent_prefix", "nobody").err().expect("missing");
+        assert!(err.contains("absent_prefix/nobody/private"), "{err}");
+    }
+
+    #[test]
+    fn agent_identity_rejects_a_malformed_secret_without_echoing_it() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("bad_b64/a/private", b"not base64 !!SECRET");
+        test_store_put("short/a/private", b64.encode([9u8; 16]).as_bytes());
+
+        let err = agent_identity("bad_b64", "a").err().expect("not base64");
+        assert!(err.contains("bad_b64/a/private") && err.contains("base64"), "{err}");
+        assert!(!err.contains("SECRET"), "{err}");
+
+        let err = agent_identity("short", "a").err().expect("wrong length");
+        assert!(err.contains("short/a/private") && err.contains("32-byte"), "{err}");
+    }
+
+    #[test]
+    fn agent_identity_loads_a_stored_key() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("good/a/private", b64.encode([7u8; 32]).as_bytes());
+        assert!(agent_identity("good", "a").is_ok());
+    }
+
+    #[test]
+    fn the_issue_arguments_are_reachable_from_the_environment() {
+        use clap::CommandFactory;
+
+        let command = CredentialCli::command();
+        let issue = command.find_subcommand("issue").expect("issue subcommand");
+        let names: Vec<String> = issue
+            .get_arguments()
+            .filter_map(|arg| arg.get_env())
+            .map(|env| env.to_string_lossy().into_owned())
+            .collect();
+
+        for expected in [
+            "SHADI_CREDENTIAL_IDP",
+            "SHADI_CREDENTIAL_CLIENT_ID",
+            "SHADI_CREDENTIAL_EMAIL",
+            "SHADI_CREDENTIAL_CONFIGURATION_ID",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+        assert!(
+            !names.iter().any(|name| name.starts_with("SHADI_MEMORY")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
     fn importing_then_listing_works_through_the_command_entry_point() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("credentials.db");
@@ -761,5 +932,91 @@ mod tests {
             };
             assert!(err.contains(needle), "{needle}: {err}");
         }
+    }
+
+    fn issue_command(agent: &[&str], key_prefix: &str) -> CredentialCommand {
+        CredentialCommand::Issue {
+            idp: "https://idp.invalid".to_string(),
+            client_id: "c".to_string(),
+            email: "e@example.com".to_string(),
+            configuration_id: "cfg".to_string(),
+            agent: agent.iter().map(|a| a.to_string()).collect(),
+            key_prefix: key_prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_missing_agent_key_is_refused_before_any_login() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("multi_missing/a/private", b64.encode([7u8; 32]).as_bytes());
+
+        let agents = ["a".to_string(), "b".to_string()];
+        let err = agent_identities("multi_missing", &agents)
+            .err()
+            .expect("missing");
+        assert!(err.contains("multi_missing/b/private"), "{err}");
+
+        // The idp is unresolvable, so reaching the network would also fail;
+        // the exit code alone cannot tell, hence the helper assertion above.
+        let vault = vault();
+        assert_eq!(
+            run_issue(&issue_command(&["a", "b"], "multi_missing"), &vault),
+            ExitCode::from(1)
+        );
+    }
+
+    #[test]
+    fn duplicate_agents_are_loaded_once_in_order() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("multi_dup/a/private", b64.encode([1u8; 32]).as_bytes());
+        test_store_put("multi_dup/b/private", b64.encode([2u8; 32]).as_bytes());
+
+        let agents: Vec<String> = ["b", "a", "b", "a"].iter().map(|a| a.to_string()).collect();
+        let identities = agent_identities("multi_dup", &agents).expect("load");
+        let names: Vec<&str> = identities.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["b", "a"]);
+    }
+
+    #[test]
+    fn repeated_agent_flags_parse_into_a_list() {
+        use clap::Parser;
+
+        let cli = CredentialCli::try_parse_from([
+            "credential",
+            "issue",
+            "--idp",
+            "https://idp.example",
+            "--client-id",
+            "c",
+            "--email",
+            "e@example.com",
+            "--configuration-id",
+            "cfg",
+            "--agent",
+            "a",
+            "--agent",
+            "b",
+        ])
+        .expect("parse");
+        let CredentialCommand::Issue { agent, .. } = cli.command else {
+            panic!("not issue");
+        };
+        assert_eq!(agent, ["a", "b"]);
+    }
+
+    #[test]
+    fn the_issue_report_names_each_agent() {
+        let report = issue_report(&[
+            ("w".to_string(), Ok(record("id-1"))),
+            ("p".to_string(), Err("boom".to_string())),
+        ]);
+        let parsed: Value = serde_json::from_str(&report).expect("json");
+        assert_eq!(parsed[0]["agent"], "w");
+        assert_eq!(parsed[0]["status"], "issued");
+        assert_eq!(parsed[0]["id"], "id-1");
+        assert_eq!(
+            parsed[1],
+            json!({ "agent": "p", "status": "failed", "error": "boom" })
+        );
     }
 }

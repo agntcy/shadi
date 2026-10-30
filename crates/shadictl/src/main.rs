@@ -30,6 +30,7 @@ use tracing::{field, info_span};
 
 mod memory_command;
 mod credential_command;
+mod credential_issue;
 mod identity_command;
 mod cli_types;
 mod dir_command;
