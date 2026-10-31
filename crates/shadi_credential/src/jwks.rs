@@ -5,6 +5,8 @@
 //! `(issuer, kid)`. Offline only: a listener must verify with the IdP down.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use ed25519_dalek::VerifyingKey;
@@ -40,34 +42,29 @@ impl JwksStore {
     /// Pin the keys in the JWKS document at `path` as `issuer`'s.
     pub fn add_file(&mut self, issuer: &str, path: &Path) -> Result<(), CredentialError> {
         let shown = path.display();
-        let len = std::fs::metadata(path)
-            .map_err(|e| CredentialError::Storage(format!("cannot read {shown}: {e}")))?
-            .len();
-        if len > MAX_JWKS_BYTES {
-            return Err(CredentialError::Refused(format!(
-                "{shown} is {len} bytes, over the {MAX_JWKS_BYTES} byte limit"
-            )));
-        }
-        let bytes = std::fs::read(path)
-            .map_err(|e| CredentialError::Storage(format!("cannot read {shown}: {e}")))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| CredentialError::Malformed(format!("{shown} is not JSON")))?;
+        let cannot =
+            |e: std::io::Error| CredentialError::Storage(format!("cannot read {shown}: {e}"));
+        let mut text = String::new();
+        File::open(path)
+            .map_err(cannot)?
+            .take(MAX_JWKS_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(cannot)?;
         self.load(issuer, &text, &shown.to_string())
     }
 
     /// Pin the keys in the JWKS document `text` as `issuer`'s, so a fetched
     /// document can be checked before it is written anywhere.
     pub fn add_json(&mut self, issuer: &str, text: &str) -> Result<(), CredentialError> {
-        let len = text.len() as u64;
-        if len > MAX_JWKS_BYTES {
-            return Err(CredentialError::Refused(format!(
-                "the JWKS is {len} bytes, over the {MAX_JWKS_BYTES} byte limit"
-            )));
-        }
         self.load(issuer, text, "the JWKS")
     }
 
     fn load(&mut self, issuer: &str, text: &str, shown: &str) -> Result<(), CredentialError> {
+        if text.len() as u64 > MAX_JWKS_BYTES {
+            return Err(CredentialError::Refused(format!(
+                "{shown} is over the {MAX_JWKS_BYTES} byte limit"
+            )));
+        }
         let doc: Value = serde_json::from_str(text)
             .map_err(|e| CredentialError::Malformed(format!("{shown} is not JSON: {e}")))?;
         let keys = doc
@@ -106,7 +103,13 @@ impl JwksStore {
                 "{shown} holds no Ed25519 key; an issuer with no usable key cannot verify anything"
             )));
         }
-        self.issuers.insert(pin_issuer(issuer).to_string(), entries);
+        let issuer = pin_issuer(issuer);
+        if self.issuers.contains_key(issuer) {
+            return Err(CredentialError::Refused(format!(
+                "issuer {issuer} is already pinned"
+            )));
+        }
+        self.issuers.insert(issuer.to_string(), entries);
         Ok(())
     }
 
@@ -279,6 +282,26 @@ mod tests {
         std::fs::write(&path, vec![b' '; MAX_JWKS_BYTES as usize + 1]).unwrap();
         let e = err(JwksStore::new().add_file(ISS, &path));
         assert!(e.contains("byte limit"), "{e}");
+    }
+
+    /// `/dev/zero` reports a length of 0 and never ends.
+    #[cfg(unix)]
+    #[test]
+    fn an_endless_file_reporting_no_length_is_refused() {
+        let path = Path::new("/dev/zero");
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+        let e = err(JwksStore::new().add_file(ISS, path));
+        assert!(e.contains("byte limit"), "{e}");
+    }
+
+    #[test]
+    fn re_pinning_an_issuer_is_refused() {
+        let text = json!({"keys":[okp("a", 1)]}).to_string();
+        let mut store = JwksStore::new();
+        store.add_json(ISS, &text).unwrap();
+        let e = err(store.add_json(&format!("{ISS}/"), &text));
+        assert!(e.contains("already pinned"), "{e}");
+        assert_eq!(store.key(ISS, Some("a")).unwrap(), key(1));
     }
 
     #[test]

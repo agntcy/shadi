@@ -575,8 +575,10 @@ mod tests {
         assert!(err.contains("2 credential queries"), "{err}");
     }
 
+    /// Refused at import, so a value probe can never choose between two
+    /// disclosures sharing a name.
     #[test]
-    fn a_later_disclosure_with_the_probed_value_is_found() {
+    fn a_credential_repeating_a_claim_name_is_refused() {
         let vault = sqlcipher_vault();
         let raw = credential_with(
             "dc+sd-jwt",
@@ -587,10 +589,7 @@ mod tests {
                 ("groups", serde_json::json!("platform-admins")),
             ],
         );
-        import(&vault, &raw, 1_000).expect("import");
-        let selection = run(&vault, &sample(), &policy()).expect("select");
-        assert_eq!(selection.disclosures.len(), 1);
-        assert_eq!(selection.disclosures[0].value, "platform-admins");
+        assert!(import(&vault, &raw, 1_000).is_err());
     }
 
     #[test]

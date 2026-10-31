@@ -10,11 +10,16 @@
 //! store".
 //!
 //! The one binding that is checked: every disclosure must be committed to by
-//! a digest in the issuer JWT (or in another disclosure). A disclosure the
-//! issuer never committed to would read as an issuer claim to anyone who
-//! pulls the credential out of the vault, so it is refused here rather than
-//! left to each caller. Only `sha-256` digests can be checked; any other
-//! `_sd_alg` is refused.
+//! a digest in the issuer JWT's top-level `_sd`, or by a `{"...": digest}`
+//! array-element marker. A disclosure the issuer never committed to would read
+//! as an issuer claim to anyone who pulls the credential out of the vault, so
+//! it is refused here rather than left to each caller. Only `sha-256` digests
+//! can be checked; any other `_sd_alg` is refused.
+//!
+//! Recursive and nested selective disclosure are not supported, so every named
+//! disclosure that survives parsing is a top-level claim, and a claim name
+//! occurs at most once. That is what makes matching by name sound for both the
+//! holder and the verifier.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -272,10 +277,8 @@ pub fn parse_presentation(raw: &str) -> Result<ParsedPresentation, CredentialErr
     })
 }
 
-/// Every disclosure's digest must appear in the issuer payload or in another
-/// disclosure's value. The digests are pooled, so this proves the issuer
-/// committed to each disclosure somewhere, not that it attaches where a reader
-/// will interpret it.
+/// Every disclosure's digest must be in the top-level `_sd` or be an
+/// array-element marker, and no claim name may repeat.
 fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), CredentialError> {
     match payload.get("_sd_alg") {
         None => {}
@@ -287,11 +290,20 @@ fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), Cr
         }
     }
 
-    let mut committed = HashSet::new();
-    collect_digests(payload, &mut committed);
-    for d in disclosures {
-        collect_digests(&d.value, &mut committed);
+    let mut names = HashSet::new();
+    for name in disclosures.iter().filter_map(|d| d.name.as_deref()) {
+        if !names.insert(name) {
+            return Err(CredentialError::Malformed(format!(
+                "the claim `{name}` is disclosed more than once"
+            )));
+        }
     }
+
+    let mut committed = HashSet::new();
+    if let Some(Value::Array(items)) = payload.get("_sd") {
+        committed.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+    }
+    collect_markers(payload, &mut committed);
     for d in disclosures {
         if !committed.contains(&URL_SAFE_NO_PAD.encode(Sha256::digest(d.raw.as_bytes()))) {
             let claim = d.name.as_deref().map_or_else(
@@ -306,19 +318,25 @@ fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), Cr
     Ok(())
 }
 
-/// Gather `_sd` array entries and `{"...": digest}` array-element markers.
-fn collect_digests(value: &Value, out: &mut HashSet<String>) {
+/// Gather `{"...": digest}` objects that are elements of an array.
+fn collect_markers(value: &Value, out: &mut HashSet<String>) {
     match value {
-        Value::Object(map) => {
-            if let Some(Value::Array(items)) = map.get("_sd") {
-                out.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+        Value::Object(map) => map
+            .iter()
+            .filter(|(k, _)| *k != "_sd")
+            .for_each(|(_, v)| collect_markers(v, out)),
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::Object(m) if m.len() == 1 => {
+                        if let Some(Value::String(d)) = m.get("...") {
+                            out.insert(d.clone());
+                        }
+                    }
+                    _ => collect_markers(item, out),
+                }
             }
-            if let (1, Some(Value::String(digest))) = (map.len(), map.get("...")) {
-                out.insert(digest.clone());
-            }
-            map.values().for_each(|v| collect_digests(v, out));
         }
-        Value::Array(items) => items.iter().for_each(|v| collect_digests(v, out)),
         _ => {}
     }
 }
@@ -737,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_disclosure_committed_inside_another_disclosure() {
+    fn rejects_a_disclosure_committed_inside_another_disclosure() {
         let inner = disclosure("city", serde_json::json!("Oslo"));
         let outer = disclosure(
             "address",
@@ -750,7 +768,39 @@ mod tests {
             payload,
             &[outer, inner],
         );
-        assert_eq!(parse_sd_jwt(&raw).expect("parse").disclosures.len(), 2);
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("`city`"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_disclosure_committed_in_a_nested_object() {
+        let groups = disclosure("groups", serde_json::json!("platform-admins"));
+        let mut payload = payload();
+        payload["address"] = serde_json::json!({"_sd": [digest_of(&groups)]});
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload,
+            &[groups],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("`groups`"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_repeated_claim_name_but_not_repeated_array_elements() {
+        let raw = credential_with(
+            payload(),
+            &[
+                disclosure("groups", serde_json::json!("interns")),
+                disclosure("groups", serde_json::json!("platform-admins")),
+            ],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("more than once"), "{err}");
+
+        let el = |v: &str| b64(serde_json::json!(["c2FsdA", v]).to_string().as_bytes());
+        let raw = credential_with(payload(), &[el("a"), el("b")]);
+        assert!(parse_sd_jwt(&raw).is_ok());
     }
 
     #[test]
