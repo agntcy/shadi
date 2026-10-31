@@ -3,6 +3,9 @@ use super::*;
 use shadi_credential::{CredentialRecord, CredentialVault, Disclosure, VaultBackend};
 
 pub(crate) fn run_credential_command(cli: CredentialCli) -> ExitCode {
+    if let CredentialCommand::FetchJwks { idp, out } = &cli.command {
+        return run_fetch_jwks(idp, out);
+    }
     let vault = match open_vault(&cli) {
         Ok(vault) => vault,
         Err(err) => {
@@ -143,7 +146,49 @@ pub(crate) fn handle_credential_command(
             .to_string())
         }
         CredentialCommand::Issue { .. } => Err("issue is handled by run_issue".to_string()),
+        CredentialCommand::FetchJwks { .. } => {
+            Err("fetch-jwks is handled by run_fetch_jwks".to_string())
+        }
     }
+}
+
+fn run_fetch_jwks(idp: &str, out: &std::path::Path) -> ExitCode {
+    match crate::credential_issue::client().and_then(|http| fetch_jwks_file(&http, idp, out)) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Checks the document before `out` exists, so a rejected one leaves no file.
+/// The issuer line is the exact string the policy's `iss` must carry.
+pub(crate) fn fetch_jwks_file(
+    http: &dyn crate::credential_issue::Http,
+    idp: &str,
+    out: &std::path::Path,
+) -> Result<String, String> {
+    let (issuer, text) = crate::credential_issue::fetch_jwks(http, idp)?;
+    let mut store = shadi_credential::JwksStore::new();
+    store.add_json(&issuer, &text).map_err(|err| err.to_string())?;
+    let doc: Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
+    let usable = doc["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|jwk| jwk["kid"].as_str())
+        .filter(|kid| store.key(&issuer, Some(kid)).is_ok())
+        .count();
+    std::fs::write(out, &text)
+        .map_err(|err| format!("failed to write {}: {}", out.display(), err))?;
+    Ok(format!(
+        "issuer: {issuer}\nusable keys: {usable}\nwrote: {}",
+        out.display()
+    ))
 }
 
 /// Always a JSON array, one entry per agent; any failure is a nonzero exit.
