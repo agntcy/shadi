@@ -3,16 +3,25 @@
 
 //! SD-JWT VC: the one credential format the vault currently holds.
 //!
-//! **Parsing here is structural only.** Nothing verifies the issuer
+//! **Parsing here is mostly structural.** Nothing verifies the issuer
 //! signature, checks the key binding or evaluates any policy: a credential
 //! that would fail verification is still storable, deliberately, so the
 //! failure surfaces where it can be reported well rather than as "cannot
 //! store".
+//!
+//! The one binding that is checked: every disclosure must be committed to by
+//! a digest in the issuer JWT (or in another disclosure). A disclosure the
+//! issuer never committed to would read as an issuer claim to anyone who
+//! pulls the credential out of the vault, so it is refused here rather than
+//! left to each caller. Only `sha-256` digests can be checked; any other
+//! `_sd_alg` is refused.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use ed25519_dalek::VerifyingKey;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 use crate::store::CredentialRecord;
 
@@ -29,6 +38,10 @@ pub const SD_JWT_FORMAT: &str = "dc+sd-jwt";
 pub struct Disclosure {
     pub name: Option<String>,
     pub value: Value,
+    /// The base64url segment exactly as the issuer wrote it. A presentation
+    /// hashes what it sends, and re-encoding the parsed value does not
+    /// reliably reproduce these bytes.
+    pub raw: String,
 }
 
 /// What the vault lifts out of a credential at import.
@@ -142,6 +155,7 @@ pub fn parse_sd_jwt(raw: &str) -> Result<ParsedCredential, CredentialError> {
         .iter()
         .map(|part| parse_disclosure(part))
         .collect::<Result<Vec<_>, _>>()?;
+    check_committed(&payload, &disclosures)?;
 
     Ok(ParsedCredential {
         issuer,
@@ -151,6 +165,57 @@ pub fn parse_sd_jwt(raw: &str) -> Result<ParsedCredential, CredentialError> {
         expires_at,
         disclosures,
     })
+}
+
+/// Every disclosure's digest must appear in the issuer payload or in another
+/// disclosure's value. The digests are pooled, so this proves the issuer
+/// committed to each disclosure somewhere, not that it attaches where a reader
+/// will interpret it.
+fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), CredentialError> {
+    match payload.get("_sd_alg") {
+        None => {}
+        Some(Value::String(alg)) if alg == "sha-256" => {}
+        Some(_) => {
+            return Err(CredentialError::Malformed(
+                "`_sd_alg` is not sha-256, so disclosures cannot be checked".to_string(),
+            ))
+        }
+    }
+
+    let mut committed = HashSet::new();
+    collect_digests(payload, &mut committed);
+    for d in disclosures {
+        collect_digests(&d.value, &mut committed);
+    }
+    for d in disclosures {
+        if !committed.contains(&URL_SAFE_NO_PAD.encode(Sha256::digest(d.raw.as_bytes()))) {
+            let claim = d.name.as_deref().map_or_else(
+                || "an array element".to_string(),
+                |name| format!("`{name}`"),
+            );
+            return Err(CredentialError::Malformed(format!(
+                "the disclosure for {claim} is not committed to by the issuer"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Gather `_sd` array entries and `{"...": digest}` array-element markers.
+fn collect_digests(value: &Value, out: &mut HashSet<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get("_sd") {
+                out.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+            }
+            if let (1, Some(Value::String(digest))) = (map.len(), map.get("...")) {
+                out.insert(digest.clone());
+            }
+            map.values().for_each(|v| collect_digests(v, out));
+        }
+        Value::Array(items) => items.iter().for_each(|v| collect_digests(v, out)),
+        _ => {}
+    }
 }
 
 fn required_str(value: &Value, claim: &str) -> Result<String, CredentialError> {
@@ -195,6 +260,7 @@ fn parse_disclosure(segment: &str) -> Result<Disclosure, CredentialError> {
         2 => Ok(Disclosure {
             name: None,
             value: array[1].clone(),
+            raw: segment.to_string(),
         }),
         3 => Ok(Disclosure {
             name: Some(
@@ -208,6 +274,7 @@ fn parse_disclosure(segment: &str) -> Result<Disclosure, CredentialError> {
                     .to_string(),
             ),
             value: array[2].clone(),
+            raw: segment.to_string(),
         }),
         other => Err(CredentialError::Malformed(format!(
             "a disclosure has {other} elements, expected 2 or 3"
@@ -266,6 +333,10 @@ mod tests {
         })
     }
 
+    fn digest_of(segment: &str) -> String {
+        b64(&Sha256::digest(segment.as_bytes()))
+    }
+
     fn disclosure(name: &str, value: Value) -> String {
         b64(serde_json::json!(["c2FsdA", name, value])
             .to_string()
@@ -274,7 +345,9 @@ mod tests {
 
     /// A credential in the shape the vault stores: issuer JWT, disclosures,
     /// trailing tilde, no KB-JWT.
-    fn credential_with(payload: Value, disclosures: &[String]) -> String {
+    fn credential_with(mut payload: Value, disclosures: &[String]) -> String {
+        let sd: Vec<String> = disclosures.iter().map(|d| digest_of(d)).collect();
+        payload["_sd"] = serde_json::json!(sd);
         credential_with_header(
             serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
             payload,
@@ -497,6 +570,127 @@ mod tests {
         let parsed = parse_sd_jwt(&raw).expect("parse");
         assert_eq!(parsed.disclosures[0].name, None);
         assert_eq!(parsed.disclosures[0].value, serde_json::json!("value"));
+    }
+
+    #[test]
+    fn rejects_an_appended_disclosure() {
+        let appended = disclosure("admin", serde_json::json!("sekrit-value"));
+        let raw = format!("{}{appended}~", fixture());
+        let err = parse_sd_jwt(&raw).expect_err("reject").to_string();
+        assert!(err.contains("`admin`"), "{err}");
+        assert!(!err.contains("sekrit-value"), "{err}");
+        assert!(import(&sqlcipher_vault(), &raw, 1_000).is_err());
+    }
+
+    #[test]
+    fn an_appended_array_element_is_named_as_such() {
+        let appended = b64(serde_json::json!(["c2FsdA", "sekrit-value"])
+            .to_string()
+            .as_bytes());
+        let raw = format!("{}{appended}~", fixture());
+        let err = parse_sd_jwt(&raw).expect_err("reject").to_string();
+        assert!(err.contains("an array element"), "{err}");
+        assert!(!err.contains("sekrit-value"), "{err}");
+    }
+
+    #[test]
+    fn committed_disclosures_come_back_in_order() {
+        let first = disclosure("a", serde_json::json!(1));
+        let second = disclosure("b", serde_json::json!(2));
+        let third = disclosure("c", serde_json::json!(3));
+        let mut payload = payload();
+        // Commitment order differs from presentation order.
+        payload["_sd"] =
+            serde_json::json!([digest_of(&third), digest_of(&first), digest_of(&second)]);
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload,
+            &[first.clone(), second.clone(), third.clone()],
+        );
+        let parsed = parse_sd_jwt(&raw).expect("parse");
+        let raws: Vec<_> = parsed.disclosures.iter().map(|d| d.raw.clone()).collect();
+        assert_eq!(raws, vec![first, second, third]);
+    }
+
+    #[test]
+    fn accepts_an_array_element_referenced_by_its_marker() {
+        let element = b64(serde_json::json!(["c2FsdA", "x"]).to_string().as_bytes());
+        let mut payload = payload();
+        payload["roles"] = serde_json::json!([{"...": digest_of(&element)}]);
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload,
+            &[element],
+        );
+        assert!(parse_sd_jwt(&raw).is_ok());
+    }
+
+    #[test]
+    fn accepts_a_disclosure_committed_inside_another_disclosure() {
+        let inner = disclosure("city", serde_json::json!("Oslo"));
+        let outer = disclosure(
+            "address",
+            serde_json::json!({"_sd": [digest_of(&inner)], "country": "NO"}),
+        );
+        let mut payload = payload();
+        payload["_sd"] = serde_json::json!([digest_of(&outer)]);
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload,
+            &[outer, inner],
+        );
+        assert_eq!(parse_sd_jwt(&raw).expect("parse").disclosures.len(), 2);
+    }
+
+    #[test]
+    fn rejects_an_unsupported_sd_alg_even_when_digests_match() {
+        let mut payload = payload();
+        payload["_sd_alg"] = serde_json::json!("sha-512");
+        let raw = credential_with(
+            payload,
+            &[disclosure("groups", serde_json::json!("admins"))],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("_sd_alg"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_sd_alg_defaults_to_sha_256() {
+        let mut payload = payload();
+        payload.as_object_mut().unwrap().remove("_sd_alg");
+        let raw = credential_with(
+            payload,
+            &[disclosure("groups", serde_json::json!("admins"))],
+        );
+        assert!(parse_sd_jwt(&raw).is_ok());
+    }
+
+    #[test]
+    fn a_credential_with_no_disclosures_parses() {
+        let parsed = parse_sd_jwt(&credential_with(payload(), &[])).expect("parse");
+        assert!(parsed.disclosures.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_one_byte_mutation_of_a_committed_disclosure() {
+        let original = disclosure("groups", serde_json::json!("admins"));
+        let mut payload = payload();
+        payload["_sd"] = serde_json::json!([digest_of(&original)]);
+        // Same JSON, different bytes: `["c2FsdA",...]` with a padded space.
+        let mutated = b64(
+            String::from_utf8(URL_SAFE_NO_PAD.decode(&original).unwrap())
+                .unwrap()
+                .replacen(',', ", ", 1)
+                .as_bytes(),
+        );
+        assert_ne!(mutated, original);
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload,
+            &[mutated],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("`groups`"), "{err}");
     }
 
     #[test]
