@@ -10,7 +10,9 @@
 //! credential format lands as a sibling of `sd_jwt`, not as a change to the
 //! storage.
 
+pub mod dcql;
 pub mod oid4vci;
+pub mod presentation;
 pub mod sd_jwt;
 pub mod store;
 pub mod vault;
@@ -30,7 +32,9 @@ pub enum CredentialError {
     Refused(String),
 }
 
+pub use dcql::{select, ClaimQuery, CredentialQuery, DcqlQuery, ReleasePolicy, Selection};
 pub use oid4vci::{check_id_token, proof_jwt, IdTokenClaims, IdpOrigin};
+pub use presentation::answer_challenge;
 pub use sd_jwt::{import, parse_sd_jwt, Disclosure, ParsedCredential, SD_JWT_FORMAT};
 pub use store::{CredentialRecord, SqlCipherVault};
 pub use vault::{
