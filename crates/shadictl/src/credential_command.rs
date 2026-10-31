@@ -174,7 +174,9 @@ pub(crate) fn fetch_jwks_file(
 ) -> Result<String, String> {
     let (issuer, text) = crate::credential_issue::fetch_jwks(http, idp)?;
     let mut store = shadi_credential::JwksStore::new();
-    store.add_json(&issuer, &text).map_err(|err| err.to_string())?;
+    store
+        .add_json(&issuer, &text)
+        .map_err(|err| err.to_string())?;
     let doc: Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
     let usable = doc["keys"]
         .as_array()
@@ -696,18 +698,13 @@ mod tests {
     }
 
     #[test]
-    fn disclose_shows_every_claim_sharing_a_name() {
-        let disclosed = disclosed_json(&[
+    fn a_credential_repeating_a_claim_name_cannot_be_imported() {
+        let vault = vault();
+        let raw = fixture_with(&[
             json!(["c2FsdA", "groups", "admins"]),
             json!(["c2FsdA", "groups", "auditors"]),
         ]);
-        assert_eq!(
-            disclosed,
-            json!([
-                { "name": "groups", "value": "admins" },
-                { "name": "groups", "value": "auditors" },
-            ])
-        );
+        assert!(shadi_credential::import(&vault, &raw, 1_000).is_err());
     }
 
     #[test]

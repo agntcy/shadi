@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::dcql::DcqlQuery;
+use crate::dcql::{DcqlQuery, MAX_CLAIMS_PER_QUERY};
 use crate::jwks::JwksStore;
 use crate::vault::pin_issuer;
 use crate::verify::VerifiedPresentation;
@@ -74,17 +74,16 @@ impl AdmissionPolicy {
                 "policy {shown} declares neither `issuers` nor `human_dids`"
             )));
         }
+        // A challenge names one credential query, so more cannot be answered.
+        if file.issuers.len() > 1 {
+            return Err(CredentialError::Refused(format!(
+                "policy {shown} lists {} issuers; a challenge can name only one",
+                file.issuers.len()
+            )));
+        }
+        let dir = path.parent().unwrap_or(Path::new(""));
         let mut jwks = JwksStore::new();
-        for (i, entry) in file.issuers.iter().enumerate() {
-            if file.issuers[..i]
-                .iter()
-                .any(|e| pin_issuer(&e.iss) == pin_issuer(&entry.iss))
-            {
-                return Err(CredentialError::Refused(format!(
-                    "policy {shown} lists issuer {} twice",
-                    pin_issuer(&entry.iss)
-                )));
-            }
+        for entry in &file.issuers {
             // A challenge cannot ask for no claims, so such an entry could
             // never be presented against — refuse it here, not on first contact.
             if entry.require_claims.is_empty() {
@@ -93,7 +92,15 @@ impl AdmissionPolicy {
                     pin_issuer(&entry.iss)
                 )));
             }
-            jwks.add_file(&entry.iss, &entry.jwks)?;
+            if entry.require_claims.len() > MAX_CLAIMS_PER_QUERY {
+                return Err(CredentialError::Refused(format!(
+                    "policy {shown}: issuer {} requires {} claims, over the limit of {MAX_CLAIMS_PER_QUERY}",
+                    pin_issuer(&entry.iss),
+                    entry.require_claims.len()
+                )));
+            }
+            // A relative path is the policy's own neighbour, not the CWD's.
+            jwks.add_file(&entry.iss, &dir.join(&entry.jwks))?;
         }
         Ok(Self {
             issuers: file.issuers,
@@ -108,7 +115,8 @@ impl AdmissionPolicy {
     }
 
     /// The challenge query. A holder answers one credential query, so a policy
-    /// with several issuers cannot be turned into one.
+    /// with several issuers cannot be turned into one; `from_file` already
+    /// refuses that, and this is the backstop.
     pub fn to_dcql(&self) -> Result<DcqlQuery, CredentialError> {
         let [issuer] = self.issuers.as_slice() else {
             return Err(CredentialError::Refused(format!(
@@ -389,7 +397,7 @@ mod tests {
         let e = refused(fx.load_doc(
             &json!({"issuers": [fx.entry(ISS, admin()), fx.entry(&format!("{ISS}/"), admin())]}),
         ));
-        assert!(e.contains("twice"), "{e}");
+        assert!(e.contains("can name only one"), "{e}");
     }
 
     /// A vct-only entry could never be challenged for, so it fails at load
@@ -479,19 +487,52 @@ mod tests {
     #[test]
     fn a_challenge_names_one_issuer_only() {
         let fx = Fx::new();
-        let one = fx.load(vec![fx.entry(ISS, admin())]);
-        assert!(one.to_dcql().is_ok());
-        let two = fx.load(vec![
+        let e = refused(fx.load_doc(&json!({"issuers": [
             fx.entry(ISS, admin()),
             fx.entry("https://other.example", admin()),
-        ]);
-        let e = two.to_dcql().expect_err("two issuers").to_string();
+        ]})));
         assert!(e.contains("can name only one"), "{e}");
-        // Verification and evaluation still work with both configured.
-        assert_eq!(
-            fx.present(&two, "https://other.example", VCT, None, &groups()),
-            Decision::Admit
+    }
+
+    #[test]
+    fn to_dcql_still_refuses_what_load_would_have() {
+        let fx = Fx::new();
+        let mut p = fx.load(vec![fx.entry(ISS, admin())]);
+        let again = p.issuers[0].clone();
+        p.issuers.push(again);
+        let e = p.to_dcql().expect_err("two issuers").to_string();
+        assert!(e.contains("can name only one"), "{e}");
+    }
+
+    #[test]
+    fn too_many_required_claims_is_refused_at_load() {
+        let fx = Fx::new();
+        let claims = |n: usize| -> Value {
+            json!({"require_claims": (0..n).map(|i| (format!("c{i}"), "v")).collect::<BTreeMap<_, _>>()})
+        };
+        let p = fx.load(vec![fx.entry(ISS, claims(MAX_CLAIMS_PER_QUERY))]);
+        assert!(p.to_dcql().is_ok());
+        let e = refused(
+            fx.load_doc(&json!({"issuers": [fx.entry(ISS, claims(MAX_CLAIMS_PER_QUERY + 1))]})),
         );
+        assert!(e.contains(ISS) && e.contains("limit of 16"), "{e}");
+    }
+
+    #[test]
+    fn a_relative_jwks_resolves_against_the_policy_directory() {
+        let fx = Fx::new();
+        let mut rel = fx.entry(ISS, admin());
+        rel["jwks"] = json!("jwks.json");
+        // The CWD is not the policy directory, so only the policy-relative
+        // reading can find the file.
+        assert!(fx.load_doc(&json!({"issuers": [rel]})).is_ok());
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let mut abs = fx.entry(ISS, admin());
+        abs["jwks"] = json!(fx.jwks_path());
+        let path = elsewhere.path().join("policy.json");
+        std::fs::write(&path, json!({"issuers": [abs]}).to_string()).unwrap();
+        assert!(AdmissionPolicy::from_file(&path).is_ok());
     }
 
     /// The query is derived from `require_claims`, so a claim the policy
