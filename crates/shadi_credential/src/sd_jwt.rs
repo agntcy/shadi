@@ -334,24 +334,30 @@ fn required_str(value: &Value, claim: &str) -> Result<String, CredentialError> {
 /// `cnf.jwk` must be the Ed25519 key the credential is bound to; the `did:key`
 /// is what `find_valid` filters on and what the operator sees.
 fn did_from_jwk(jwk: &Value) -> Result<String, CredentialError> {
+    Ok(shadi_identity::encode_did_key(&ed25519_from_jwk(
+        jwk, "cnf.jwk",
+    )?))
+}
+
+/// Decode an `OKP`/`Ed25519` JWK; `what` names it in errors, which never carry
+/// the key itself.
+pub(crate) fn ed25519_from_jwk(jwk: &Value, what: &str) -> Result<VerifyingKey, CredentialError> {
     let kty = jwk.get("kty").and_then(Value::as_str).unwrap_or_default();
     let crv = jwk.get("crv").and_then(Value::as_str).unwrap_or_default();
     if kty != "OKP" || crv != "Ed25519" {
         return Err(CredentialError::Malformed(format!(
-            "`cnf.jwk` is {kty}/{crv}, not OKP/Ed25519"
+            "`{what}` is {kty}/{crv}, not OKP/Ed25519"
         )));
     }
     let x = jwk
         .get("x")
         .and_then(Value::as_str)
-        .ok_or_else(|| CredentialError::Malformed("`cnf.jwk` has no `x`".to_string()))?;
-    let bytes: [u8; 32] = decode_segment(x, "`cnf.jwk.x`")?
+        .ok_or_else(|| CredentialError::Malformed(format!("`{what}` has no `x`")))?;
+    let bytes: [u8; 32] = decode_segment(x, &format!("`{what}.x`"))?
         .try_into()
-        .map_err(|_| CredentialError::Malformed("`cnf.jwk.x` is not 32 bytes".to_string()))?;
-    let key = VerifyingKey::from_bytes(&bytes).map_err(|_| {
-        CredentialError::Malformed("`cnf.jwk.x` is not an Ed25519 public key".to_string())
-    })?;
-    Ok(shadi_identity::encode_did_key(&key))
+        .map_err(|_| CredentialError::Malformed(format!("`{what}.x` is not 32 bytes")))?;
+    VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| CredentialError::Malformed(format!("`{what}.x` is not an Ed25519 public key")))
 }
 
 fn parse_disclosure(segment: &str) -> Result<Disclosure, CredentialError> {
