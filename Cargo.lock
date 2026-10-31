@@ -352,6 +352,7 @@ dependencies = [
  "agntcy-shadi-identity",
  "base64 0.23.1",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "rusqlite",
  "serde",
  "serde_json",
