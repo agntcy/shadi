@@ -460,6 +460,7 @@ pub(crate) fn issue_all(
 mod tests {
     use super::*;
     use base64::Engine;
+    use sha2::Digest;
     use shadi_credential::SqlCipherVault;
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
@@ -484,17 +485,19 @@ mod tests {
     }
 
     fn sd_jwt(holder: &AgentIdentity, issuer: &str) -> String {
+        let disclosure = b64(json!(["c2FsdA", "groups", "admins"]).to_string().as_bytes());
         let payload = json!({
             "iss": issuer,
             "vct": "urn:shadi:agent-admission:1",
             "exp": 2_000,
+            "_sd": [b64(&sha2::Sha256::digest(disclosure.as_bytes()))],
             "cnf": { "jwk": { "kty": "OKP", "crv": "Ed25519", "x": b64(&holder.verifying_key_bytes()) } },
         });
         format!(
             "{}.{}.c2ln~{}~",
             b64(br#"{"alg":"EdDSA","typ":"dc+sd-jwt"}"#),
             b64(payload.to_string().as_bytes()),
-            b64(json!(["c2FsdA", "groups", "admins"]).to_string().as_bytes()),
+            disclosure,
         )
     }
 

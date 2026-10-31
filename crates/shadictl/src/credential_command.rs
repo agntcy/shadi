@@ -370,6 +370,7 @@ fn format_summaries(summaries: &[CredentialSummary]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
     use shadi_credential::SqlCipherVault;
 
     fn vault() -> SqlCipherVault {
@@ -389,10 +390,19 @@ mod tests {
         let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let key =
             ed25519_dalek::VerifyingKey::from(&ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
+        let segments: Vec<String> = disclosures
+            .iter()
+            .map(|d| b64(d.to_string().as_bytes()))
+            .collect();
+        let sd: Vec<String> = segments
+            .iter()
+            .map(|s| b64(&sha2::Sha256::digest(s.as_bytes())))
+            .collect();
         let payload = json!({
             "iss": "https://idp.example/realms/eng",
             "vct": "urn:shadi:agent-admission:1",
             "exp": 2_000,
+            "_sd": sd,
             "cnf": { "jwk": { "kty": "OKP", "crv": "Ed25519", "x": b64(key.as_bytes()) } },
         });
         let mut raw = format!(
@@ -400,8 +410,8 @@ mod tests {
             b64(br#"{"alg":"EdDSA","typ":"dc+sd-jwt"}"#),
             b64(payload.to_string().as_bytes()),
         );
-        for d in disclosures {
-            raw.push_str(&b64(d.to_string().as_bytes()));
+        for segment in &segments {
+            raw.push_str(segment);
             raw.push('~');
         }
         raw

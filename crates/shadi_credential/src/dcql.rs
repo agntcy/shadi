@@ -295,6 +295,7 @@ mod tests {
     use crate::vault::tests::sqlcipher_vault;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use sha2::Digest;
 
     const VCT: &str = "urn:shadi:agent-admission:1";
     const PEER: &str = "did:key:zPeer";
@@ -326,10 +327,23 @@ mod tests {
 
     fn credential_with(typ: &str, vct: &str, exp: i64, disclosures: &[(&str, Value)]) -> String {
         let header = serde_json::json!({"alg": "EdDSA", "typ": typ});
+        let segments: Vec<String> = disclosures
+            .iter()
+            .map(|(name, value)| {
+                b64(serde_json::json!(["c2FsdA", name, value])
+                    .to_string()
+                    .as_bytes())
+            })
+            .collect();
+        let sd: Vec<String> = segments
+            .iter()
+            .map(|s| b64(&sha2::Sha256::digest(s.as_bytes())))
+            .collect();
         let payload = serde_json::json!({
             "iss": "https://idp.example",
             "vct": vct,
             "exp": exp,
+            "_sd": sd,
             "cnf": {"jwk": {"kty": "OKP", "crv": "Ed25519", "x": b64(key().as_bytes())}},
         });
         let mut raw = format!(
@@ -337,11 +351,9 @@ mod tests {
             b64(header.to_string().as_bytes()),
             b64(payload.to_string().as_bytes())
         );
-        for (name, value) in disclosures {
+        for segment in &segments {
             raw.push('~');
-            raw.push_str(&b64(serde_json::json!(["c2FsdA", name, value])
-                .to_string()
-                .as_bytes()));
+            raw.push_str(segment);
         }
         raw.push('~');
         raw
@@ -425,7 +437,7 @@ mod tests {
             VCT,
             &format!(
                 r#"[{{"path":["groups"],"values":[{}]}}]"#,
-                vec!["1"; MAX_CLAIM_VALUES + 1].join(",")
+                ["1"; MAX_CLAIM_VALUES + 1].join(",")
             ),
         );
         for (text, needle) in [
@@ -455,7 +467,7 @@ mod tests {
 
     #[test]
     fn unsupported_features_are_rejected_not_ignored() {
-        let sets = format!(r#"{{"credentials":[],"credential_sets":[{{"options":[["c1"]]}}]}}"#);
+        let sets = r#"{"credentials":[],"credential_sets":[{"options":[["c1"]]}]}"#.to_string();
         let unknown_claim_field =
             query_json("dc+sd-jwt", VCT, r#"[{"path":["a"],"values":[1],"gt":3}]"#);
         let unknown_cred_field = format!(
