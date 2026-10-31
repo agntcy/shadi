@@ -29,6 +29,10 @@ pub const SD_JWT_FORMAT: &str = "dc+sd-jwt";
 pub struct Disclosure {
     pub name: Option<String>,
     pub value: Value,
+    /// The base64url segment exactly as the issuer wrote it. A presentation
+    /// hashes what it sends, and re-encoding the parsed value does not
+    /// reliably reproduce these bytes.
+    pub raw: String,
 }
 
 /// What the vault lifts out of a credential at import.
@@ -195,6 +199,7 @@ fn parse_disclosure(segment: &str) -> Result<Disclosure, CredentialError> {
         2 => Ok(Disclosure {
             name: None,
             value: array[1].clone(),
+            raw: segment.to_string(),
         }),
         3 => Ok(Disclosure {
             name: Some(
@@ -208,6 +213,7 @@ fn parse_disclosure(segment: &str) -> Result<Disclosure, CredentialError> {
                     .to_string(),
             ),
             value: array[2].clone(),
+            raw: segment.to_string(),
         }),
         other => Err(CredentialError::Malformed(format!(
             "a disclosure has {other} elements, expected 2 or 3"
