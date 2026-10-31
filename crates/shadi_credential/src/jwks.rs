@@ -50,7 +50,25 @@ impl JwksStore {
         }
         let bytes = std::fs::read(path)
             .map_err(|e| CredentialError::Storage(format!("cannot read {shown}: {e}")))?;
-        let doc: Value = serde_json::from_slice(&bytes)
+        let text = String::from_utf8(bytes)
+            .map_err(|_| CredentialError::Malformed(format!("{shown} is not JSON")))?;
+        self.load(issuer, &text, &shown.to_string())
+    }
+
+    /// Pin the keys in the JWKS document `text` as `issuer`'s, so a fetched
+    /// document can be checked before it is written anywhere.
+    pub fn add_json(&mut self, issuer: &str, text: &str) -> Result<(), CredentialError> {
+        let len = text.len() as u64;
+        if len > MAX_JWKS_BYTES {
+            return Err(CredentialError::Refused(format!(
+                "the JWKS is {len} bytes, over the {MAX_JWKS_BYTES} byte limit"
+            )));
+        }
+        self.load(issuer, text, "the JWKS")
+    }
+
+    fn load(&mut self, issuer: &str, text: &str, shown: &str) -> Result<(), CredentialError> {
+        let doc: Value = serde_json::from_str(text)
             .map_err(|e| CredentialError::Malformed(format!("{shown} is not JSON: {e}")))?;
         let keys = doc
             .get("keys")
@@ -81,9 +99,11 @@ impl JwksStore {
             };
             entries.push((kid.to_string(), entry));
         }
-        if entries.is_empty() {
+        // Unsupported entries are kept so a token naming one fails as such,
+        // but a set with none we can verify is a pin that admits nothing.
+        if !entries.iter().any(|(_, e)| matches!(e, Entry::Usable(_))) {
             return Err(CredentialError::Refused(format!(
-                "{shown} holds no keys; an issuer with no key cannot verify anything"
+                "{shown} holds no Ed25519 key; an issuer with no usable key cannot verify anything"
             )));
         }
         self.issuers.insert(pin_issuer(issuer).to_string(), entries);
@@ -216,6 +236,20 @@ mod tests {
         assert!(store_with(json!([okp("a", 1), okp("a", 2)])).is_err());
     }
 
+    /// Keys we cannot verify with are no better than none: the pin would
+    /// admit nothing, and the operator should learn that at load.
+    #[test]
+    fn a_set_with_no_ed25519_key_is_refused_at_load() {
+        let err = store_with(json!([
+            {"kty":"RSA","kid":"rsa","n":"AQAB","e":"AQAB","alg":"RS256"},
+            {"kty":"EC","crv":"P-256","kid":"ec","x":"AA","y":"AA"},
+        ]))
+        .err()
+        .expect("must be refused")
+        .to_string();
+        assert!(err.contains("no Ed25519 key"), "{err}");
+    }
+
     #[test]
     fn no_keys_is_refused_at_load() {
         assert!(store_with(json!([])).is_err());
@@ -256,5 +290,22 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         let bad = err(JwksStore::new().add_file(ISS, &path));
         assert!(bad.contains("not JSON"), "{bad}");
+    }
+
+    #[test]
+    fn add_json_and_add_file_agree() {
+        let text = json!({"keys":[okp("a", 1), okp("b", 2)]}).to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jwks.json");
+        std::fs::write(&path, &text).unwrap();
+        let mut from_file = JwksStore::new();
+        from_file.add_file(ISS, &path).unwrap();
+        let mut from_json = JwksStore::new();
+        from_json.add_json(ISS, &text).unwrap();
+        for (kid, seed) in [("a", 1), ("b", 2)] {
+            assert_eq!(from_file.key(ISS, Some(kid)).unwrap(), key(seed));
+            assert_eq!(from_json.key(ISS, Some(kid)).unwrap(), key(seed));
+        }
+        assert!(JwksStore::new().add_json(ISS, "{}").is_err());
     }
 }

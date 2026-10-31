@@ -277,6 +277,19 @@ fn extract_credential(body: &Value) -> Result<String, String> {
         .ok_or_else(|| "the credential response held no credential".to_string())
 }
 
+/// `(issuer, jwks document)`; both URLs are pinned to the IdP's origin.
+pub(crate) fn fetch_jwks(http: &dyn Http, idp: &str) -> Result<(String, String), String> {
+    let origin = IdpOrigin::new(idp).map_err(|err| err.to_string())?;
+    let config = http.get(&well_known(idp, "openid-configuration")?, None)?;
+    let issuer = str_field(&config, "issuer")?;
+    if !same_id(issuer, idp) {
+        return Err("issuer does not match the IdP".to_string());
+    }
+    let jwks_url = endpoint(&origin, &config, "jwks_uri")?;
+    let jwks = http.get(&jwks_url, None)?;
+    Ok((issuer.to_string(), jwks.to_string()))
+}
+
 /// What the shared login leg yields; each agent's issuance runs from it.
 struct Session {
     origin: IdpOrigin,
@@ -1202,5 +1215,94 @@ mod tests {
             assert_eq!(extract_credential(&body).expect("parse"), raw);
         }
         assert!(extract_credential(&json!({ "credentials": [] })).is_err());
+    }
+
+    const CONFIG: &str = "/realms/eng/.well-known/openid-configuration";
+    const JWKS: &str = "/realms/eng/certs";
+
+    fn jwks_doc(keys: Value) -> Value {
+        json!({ "keys": keys })
+    }
+
+    fn ed_key(kid: &str) -> Value {
+        json!({ "kty": "OKP", "crv": "Ed25519", "kid": kid, "alg": "EdDSA",
+                "x": b64(&AgentIdentity::generate().expect("identity").verifying_key_bytes()) })
+    }
+
+    fn jwks_fake(config: Value, jwks: Value) -> Fake {
+        let fake = fake();
+        fake.set(CONFIG, vec![config]);
+        fake.set(JWKS, vec![jwks]);
+        fake
+    }
+
+    fn config(issuer: &str, uri: &str) -> Value {
+        json!({ "issuer": issuer, "jwks_uri": uri })
+    }
+
+    const CERTS: &str = "https://idp.example/realms/eng/certs";
+
+    /// Runs the command core and asserts the refusal left nothing on disk.
+    fn refused(fake: &Fake) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        crate::credential_command::fetch_jwks_file(fake, IDP, &out).expect_err("refused");
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn fetch_jwks_writes_a_file_the_store_then_loads() {
+        let fake = jwks_fake(
+            config(IDP, CERTS),
+            jwks_doc(json!([
+                ed_key("a"),
+                json!({ "kty": "RSA", "kid": "r", "n": "AQAB", "e": "AQAB" })
+            ])),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        let report = crate::credential_command::fetch_jwks_file(&fake, IDP, &out).expect("fetch");
+        assert_eq!(
+            report,
+            format!("issuer: {IDP}\nusable keys: 1\nwrote: {}", out.display())
+        );
+        let mut store = shadi_credential::JwksStore::new();
+        store.add_file(IDP, &out).expect("load");
+        assert!(store.key(IDP, Some("a")).is_ok());
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_mismatched_issuer_and_writes_nothing() {
+        refused(&jwks_fake(
+            config("https://idp.example/realms/rogue", CERTS),
+            jwks_doc(json!([ed_key("a")])),
+        ));
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_jwks_uri_on_another_origin() {
+        let fake = jwks_fake(
+            config(IDP, "https://evil.example/certs"),
+            jwks_doc(json!([ed_key("a")])),
+        );
+        refused(&fake);
+        assert!(fake.requests_to("/certs").is_empty());
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_document_with_no_usable_key() {
+        for keys in [
+            json!([]),
+            json!([{ "kty": "RSA", "kid": "r", "n": "AQAB", "e": "AQAB" }]),
+        ] {
+            refused(&jwks_fake(config(IDP, CERTS), jwks_doc(keys)));
+        }
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_malformed_document() {
+        for body in [json!("not json"), json!({ "keys": "nope" })] {
+            refused(&jwks_fake(config(IDP, CERTS), body));
+        }
     }
 }
