@@ -199,6 +199,16 @@ pub(crate) enum CredentialCommand {
         #[arg(long = "key-prefix", default_value = "agent_keys")]
         key_prefix: String,
     },
+    /// Fetch the IdP's signing keys into a file a listener pins and reads
+    /// offline. The one online step; needs no vault.
+    FetchJwks {
+        /// The IdP base URL; the key set must be served from this origin.
+        #[arg(long, env = "SHADI_CREDENTIAL_IDP", value_name = "URL")]
+        idp: String,
+        /// Written only once the document has been checked.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Parser, Debug)]
