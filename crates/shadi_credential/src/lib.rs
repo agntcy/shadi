@@ -28,8 +28,9 @@ pub enum CredentialError {
     Malformed(String),
     #[error("vault storage error: {0}")]
     Storage(String),
-    /// A response parsed fine but failed a check.
-    #[error("issuance refused: {0}")]
+    /// Well-formed input that failed a check — an issuance response, a
+    /// challenge, or a key lookup.
+    #[error("refused: {0}")]
     Refused(String),
 }
 
