@@ -35,7 +35,10 @@ pub enum CredentialError {
 pub use dcql::{select, ClaimQuery, CredentialQuery, DcqlQuery, ReleasePolicy, Selection};
 pub use oid4vci::{check_id_token, proof_jwt, IdTokenClaims, IdpOrigin};
 pub use presentation::answer_challenge;
-pub use sd_jwt::{import, parse_sd_jwt, Disclosure, ParsedCredential, SD_JWT_FORMAT};
+pub use sd_jwt::{
+    import, parse_presentation, parse_sd_jwt, Disclosure, Jwt, ParsedCredential,
+    ParsedPresentation, SD_JWT_FORMAT,
+};
 pub use store::{CredentialRecord, SqlCipherVault};
 pub use vault::{
     default_backend, default_vault, pin_issuer, CredentialVault, KeychainVault, VaultBackend,
