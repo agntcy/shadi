@@ -110,17 +110,21 @@ mod tests {
     }
 
     fn selection_for(id: &AgentIdentity, take: usize) -> Selection {
+        let groups = disclosure("groups", "admins");
+        let email = disclosure("email", "a@example.test");
         let payload = json!({
             "iss": "https://idp.example",
             "vct": "urn:shadi:agent-admission:1",
             "cnf": { "jwk": id.public_jwk() },
+            "_sd": [
+                URL_SAFE_NO_PAD.encode(Sha256::digest(groups.as_bytes())),
+                URL_SAFE_NO_PAD.encode(Sha256::digest(email.as_bytes())),
+            ],
         });
         let raw = format!(
-            "{}.{}.c2ln~{}~{}~",
+            "{}.{}.c2ln~{groups}~{email}~",
             b64(r#"{"alg":"EdDSA","typ":"dc+sd-jwt"}"#),
             b64(&payload.to_string()),
-            disclosure("groups", "admins"),
-            disclosure("email", "a@example.test"),
         );
         let vault = sqlcipher_vault();
         let record = import(&vault, &raw, 1_000).unwrap();
