@@ -14,10 +14,12 @@ pub mod dcql;
 pub mod jwks;
 pub mod nonce;
 pub mod oid4vci;
+pub mod policy;
 pub mod presentation;
 pub mod sd_jwt;
 pub mod store;
 pub mod vault;
+pub mod verify;
 
 use thiserror::Error;
 
@@ -39,6 +41,7 @@ pub use dcql::{select, ClaimQuery, CredentialQuery, DcqlQuery, ReleasePolicy, Se
 pub use jwks::{JwksStore, MAX_JWKS_BYTES};
 pub use nonce::{Challenge, NonceStore, MAX_NONCES, NONCE_TTL_SECS};
 pub use oid4vci::{check_id_token, proof_jwt, IdTokenClaims, IdpOrigin};
+pub use policy::{AdmissionPolicy, Decision, IssuerPolicy};
 pub use presentation::answer_challenge;
 pub use sd_jwt::{
     import, parse_presentation, parse_sd_jwt, Disclosure, Jwt, ParsedCredential,
@@ -48,4 +51,7 @@ pub use store::{CredentialRecord, SqlCipherVault};
 pub use vault::{
     default_backend, default_vault, pin_issuer, CredentialVault, KeychainVault, VaultBackend,
     CREDENTIAL_KEY_PREFIX,
+};
+pub use verify::{
+    verify, VerifiedPresentation, ALLOWED_ALGS, KB_FUTURE_SKEW_SECS, KB_MAX_AGE_SECS,
 };
