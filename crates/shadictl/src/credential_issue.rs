@@ -277,17 +277,22 @@ fn extract_credential(body: &Value) -> Result<String, String> {
         .ok_or_else(|| "the credential response held no credential".to_string())
 }
 
-/// `(issuer, jwks document)`; both URLs are pinned to the IdP's origin.
-pub(crate) fn fetch_jwks(http: &dyn Http, idp: &str) -> Result<(String, String), String> {
-    let origin = IdpOrigin::new(idp).map_err(|err| err.to_string())?;
+/// The IdP's `openid-configuration` and its `issuer`, which must be the IdP.
+fn oidc_config(http: &dyn Http, idp: &str) -> Result<(Value, String), String> {
     let config = http.get(&well_known(idp, "openid-configuration")?, None)?;
-    let issuer = str_field(&config, "issuer")?;
-    if !same_id(issuer, idp) {
+    let issuer = str_field(&config, "issuer")?.to_string();
+    if !same_id(&issuer, idp) {
         return Err("issuer does not match the IdP".to_string());
     }
+    Ok((config, issuer))
+}
+
+/// `(issuer, jwks document)`; both URLs are pinned to the IdP's origin.
+pub(crate) fn fetch_jwks(http: &dyn Http, idp: &str) -> Result<(String, Value), String> {
+    let origin = IdpOrigin::new(idp).map_err(|err| err.to_string())?;
+    let (config, issuer) = oidc_config(http, idp)?;
     let jwks_url = endpoint(&origin, &config, "jwks_uri")?;
-    let jwks = http.get(&jwks_url, None)?;
-    Ok((issuer.to_string(), jwks.to_string()))
+    Ok((issuer, http.get(&jwks_url, None)?))
 }
 
 /// What the shared login leg yields; each agent's issuance runs from it.
@@ -333,11 +338,7 @@ fn login(
         }
     }
 
-    let config = http.get(&well_known(args.idp, "openid-configuration")?, None)?;
-    let oidc_issuer = str_field(&config, "issuer")?;
-    if !same_id(oidc_issuer, args.idp) {
-        return Err("issuer does not match the IdP".to_string());
-    }
+    let (config, oidc_issuer) = oidc_config(http, args.idp)?;
     let token_url = endpoint(&origin, &config, "token_endpoint")?;
     let device_url = endpoint(&origin, &config, "device_authorization_endpoint")?;
 
@@ -367,7 +368,7 @@ fn login(
     let claims = shadi_credential::check_id_token(
         &origin,
         &token.id_token,
-        oidc_issuer,
+        &oidc_issuer,
         args.client_id,
         args.email,
         now,
@@ -375,7 +376,7 @@ fn login(
     .map_err(|err| err.to_string())?;
 
     let pinned = vault
-        .pin_subject(oidc_issuer, &claims.email, &claims.subject)
+        .pin_subject(&oidc_issuer, &claims.email, &claims.subject)
         .map_err(|err| err.to_string())?;
     if pinned != claims.subject {
         return Err("this email is already pinned to a different account at this IdP".to_string());

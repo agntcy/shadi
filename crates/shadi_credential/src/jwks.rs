@@ -29,7 +29,6 @@ enum Entry {
 
 /// Pinned issuer keys.
 #[derive(Default)]
-#[non_exhaustive]
 pub struct JwksStore {
     issuers: HashMap<String, Vec<(String, Entry)>>,
 }

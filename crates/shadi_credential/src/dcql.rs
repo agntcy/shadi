@@ -167,7 +167,6 @@ fn show(path: &[String]) -> String {
 /// for a specific value and read admission as the answer, so a released path
 /// is also a membership oracle for that path.
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
 pub struct ReleasePolicy {
     global: Vec<Vec<String>>,
     per_peer: HashMap<String, Vec<Vec<String>>>,
