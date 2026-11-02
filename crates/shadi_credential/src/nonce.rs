@@ -18,12 +18,14 @@ pub const MAX_NONCES: usize = 4096;
 
 /// What the listener puts in the challenge. `expires_at` is advisory for the
 /// holder; the store's own record decides.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Challenge {
     pub nonce: String,
     pub aud: String,
+    pub task_id: String,
     pub expires_at: i64,
+    pub dcql_query: String,
 }
 
 struct Issued {
@@ -41,6 +43,7 @@ struct Inner {
 /// Issues and consumes nonces. Share one per listener.
 pub struct NonceStore {
     aud: String,
+    dcql_query: String,
     inner: Mutex<Inner>,
 }
 
@@ -52,9 +55,11 @@ fn rejected() -> CredentialError {
 
 impl NonceStore {
     /// `aud` is this listener's own DID, the only audience it will accept.
-    pub fn new(aud: impl Into<String>) -> Self {
+    /// Every challenge is stamped with `aud` and `dcql_query`.
+    pub fn new(aud: impl Into<String>, dcql_query: impl Into<String>) -> Self {
         Self {
             aud: aud.into(),
+            dcql_query: dcql_query.into(),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -99,7 +104,9 @@ impl NonceStore {
         Ok(Challenge {
             nonce,
             aud: self.aud.clone(),
+            task_id: task_id.to_owned(),
             expires_at,
+            dcql_query: self.dcql_query.clone(),
         })
     }
 
@@ -127,7 +134,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn store() -> NonceStore {
-        NonceStore::new("did:example:listener")
+        NonceStore::new("did:example:listener", "{\"fake\":true}")
     }
 
     #[test]
@@ -219,5 +226,20 @@ mod tests {
             }
         });
         assert_eq!(wins.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn challenge_round_trips_through_json() {
+        let c = store().issue("t1", 100).unwrap();
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"task_id\"") && json.contains("\"dcql_query\""));
+        assert_eq!(serde_json::from_str::<Challenge>(&json).unwrap(), c);
+    }
+
+    #[test]
+    fn challenge_carries_task_and_query() {
+        let c = store().issue("t1", 100).unwrap();
+        assert_eq!(c.task_id, "t1");
+        assert_eq!(c.dcql_query, "{\"fake\":true}");
     }
 }
