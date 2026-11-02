@@ -220,7 +220,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 holder: AgentIdentity::generate().unwrap(),
-                nonces: NonceStore::new(AUD),
+                nonces: NonceStore::new(AUD, "{}"),
                 jwks: jwks(),
             }
         }

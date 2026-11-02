@@ -114,10 +114,10 @@ impl AdmissionPolicy {
         &self.jwks
     }
 
-    /// The challenge query. A holder answers one credential query, so a policy
-    /// with several issuers cannot be turned into one; `from_file` already
-    /// refuses that, and this is the backstop.
-    pub fn to_dcql(&self) -> Result<DcqlQuery, CredentialError> {
+    /// The challenge query as JSON text. A holder answers one credential query,
+    /// so a policy with several issuers cannot be turned into one; `from_file`
+    /// already refuses that, and this is the backstop.
+    pub fn challenge_query(&self) -> Result<String, CredentialError> {
         let [issuer] = self.issuers.as_slice() else {
             return Err(CredentialError::Refused(format!(
                 "{} issuers are configured; a challenge can name only one",
@@ -136,7 +136,9 @@ impl AdmissionPolicy {
             "claims": claims,
         }]});
         // Through the real parser, so the holder's caps are checked here too.
-        DcqlQuery::parse(&query.to_string())
+        let text = query.to_string();
+        DcqlQuery::parse(&text)?;
+        Ok(text)
     }
 
     /// Judge a presentation that `verify` accepted.
@@ -216,7 +218,7 @@ mod tests {
             Self {
                 dir,
                 holder: AgentIdentity::generate().unwrap(),
-                nonces: NonceStore::new("did:key:listener"),
+                nonces: NonceStore::new("did:key:listener", "{}"),
             }
         }
 
@@ -304,7 +306,7 @@ mod tests {
     fn a_minimal_policy_loads_round_trips_and_admits() {
         let fx = Fx::new();
         let p = fx.load(vec![fx.entry(ISS, admin())]);
-        let q = p.to_dcql().unwrap();
+        let q = DcqlQuery::parse(&p.challenge_query().unwrap()).unwrap();
         let c = &q.credentials[0];
         assert_eq!(c.format, SD_JWT_FORMAT);
         assert_eq!(c.vct_values, vec![VCT]);
@@ -461,12 +463,12 @@ mod tests {
     }
 
     #[test]
-    fn to_dcql_still_refuses_what_load_would_have() {
+    fn challenge_query_still_refuses_what_load_would_have() {
         let fx = Fx::new();
         let mut p = fx.load(vec![fx.entry(ISS, admin())]);
         let again = p.issuers[0].clone();
         p.issuers.push(again);
-        let e = p.to_dcql().expect_err("two issuers").to_string();
+        let e = p.challenge_query().expect_err("two issuers").to_string();
         assert!(e.contains("can name only one"), "{e}");
     }
 
@@ -477,7 +479,7 @@ mod tests {
             json!({"require_claims": (0..n).map(|i| (format!("c{i}"), "v")).collect::<BTreeMap<_, _>>()})
         };
         let p = fx.load(vec![fx.entry(ISS, claims(MAX_CLAIMS_PER_QUERY))]);
-        assert!(p.to_dcql().is_ok());
+        assert!(p.challenge_query().is_ok());
         let e = refused(
             fx.load_doc(&json!({"issuers": [fx.entry(ISS, claims(MAX_CLAIMS_PER_QUERY + 1))]})),
         );
@@ -508,7 +510,7 @@ mod tests {
         let fx = Fx::new();
         let req = json!({"require_claims": {"groups": "a", "email": "b", "team": "c"}});
         let p = fx.load(vec![fx.entry(ISS, req)]);
-        let query = p.to_dcql().unwrap();
+        let query = DcqlQuery::parse(&p.challenge_query().unwrap()).unwrap();
         let asked: Vec<String> = query.credentials[0]
             .claims
             .iter()
