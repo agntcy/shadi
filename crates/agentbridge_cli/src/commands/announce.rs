@@ -430,6 +430,25 @@ fn write_descriptor(dir: &Path, workload_id: &str, descriptor: &Value) -> anyhow
 }
 
 fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+    // `a/.` has `a`'s parent as its parent, so creating that wouldn't create `a`.
+    let dir = without_cur_dirs(dir);
+    create_private_dir_once(&dir, true)
+}
+
+/// `dir` without `.` components (`.` itself if nothing else is left).
+fn without_cur_dirs(dir: &Path) -> PathBuf {
+    let path: PathBuf = dir
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path
+    }
+}
+
+fn create_private_dir_once(dir: &Path, create_parents: bool) -> anyhow::Result<()> {
     // Don't probe the directory first: a sandbox that grants writing into it may
     // still deny reading its metadata. Create it, and accept that it exists.
     match fs::create_dir(dir) {
@@ -443,15 +462,15 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // A missing parent: create the ancestors, then this directory.
+        Err(e) if create_parents && e.kind() == std::io::ErrorKind::NotFound => {
+            // A missing parent: create the ancestors, then this directory, once.
             if let Some(parent) = dir.parent() {
                 fs::create_dir_all(parent).map_err(|e| {
                     anyhow::anyhow!("create descriptor directory {}: {e}", dir.display())
                 })?;
             }
 
-            create_private_dir(dir)
+            create_private_dir_once(dir, false)
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
             "create descriptor directory {}: {e}; under shadictl, allow it with `--write {}`",
@@ -891,9 +910,14 @@ mod tests {
 
         let path = write_descriptor(&dir, "w1", &json!({ "name": "x" })).expect("write");
         assert!(path.is_file());
-        assert!(
-            !dir.join(".w1.json.tmp").exists(),
-            "temporary file must be renamed away"
+        let entries: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            ["w1.json"],
+            "the temporary file must be renamed away"
         );
 
         #[cfg(unix)]
@@ -911,6 +935,19 @@ mod tests {
         assert!(!path.exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_directory_ending_in_a_dot_is_created() {
+        let base = std::env::temp_dir().join(format!("agentbridge-dot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("workloads.d").join(".");
+
+        let path = write_descriptor(&dir, "w1", &json!({ "name": "x" })).expect("write");
+        assert_eq!(path, base.join("workloads.d").join("w1.json"));
+        assert!(path.is_file());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
