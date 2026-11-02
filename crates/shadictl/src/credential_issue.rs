@@ -463,6 +463,9 @@ pub(crate) fn issue(
     issue_for(http, vault, identity, &session, args)
 }
 
+/// One outcome per agent, in the order asked for.
+pub(crate) type IssuedPerAgent = Vec<(String, Result<CredentialRecord, String>)>;
+
 /// `Err` means the shared login failed and no agent was tried.
 pub(crate) fn issue_all(
     http: &dyn Http,
@@ -470,7 +473,7 @@ pub(crate) fn issue_all(
     identities: &[(String, AgentIdentity)],
     args: &IssueArgs<'_>,
     now: i64,
-) -> Result<Vec<(String, Result<CredentialRecord, String>)>, String> {
+) -> Result<IssuedPerAgent, String> {
     let names: Vec<&str> = identities.iter().map(|(name, _)| name.as_str()).collect();
     let session = login(http, vault, args, &names, now)?;
     Ok(identities

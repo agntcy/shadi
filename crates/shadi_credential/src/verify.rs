@@ -130,7 +130,7 @@ pub fn verify(
         return Err(refused("the key-binding JWT is too old"));
     }
 
-    // 12. Only what the issuer committed to and the holder chose to reveal.
+    // 11. Only what the issuer committed to and the holder chose to reveal.
     Ok(VerifiedPresentation {
         issuer: parsed.credential.issuer,
         credential_type: parsed.credential.credential_type,
