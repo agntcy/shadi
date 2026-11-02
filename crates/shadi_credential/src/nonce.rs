@@ -39,7 +39,6 @@ struct Inner {
 }
 
 /// Issues and consumes nonces. Share one per listener.
-#[non_exhaustive]
 pub struct NonceStore {
     aud: String,
     inner: Mutex<Inner>,
@@ -75,16 +74,17 @@ impl NonceStore {
 
         let mut g = self.lock()?;
         g.map.retain(|_, v| v.expires_at > now);
-        while g.map.len() >= MAX_NONCES {
-            let Some(oldest) = g
+        // The sweep above leaves the map at most at the cap, so one eviction
+        // makes room.
+        if g.map.len() >= MAX_NONCES {
+            if let Some(oldest) = g
                 .map
                 .iter()
                 .min_by_key(|(_, v)| v.seq)
                 .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            g.map.remove(&oldest);
+            {
+                g.map.remove(&oldest);
+            }
         }
         let seq = g.next_seq;
         g.next_seq += 1;
@@ -106,7 +106,7 @@ impl NonceStore {
     /// Returns the audience this listener recorded, so the caller checks the
     /// presentation against a value it issued rather than one the token supplied.
     /// A wrong-task attempt leaves the nonce live for its rightful task.
-    pub fn consume(&self, nonce: &str, task_id: &str, now: i64) -> Result<String, CredentialError> {
+    pub fn consume(&self, nonce: &str, task_id: &str, now: i64) -> Result<&str, CredentialError> {
         let mut g = self.lock()?;
         let entry = g.map.get(nonce).ok_or_else(rejected)?;
         if entry.expires_at <= now {
@@ -117,7 +117,7 @@ impl NonceStore {
             return Err(rejected());
         }
         g.map.remove(nonce);
-        Ok(self.aud.clone())
+        Ok(&self.aud)
     }
 }
 

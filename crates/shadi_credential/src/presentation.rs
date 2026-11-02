@@ -94,45 +94,23 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sd_jwt::{decode_json, import};
+    use crate::sd_jwt::decode_json;
+    use crate::testkit::{b64, base_claims, base_header, credential, issuer_key, selection, NOW};
     use crate::vault::tests::sqlcipher_vault;
     use ed25519_dalek::{Signature, Verifier};
 
-    const NOW: i64 = 1_700_000_000;
-
-    fn b64(s: &str) -> String {
-        URL_SAFE_NO_PAD.encode(s.as_bytes())
-    }
-
     fn disclosure(name: &str, value: &str) -> String {
         // Whitespace after the commas: a re-encode would not reproduce this.
-        b64(&format!("[ \"c2FsdA\", \"{name}\", \"{value}\" ]"))
+        b64(format!("[ \"c2FsdA\", \"{name}\", \"{value}\" ]"))
     }
 
     fn selection_for(id: &AgentIdentity, take: usize) -> Selection {
-        let groups = disclosure("groups", "admins");
-        let email = disclosure("email", "a@example.test");
-        let payload = json!({
-            "iss": "https://idp.example",
-            "vct": "urn:shadi:agent-admission:1",
-            "cnf": { "jwk": id.public_jwk() },
-            "_sd": [
-                URL_SAFE_NO_PAD.encode(Sha256::digest(groups.as_bytes())),
-                URL_SAFE_NO_PAD.encode(Sha256::digest(email.as_bytes())),
-            ],
-        });
-        let raw = format!(
-            "{}.{}.c2ln~{groups}~{email}~",
-            b64(r#"{"alg":"EdDSA","typ":"dc+sd-jwt"}"#),
-            b64(&payload.to_string()),
-        );
-        let vault = sqlcipher_vault();
-        let record = import(&vault, &raw, 1_000).unwrap();
-        let disclosures = crate::parse_sd_jwt(&raw).unwrap().disclosures[..take].to_vec();
-        Selection {
-            record,
-            disclosures,
-        }
+        let d = [
+            disclosure("groups", "admins"),
+            disclosure("email", "a@example.test"),
+        ];
+        let cred = credential(&issuer_key(), &base_header(), &base_claims(id, &d), &d);
+        selection(&cred, take)
     }
 
     /// Verify the KB-JWT signature and `sd_hash` of `pres`.

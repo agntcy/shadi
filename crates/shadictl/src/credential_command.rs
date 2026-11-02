@@ -172,12 +172,12 @@ pub(crate) fn fetch_jwks_file(
     idp: &str,
     out: &std::path::Path,
 ) -> Result<String, String> {
-    let (issuer, text) = crate::credential_issue::fetch_jwks(http, idp)?;
+    let (issuer, doc) = crate::credential_issue::fetch_jwks(http, idp)?;
+    let text = doc.to_string();
     let mut store = shadi_credential::JwksStore::new();
     store
         .add_json(&issuer, &text)
         .map_err(|err| err.to_string())?;
-    let doc: Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
     let usable = doc["keys"]
         .as_array()
         .into_iter()
