@@ -121,42 +121,31 @@ pub fn parse_sd_jwt(raw: &str) -> Result<ParsedCredential, CredentialError> {
     // everything else here, so `typ` is the only thing that says this is an
     // SD-JWT VC the vault can read back.
     let header = decode_json(issuer_jwt[0], "the issuer JWT header")?;
-    let format = issuer_format(&header)?;
+    check_issuer_format(&header)?;
     let payload = decode_json(issuer_jwt[1], "the issuer JWT payload")?;
-    read_credential(format, &payload, &parts[1..parts.len() - 1])
+    read_credential(&payload, &parts[1..parts.len() - 1])
 }
 
-fn issuer_format(header: &Value) -> Result<String, CredentialError> {
+fn check_issuer_format(header: &Value) -> Result<(), CredentialError> {
     let format = required_str(header, "typ")?;
     if format != SD_JWT_FORMAT {
         return Err(CredentialError::Malformed(format!(
             "the issuer JWT `typ` is {format}, expected {SD_JWT_FORMAT}"
         )));
     }
-    Ok(format)
+    Ok(())
 }
 
 /// The claims and disclosures shared by the issued and presented paths.
 fn read_credential(
-    format: String,
     payload: &Value,
     disclosure_parts: &[&str],
 ) -> Result<ParsedCredential, CredentialError> {
     let issuer = required_str(payload, "iss")?;
     let credential_type = required_str(payload, "vct")?;
 
-    let expires_at = match payload.get("exp") {
-        None | Some(Value::Null) => None,
-        // NumericDate may be fractional; floor so it can only expire earlier.
-        Some(value) => Some(
-            value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|f| f.floor() as i64))
-                .ok_or_else(|| {
-                    CredentialError::Malformed("`exp` is not a number of seconds".to_string())
-                })?,
-        ),
-    };
+    // Floored, so a fractional `exp` can only expire earlier.
+    let expires_at = seconds(payload, "exp", f64::floor)?;
 
     let jwk = payload
         .get("cnf")
@@ -167,7 +156,8 @@ fn read_credential(
                     .to_string(),
             )
         })?;
-    let agent_did = did_from_jwk(jwk)?;
+    // The `did:key` is what `find_valid` filters on and what the operator sees.
+    let agent_did = shadi_identity::encode_did_key(&ed25519_from_jwk(jwk, "cnf.jwk")?);
 
     let disclosures = disclosure_parts
         .iter()
@@ -178,7 +168,7 @@ fn read_credential(
     Ok(ParsedCredential {
         issuer,
         credential_type,
-        format,
+        format: SD_JWT_FORMAT.to_string(),
         agent_did,
         expires_at,
         disclosures,
@@ -265,8 +255,8 @@ pub fn parse_presentation(raw: &str) -> Result<ParsedPresentation, CredentialErr
 
     let key_binding_jwt = split_jwt(kb, "the key-binding JWT")?;
     let issuer_jwt = split_jwt(parts[0], "the issuer JWT")?;
-    let format = issuer_format(&issuer_jwt.header)?;
-    let credential = read_credential(format, &issuer_jwt.payload, disclosure_parts)?;
+    check_issuer_format(&issuer_jwt.header)?;
+    let credential = read_credential(&issuer_jwt.payload, disclosure_parts)?;
 
     Ok(ParsedPresentation {
         credential,
@@ -341,20 +331,30 @@ fn collect_markers(value: &Value, out: &mut HashSet<String>) {
     }
 }
 
+/// A NumericDate claim, which may be fractional; `round` picks the safe side.
+pub(crate) fn seconds(
+    payload: &Value,
+    claim: &str,
+    round: fn(f64) -> f64,
+) -> Result<Option<i64>, CredentialError> {
+    match payload.get(claim) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .or_else(|| v.as_f64().map(|f| round(f) as i64))
+            .map(Some)
+            .ok_or_else(|| {
+                CredentialError::Malformed(format!("`{claim}` is not a number of seconds"))
+            }),
+    }
+}
+
 fn required_str(value: &Value, claim: &str) -> Result<String, CredentialError> {
     value
         .get(claim)
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| CredentialError::Malformed(format!("no `{claim}` claim")))
-}
-
-/// `cnf.jwk` must be the Ed25519 key the credential is bound to; the `did:key`
-/// is what `find_valid` filters on and what the operator sees.
-fn did_from_jwk(jwk: &Value) -> Result<String, CredentialError> {
-    Ok(shadi_identity::encode_did_key(&ed25519_from_jwk(
-        jwk, "cnf.jwk",
-    )?))
 }
 
 /// Decode an `OKP`/`Ed25519` JWK; `what` names it in errors, which never carry
@@ -442,11 +442,10 @@ pub fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{
+        b64, base_claims, base_header, credential, disclosure, issuer_key, present_n,
+    };
     use crate::vault::tests::sqlcipher_vault;
-
-    fn b64(bytes: &[u8]) -> String {
-        URL_SAFE_NO_PAD.encode(bytes)
-    }
 
     /// The agent key the fixture credentials are bound to. Fixed bytes so the
     /// expected `did:key` is stable.
@@ -463,13 +462,7 @@ mod tests {
     }
 
     fn digest_of(segment: &str) -> String {
-        b64(&Sha256::digest(segment.as_bytes()))
-    }
-
-    fn disclosure(name: &str, value: Value) -> String {
-        b64(serde_json::json!(["c2FsdA", name, value])
-            .to_string()
-            .as_bytes())
+        b64(Sha256::digest(segment.as_bytes()))
     }
 
     /// A credential in the shape the vault stores: issuer JWT, disclosures,
@@ -636,8 +629,8 @@ mod tests {
         off_curve[31] = 1;
 
         for (x, needle) in [
-            (b64(&off_curve), "not an Ed25519 public key"),
-            (b64(&[7u8; 31]), "not 32 bytes"),
+            (b64(off_curve), "not an Ed25519 public key"),
+            (b64([7u8; 31]), "not 32 bytes"),
         ] {
             let mut payload = payload();
             payload["cnf"]["jwk"]["x"] = serde_json::json!(x);
@@ -900,24 +893,13 @@ mod tests {
     }
 
     fn presented(take: usize) -> (shadi_identity::AgentIdentity, String, String) {
-        use crate::dcql::Selection;
         let id = shadi_identity::AgentIdentity::generate().unwrap();
-        let mut p = payload();
-        p["cnf"]["jwk"] = id.public_jwk();
-        let raw = credential_with(
-            p,
-            &[
-                disclosure("groups", serde_json::json!("platform-admins")),
-                disclosure("email", serde_json::json!("alice@example.test")),
-            ],
-        );
-        let record = import(&sqlcipher_vault(), &raw, 1_000).unwrap();
-        let disclosures = parse_sd_jwt(&raw).unwrap().disclosures[..take].to_vec();
-        let sel = Selection {
-            record,
-            disclosures,
-        };
-        let pres = crate::presentation::build(&id, &sel, "n-1", "did:key:v", 1_500).unwrap();
+        let d = [
+            disclosure("groups", "platform-admins"),
+            disclosure("email", "alice@example.test"),
+        ];
+        let raw = credential(&issuer_key(), &base_header(), &base_claims(&id, &d), &d);
+        let pres = present_n(&id, &raw, take, "n-1", "did:key:v", 1_500);
         (id, raw, pres)
     }
 
@@ -962,7 +944,7 @@ mod tests {
         assert_eq!(got.sd_hash_input, sent);
         assert_eq!(
             got.key_binding_jwt.payload["sd_hash"],
-            b64(&Sha256::digest(sent.as_bytes()))
+            b64(Sha256::digest(sent.as_bytes()))
         );
     }
 

@@ -15,11 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::jwks::JwksStore;
 use crate::nonce::NonceStore;
-use crate::sd_jwt::{ed25519_from_jwk, parse_presentation, Disclosure, Jwt};
+use crate::sd_jwt::{ed25519_from_jwk, parse_presentation, seconds, Disclosure, Jwt};
 use crate::CredentialError;
-
-/// The only `alg` this crate can verify without new dependencies.
-pub const ALLOWED_ALGS: &[&str] = &["EdDSA"];
 
 /// Tolerated holder clock lead: two laptops' clocks are rarely in step.
 pub const KB_FUTURE_SKEW_SECS: i64 = 30;
@@ -99,7 +96,7 @@ pub fn verify(
     }
 
     // 8. Replay at another verifier: the audience is ours, not the token's.
-    if kb_jwt.payload.get("aud").and_then(Value::as_str) != Some(audience.as_str()) {
+    if kb_jwt.payload.get("aud").and_then(Value::as_str) != Some(audience) {
         return Err(refused(
             "the key-binding JWT audience is not the one this listener issued",
         ));
@@ -143,10 +140,11 @@ pub fn verify(
     })
 }
 
-/// An unexpected `alg` is a hard rejection; the value is not echoed.
+/// `EdDSA` is the only `alg` this crate can verify. Anything else is a hard
+/// rejection; the value is not echoed.
 fn check_alg(jwt: &Jwt, what: &str) -> Result<(), CredentialError> {
     match jwt.header.get("alg").and_then(Value::as_str) {
-        Some(alg) if ALLOWED_ALGS.contains(&alg) => Ok(()),
+        Some("EdDSA") => Ok(()),
         _ => Err(CredentialError::Refused(format!(
             "the {what} `alg` is not an accepted algorithm"
         ))),
@@ -160,47 +158,21 @@ fn check_signature(key: &VerifyingKey, jwt: &Jwt, what: &str) -> Result<(), Cred
         .map_err(|_| bad())
 }
 
-/// A NumericDate claim, which may be fractional; `round` picks the safe side.
-fn seconds(
-    payload: &Value,
-    claim: &str,
-    round: fn(f64) -> f64,
-) -> Result<Option<i64>, CredentialError> {
-    match payload.get(claim) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => v
-            .as_i64()
-            .or_else(|| v.as_f64().map(|f| round(f) as i64))
-            .map(Some)
-            .ok_or_else(|| {
-                CredentialError::Malformed(format!("`{claim}` is not a number of seconds"))
-            }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::nonce::Challenge;
-    use crate::sd_jwt::{decode_json, import, parse_sd_jwt};
-    use crate::vault::tests::sqlcipher_vault;
-    use crate::Selection;
+    use crate::sd_jwt::decode_json;
     use ed25519_dalek::SigningKey;
     use serde_json::json;
     use shadi_identity::AgentIdentity;
 
-    const ISS: &str = "https://idp.example/realms/eng";
+    use crate::testkit::{
+        b64, base_claims, base_header, credential, disclosure, issuer_key, present_n, ISS, NOW,
+    };
+
     const AUD: &str = "did:key:listener";
     const TASK: &str = "task-1";
-    const NOW: i64 = 1_700_000_000;
-
-    fn b64(s: &str) -> String {
-        URL_SAFE_NO_PAD.encode(s.as_bytes())
-    }
-
-    fn issuer_key() -> SigningKey {
-        SigningKey::from_bytes(&[9u8; 32])
-    }
 
     fn jwks() -> JwksStore {
         let jwk = json!({
@@ -215,65 +187,11 @@ mod tests {
         store
     }
 
-    fn disclosure(name: &str, value: &str) -> String {
-        b64(&json!(["c2FsdA", name, value]).to_string())
-    }
-
     fn discs() -> Vec<String> {
         vec![
             disclosure("groups", "platform-admins"),
             disclosure("email", "alice@example.test"),
         ]
-    }
-
-    fn base_header() -> Value {
-        json!({"alg": "EdDSA", "typ": "dc+sd-jwt", "kid": "k1"})
-    }
-
-    fn base_claims(holder: &AgentIdentity, discs: &[String]) -> Value {
-        let sd: Vec<String> = discs
-            .iter()
-            .map(|d| URL_SAFE_NO_PAD.encode(Sha256::digest(d.as_bytes())))
-            .collect();
-        json!({
-            "iss": ISS,
-            "vct": "urn:shadi:agent-admission:1",
-            "exp": NOW + 3_600,
-            "cnf": { "jwk": holder.public_jwk() },
-            "_sd_alg": "sha-256",
-            "_sd": sd,
-        })
-    }
-
-    fn credential(key: &SigningKey, header: &Value, claims: &Value, discs: &[String]) -> String {
-        use ed25519_dalek::Signer;
-        let input = format!("{}.{}", b64(&header.to_string()), b64(&claims.to_string()));
-        let sig = URL_SAFE_NO_PAD.encode(key.sign(input.as_bytes()).to_bytes());
-        let mut raw = format!("{input}.{sig}");
-        for d in discs {
-            raw.push('~');
-            raw.push_str(d);
-        }
-        raw.push('~');
-        raw
-    }
-
-    /// The holder answers with the first `take` disclosures, via the real builder.
-    fn present_n(
-        holder: &AgentIdentity,
-        cred: &str,
-        take: usize,
-        nonce: &str,
-        aud: &str,
-        iat: i64,
-    ) -> String {
-        let record = import(&sqlcipher_vault(), cred, 1_000).unwrap();
-        let disclosures = parse_sd_jwt(cred).unwrap().disclosures[..take].to_vec();
-        let sel = Selection {
-            record,
-            disclosures,
-        };
-        crate::presentation::build(holder, &sel, nonce, aud, iat).unwrap()
     }
 
     /// Replace the key-binding JWT with a re-signed, edited copy.
@@ -287,7 +205,7 @@ mod tests {
         let mut header = decode_json(seg[0], "h").unwrap();
         let mut payload = decode_json(seg[1], "p").unwrap();
         edit(&mut header, &mut payload);
-        let input = format!("{}.{}", b64(&header.to_string()), b64(&payload.to_string()));
+        let input = format!("{}.{}", b64(header.to_string()), b64(payload.to_string()));
         let sig = URL_SAFE_NO_PAD.encode(signer.sign_bytes(input.as_bytes()));
         format!("{head}~{input}.{sig}")
     }
@@ -321,6 +239,16 @@ mod tests {
             present_n(&self.holder, &cred, d.len(), &c.nonce, &c.aud, NOW)
         }
 
+        /// A credential over `d`, signed by the pinned issuer.
+        fn cred(&self, d: &[String]) -> String {
+            credential(
+                &issuer_key(),
+                &base_header(),
+                &base_claims(&self.holder, d),
+                d,
+            )
+        }
+
         fn verify_as(&self, pres: &str, signer: &str) -> Result<VerifiedPresentation, String> {
             verify(pres, signer, TASK, &self.nonces, &self.jwks, NOW).map_err(|e| e.to_string())
         }
@@ -330,9 +258,13 @@ mod tests {
         }
 
         /// The rejection must be this check's own.
-        fn rejects(&self, pres: &str, needle: &str) {
-            let err = self.verify(pres).expect_err("must reject");
+        fn rejects_as(&self, pres: &str, signer: &str, needle: &str) {
+            let err = self.verify_as(pres, signer).expect_err("must reject");
             assert!(err.contains(needle), "wanted `{needle}`, got: {err}");
+        }
+
+        fn rejects(&self, pres: &str, needle: &str) {
+            self.rejects_as(pres, &self.holder.did(), needle);
         }
     }
 
@@ -360,13 +292,7 @@ mod tests {
     #[test]
     fn only_the_disclosed_subset_comes_back() {
         let e = Env::new();
-        let d = discs();
-        let cred = credential(
-            &issuer_key(),
-            &base_header(),
-            &base_claims(&e.holder, &d),
-            &d,
-        );
+        let cred = e.cred(&discs());
         let c = e.challenge();
         let pres = present_n(&e.holder, &cred, 1, &c.nonce, &c.aud, NOW);
         let got = e.verify(&pres).expect("verify");
@@ -450,23 +376,21 @@ mod tests {
     fn rejects_a_credential_bound_to_another_key_than_the_envelope_signer() {
         let e = Env::new();
         let other = AgentIdentity::generate().unwrap();
-        e.rejects_signer(&e.pres(|_, _| {}), &other.did());
-    }
-
-    impl Env {
-        fn rejects_signer(&self, pres: &str, signer: &str) {
-            let err = self.verify_as(pres, signer).expect_err("must reject");
-            assert!(err.contains("not bound to the key that signed"), "{err}");
-        }
+        e.rejects_as(
+            &e.pres(|_, _| {}),
+            &other.did(),
+            "not bound to the key that signed",
+        );
     }
 
     #[test]
     fn rejects_an_envelope_signer_that_is_not_a_did_key() {
         let e = Env::new();
-        let err = e
-            .verify_as(&e.pres(|_, _| {}), "did:web:example.com")
-            .expect_err("must reject");
-        assert!(err.contains("not a usable did:key"), "{err}");
+        e.rejects_as(
+            &e.pres(|_, _| {}),
+            "did:web:example.com",
+            "not a usable did:key",
+        );
     }
 
     #[test]
@@ -499,12 +423,7 @@ mod tests {
     fn rejects_a_nonce_issued_for_another_task() {
         let e = Env::new();
         let d = discs();
-        let cred = credential(
-            &issuer_key(),
-            &base_header(),
-            &base_claims(&e.holder, &d),
-            &d,
-        );
+        let cred = e.cred(&d);
         let c = e.nonces.issue("task-2", NOW).unwrap();
         let pres = present_n(&e.holder, &cred, d.len(), &c.nonce, &c.aud, NOW);
         e.rejects(&pres, "challenge nonce is not valid");
@@ -591,12 +510,7 @@ mod tests {
         let e = Env::new();
         let mut d = discs();
         d.push(disclosure("admin", "sekrit-value"));
-        let cred = credential(
-            &issuer_key(),
-            &base_header(),
-            &base_claims(&e.holder, &d),
-            &d,
-        );
+        let cred = e.cred(&d);
         let c = e.challenge();
         let pres = present_n(&e.holder, &cred, 2, &c.nonce, &c.aud, NOW);
         let (head, kb) = pres.rsplit_once('~').unwrap();
