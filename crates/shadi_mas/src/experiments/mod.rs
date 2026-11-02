@@ -13,7 +13,8 @@ use agent_transport_slim::client_access::ClientAccess;
 pub mod auth_required;
 pub use auth_required::{
     audit_auth_required, decide_auth_required, is_auth_required, run_auth_required_loop,
-    AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
+    AuthChallenge, AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
+    MAX_CHALLENGE_BYTES,
 };
 use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 use shadi_a2a::{
@@ -111,7 +112,11 @@ pub struct LiveA2ATaskAdapter {
     config: LiveA2ATaskAdapterConfig,
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
     policy: Option<Arc<dyn AgentVerifier>>,
+    presenter: Option<Presenter>,
 }
+
+/// Turns an opaque challenge into a `vp_token`.
+type Presenter = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 
 impl LiveA2ATaskAdapter {
     pub fn new(config: LiveA2ATaskAdapterConfig) -> Self {
@@ -119,6 +124,7 @@ impl LiveA2ATaskAdapter {
             config,
             dispatches: Mutex::new(Vec::new()),
             policy: None,
+            presenter: None,
         }
     }
 
@@ -127,6 +133,13 @@ impl LiveA2ATaskAdapter {
     /// but never allow what it refuses.
     pub fn with_verifier(mut self, policy: Arc<dyn AgentVerifier>) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Answer an `AUTH_REQUIRED` challenge with a `vp_token` from `presenter`.
+    /// The adapter frames the token onto the signed payload itself.
+    pub fn with_presenter(mut self, presenter: Presenter) -> Self {
+        self.presenter = Some(presenter);
         self
     }
 
@@ -175,16 +188,33 @@ impl LiveA2ATaskAdapter {
         let body = Mutex::new(render_task_message(task));
         let auth_cfg = AuthRequiredConfig::from_env();
         let response = run_auth_required_loop(
-            || {
+            |parked| {
                 let current = body
                     .lock()
                     .map_err(|_| "live A2A task body lock poisoned".to_string())?
                     .clone();
-                let signed = shadi_identity::sign_message_from_env(&self.config.agent_id, current.as_bytes())
+                let mut payload = current.into_bytes();
+                if let (Some(presenter), Some(challenge)) = (
+                    &self.presenter,
+                    parked.and_then(|p| p.challenge.as_deref()),
+                ) {
+                    let token = presenter(challenge)?;
+                    payload = shadi_identity::wrap_vp(&token, &payload)
+                        .map_err(|err| err.to_string())?;
+                }
+                let signed = shadi_identity::sign_message_from_env(&self.config.agent_id, &payload)
                     .map_err(|err| err.to_string())?;
                 let signed_text = String::from_utf8(signed)
                     .map_err(|err| format!("DID proof envelope is not UTF-8: {err}"))?;
-                self.send_signed_task(task, &signed_text)
+                // Only a task-scoped challenge needs the retry to land on the
+                // parked task; the re-prove path keeps minting its own.
+                self.send_signed_task(
+                    task,
+                    &signed_text,
+                    parked
+                        .filter(|p| p.challenge.is_some())
+                        .map(|p| p.task_id.as_str()),
+                )
             },
             &auth_cfg,
             || {
@@ -218,8 +248,9 @@ impl LiveA2ATaskAdapter {
         &self,
         task: &TaskEnvelope,
         signed_text: &str,
+        task_id: Option<&str>,
     ) -> Result<SendMessageResponse, String> {
-        let message = self.task_message(signed_text);
+        let message = self.task_message(signed_text, task_id);
         if let Some(a2a_url) = self.config.a2a_url.as_deref() {
             let locator = A2ALocator::new(
                 self.config.a2a_binding.unwrap_or(A2ABinding::Grpc),
@@ -234,8 +265,10 @@ impl LiveA2ATaskAdapter {
 
     /// Both transports send this, so the receiver can check the destination
     /// DID whichever way the task arrives.
-    fn task_message(&self, signed_text: &str) -> Message {
-        let message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
+    /// A retry carries the parked task's id so it lands on that task.
+    fn task_message(&self, signed_text: &str, task_id: Option<&str>) -> Message {
+        let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
+        message.task_id = task_id.map(str::to_string);
         match self.config.peer_did.as_deref() {
             Some(peer_did) => insert_dest_did(message, peer_did),
             None => message,
@@ -907,14 +940,31 @@ mod transport_tests {
                 peer_did: peer_did.map(str::to_string),
             })
         };
-        let tagged = adapter(Some("did:key:zPeer")).task_message("signed");
+        let tagged = adapter(Some("did:key:zPeer")).task_message("signed", None);
         assert_eq!(
             shadi_a2a::dest_did_from_message(&tagged),
             Some("did:key:zPeer")
         );
         assert_eq!(readable_message_text(&tagged), "signed");
-        let untagged = adapter(None).task_message("signed");
+        let untagged = adapter(None).task_message("signed", None);
         assert_eq!(shadi_a2a::dest_did_from_message(&untagged), None);
+    }
+
+    #[test]
+    fn task_message_sets_the_task_id_only_when_given() {
+        let adapter = LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+            endpoint: "node:47357".to_string(),
+            agent_id: "avatar".to_string(),
+            local_name: None,
+            peer_agent_id: "peer".to_string(),
+            destination: None,
+            a2a_url: None,
+            a2a_binding: None,
+            peer_did: None,
+        });
+        let retry = adapter.task_message("signed", Some("parked"));
+        assert_eq!(retry.task_id.as_deref(), Some("parked"));
+        assert_eq!(adapter.task_message("signed", None).task_id, None);
     }
 
     struct Allow;
