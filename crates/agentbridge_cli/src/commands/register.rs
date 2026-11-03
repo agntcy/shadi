@@ -960,7 +960,10 @@ fn agent_card_with(
     let mut supported_interfaces = Vec::new();
     if let Some(endpoint) = slim_endpoint {
         supported_interfaces.push(AgentInterface::new(
-            format!("slim://{endpoint}/agntcy/shadi/{agent_id}-a2a"),
+            format!(
+                "slim://{}/agntcy/shadi/{agent_id}-a2a",
+                super::announce::slim_node(endpoint)
+            ),
             TRANSPORT_PROTOCOL_SLIMRPC,
         ));
     }
@@ -2946,6 +2949,18 @@ test push ... FAILED
         let iface = &card.supported_interfaces[0];
         assert_eq!(iface.protocol_binding, TRANSPORT_PROTOCOL_SLIMRPC);
         assert_eq!(iface.url, "slim://127.0.0.1:47357/agntcy/shadi/copilot-a2a");
+    }
+
+    #[test]
+    fn the_card_names_the_slim_node_without_its_scheme() {
+        for endpoint in ["node:47357", "http://node:47357", "https://node:47357/"] {
+            let card = build_agent_card("copilot", Some(endpoint), None, A2ABinding::Grpc);
+            assert_eq!(
+                card.supported_interfaces[0].url,
+                "slim://node:47357/agntcy/shadi/copilot-a2a",
+                "{endpoint}"
+            );
+        }
     }
 
     #[test]

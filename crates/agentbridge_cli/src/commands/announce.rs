@@ -219,7 +219,7 @@ pub fn start(
         });
     }
 
-    let dir = expand_home(&opts.dir);
+    let dir = expand_home(&opts.dir, std::env::home_dir())?;
     let pid = std::process::id();
     let workload_id = workload_id(agent_id, agent_did, pid);
     let descriptor = descriptor(
@@ -326,7 +326,7 @@ struct Annotations<'a> {
 /// connection scheme (`https://node:47357`) or trailing slash. The endpoint
 /// itself, scheme included, goes into the `org.agntcy/slim-endpoint`
 /// annotation, since a scheme-less endpoint means HTTPS to SLIM clients.
-fn slim_node(endpoint: &str) -> &str {
+pub(crate) fn slim_node(endpoint: &str) -> &str {
     let rest = endpoint.split_once("://").map_or(endpoint, |(_, r)| r);
     rest.trim_end_matches('/')
 }
@@ -505,14 +505,18 @@ fn remove_descriptor(path: &Path) {
     }
 }
 
-fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-
-    PathBuf::from(path)
+/// `~/` resolved against `home` (`HOME`, or `USERPROFILE` on Windows, as
+/// dir-runtime's `os.UserHomeDir()` reads them). Without a home, `~` would
+/// be a directory under the working directory, which dir-runtime doesn't
+/// watch.
+fn expand_home(path: &str, home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    let Some(rest) = path.strip_prefix("~/") else {
+        return Ok(PathBuf::from(path));
+    };
+    let home = home.filter(|h| !h.as_os_str().is_empty()).ok_or_else(|| {
+        anyhow::anyhow!("{path} needs a home directory; pass an absolute --dir-announce-dir")
+    })?;
+    Ok(home.join(rest))
 }
 
 /// Delete the descriptor put in the returned slot on SIGTERM, then exit as
@@ -980,10 +984,19 @@ mod tests {
 
     #[test]
     fn home_is_expanded() {
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_eq!(expand_home("~/x/y"), PathBuf::from(home).join("x/y"));
-        }
-        assert_eq!(expand_home("/abs"), PathBuf::from("/abs"));
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            expand_home("~/x/y", home.clone()).unwrap(),
+            PathBuf::from("/home/u/x/y")
+        );
+        assert_eq!(expand_home("/abs", home).unwrap(), PathBuf::from("/abs"));
+    }
+
+    #[test]
+    fn a_home_relative_dir_without_a_home_is_an_error() {
+        assert!(expand_home("~/x", None).is_err());
+        assert!(expand_home("~/x", Some(PathBuf::new())).is_err());
+        assert_eq!(expand_home("/abs", None).unwrap(), PathBuf::from("/abs"));
     }
 
     #[test]

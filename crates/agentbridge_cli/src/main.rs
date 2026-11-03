@@ -364,7 +364,8 @@ fn parse_validator_url(raw: &str) -> Result<String, String> {
 }
 
 /// `--advertise-url` only replaces the `--a2a-listen` address, and a
-/// wildcard address can't be reached at, so it isn't published (`advertised_by`
+/// wildcard address or port 0 (the bound port isn't read back) can't be
+/// reached at, so it isn't published (`advertised_by`
 /// names the flag that would: `--dir-publish` or `--dir-announce`) as is.
 fn advertisable(
     a2a_listen: Option<&str>,
@@ -377,10 +378,10 @@ fn advertisable(
         }
         return Ok(());
     };
-    let wildcard = listen
+    let unreachable = listen
         .parse::<std::net::SocketAddr>()
-        .is_ok_and(|a| a.ip().is_unspecified());
-    if let Some(flag) = advertised_by.filter(|_| wildcard && advertise_url.is_none()) {
+        .is_ok_and(|a| a.ip().is_unspecified() || a.port() == 0);
+    if let Some(flag) = advertised_by.filter(|_| unreachable && advertise_url.is_none()) {
         anyhow::bail!(
             "{flag} would advertise {listen}, which clients can't connect to; \
              pass --advertise-url with the address they reach the listener at"
@@ -738,6 +739,9 @@ mod tests {
         assert!(advertisable(Some("0.0.0.0:8443"), url, announce).is_ok());
         assert!(advertisable(Some("0.0.0.0:8443"), None, None).is_ok());
         assert!(advertisable(Some("127.0.0.1:8443"), None, publish).is_ok());
+        assert!(advertisable(Some("127.0.0.1:0"), None, announce).is_err());
+        assert!(advertisable(Some("127.0.0.1:0"), url, announce).is_ok());
+        assert!(advertisable(Some("127.0.0.1:0"), None, None).is_ok());
     }
 
     #[test]
