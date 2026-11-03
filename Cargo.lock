@@ -190,6 +190,7 @@ dependencies = [
  "a2a-lf",
  "a2a-server-lf",
  "agntcy-shadi-a2a",
+ "agntcy-shadi-credential",
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",
  "agntcy-shadi-sandbox",
