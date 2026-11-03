@@ -47,19 +47,35 @@ fn release_claims() -> Vec<String> {
         .collect()
 }
 
-/// Same variables as `shadictl credential issue`: a vault opened differently
-/// would look like "no credential found".
+/// An explicit `SHADI_CREDENTIAL_BACKEND` is obeyed. Without one, an exported
+/// `SHADI_CREDENTIAL_DB` or `SHADI_CREDENTIAL_KEY` selects sqlcipher, as in
+/// `shadictl credential issue`: a vault opened differently would look like
+/// "no credential found".
 fn open_vault() -> Result<Box<dyn shadi_credential::CredentialVault>, String> {
-    let backend = match std::env::var("SHADI_CREDENTIAL_BACKEND") {
-        Ok(value) => value
-            .parse::<shadi_credential::VaultBackend>()
-            .map_err(|e| format!("SHADI_CREDENTIAL_BACKEND: {e}"))?,
-        Err(_) => shadi_credential::default_backend(),
-    };
     let db = std::env::var_os("SHADI_CREDENTIAL_DB").map(std::path::PathBuf::from);
     let key = std::env::var("SHADI_CREDENTIAL_KEY").ok();
+    let explicit = std::env::var("SHADI_CREDENTIAL_BACKEND").ok();
+    let backend = choose_backend(
+        explicit.as_deref(),
+        db.is_some() || key.is_some(),
+        shadi_credential::default_backend,
+    )?;
     shadi_credential::default_vault(backend, db.as_deref(), key.as_deref())
         .map_err(|e| e.to_string())
+}
+
+fn choose_backend(
+    explicit: Option<&str>,
+    db_or_key_given: bool,
+    default: impl FnOnce() -> shadi_credential::VaultBackend,
+) -> Result<shadi_credential::VaultBackend, String> {
+    match explicit {
+        Some(name) => name
+            .parse()
+            .map_err(|e| format!("SHADI_CREDENTIAL_BACKEND: {e}")),
+        None if db_or_key_given => Ok(shadi_credential::VaultBackend::SqlCipher),
+        None => Ok(default()),
+    }
 }
 
 /// Answer a credential challenge with the claims the operator allowed. `Err`
@@ -128,6 +144,7 @@ pub(crate) fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shadi_credential::VaultBackend;
 
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -147,6 +164,42 @@ mod tests {
         assert_eq!(with_claims(Some(" groups , "), release_claims), ["groups"]);
         assert!(with_claims(Some(",,"), release_claims).is_empty());
         assert!(with_claims(None, release_claims).is_empty());
+    }
+
+    #[test]
+    fn explicit_backend_wins_over_a_named_db() {
+        assert_eq!(
+            choose_backend(Some("keychain"), true, || VaultBackend::SqlCipher),
+            Ok(VaultBackend::Keychain)
+        );
+    }
+
+    #[test]
+    fn db_or_key_alone_selects_sqlcipher() {
+        // The default is Keychain, so SqlCipher can only come from the rule.
+        assert_eq!(
+            choose_backend(None, true, || VaultBackend::Keychain),
+            Ok(VaultBackend::SqlCipher)
+        );
+    }
+
+    #[test]
+    fn neither_named_uses_the_default() {
+        assert_eq!(
+            choose_backend(None, false, || VaultBackend::Keychain),
+            Ok(VaultBackend::Keychain)
+        );
+        assert_eq!(
+            choose_backend(None, false, || VaultBackend::SqlCipher),
+            Ok(VaultBackend::SqlCipher)
+        );
+    }
+
+    #[test]
+    fn unparseable_backend_names_the_variable() {
+        let err = choose_backend(Some("bogus"), false, || VaultBackend::Keychain)
+            .expect_err("not a backend");
+        assert!(err.contains("SHADI_CREDENTIAL_BACKEND"), "{err}");
     }
 
     #[test]

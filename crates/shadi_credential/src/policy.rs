@@ -256,7 +256,7 @@ mod tests {
             claims["vct"] = json!(vct);
             claims["exp"] = json!(exp);
             let raw = credential(&issuer_key(), &base_header(), &claims, &d);
-            let c = self.nonces.issue(TASK, NOW).unwrap();
+            let c = self.nonces.issue(TASK, &self.holder.did(), NOW).unwrap();
             let pres = present_n(&self.holder, &raw, d.len(), &c.nonce, &c.aud, NOW);
             crate::verify::verify(&pres, &self.holder.did(), TASK, &self.nonces, jwks, NOW)
                 .expect("verify")

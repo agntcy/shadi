@@ -1349,22 +1349,16 @@ fn admit_credential(
     // A clock past i64 is not a real clock; saturating keeps every nonce expired.
     let now = i64::try_from(now_unix()).unwrap_or(i64::MAX);
     let Some(token) = token else {
-        let challenge = match gate.nonces.issue(task_id, now) {
-            Ok(challenge) => challenge,
-            Err(err) => return forged(err.to_string()),
-        };
-        return match serde_json::to_string(&challenge) {
-            Ok(json) => MessageAdmission::AuthRequired {
-                reason: "credential required: answer the challenge with a presentation".to_string(),
-                challenge: Some(json),
-            },
-            Err(err) => forged(err.to_string()),
-        };
+        return challenge_for(gate, task_id, &did, now);
     };
     let verified =
         match shadi_credential::verify(token, &did, task_id, &gate.nonces, gate.policy.jwks(), now)
         {
             Ok(verified) => verified,
+            // A stale or spent nonce is the holder's to retry, not a forgery.
+            Err(shadi_credential::CredentialError::NonceNotConsumable(_)) => {
+                return challenge_for(gate, task_id, &did, now);
+            }
             Err(err) => return forged(err.to_string()),
         };
     match gate.policy.evaluate(&verified) {
@@ -1382,6 +1376,22 @@ fn admit_credential(
         }
         shadi_credential::Decision::Deny(why) => forged(why),
         _ => forged("credential not admitted".to_string()),
+    }
+}
+
+/// Park the caller with a fresh challenge bound to `did`.
+fn challenge_for(gate: &CredentialGate, task_id: &str, did: &str, now: i64) -> MessageAdmission {
+    let forged = |reason: String| MessageAdmission::Forged { reason };
+    let challenge = match gate.nonces.issue(task_id, did, now) {
+        Ok(challenge) => challenge,
+        Err(err) => return forged(err.to_string()),
+    };
+    match serde_json::to_string(&challenge) {
+        Ok(json) => MessageAdmission::AuthRequired {
+            reason: "credential required: answer the challenge with a presentation".to_string(),
+            challenge: Some(json),
+        },
+        Err(err) => forged(err.to_string()),
     }
 }
 
@@ -2946,6 +2956,13 @@ test push ... FAILED
     /// A gate over a real issuer key, and the second-pass message a sender builds
     /// by answering the gate's own challenge.
     fn answered_challenge() -> (tempfile::TempDir, CredentialGate, String, String) {
+        answered_challenge_with(|token| token)
+    }
+
+    /// As `answered_challenge`, with `edit` applied to the token before it is sent.
+    fn answered_challenge_with(
+        edit: impl FnOnce(String) -> String,
+    ) -> (tempfile::TempDir, CredentialGate, String, String) {
         use shadi_credential::testkit;
 
         let agent = shadi_identity::AgentIdentity::generate().unwrap();
@@ -3012,7 +3029,7 @@ test push ... FAILED
         )
         .unwrap();
 
-        let framed = shadi_identity::wrap_vp(&token, b"real prompt").unwrap();
+        let framed = shadi_identity::wrap_vp(&edit(token), b"real prompt").unwrap();
         let envelope = shadi_identity::wrap_signed_message(&agent, &framed).unwrap();
         (
             dir,
@@ -3040,18 +3057,59 @@ test push ... FAILED
         }
     }
 
+    /// The challenge an `AuthRequired` carries, parsed.
+    fn challenge_of(admission: MessageAdmission) -> shadi_credential::Challenge {
+        match admission {
+            MessageAdmission::AuthRequired {
+                challenge: Some(json),
+                ..
+            } => serde_json::from_str(&json).unwrap(),
+            _ => panic!("expected a fresh challenge"),
+        }
+    }
+
     #[test]
-    fn a_replayed_presentation_is_forged_because_the_nonce_is_single_use() {
+    fn a_replayed_presentation_is_rechallenged_because_the_nonce_is_single_use() {
         let (_dir, gate, _, text) = answered_challenge();
         let msg = sample_request(text).message;
         assert!(matches!(
             admit_message(&msg, Some(&gate), "task-1"),
             MessageAdmission::Proven { .. }
         ));
-        assert!(matches!(
-            admit_message(&msg, Some(&gate), "task-1"),
-            MessageAdmission::Forged { .. }
+        let fresh = challenge_of(admit_message(&msg, Some(&gate), "task-1"));
+        assert_eq!(fresh.task_id, "task-1");
+    }
+
+    #[test]
+    fn an_unknown_nonce_is_rechallenged_not_forged() {
+        let (_dir, _, _, text) = answered_challenge();
+        let (_other_dir, other_gate) = gate_fixture();
+        let fresh = challenge_of(admit_message(
+            &sample_request(text).message,
+            Some(&other_gate),
+            "task-1",
         ));
+        assert_eq!(fresh.aud, LISTENER_DID);
+        assert!(!fresh.nonce.is_empty());
+    }
+
+    #[test]
+    fn a_bad_issuer_signature_is_still_forged() {
+        let (_dir, gate, _, text) = answered_challenge_with(|token| {
+            let at = token.find('~').unwrap() - 10;
+            let swap = if token.as_bytes()[at] == b'A' {
+                "B"
+            } else {
+                "A"
+            };
+            format!("{}{swap}{}", &token[..at], &token[at + 1..])
+        });
+        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+            MessageAdmission::Forged { reason } => {
+                assert!(reason.contains("signature"), "{reason}")
+            }
+            _ => panic!("a bad signature must be forged"),
+        }
     }
 
     #[test]

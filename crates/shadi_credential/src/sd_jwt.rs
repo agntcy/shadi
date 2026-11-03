@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use crate::store::CredentialRecord;
 
 use crate::vault::CredentialVault;
-use crate::CredentialError;
+use crate::{printable, CredentialError};
 
 /// The only issuer JWT `typ` this module reads.
 pub const SD_JWT_FORMAT: &str = "dc+sd-jwt";
@@ -307,7 +307,7 @@ fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), Cr
         if !committed.contains(&URL_SAFE_NO_PAD.encode(Sha256::digest(d.raw.as_bytes()))) {
             let claim = d.name.as_deref().map_or_else(
                 || "an array element".to_string(),
-                |name| format!("`{name}`"),
+                |name| format!("`{}`", printable(name)),
             );
             return Err(CredentialError::Malformed(format!(
                 "the disclosure for {claim} is not committed to by the issuer"
