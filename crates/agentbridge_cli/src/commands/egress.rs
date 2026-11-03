@@ -84,13 +84,7 @@ fn present(challenge: &str, agent_id: &str, peer_did: Option<&str>) -> Result<St
     let paths: Vec<&[&str]> = paths.iter().map(|p| p.as_slice()).collect();
     let policy = shadi_credential::ReleasePolicy::new(&paths);
     let vault = open_vault()?;
-    let shadi_identity::SlimAuth::Did { signing_pem, .. } =
-        shadi_identity::require_did_auth_from_env(agent_id).map_err(|e| e.to_string())?
-    else {
-        return Err("presenting a credential requires SHADI_SLIM_AUTH=did".to_string());
-    };
-    let identity =
-        shadi_identity::AgentIdentity::from_pkcs8_pem(&signing_pem).map_err(|e| e.to_string())?;
+    let identity = shadi_identity::agent_identity_from_env(agent_id).map_err(|e| e.to_string())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);

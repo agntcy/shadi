@@ -334,10 +334,9 @@ fn start_listeners(
 /// one: `Some(did)` iff DID auth is actually configured in the environment,
 /// `None` otherwise (the card is then published without an `authors` entry).
 fn best_effort_did(agent_id: &str) -> Option<String> {
-    match shadi_identity::did_auth_from_env(agent_id) {
-        Some(Ok(shadi_identity::SlimAuth::Did { did, .. })) => Some(did),
-        _ => None,
-    }
+    shadi_identity::agent_identity_from_env(agent_id)
+        .ok()
+        .map(|i| i.did())
 }
 
 // ─── SLIM A2A listener ────────────────────────────────────────────────────────
@@ -1485,11 +1484,18 @@ fn admit_credential(
             Err(err) => return forged(err.to_string()),
         };
     match gate.policy.evaluate(&verified) {
-        shadi_credential::Decision::Admit => MessageAdmission::Proven {
-            did,
-            human_did,
-            payload,
-        },
+        shadi_credential::Decision::Admit => {
+            tracing::info!(
+                agent_did = %did,
+                issuer = %verified.issuer,
+                "admitted A2A message through the credential gate"
+            );
+            MessageAdmission::Proven {
+                did,
+                human_did,
+                payload,
+            }
+        }
         shadi_credential::Decision::Deny(why) => forged(why),
         _ => forged("credential not admitted".to_string()),
     }
@@ -1705,17 +1711,9 @@ fn run_unicast_listener(
         format!("invalid --a2a-listen '{listen}' (expected host:port): {e}")
     })?;
 
-    let auth = shadi_identity::require_did_auth_from_env(agent_id)
-        .map_err(|e| format!("A2A {} auth error: {e}", a2a_binding.as_protocol_binding()))?;
-    let did = match &auth {
-        shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
-        shadi_identity::SlimAuth::SharedSecret(_) => {
-            return Err(format!(
-                "A2A {} listen requires an agent DID (SHADI_SLIM_AUTH=did); shared-secret node auth is not enough",
-                a2a_binding.as_protocol_binding()
-            ));
-        }
-    };
+    let did = shadi_identity::agent_identity_from_env(agent_id)
+        .map_err(|e| format!("A2A {} auth error: {e}", a2a_binding.as_protocol_binding()))?
+        .did();
 
     let a2a_url = advertised_a2a_url(listen);
 

@@ -281,17 +281,9 @@ impl LiveA2ATaskAdapter {
         message: &Message,
         locator: &A2ALocator,
     ) -> Result<SendMessageResponse, String> {
-        let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
-            .map_err(|e| e.to_string())?;
-        let proven_did = match &auth {
-            shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
-            shadi_identity::SlimAuth::SharedSecret(_) => {
-                return Err(
-                    "application auth requires an agent DID; shared-secret node auth is not enough"
-                        .to_string(),
-                );
-            }
-        };
+        let proven_did = shadi_identity::agent_identity_from_env(&self.config.agent_id)
+            .map_err(|e| e.to_string())?
+            .did();
         let session = SessionContext::new(
             &self.config.agent_id,
             format!("mas-task-session-{}", task.task_id),
