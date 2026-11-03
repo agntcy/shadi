@@ -18,8 +18,8 @@ pub mod policy;
 pub mod presentation;
 pub mod sd_jwt;
 pub mod store;
-#[cfg(test)]
-pub(crate) mod testkit;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 pub mod vault;
 pub mod verify;
 

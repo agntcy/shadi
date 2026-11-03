@@ -61,6 +61,7 @@ tempfile = "3.27"
 libc = "0.2"
 
 [dev-dependencies]
+shadi_credential = { package = "agntcy-shadi-credential", version = "0.1.0", path = "../shadi_credential", features = ["testkit"] }
 opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tempfile = "3.27"

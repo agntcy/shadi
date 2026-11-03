@@ -3165,6 +3165,117 @@ test push ... FAILED
         }
     }
 
+    /// A gate over a real issuer key, and the second-pass message a sender builds
+    /// by answering the gate's own challenge.
+    fn answered_challenge() -> (tempfile::TempDir, CredentialGate, String, String) {
+        use shadi_credential::testkit;
+
+        let agent = shadi_identity::AgentIdentity::generate().unwrap();
+        // The kit's own `exp` is in the past; the listener reads the real clock.
+        let now = i64::try_from(now_unix()).unwrap();
+        let discs = [testkit::disclosure("groups", "platform-admins")];
+        let mut claims = testkit::base_claims(&agent, &discs);
+        claims["exp"] = (now + 3_600).into();
+        let cred = testkit::credential(
+            &testkit::issuer_key(),
+            &testkit::base_header(),
+            &claims,
+            &discs,
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let x = testkit::b64(testkit::issuer_key().verifying_key().to_bytes());
+        fs::write(
+            dir.path().join("jwks.json"),
+            serde_json::json!({"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k1","alg":"EdDSA","x":x}]})
+                .to_string(),
+        )
+        .unwrap();
+        let policy = dir.path().join("policy.json");
+        fs::write(
+            &policy,
+            serde_json::json!({"issuers":[{
+                "iss": testkit::ISS,
+                "jwks": "jwks.json",
+                "vct": claims["vct"],
+                "require_claims": {"groups": "platform-admins"},
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+        let gate = CredentialGate::load(&policy, LISTENER_DID).unwrap();
+
+        let vault =
+            shadi_credential::SqlCipherVault::open(&dir.path().join("vault.db"), "k").unwrap();
+        shadi_credential::import(&vault, &cred, now).unwrap();
+
+        let task = shadi_identity::wrap_signed_message(&agent, b"real prompt").unwrap();
+        let msg = sample_request(String::from_utf8(task).unwrap()).message;
+        let MessageAdmission::AuthRequired {
+            challenge: Some(json),
+            ..
+        } = admit_message(&msg, Some(&gate), "task-1")
+        else {
+            panic!("an unpresented message must be challenged");
+        };
+        let challenge: shadi_credential::Challenge = serde_json::from_str(&json).unwrap();
+
+        let policy = shadi_credential::ReleasePolicy::new(&[&["groups"]]);
+        let query = shadi_credential::DcqlQuery::parse(&challenge.dcql_query).unwrap();
+        let token = shadi_credential::answer_challenge(
+            &vault,
+            &agent,
+            &policy,
+            LISTENER_DID,
+            &challenge.aud,
+            &challenge.nonce,
+            &query,
+            now,
+        )
+        .unwrap();
+
+        let framed = shadi_identity::wrap_vp(&token, b"real prompt").unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&agent, &framed).unwrap();
+        (
+            dir,
+            gate,
+            agent.did().to_string(),
+            String::from_utf8(envelope).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_presentation_the_sender_builds_is_admitted_by_the_listener() {
+        let (_dir, gate, did, text) = answered_challenge();
+        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+            MessageAdmission::Proven {
+                did: proven,
+                payload,
+                ..
+            } => {
+                assert_eq!(proven, did);
+                assert_eq!(payload, "real prompt");
+                assert!(!payload.contains("SHADI-VP/1"), "{payload}");
+            }
+            MessageAdmission::Forged { reason } => panic!("forged: {reason}"),
+            MessageAdmission::AuthRequired { reason, .. } => panic!("auth required: {reason}"),
+        }
+    }
+
+    #[test]
+    fn a_replayed_presentation_is_forged_because_the_nonce_is_single_use() {
+        let (_dir, gate, _, text) = answered_challenge();
+        let msg = sample_request(text).message;
+        assert!(matches!(
+            admit_message(&msg, Some(&gate), "task-1"),
+            MessageAdmission::Proven { .. }
+        ));
+        assert!(matches!(
+            admit_message(&msg, Some(&gate), "task-1"),
+            MessageAdmission::Forged { .. }
+        ));
+    }
+
     #[test]
     fn a_malformed_vp_layer_is_rejected_with_or_without_a_gate() {
         let (_dir, gate) = gate_fixture();
