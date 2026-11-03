@@ -1,7 +1,7 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Single-use, task-scoped challenge nonces for the verifier.
+//! Single-use challenge nonces for the verifier, bound to the peer they were issued to.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -30,6 +30,7 @@ pub struct Challenge {
 
 struct Issued {
     task_id: String,
+    did: String,
     expires_at: i64,
     seq: u64,
 }
@@ -47,10 +48,10 @@ pub struct NonceStore {
     inner: Mutex<Inner>,
 }
 
-// One message for unknown, expired and wrong-task: telling them apart would let
-// a caller probe which nonces are live or which task owns them.
+// One message for unknown, expired, wrong-task and wrong-peer: telling them
+// apart would let a caller probe which nonces are live or who owns them.
 fn rejected() -> CredentialError {
-    CredentialError::Refused("challenge nonce is not valid".into())
+    CredentialError::NonceNotConsumable("challenge nonce is not valid".into())
 }
 
 impl NonceStore {
@@ -70,7 +71,8 @@ impl NonceStore {
             .map_err(|_| CredentialError::Storage("nonce store lock poisoned".into()))
     }
 
-    pub fn issue(&self, task_id: &str, now: i64) -> Result<Challenge, CredentialError> {
+    /// `did` is the peer the challenge is for; only it can consume the nonce.
+    pub fn issue(&self, task_id: &str, did: &str, now: i64) -> Result<Challenge, CredentialError> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes)
             .map_err(|e| CredentialError::Storage(format!("nonce generation failed: {e}")))?;
@@ -97,6 +99,7 @@ impl NonceStore {
             nonce.clone(),
             Issued {
                 task_id: task_id.to_owned(),
+                did: did.to_owned(),
                 expires_at,
                 seq,
             },
@@ -112,15 +115,21 @@ impl NonceStore {
 
     /// Returns the audience this listener recorded, so the caller checks the
     /// presentation against a value it issued rather than one the token supplied.
-    /// A wrong-task attempt leaves the nonce live for its rightful task.
-    pub fn consume(&self, nonce: &str, task_id: &str, now: i64) -> Result<&str, CredentialError> {
+    /// A wrong-task or wrong-peer attempt leaves the nonce live for its rightful holder.
+    pub fn consume(
+        &self,
+        nonce: &str,
+        task_id: &str,
+        did: &str,
+        now: i64,
+    ) -> Result<&str, CredentialError> {
         let mut g = self.lock()?;
         let entry = g.map.get(nonce).ok_or_else(rejected)?;
         if entry.expires_at <= now {
             g.map.remove(nonce);
             return Err(rejected());
         }
-        if entry.task_id != task_id {
+        if entry.task_id != task_id || entry.did != did {
             return Err(rejected());
         }
         g.map.remove(nonce);
@@ -140,73 +149,90 @@ mod tests {
     #[test]
     fn single_use() {
         let s = store();
-        let c = s.issue("t1", 100).unwrap();
+        let c = s.issue("t1", "d", 100).unwrap();
         assert_eq!(c.expires_at, 100 + NONCE_TTL_SECS);
-        assert!(s.consume(&c.nonce, "t1", 101).is_ok());
-        assert!(s.consume(&c.nonce, "t1", 101).is_err());
+        assert!(s.consume(&c.nonce, "t1", "d", 101).is_ok());
+        assert!(s.consume(&c.nonce, "t1", "d", 101).is_err());
     }
 
     #[test]
     fn wrong_task_fails() {
         let s = store();
-        let c = s.issue("t1", 100).unwrap();
-        assert!(s.consume(&c.nonce, "t2", 101).is_err());
-        assert!(s.consume(&c.nonce, "t1", 101).is_ok());
+        let c = s.issue("t1", "d", 100).unwrap();
+        assert!(s.consume(&c.nonce, "t2", "d", 101).is_err());
+        assert!(s.consume(&c.nonce, "t1", "d", 101).is_ok());
+    }
+
+    #[test]
+    fn wrong_peer_fails_and_leaves_the_nonce_live() {
+        let s = store();
+        let c = s.issue("t1", "did:a", 100).unwrap();
+        let wrong_peer = s.consume(&c.nonce, "t1", "did:b", 101).unwrap_err();
+        let unknown = s.consume("nope", "t1", "did:a", 101).unwrap_err();
+        let wrong_task = s.consume(&c.nonce, "t2", "did:a", 101).unwrap_err();
+        assert_eq!(wrong_peer.to_string(), unknown.to_string());
+        assert_eq!(wrong_peer.to_string(), wrong_task.to_string());
+        assert!(s.consume(&c.nonce, "t1", "did:a", 101).is_ok());
     }
 
     #[test]
     fn ttl_boundary() {
         let s = store();
-        let a = s.issue("t", 100).unwrap();
-        let b = s.issue("t", 100).unwrap();
-        assert!(s.consume(&a.nonce, "t", 100 + NONCE_TTL_SECS - 1).is_ok());
-        assert!(s.consume(&b.nonce, "t", 100 + NONCE_TTL_SECS).is_err());
+        let a = s.issue("t", "d", 100).unwrap();
+        let b = s.issue("t", "d", 100).unwrap();
+        assert!(s
+            .consume(&a.nonce, "t", "d", 100 + NONCE_TTL_SECS - 1)
+            .is_ok());
+        assert!(s.consume(&b.nonce, "t", "d", 100 + NONCE_TTL_SECS).is_err());
     }
 
     #[test]
     fn returns_recorded_audience() {
         let s = store();
-        let c = s.issue("t", 0).unwrap();
+        let c = s.issue("t", "d", 0).unwrap();
         assert_eq!(c.aud, "did:example:listener");
-        assert_eq!(s.consume(&c.nonce, "t", 1).unwrap(), "did:example:listener");
+        assert_eq!(
+            s.consume(&c.nonce, "t", "d", 1).unwrap(),
+            "did:example:listener"
+        );
     }
 
     #[test]
     fn unknown_fails_without_echoing_nonce() {
-        let err = store().consume("nope-nonce", "t", 0).unwrap_err();
+        let err = store().consume("nope-nonce", "t", "d", 0).unwrap_err();
         assert!(!err.to_string().contains("nope-nonce"));
     }
 
     #[test]
     fn cap_evicts_oldest() {
         let s = store();
-        let first = s.issue("t", 0).unwrap();
-        let second = s.issue("t", 0).unwrap();
+        let first = s.issue("t", "d", 0).unwrap();
+        let second = s.issue("t", "d", 0).unwrap();
         for _ in 0..MAX_NONCES - 1 {
-            s.issue("t", 0).unwrap();
+            s.issue("t", "d", 0).unwrap();
         }
         assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
-        assert!(s.consume(&first.nonce, "t", 1).is_err());
-        assert!(s.consume(&second.nonce, "t", 1).is_ok());
+        assert!(s.consume(&first.nonce, "t", "d", 1).is_err());
+        assert!(s.consume(&second.nonce, "t", "d", 1).is_ok());
     }
 
     #[test]
     fn expired_entries_reclaimed_on_issue() {
         let s = store();
         for _ in 0..MAX_NONCES {
-            s.issue("t", 0).unwrap();
+            s.issue("t", "d", 0).unwrap();
         }
         let now = NONCE_TTL_SECS + 1;
-        let c = s.issue("t", now).unwrap();
+        let c = s.issue("t", "d", now).unwrap();
         assert_eq!(s.inner.lock().unwrap().map.len(), 1);
-        assert!(s.consume(&c.nonce, "t", now).is_ok());
+        assert!(s.consume(&c.nonce, "t", "d", now).is_ok());
     }
 
     #[test]
     fn nonces_differ_and_have_expected_shape() {
         let s = store();
-        let a = s.issue("t", 0).unwrap();
-        let b = s.issue("t", 0).unwrap();
+        let a = s.issue("t", "d", 0).unwrap();
+        let b = s.issue("t", "d", 0).unwrap();
         assert_ne!(a.nonce, b.nonce);
         assert_eq!(a.nonce.len(), 22);
     }
@@ -214,12 +240,12 @@ mod tests {
     #[test]
     fn concurrent_consume_admits_one() {
         let s = store();
-        let c = s.issue("t", 0).unwrap();
+        let c = s.issue("t", "d", 0).unwrap();
         let wins = AtomicUsize::new(0);
         std::thread::scope(|sc| {
             for _ in 0..16 {
                 sc.spawn(|| {
-                    if s.consume(&c.nonce, "t", 1).is_ok() {
+                    if s.consume(&c.nonce, "t", "d", 1).is_ok() {
                         wins.fetch_add(1, Ordering::SeqCst);
                     }
                 });
@@ -230,7 +256,7 @@ mod tests {
 
     #[test]
     fn challenge_round_trips_through_json() {
-        let c = store().issue("t1", 100).unwrap();
+        let c = store().issue("t1", "d", 100).unwrap();
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains("\"task_id\"") && json.contains("\"dcql_query\""));
         assert_eq!(serde_json::from_str::<Challenge>(&json).unwrap(), c);
@@ -238,7 +264,7 @@ mod tests {
 
     #[test]
     fn challenge_carries_task_and_query() {
-        let c = store().issue("t1", 100).unwrap();
+        let c = store().issue("t1", "d", 100).unwrap();
         assert_eq!(c.task_id, "t1");
         assert_eq!(c.dcql_query, "{\"fake\":true}");
     }
