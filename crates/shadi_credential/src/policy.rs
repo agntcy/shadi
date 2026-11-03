@@ -40,8 +40,6 @@ pub struct IssuerPolicy {
 struct PolicyFile {
     #[serde(default)]
     issuers: Vec<IssuerPolicy>,
-    #[serde(default)]
-    human_dids: Vec<String>,
 }
 
 /// The admission verdict. A reason names the failing claim, never its value.
@@ -55,24 +53,21 @@ pub enum Decision {
 #[non_exhaustive]
 pub struct AdmissionPolicy {
     pub issuers: Vec<IssuerPolicy>,
-    // Carried only: the agent-binding admission that uses these lives with
-    // the protocol wiring, and `evaluate` does not consult them.
-    pub human_dids: Vec<String>,
     jwks: JwksStore,
 }
 
 impl AdmissionPolicy {
-    /// Load and pin. Anything unrecognised, or a file naming no issuer and no
-    /// human, is an error rather than "no restrictions".
+    /// Load and pin. Anything unrecognised, or a file naming no issuer, is an
+    /// error rather than "no restrictions".
     pub fn from_file(path: &Path) -> Result<Self, CredentialError> {
         let shown = path.display();
         let text = std::fs::read_to_string(path)
             .map_err(|e| CredentialError::Storage(format!("cannot read {shown}: {e}")))?;
         let file: PolicyFile = serde_json::from_str(&text)
             .map_err(|e| CredentialError::Malformed(format!("policy {shown}: {e}")))?;
-        if file.issuers.is_empty() && file.human_dids.is_empty() {
+        if file.issuers.is_empty() {
             return Err(CredentialError::Refused(format!(
-                "policy {shown} declares neither `issuers` nor `human_dids`"
+                "policy {shown} declares no `issuers`"
             )));
         }
         // A challenge names one credential query, so more cannot be answered.
@@ -105,7 +100,6 @@ impl AdmissionPolicy {
         }
         Ok(Self {
             issuers: file.issuers,
-            human_dids: file.human_dids,
             jwks,
         })
     }
@@ -328,21 +322,11 @@ mod tests {
         let entry =
             refused(fx.load_doc(&json!({"issuers": [fx.entry(ISS, json!({"requre_exp": true}))]})));
         let neither = refused(fx.load_doc(&json!({})));
-        let empty = refused(fx.load_doc(&json!({"issuers": [], "human_dids": []})));
+        let empty = refused(fx.load_doc(&json!({"issuers": []})));
         assert!(top.contains("unknown field `isuers`"), "{top}");
         assert!(entry.contains("unknown field `requre_exp`"), "{entry}");
-        assert!(neither.contains("neither"), "{neither}");
-        assert!(empty.contains("neither"), "{empty}");
-    }
-
-    #[test]
-    fn human_dids_alone_is_a_policy() {
-        let fx = Fx::new();
-        let p = fx
-            .load_doc(&json!({"human_dids": ["did:key:zAlice"]}))
-            .unwrap();
-        assert_eq!(p.human_dids, vec!["did:key:zAlice"]);
-        assert!(p.issuers.is_empty());
+        assert!(neither.contains("declares no `issuers`"), "{neither}");
+        assert!(empty.contains("declares no `issuers`"), "{empty}");
     }
 
     #[test]
