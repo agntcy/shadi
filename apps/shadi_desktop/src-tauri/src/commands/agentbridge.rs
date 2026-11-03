@@ -20,13 +20,16 @@ use std::sync::{Arc, Mutex};
 
 use agentbridge::adapter::CliToolAdapter;
 use agentbridge::adapters::generic_stdio::GenericStdioAdapter;
+use agentbridge::local_registry::LocalAdapterRegistry;
 use agentbridge::open_profile_adapter;
 use agentbridge::mas::{
     AgentId, CoordinationEngine, DevelopmentEngine, DevelopmentEngineConfig, Epoch, EventId,
     EventMetadata, EventOutcome, EventSource, MasRuntime, PatternKind, SemanticEvent,
     SemanticPayload,
 };
-use agentbridge::member_source::{DirLookupOptions, MemberSource, SkillSearchSource};
+use agentbridge::member_source::{
+    resolve_adapter_peer, DirLookupOptions, MemberSource, SkillSearchSource,
+};
 use agentbridge::{CliAdapter, ContextPacket};
 use serde::{Deserialize, Serialize};
 use shadi_mas::experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig};
@@ -179,6 +182,29 @@ pub async fn agentbridge_handoff(
     .map_err(|e| format!("task failed: {e}"))?
 }
 
+/// The peer's DID, or `None` when it does not resolve: the peer is then
+/// dialled by name as before and a credential challenge refuses.
+fn resolve_peer_did(
+    to: &str,
+    registry: &LocalAdapterRegistry,
+    dir: Option<&DirLookupOptions>,
+) -> Option<String> {
+    resolve_adapter_peer(to, registry, dir)
+        .ok()
+        .map(|peer| peer.did)
+        .filter(|did| !did.is_empty())
+}
+
+fn peer_did_from_env(to: &str) -> Option<String> {
+    let dir = DirLookupOptions {
+        server_addr: std::env::var("DIRECTORY_SERVER")
+            .unwrap_or_else(|_| "prod.gateway.ads.outshift.io:443".to_string()),
+        gh_token: std::env::var("DIRECTORY_CLIENT_GITHUB_TOKEN").ok(),
+        limit: 5,
+    };
+    resolve_peer_did(to, &LocalAdapterRegistry::from_env(), Some(&dir))
+}
+
 /// Send a single prompt to a remote adapter over A2A/SLIM.
 #[tauri::command]
 pub async fn agentbridge_delegate(
@@ -191,6 +217,7 @@ pub async fn agentbridge_delegate(
         // LiveA2ATaskAdapter reads SLIM_ENDPOINT internally.
         std::env::set_var("SLIM_ENDPOINT", &endpoint);
 
+        let peer_did = peer_did_from_env(&to);
         let config = LiveA2ATaskAdapterConfig {
             endpoint,
             agent_id: agent_id.clone(),
@@ -199,9 +226,9 @@ pub async fn agentbridge_delegate(
             destination: Some(format!("agntcy/shadi/{to}-a2a")),
             a2a_url: None,
             a2a_binding: None,
-            peer_did: None,
+            peer_did,
         };
-        let adapter = LiveA2ATaskAdapter::new(config);
+        let adapter = agentbridge::live_adapter(config);
 
         let task_id = uuid::Uuid::new_v4().to_string();
         let task = TaskEnvelope {
@@ -303,6 +330,7 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
                 .map(|(id, ep)| (id.to_string(), ep.to_string()))
                 .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
             std::env::set_var("SLIM_ENDPOINT", &endpoint);
+            let peer_did = peer_did_from_env(&agent_id);
             let config = LiveA2ATaskAdapterConfig {
                 endpoint,
                 agent_id: "coordinator".to_string(),
@@ -311,10 +339,10 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
                 destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
                 a2a_url: None,
                 a2a_binding: None,
-                peer_did: None,
+                peer_did,
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
-                inner: LiveA2ATaskAdapter::new(config),
+                inner: agentbridge::live_adapter(config),
                 dispatch_count: Mutex::new(0),
             });
             (agent_id, slim_adapter as Arc<dyn ToolAdapter>)
@@ -564,4 +592,17 @@ pub async fn agentbridge_coordinate(
     })
     .await
     .map_err(|e| format!("task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unresolvable_peer_yields_no_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = LocalAdapterRegistry::with_dir(dir.path().to_path_buf());
+        assert_eq!(resolve_peer_did("nobody", &registry, None), None);
+        assert_eq!(resolve_peer_did("did:key:zMissing", &registry, None), None);
+    }
 }
