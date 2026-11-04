@@ -53,6 +53,7 @@ unicode-width = "0.2"
 ctrlc = "3.5"
 signal-hook = "0.4"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+tempfile = "3.27"
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2"
@@ -68,5 +69,4 @@ windows-sys = { version = "0.61", features = [
 sequoia-openpgp = { version = "2.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate", "compression-bzip2"] }
 # Building OpenSSH key fixtures for the SSH identity tests (agntcy/shadi#140).
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519"] }
-tempfile = "3.27"
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.4.0", path = "../shadi_identity", features = ["openpgp"] }

@@ -141,6 +141,15 @@ fn read_credential(
     payload: &Value,
     disclosure_parts: &[&str],
 ) -> Result<ParsedCredential, CredentialError> {
+    // Shared so a credential imported with an excessive disclosure count
+    // cannot turn every later `dcql::select` over it into unbounded digest
+    // work — `parse_presentation` also checks this, but earlier callers must
+    // not be able to store their way past it.
+    if disclosure_parts.len() > MAX_DISCLOSURES {
+        return Err(CredentialError::Malformed(format!(
+            "more than {MAX_DISCLOSURES} disclosures"
+        )));
+    }
     let issuer = required_str(payload, "iss")?;
     let credential_type = required_str(payload, "vct")?;
 
@@ -532,6 +541,21 @@ mod tests {
             parsed.disclosures[0].value,
             serde_json::json!("platform-admins")
         );
+    }
+
+    /// An issuer could craft (or an import could otherwise carry) a credential
+    /// with an excessive disclosure count; this must be refused at import so
+    /// it never sits in the vault, where every `dcql::select` over it would
+    /// re-pay the same unbounded digest-check cost.
+    #[test]
+    fn refuses_too_many_disclosures_on_import() {
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload(),
+            &vec!["x".to_string(); MAX_DISCLOSURES + 1],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("more than"), "{err}");
     }
 
     /// Only `dc+sd-jwt` is readable: a plain JWT with a trailing `~` must be
