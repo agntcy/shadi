@@ -295,23 +295,17 @@ fn parse_no_new_privs(status: &str) -> Option<bool> {
 /// Whether `ancestor` is among `pid`'s parents.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn descends_from(pid: libc::pid_t, ancestor: libc::pid_t) -> bool {
-    let mut current = pid;
-    for _ in 0..4096 {
-        let Some(parent) = std::fs::read_to_string(format!("/proc/{current}/stat"))
-            .ok()
-            .and_then(|stat| parse_parent_pid(&stat))
-        else {
-            return false;
-        };
-        if parent == ancestor {
-            return true;
-        }
-        if parent <= 1 {
-            return false;
-        }
-        current = parent;
-    }
-    false
+    std::iter::successors(parent_pid(pid), |&parent| {
+        (parent > 1).then_some(parent).and_then(parent_pid)
+    })
+    .take(4096)
+    .any(|parent| parent == ancestor)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_parent_pid(&stat)
 }
 
 /// The parent pid in `/proc/<pid>/stat`: the field after the state, which
@@ -876,31 +870,24 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn control_socket_refuses_a_peer_with_no_new_privs() {
-        use std::os::unix::process::CommandExt;
-
         let live = test_live_policy();
         let dir = tempfile::tempdir().expect("tempdir");
         let sock_path = dir.path().join("test.sock");
         let _handle = start_control_socket(&sock_path, Arc::clone(&live)).expect("start socket");
         wait_for_socket_ready(&sock_path);
 
-        let mut child = std::process::Command::new("/usr/bin/env");
-        unsafe {
-            child.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        let mut child = std::process::Command::new("/usr/bin/setpriv");
+        child.arg("--no-new-privs");
         let reply = patch_from(&mut child, &sock_path);
         assert!(
             reply.contains("unauthorized control socket peer"),
             "{reply}"
         );
-        if !no_new_privs("self").expect("read own status") {
-            assert!(reply.contains("no_new_privs"), "{reply}");
-        }
+        // With no_new_privs on this process too, the descent check refuses it.
+        assert!(
+            reply.contains("no_new_privs") || no_new_privs("self").expect("read own status"),
+            "{reply}"
+        );
         assert!(!live.lock().unwrap().allow.contains("node"));
     }
 
