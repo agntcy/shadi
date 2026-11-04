@@ -31,6 +31,10 @@ ignore:
   - "crates/agentbridge_cli/src/commands/request_invite.rs"
   - "crates/agentbridge_cli/src/commands/handoff.rs"
   - "crates/agentbridge_cli/src/commands/list.rs"
+  # dir-runtime announcement — the SIGTERM handler, the card listener's thread
+  # and the exits when either fails run only in a live `register`; descriptors,
+  # locators and the private directory are unit-tested.
+  - "crates/agentbridge_cli/src/commands/announce.rs"
   # Live A2A/SLIM transport task adapter — the send path needs a running node.
   - "crates/shadi_mas/src/experiments/mod.rs"
   # SLIM controller client — needs a live controller endpoint (see PR #99);
