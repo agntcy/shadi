@@ -16,6 +16,10 @@ pub const NONCE_TTL_SECS: i64 = 60;
 /// Hard bound on parked nonces; the TTL alone is bounded only by inbound rate.
 pub const MAX_NONCES: usize = 4096;
 
+/// Hard bound on nonces live for one DID. Caps a single peer's share of the
+/// store so flooding it evicts only that peer's own entries, never another's.
+pub const MAX_NONCES_PER_DID: usize = 2;
+
 /// What the listener puts in the challenge. `expires_at` is advisory for the
 /// holder; the store's own record decides.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,8 +85,24 @@ impl NonceStore {
 
         let mut g = self.lock()?;
         g.map.retain(|_, v| v.expires_at > now);
-        // The sweep above leaves the map at most at the cap, so one eviction
-        // makes room.
+
+        // Evict this DID's own oldest nonce first, so a flood from one peer
+        // never touches another peer's parked challenge.
+        let mut mine: Vec<(String, u64)> = g
+            .map
+            .iter()
+            .filter(|(_, v)| v.did == did)
+            .map(|(k, v)| (k.clone(), v.seq))
+            .collect();
+        if mine.len() >= MAX_NONCES_PER_DID {
+            mine.sort_by_key(|(_, seq)| *seq);
+            for (k, _) in mine.iter().take(mine.len() + 1 - MAX_NONCES_PER_DID) {
+                g.map.remove(k);
+            }
+        }
+
+        // Backstop: the sweep and the per-DID evictions above leave the map at
+        // most at the cap, so one eviction makes room.
         if g.map.len() >= MAX_NONCES {
             if let Some(oldest) = g
                 .map
@@ -206,26 +226,46 @@ mod tests {
     #[test]
     fn cap_evicts_oldest() {
         let s = store();
-        let first = s.issue("t", "d", 0).unwrap();
-        let second = s.issue("t", "d", 0).unwrap();
-        for _ in 0..MAX_NONCES - 1 {
-            s.issue("t", "d", 0).unwrap();
+        let first = s.issue("t", "d0", 0).unwrap();
+        let second = s.issue("t", "d1", 0).unwrap();
+        for i in 2..=MAX_NONCES {
+            s.issue("t", &format!("d{i}"), 0).unwrap();
         }
         assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
-        assert!(s.consume(&first.nonce, "t", "d", 1).is_err());
-        assert!(s.consume(&second.nonce, "t", "d", 1).is_ok());
+        assert!(s.consume(&first.nonce, "t", "d0", 1).is_err());
+        assert!(s.consume(&second.nonce, "t", "d1", 1).is_ok());
     }
 
     #[test]
     fn expired_entries_reclaimed_on_issue() {
         let s = store();
-        for _ in 0..MAX_NONCES {
-            s.issue("t", "d", 0).unwrap();
+        for i in 0..MAX_NONCES {
+            s.issue("t", &format!("d{i}"), 0).unwrap();
         }
         let now = NONCE_TTL_SECS + 1;
         let c = s.issue("t", "d", now).unwrap();
         assert_eq!(s.inner.lock().unwrap().map.len(), 1);
         assert!(s.consume(&c.nonce, "t", "d", now).is_ok());
+    }
+
+    #[test]
+    fn per_did_flood_does_not_evict_other_peers() {
+        let s = store();
+        let victim = s.issue("t", "victim", 0).unwrap();
+        // The attacker mints far more nonces than its own cap allows.
+        for _ in 0..MAX_NONCES_PER_DID * 10 {
+            s.issue("t", "attacker", 0).unwrap();
+        }
+        assert!(s.consume(&victim.nonce, "t", "victim", 1).is_ok());
+        let live_for_attacker = s
+            .inner
+            .lock()
+            .unwrap()
+            .map
+            .values()
+            .filter(|v| v.did == "attacker")
+            .count();
+        assert_eq!(live_for_attacker, MAX_NONCES_PER_DID);
     }
 
     #[test]
