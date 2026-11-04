@@ -58,7 +58,7 @@ the skills it was given, so nothing here spends tokens.
 2. Build dirctl with runtime discovery (dirctl daemon + dirctl runtime list)
 
     ```bash
-    git clone --branch feat/runtime-stale-descriptors https://github.com/agntcy/dir.git ../dir
+    git clone https://github.com/agntcy/dir.git ../dir
     (cd ../dir/cli && go build -o "$HOME/go/bin/dirctl-dev" .)
     ```
 
@@ -66,8 +66,7 @@ the skills it was given, so nothing here spends tokens.
 1.8.0. The JSON output used here
 ([agntcy/dir#2366](https://github.com/agntcy/dir/pull/2366)) and the clean-up
 of stale descriptors ([agntcy/dir#2373](https://github.com/agntcy/dir/pull/2373))
-aren't merged yet; #2373's branch carries both, so build `dirctl` from it as
-above. Once both are merged, build from `main` instead.
+are on `main` but not in a release yet, so build `dirctl` from `main` as above.
 
 !!! note "Runtime discovery is local for now"
     The runtime discovery API is served by `dirctl daemon`, which runs Directory's
@@ -175,7 +174,7 @@ target/debug/shadictl --net-block \
   --net-allow 127.0.0.1:19960 --net-allow schema.oasf.outshift.com:443 \
   --net-allow localhost:8888 --read ~/.dir --read ~/.config/dirctl \
   --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
-  -- target/debug/agentbridge register --tool fake-harness \
+  -- target/debug/agentbridge register --tool fake-harness-isolated \
      --a2a-listen 127.0.0.1:19960 --a2a-binding http+json \
      --record code-review --record-server localhost:8888 --dir-announce
 ```
@@ -183,9 +182,9 @@ target/debug/shadictl --net-block \
 ```text
 [agentbridge] running DIR record code-review 1.0.0 (baeareigguj5x…) from localhost:8888; signature: unsigned
 [agentbridge] 'code-review' resolved to baeareigguj5x…; pass --record baeareigguj5x… to run exactly this record
-[agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/fake-harness-21162/skills/code-review
-Registered fake-harness adapter from profile (agent id: fake-harness, dir: …)
-[agentbridge] announced to dir-runtime as fake-harness-<DID suffix>-21162 (…/workloads.d/fake-harness-<DID suffix>-21162.json)
+[agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/fake-harness-isolated-21162/skills/code-review
+Registered fake-harness-isolated adapter from profile (agent id: fake-harness-isolated, dir: …)
+[agentbridge] announced to dir-runtime as fake-harness-isolated-<DID suffix>-21162 (…/workloads.d/fake-harness-isolated-<DID suffix>-21162.json)
 Starting A2A HTTP+JSON listener on 127.0.0.1:19960 ...
 [agentbridge] ready — A2A HTTP+JSON on http://127.0.0.1:19960
 ```
@@ -204,7 +203,7 @@ What happened before the listener started:
 2. Every agent skill in the record (its `core/language_model/agentskills`
    modules) was written into a fresh configuration directory for this run.
    The harness's profile points it there (`isolation` and `provision.skills`
-   in `examples/agentbridge-container/profiles/fake-harness.json`), so it
+   in `examples/agentbridge-container/profiles/fake-harness-isolated.json`), so it
    doesn't see your own skills or settings. The directory is removed when
    `register` stops.
 3. The card was built with the record's version, skills and domains, and
@@ -227,10 +226,10 @@ directory (`--write`).
 ```
 
 ```text
-fake-harness-<DID suffix>-21162
+fake-harness-isolated-<DID suffix>-21162
   runtime:  process
   host:     my-laptop
-  agent:    fake-harness 1.0.0
+  agent:    fake-harness-isolated 1.0.0
   locators: http://127.0.0.1:19960
   skills:   software_engineering/code_debugging/error_handling
   domains:  technology/software_engineering
@@ -269,7 +268,7 @@ target/debug/agentbridge list --skill "software_engineering/*"   # only announce
 ```
 
 ```text
-fake-harness  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [runtime (localhost:8888)]
+fake-harness-isolated  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [runtime (localhost:8888)]
 ```
 
 Each line says where the agent's record is: `local` for a listener on this
@@ -292,12 +291,12 @@ later, and with an older one it says so and lists only local listeners.
 **Terminal C:**
 
 ```bash
-target/debug/agentbridge delegate --to fake-harness "Review: return a / b"
+target/debug/agentbridge delegate --to fake-harness-isolated "Review: return a / b"
 ```
 
 ```text
-[agentbridge] 'fake-harness' (did:key:z6Mk…) was found through dir-runtime localhost:8888: its DID and address are what it announced about itself, and nothing checks that the DID answers there yet (agntcy/shadi#504)
-Response from 'fake-harness' (488ms):
+[agentbridge] 'fake-harness-isolated' (did:key:z6Mk…) was found through dir-runtime localhost:8888: its DID and address are what it announced about itself, and nothing checks that the DID answers there yet (agntcy/shadi#504)
+Response from 'fake-harness-isolated' (488ms):
 [fake-harness] received: Review: return a / b
 [fake-harness] agent skill: code-review: Toolkit for performing structured code reviews. Covers identifying bugs, security issues, performance problems, and style violations. Use when asked to review code changes, pull requests, or individual files.
 ```
@@ -470,12 +469,15 @@ records: the `running:<skill>` member source finds them through
 `dirctl runtime list` instead of a record search. This step uses that demo's
 environment and SLIM setup, not `demo-env-runtime.sh`: in each terminal
 `source docs/content/demos/demo-env-dir.sh` (it sets `SLIM_ENDPOINT` and the
-mTLS material), start the node with `shadictl slim start-node`, and put the
-moderator's DID in each agent's `SLIM_MEMBER_DIDS`, as that demo does. Then
-announce each agent with a skill and a SLIM endpoint:
+mTLS material) and start the node with `shadictl slim start-node`. That script
+clears `SLIM_MEMBER_DIDS` and doesn't pick a `dirctl`, so after sourcing it, put
+the moderator's DID (from `/slim whoami`, as that demo shows) in each agent's
+`SLIM_MEMBER_DIDS`, and point `SHADI_DIRCTL_BINARY` at the `dirctl` built in the
+prerequisites. Then announce each agent with a skill and a SLIM endpoint:
 
 ```bash
 source docs/content/demos/demo-env-dir.sh
+export SLIM_MEMBER_DIDS="did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"   # the moderator
 target/debug/shadictl --net-block \
   --net-allow "$SLIM_ENDPOINT" --net-allow schema.oasf.outshift.com:443 \
   --net-allow 127.0.0.1:19953 \
@@ -498,6 +500,8 @@ each agent.
 Then the moderator resolves the group from running agents:
 
 ```bash
+source docs/content/demos/demo-env-dir.sh
+export SHADI_DIRCTL_BINARY="$HOME/go/bin/dirctl-dev"
 target/debug/shadictl slim create-group \
   --members "running:ai_ml_engineering/agent_orchestration/multi_agent_coordination" \
   --runtime localhost:8888 \
@@ -542,7 +546,7 @@ step 3 unless noted.
 | `dirctl` blocked by the sandbox | Step 3 without `--read ~/.dir --read ~/.config/dirctl` | `dirctl info code-review failed: panic: mkdir …/.dir: file exists`, with the flags to add |
 | `dirctl` under `/tmp` | `SHADI_DIRCTL_BINARY=/tmp/dirctl …` | `could not run dirctl (/tmp/dirctl): Operation not permitted …` |
 | A record without an agent skill | An A2A-card record (`dirctl import --type=a2a`) as `--record` | `record '…' has no agent skill (core/language_model/agentskills module); only agent-skill records can be run` |
-| `$SHADI_TMP_DIR` not allowed | Step 3 without `--allow "$SHADI_TMP_DIR"` | `could not create …/agentbridge-record/fake-harness-<pid>: Operation not permitted. Under shadictl, allow it with --allow …` |
+| `$SHADI_TMP_DIR` not allowed | Step 3 without `--allow "$SHADI_TMP_DIR"` | `could not create …/agentbridge-record/fake-harness-isolated-<pid>: Operation not permitted. Under shadictl, allow it with --allow …` |
 | A harness that isn't isolated | `register --tool claude-code … --record code-review …` | Starts, with `warning: profile 'claude-code' isn't isolated. The harness also reads your own configuration …`; the skill goes into `<workdir>/.claude/skills` |
 | A harness with nowhere to put skills | `register --tool copilot … --record code-review …` | `profile 'copilot' can't run a DIR record: it has no provision.skills section, so there is nowhere to put the record's skills` |
 | A record in another OASF version | A record imported with `schema_version: "1.0.0"` | Starts, but `warning: record … uses OASF 1.0.0, the card OASF 1.1.0; its skills and domains are not advertised` |

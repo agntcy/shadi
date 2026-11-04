@@ -23,9 +23,12 @@ TLS_DIR="${TLS_DIR:-$HOME/tls}"
 OASF_SCHEMA_URL="${OASF_SCHEMA_URL:-https://schema.oasf.outshift.com}"
 oasf_authority="${OASF_SCHEMA_URL#*://}"
 oasf_authority="${oasf_authority%%/*}"
+case "$OASF_SCHEMA_URL" in http://*) oasf_port=80 ;; *) oasf_port=443 ;; esac
 case "$oasf_authority" in
-  *:*) ;;
-  *) case "$OASF_SCHEMA_URL" in http://*) oasf_authority="$oasf_authority:80" ;; *) oasf_authority="$oasf_authority:443" ;; esac ;;
+  \[*\]:*) ;;                                       # [v6]:port
+  \[*\]) oasf_authority="$oasf_authority:$oasf_port" ;;  # [v6]: its colons aren't a port
+  *:*) ;;                                           # host:port
+  *) oasf_authority="$oasf_authority:$oasf_port" ;;
 esac
 
 if [ -z "${A2A_TLS_CERT:-}" ]; then

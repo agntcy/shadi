@@ -6,6 +6,7 @@ Run agentbridge agents as host processes and as Docker containers, and find them
 | --- | --- |
 | `fake-harness` | The stand-in harness: prints the prompt, the agent's name and its skills |
 | `profiles/fake-harness.json` | The agentbridge profile that runs it (`--tool fake-harness`) |
+| `profiles/fake-harness-isolated.json` | The same, with a fresh configuration per run for `register --record` (`--tool fake-harness-isolated`) |
 | `Dockerfile`, `entrypoint.sh` | An image with `agentbridge`, `shadictl` and the fake harness |
 | `compose.yaml` | Two containerised agents with Docker discovery labels |
 
@@ -67,14 +68,15 @@ SIGTERM sent to `agentbridge` itself withdraws the announcement at once; the age
 
 ## An agent from a DIR agent skill
 
-`register --record` pulls an agent-skill record from a DIR node and gives its skills to the harness, which starts with a fresh configuration (`isolation` and `provision.skills` in its profile; the fake harness lists what it was given). The record's version, skills and domains go into the card, and its CID onto the workload as `org.agntcy/agent-record`.
+`register --record` pulls an agent-skill record from a DIR node and gives its skills to the harness, which starts with a fresh configuration (`isolation` and `provision.skills` in `fake-harness-isolated.json`; the fake harness lists what it was given). An isolated profile only runs with `--record`, which creates that configuration; the examples without it use the plain `fake-harness`. The record's version, skills and domains go into the card, and its CID onto the workload as `org.agntcy/agent-record`.
 
-Import a skill with OASF 1.1.0 classes (the card's version; a record in another version keeps only the flags' skills):
+Import a skill with OASF 1.1.0 classes (the card's version; a record in another version keeps only the flags' skills). The sample skill is in Directory's test data; from the root of this repository:
 
 ```sh
+git clone --depth 1 https://github.com/agntcy/dir.git ../dir   # if it isn't there yet
 cat > /tmp/import-code-review.yaml <<EOF
 type: agent-skill
-file_path: $HOME/Github/agntcy/dir/tests/e2e/shared/testdata/code-review
+file_path: $PWD/../dir/tests/e2e/shared/testdata/code-review
 schema_version: "1.1.0"
 enricher:
   static:
@@ -84,19 +86,21 @@ EOF
 dirctl import --config /tmp/import-code-review.yaml
 ```
 
-Run it. Inside the sandbox, `dirctl` needs the DIR node and read access to its own state; `SHADI_DIRCTL_BINARY` picks the `dirctl` to run when the sandbox's `PATH` would find another:
+Run it. Inside the sandbox, `dirctl` needs the DIR node and read access to its own state; `SHADI_DIRCTL_BINARY` picks the `dirctl` to run when the sandbox's `PATH` would find another. The fresh configuration goes under `$SHADI_TMP_DIR`, which the sandbox must let it write:
 
 ```sh
+mkdir -p /tmp/agentbridge-example
+export SHADI_TMP_DIR="$(cd /tmp/agentbridge-example && pwd -P)"   # the real path: /tmp is a symlink on macOS
 shadictl --net-block \
   --net-allow 127.0.0.1:19960 --net-allow schema.oasf.outshift.com:443 \
   --net-allow localhost:8888 --read ~/.dir --read ~/.config/dirctl \
-  --write ~/.agntcy/dir-runtime/workloads.d \
-  -- agentbridge register --tool fake-harness \
+  --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
+  -- agentbridge register --tool fake-harness-isolated \
      --a2a-listen 127.0.0.1:19960 --a2a-binding http+json \
      --record code-review --record-server localhost:8888 --dir-announce
 
 dirctl runtime list --label org.agntcy/agent-record=.
-agentbridge delegate --to fake-harness "Review: return a / b"   # answers with the code-review skill
+agentbridge delegate --to fake-harness-isolated "Review: return a / b"   # answers with the code-review skill
 ```
 
 ## Containers
