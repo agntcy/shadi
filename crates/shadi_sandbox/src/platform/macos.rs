@@ -317,6 +317,13 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
         rules.push("(allow network*)".to_string());
     }
 
+    // Last, so no allowance above reaches it: a shadictl control socket can
+    // widen a sandbox, this one's or another session's.
+    rules.push(
+        r##"(deny network-outbound (remote unix-socket (regex #"/shadi-ctl-[^/]*\.sock$")))"##
+            .to_string(),
+    );
+
     Ok(rules.join("\n"))
 }
 
@@ -726,6 +733,26 @@ mod tests {
         let profile = build_profile(&policy).unwrap();
         assert!(profile.contains("(allow network-outbound (local unix-socket))"));
         assert!(profile.contains("(allow network-inbound (local unix-socket))"));
+    }
+
+    #[test]
+    fn no_profile_reaches_a_shadictl_control_socket() {
+        for policy in [
+            SandboxPolicy::new(),
+            SandboxPolicy::new()
+                .use_minimal_platform_profile()
+                .allow_local_unix_sockets(),
+            SandboxPolicy::new().allow_network_destination("example.com:443"),
+        ] {
+            let profile = build_profile(&policy).unwrap();
+            let deny = profile
+                .rfind(r#"(deny network-outbound (remote unix-socket (regex #"/shadi-ctl-"#)
+                .expect("the control-socket deny");
+            assert!(
+                !profile[deny..].contains("(allow network"),
+                "an allowance after the deny would override it"
+            );
+        }
     }
 
     #[test]
