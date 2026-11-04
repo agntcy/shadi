@@ -174,24 +174,56 @@ fn accept_loop(listener: &UnixListener, live: &Arc<Mutex<LivePolicy>>, socket_pa
     }
 }
 
+/// A peer may change this sandbox only from outside every sandbox: the control
+/// socket widens policy, so a sandboxed process that can reach it (Seatbelt
+/// unix-socket allowances, or Landlock, which doesn't mediate connect) must
+/// not be able to use it.
 #[cfg(target_os = "macos")]
 fn authorize_control_peer(stream: &UnixStream) -> Result<(), String> {
     use std::os::fd::AsRawFd;
 
+    extern "C" {
+        fn sandbox_check(
+            pid: libc::pid_t,
+            operation: *const libc::c_char,
+            kind: libc::c_int,
+            ...
+        ) -> libc::c_int;
+    }
+
+    let fd = stream.as_raw_fd();
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
-    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    if rc != 0 {
-        // getpeereid(2) failed — this can happen on some macOS versions/environments
-        // (e.g., macOS 15 Sequoia CI runners).  The socket is already protected by
-        // 0o600 filesystem permissions set at bind time, so we degrade gracefully:
-        // skip UID verification rather than refusing all connections.  We only
-        // actively deny when the syscall succeeds but reports a UID mismatch.
-        return Ok(());
+    if unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } != 0 {
+        return Err(format!(
+            "cannot read the peer's credentials: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     let current_uid = unsafe { libc::geteuid() };
     if uid != current_uid {
         return Err(format!("peer uid {} does not match current uid {}", uid, current_uid));
+    }
+
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 || pid <= 0 {
+        return Err(format!(
+            "cannot read the peer's pid: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if unsafe { sandbox_check(pid, std::ptr::null(), 0) } != 0 {
+        return Err(format!("peer pid {pid} is sandboxed"));
     }
     Ok(())
 }
@@ -222,7 +254,73 @@ fn authorize_control_peer(stream: &UnixStream) -> Result<(), String> {
             peer_cred.uid, current_uid
         ));
     }
+    let pid = peer_cred.pid;
+    if pid <= 0 {
+        return Err("the peer's pid is not visible here".to_string());
+    }
+    let own = std::process::id() as libc::pid_t;
+    if pid == own {
+        return Ok(());
+    }
+    // Every process in a SHADI sandbox has no_new_privs, which can't be
+    // cleared; it only tells sandboxed peers apart when this process lacks it.
+    if !no_new_privs("self")? && no_new_privs(&pid.to_string())? {
+        return Err(format!(
+            "peer pid {pid} has no_new_privs set, so it is sandboxed"
+        ));
+    }
+    // This process's descendants are the sandboxed command and what it starts.
+    if descends_from(pid, own) {
+        return Err(format!("peer pid {pid} runs under this sandbox"));
+    }
     Ok(())
+}
+
+/// The `NoNewPrivs` flag of `/proc/<pid>/status`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn no_new_privs(pid: &str) -> Result<bool, String> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|e| format!("cannot read /proc/{pid}/status: {e}"))?;
+    parse_no_new_privs(&status).ok_or_else(|| format!("no NoNewPrivs in /proc/{pid}/status"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn parse_no_new_privs(status: &str) -> Option<bool> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("NoNewPrivs:"))
+        .map(|value| value.trim() == "1")
+}
+
+/// Whether `ancestor` is among `pid`'s parents.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn descends_from(pid: libc::pid_t, ancestor: libc::pid_t) -> bool {
+    let mut current = pid;
+    for _ in 0..4096 {
+        let Some(parent) = std::fs::read_to_string(format!("/proc/{current}/stat"))
+            .ok()
+            .and_then(|stat| parse_parent_pid(&stat))
+        else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        if parent <= 1 {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// The parent pid in `/proc/<pid>/stat`: the field after the state, which
+/// follows the last `)` because the command name may contain spaces and
+/// parentheses.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn parse_parent_pid(stat: &str) -> Option<libc::pid_t> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +821,72 @@ mod tests {
             }
             _ => panic!("expected PatchResult"),
         }
+    }
+
+    /// Sends a command patch from `client` and returns its reply.
+    #[cfg(unix)]
+    fn patch_from(client: &mut std::process::Command, sock_path: &Path) -> String {
+        let script = r#"use IO::Socket::UNIX; my $s = IO::Socket::UNIX->new(Peer => $ARGV[0]) or die "connect: $!"; print $s qq({"type":"patch","add_allow_command":["node"]}\n); print scalar <$s>;"#;
+        let output = client
+            .args(["/usr/bin/perl", "-e", script])
+            .arg(sock_path)
+            .output()
+            .expect("run the client");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn control_socket_refuses_a_sandboxed_peer() {
+        let live = test_live_policy();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("test.sock");
+        let _handle = start_control_socket(&sock_path, Arc::clone(&live)).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let mut sandboxed = std::process::Command::new("/usr/bin/sandbox-exec");
+        sandboxed.args(["-p", "(version 1)(allow default)"]);
+        let reply = patch_from(&mut sandboxed, &sock_path);
+        assert!(
+            reply.contains("unauthorized control socket peer"),
+            "{reply}"
+        );
+        assert!(reply.contains("sandboxed"), "{reply}");
+        assert!(!live.lock().unwrap().allow.contains("node"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn control_socket_refuses_a_peer_this_process_started() {
+        let live = test_live_policy();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("test.sock");
+        let _handle = start_control_socket(&sock_path, Arc::clone(&live)).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let mut child = std::process::Command::new("/usr/bin/env");
+        let reply = patch_from(&mut child, &sock_path);
+        assert!(
+            reply.contains("unauthorized control socket peer"),
+            "{reply}"
+        );
+        assert!(!live.lock().unwrap().allow.contains("node"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn proc_fields_are_read_past_an_awkward_command_name() {
+        assert_eq!(
+            parse_parent_pid("4242 (a) b (c)) S 17 4242 4242 0 -1"),
+            Some(17)
+        );
+        assert_eq!(parse_parent_pid("garbage"), None);
+        assert_eq!(
+            parse_no_new_privs("Name:\tsh\nNoNewPrivs:\t1\nSeccomp:\t0\n"),
+            Some(true)
+        );
+        assert_eq!(parse_no_new_privs("NoNewPrivs:\t0\n"), Some(false));
+        assert_eq!(parse_no_new_privs("Name:\tsh\n"), None);
     }
 
     #[test]
