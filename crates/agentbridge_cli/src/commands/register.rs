@@ -377,9 +377,24 @@ fn credential_gate(
     policy: Option<&Path>,
     listener_did: &str,
 ) -> Result<Option<Arc<CredentialGate>>, String> {
-    policy
-        .map(|path| CredentialGate::load(path, listener_did).map(Arc::new))
-        .transpose()
+    let Some(path) = policy else {
+        // With neither gate, admission is "prove the DID you claim" and
+        // nothing else — anyone can mint one for free. Refuse to start
+        // rather than let that pass for an unconfigured listener.
+        if allowed_human_dids().is_empty() {
+            return Err(
+                "refusing to start: no --admission-policy and SHADI_MEMBER_HUMAN_DIDS is unset \
+                 — this listener would admit any caller with no credential and no human binding. \
+                 Set --admission-policy, or set SHADI_MEMBER_HUMAN_DIDS to the human DIDs this \
+                 listener admits."
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    };
+    CredentialGate::load(path, listener_did)
+        .map(Arc::new)
+        .map(Some)
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -3349,6 +3364,44 @@ test push ... FAILED
         let (dir, _) = gate_fixture();
         let err = credential_gate(Some(&dir.path().join("policy.json")), "").err();
         assert!(err.is_some());
+    }
+
+    /// `SHADI_MEMBER_HUMAN_DIDS` is process-global and `credential_gate` reads
+    /// it inside the call under test, so these tests hold this lock across
+    /// both the mutation and the call.
+    static HUMAN_DIDS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn no_gate_and_no_human_allowlist_refuses_to_start() {
+        let _guard = HUMAN_DIDS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("SHADI_MEMBER_HUMAN_DIDS");
+        std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS");
+        let err = match credential_gate(None, LISTENER_DID) {
+            Err(err) => err,
+            Ok(_) => panic!("open admission must be refused"),
+        };
+        assert!(err.contains("SHADI_MEMBER_HUMAN_DIDS"), "{err}");
+        match prev {
+            Some(v) => std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", v),
+            None => std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS"),
+        }
+    }
+
+    #[test]
+    fn no_gate_with_a_human_allowlist_starts_with_no_credential_gate() {
+        let _guard = HUMAN_DIDS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("SHADI_MEMBER_HUMAN_DIDS");
+        std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", "did:key:human");
+        let gate = credential_gate(None, LISTENER_DID).unwrap();
+        assert!(gate.is_none());
+        match prev {
+            Some(v) => std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", v),
+            None => std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS"),
+        }
     }
 
     #[tokio::test]
