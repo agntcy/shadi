@@ -257,14 +257,17 @@ fn printable(text: &str) -> String {
 }
 
 /// Per run: a fresh, private (0700) directory with a random name under
-/// `$SHADI_TMP_DIR/agentbridge-record` (writable in the SHADI sandbox), or the
-/// temp dir's. The parent must be this user's own real directory, so nobody
-/// else can plant configuration (hooks, skills) the harness would load.
+/// `$SHADI_TMP_DIR/agentbridge-record` (writable in the SHADI sandbox), or
+/// `agentbridge-record-<uid>` in the temp dir, which on Linux is the shared
+/// `/tmp`: one parent for every user would belong to whoever came first. The
+/// parent must be this user's own real directory, so nobody else can plant
+/// configuration (hooks, skills) the harness would load.
 fn config_root_for(tool: &str) -> anyhow::Result<PathBuf> {
-    let base = std::env::var_os("SHADI_TMP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let parent = real_path(&base).join("agentbridge-record");
+    let parent = match std::env::var_os("SHADI_TMP_DIR") {
+        Some(base) => real_path(Path::new(&base)).join("agentbridge-record"),
+        None => real_path(&std::env::temp_dir()).join(shared_parent_name()),
+    };
+    let base = parent.parent().map(Path::to_path_buf).unwrap_or_default();
     private_parent(&parent)?;
 
     let prefix = format!("{}-{}-", sanitize(tool), std::process::id());
@@ -288,6 +291,20 @@ fn config_root_for(tool: &str) -> anyhow::Result<PathBuf> {
         .keep();
     created(&root);
     Ok(root)
+}
+
+/// The config roots' parent in a temp dir other users may share.
+fn shared_parent_name() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        format!("agentbridge-record-{}", unsafe { libc::geteuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows' temp dir is the user's own.
+        "agentbridge-record".to_string()
+    }
 }
 
 /// Create `dir` (0700) if missing, and refuse one that is a symlink or
@@ -1273,6 +1290,15 @@ mod tests {
         let err = config_root_for("codex-isolated").unwrap_err().to_string();
         std::env::remove_var("SHADI_TMP_DIR");
         assert!(err.contains("not a directory"), "{err}");
+
+        // Without SHADI_TMP_DIR, each user has a parent of their own.
+        let root = config_root_for("codex-isolated").unwrap();
+        let me = unsafe { libc::geteuid() };
+        assert_eq!(
+            root.parent().unwrap().file_name().unwrap().to_string_lossy(),
+            format!("agentbridge-record-{me}")
+        );
+        cleanup();
     }
 
     #[cfg(unix)]
