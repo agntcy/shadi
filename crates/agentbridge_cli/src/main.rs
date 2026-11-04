@@ -314,8 +314,8 @@ fn parse_http_url(raw: &str) -> Result<String, String> {
 /// An OASF validator: https, or http on loopback, since a plain-http answer
 /// from elsewhere could come from anyone on the path.
 fn parse_validator_url(raw: &str) -> Result<String, String> {
-    parse_http_url(raw)?;
-    let url = url::Url::parse(raw).map_err(|e| e.to_string())?;
+    let normalized = parse_http_url(raw)?;
+    let url = url::Url::parse(&normalized).map_err(|e| e.to_string())?;
     let loopback = match url.host() {
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
@@ -325,7 +325,7 @@ fn parse_validator_url(raw: &str) -> Result<String, String> {
     if url.scheme() == "http" && !loopback {
         return Err("a plain-http OASF server is accepted only on loopback; use https".to_string());
     }
-    Ok(raw.to_string())
+    Ok(normalized)
 }
 
 /// `--advertise-url` only replaces the `--a2a-listen` address, and a
@@ -632,6 +632,18 @@ mod tests {
         assert!(parse_validator_url("http://[::1]:8080").is_ok());
         assert!(parse_validator_url("http://schema.example.com").is_err());
         assert!(parse_validator_url("http://192.168.1.5:8080").is_err());
+    }
+
+    #[test]
+    fn an_oasf_server_url_is_normalized_like_advertise_url() {
+        assert_eq!(
+            parse_validator_url("HTTPS://schema.oasf.outshift.com").unwrap(),
+            "https://schema.oasf.outshift.com"
+        );
+        assert_eq!(
+            parse_validator_url("http://LOCALHOST:8080/").unwrap(),
+            "http://localhost:8080/"
+        );
     }
 
     #[test]
