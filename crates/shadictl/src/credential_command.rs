@@ -189,19 +189,21 @@ fn run_issue(command: &CredentialCommand, vault: &dyn CredentialVault) -> ExitCo
     })();
 
     match result {
-        Ok(results) => {
-            let failed = results.iter().any(|(_, outcome)| outcome.is_err());
-            println!("{}", issue_report(&results));
-            if failed {
-                ExitCode::from(1)
-            } else {
-                ExitCode::SUCCESS
-            }
-        }
+        Ok(results) => report_issue_results(&results),
         Err(err) => {
             eprintln!("{}", err);
             ExitCode::from(1)
         }
+    }
+}
+
+/// Prints the per-agent outcome and exits nonzero iff any agent's issuance failed.
+fn report_issue_results(results: &[(String, Result<CredentialRecord, String>)]) -> ExitCode {
+    println!("{}", issue_report(results));
+    if results.iter().any(|(_, outcome)| outcome.is_err()) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -1018,5 +1020,90 @@ mod tests {
             parsed[1],
             json!({ "agent": "p", "status": "failed", "error": "boom" })
         );
+    }
+
+    #[test]
+    fn report_issue_results_succeeds_when_every_agent_issued() {
+        assert_eq!(
+            report_issue_results(&[("w".to_string(), Ok(record("id-1")))]),
+            ExitCode::SUCCESS
+        );
+    }
+
+    #[test]
+    fn report_issue_results_is_nonzero_when_any_agent_failed() {
+        assert_eq!(
+            report_issue_results(&[
+                ("w".to_string(), Ok(record("id-1"))),
+                ("p".to_string(), Err("boom".to_string())),
+            ]),
+            ExitCode::from(1)
+        );
+    }
+
+    #[test]
+    fn run_issue_refuses_a_non_issue_command() {
+        let vault = vault();
+        assert_eq!(run_issue(&list(), &vault), ExitCode::from(1));
+    }
+
+    #[test]
+    fn handle_credential_command_refuses_issue_directly() {
+        let vault = vault();
+        let err = handle_credential_command(&issue_command(&[], "handle_issue_directly"), &vault)
+            .expect_err("issue is not handled here");
+        assert_eq!(err, "issue is handled by run_issue");
+    }
+
+    #[test]
+    fn resolve_credential_key_reads_from_the_secret_store_when_no_key_flag() {
+        test_store_put("credential-command-tests/vault-key", b"from-the-store");
+        let cli = CredentialCli {
+            key_name: "credential-command-tests/vault-key".to_string(),
+            ..cli(None, None, list())
+        };
+        assert_eq!(resolve_credential_key(&cli).expect("key"), "from-the-store");
+    }
+
+    #[test]
+    fn run_issue_proceeds_past_identity_loading_before_failing_on_the_network() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("single_present/a/private", b64.encode([9u8; 32]).as_bytes());
+
+        let vault = vault();
+        assert_eq!(
+            run_issue(&issue_command(&["a"], "single_present"), &vault),
+            ExitCode::from(1)
+        );
+    }
+
+    #[test]
+    fn run_credential_command_dispatches_issue_to_run_issue() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = file.path().to_path_buf();
+        std::mem::forget(file);
+        let command = cli(
+            Some(path),
+            Some("test-key"),
+            issue_command(&["run_dispatch_missing_agent"], "run_credential_command_dispatch"),
+        );
+        assert_eq!(run_credential_command(command), ExitCode::from(1));
+    }
+
+    #[test]
+    fn run_credential_command_reports_a_handler_error() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = file.path().to_path_buf();
+        std::mem::forget(file);
+        let command = cli(
+            Some(path),
+            Some("test-key"),
+            CredentialCommand::Show {
+                id: "missing".to_string(),
+                disclose: false,
+                json: false,
+            },
+        );
+        assert_eq!(run_credential_command(command), ExitCode::from(1));
     }
 }
