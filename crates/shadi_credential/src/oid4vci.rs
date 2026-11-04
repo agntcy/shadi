@@ -52,6 +52,12 @@ impl IdpOrigin {
         }
         Ok(parsed)
     }
+
+    /// Whether this origin is `https` — the only transport honest enough to
+    /// let [`check_id_token`] skip verifying the ID token's own signature.
+    pub fn is_https(&self) -> bool {
+        matches!(&self.0, Origin::Tuple(scheme, ..) if scheme == "https")
+    }
 }
 
 /// Build the OID4VCI proof-of-possession JWT, with a `kid`-less JWK in the header.
@@ -90,19 +96,27 @@ pub struct IdTokenClaims {
 
 /// Check the ID token claims. Errors never carry token content.
 pub fn check_id_token(
+    idp: &IdpOrigin,
     id_token: &str,
     issuer: &str,
     client_id: &str,
     expected_email: &str,
     now: i64,
 ) -> Result<IdTokenClaims, CredentialError> {
+    if !idp.is_https() {
+        return Err(refused(
+            "cannot trust an ID token's unverified claims over a non-https IdP",
+        ));
+    }
     let parts: Vec<&str> = id_token.split('.').collect();
     if parts.len() != 3 {
         return Err(CredentialError::Malformed(
             "ID token is not three dot-separated segments".into(),
         ));
     }
-    // The signature is not checked here.
+    // The signature itself still isn't checked — sound now that `idp` above
+    // is confirmed https, so this token could only have come from the real
+    // IdP over a channel an on-path attacker can't tamper with.
     let claims = decode_json(parts[1], "ID token payload")?;
 
     if claims.get("iss").and_then(Value::as_str) != Some(issuer) {
@@ -264,7 +278,7 @@ mod tests {
     }
 
     fn run(claims: &Value) -> Result<IdTokenClaims, CredentialError> {
-        check_id_token(&token(claims), ISS, CLIENT, EMAIL, NOW)
+        check_id_token(&origin(ISS), &token(claims), ISS, CLIENT, EMAIL, NOW)
     }
 
     fn without(key: &str) -> Value {
@@ -368,8 +382,16 @@ mod tests {
     #[test]
     fn id_token_needs_three_segments() {
         assert!(matches!(
-            check_id_token("a.b", ISS, CLIENT, EMAIL, NOW),
+            check_id_token(&origin(ISS), "a.b", ISS, CLIENT, EMAIL, NOW),
             Err(CredentialError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn id_token_refuses_a_non_https_idp() {
+        let http_origin = IdpOrigin::new("http://127.0.0.1:1").unwrap();
+        let err =
+            check_id_token(&http_origin, &token(&good()), ISS, CLIENT, EMAIL, NOW).unwrap_err();
+        assert!(matches!(err, CredentialError::Refused(_)), "{err}");
     }
 }

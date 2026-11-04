@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, OpenFlags, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::vault::{pin_email, CredentialVault};
+use crate::vault::{pin_email, pin_issuer, CredentialVault};
 use crate::CredentialError;
 
 /// One stored credential. `raw` is the issued credential verbatim, disclosures
@@ -216,6 +216,7 @@ impl CredentialVault for SqlCipherVault {
         email: &str,
         subject: &str,
     ) -> Result<String, CredentialError> {
+        let issuer = pin_issuer(issuer);
         let email = pin_email(email);
         let pinned_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -242,7 +243,7 @@ impl CredentialVault for SqlCipherVault {
         let conn = self.conn()?;
         let mut stmt =
             conn.prepare("SELECT subject FROM issuer_subjects WHERE issuer = ?1 AND email = ?2")?;
-        let mut rows = stmt.query(params![issuer, pin_email(email)])?;
+        let mut rows = stmt.query(params![pin_issuer(issuer), pin_email(email)])?;
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),

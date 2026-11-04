@@ -66,6 +66,12 @@ pub(crate) fn pin_email(email: &str) -> String {
     email.to_ascii_lowercase()
 }
 
+/// Issuer identifiers match apart from one trailing slash; pin keys and the
+/// login comparison both go through this.
+pub fn pin_issuer(issuer: &str) -> &str {
+    issuer.strip_suffix('/').unwrap_or(issuer)
+}
+
 pub trait CredentialVault: Send + Sync {
     fn put(&self, record: &CredentialRecord) -> Result<(), CredentialError>;
     fn get(&self, id: &str) -> Result<Option<CredentialRecord>, CredentialError>;
@@ -216,7 +222,7 @@ impl CredentialVault for KeychainVault {
         }
         self.store
             .put(
-                &Self::subject_key(issuer, &pin_email(email)),
+                &Self::subject_key(pin_issuer(issuer), &pin_email(email)),
                 subject.as_bytes(),
             )
             .map_err(|err| CredentialError::Storage(err.to_string()))?;
@@ -226,7 +232,7 @@ impl CredentialVault for KeychainVault {
     fn pinned_subject(&self, issuer: &str, email: &str) -> Result<Option<String>, CredentialError> {
         match self
             .store
-            .get(&Self::subject_key(issuer, &pin_email(email)))
+            .get(&Self::subject_key(pin_issuer(issuer), &pin_email(email)))
         {
             Ok(secret) => {
                 let bytes = secret.expose(|bytes| bytes.to_vec());
@@ -511,6 +517,31 @@ pub(crate) mod tests {
             .expect("pin");
         assert_eq!(pinned("https://idp/a", "b@x").as_deref(), Some("sub-a"));
         assert_eq!(pinned("https://idp", "a/b@x").as_deref(), Some("sub-b"));
+    }
+
+    fn pins_ignore_a_trailing_slash(vault: &dyn CredentialVault) {
+        vault
+            .pin_subject("https://idp/realm/", "a@x", "sub-1")
+            .expect("pin");
+        assert_eq!(
+            vault
+                .pinned_subject("https://idp/realm", "a@x")
+                .expect("pinned")
+                .as_deref(),
+            Some("sub-1")
+        );
+        assert_eq!(
+            vault
+                .pin_subject("https://idp/realm", "a@x", "sub-2")
+                .expect("pin"),
+            "sub-1"
+        );
+    }
+
+    #[test]
+    fn both_backends_ignore_a_trailing_slash_on_pins() {
+        pins_ignore_a_trailing_slash(&sqlcipher_vault());
+        pins_ignore_a_trailing_slash(&keychain_vault());
     }
 
     #[test]
