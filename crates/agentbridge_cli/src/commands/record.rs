@@ -1465,4 +1465,170 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_provisions_a_record_for_a_plain_profile_and_cleans_up() {
+        let _guard = dirctl_env_lock();
+        let profiles = tempfile::tempdir().unwrap();
+        std::fs::write(
+            profiles.path().join("plain-skills.json"),
+            r#"{"id":"plain-skills","bin":"/bin/echo",
+                "provision":{"skills":{"dir":"{workdir}/.plain/skills"}},
+                "execute":{"args":["{prompt}"]}}"#,
+        )
+        .unwrap();
+        let (script, _bin) = fake_dirctl("code-review");
+        let workdir = tempfile::tempdir().unwrap();
+        std::env::set_var("AGENTBRIDGE_PROFILES_DIR", profiles.path());
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let opts = |reference: Option<&str>| RecordOptions {
+            reference: reference.map(str::to_string),
+            server: "localhost:1".to_string(),
+            signer: None,
+        };
+
+        let none = prepare(&opts(None), "plain-skills", workdir.path()).unwrap();
+        let no_profile = prepare(&opts(Some("code-review")), "no-such-tool", workdir.path());
+        let source = prepare(&opts(Some("code-review")), "plain-skills", workdir.path());
+
+        std::env::remove_var("AGENTBRIDGE_PROFILES_DIR");
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert!(none.is_none());
+        assert!(no_profile.is_err());
+        let source = source.unwrap().unwrap();
+        assert_eq!(source.cid, "bafytestcid");
+        assert_eq!(source.name, "code-review");
+        // A plain profile runs without a config root.
+        assert!(config_root().is_none());
+        let skill = workdir.path().join(".plain/skills/code-review/SKILL.md");
+        assert!(skill.is_file());
+        cleanup();
+        assert!(!workdir.path().join(".plain").exists(), "created parents are removed too");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirctl_info_must_return_a_cid() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let script = bin.path().join("dirctl");
+        let answer = |json: &str| {
+            std::fs::write(&script, format!("#!/bin/sh\necho '{json}'\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+            let result = resolve_cid("code-review", "localhost:1");
+            std::env::remove_var("SHADI_DIRCTL_BINARY");
+            result.unwrap_err().to_string()
+        };
+
+        assert!(answer(r#"{"name":"x"}"#).contains("returned no CID"));
+        assert!(answer(r#"{"cid":"not a cid"}"#).contains("which isn't a CID"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_signer_needs_a_working_signature_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let script = bin.path().join("dirctl");
+        std::fs::write(&script, "#!/bin/sh\necho 'connection refused' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let signer = Signer {
+            issuer: "https://issuer".into(),
+            subject: "me@example.com".into(),
+        };
+
+        let result = check_signature("bafytestcid", "localhost:1", Some(&signer));
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("against the pinned signer"), "{err}");
+    }
+
+    #[test]
+    fn a_signature_names_its_signers_when_none_is_pinned() {
+        let label = describe_verification(
+            &json!({ "success": true, "signers": ["alice", "bob"] }),
+            None,
+        )
+        .unwrap();
+        assert!(label.starts_with("signed by \"alice\", \"bob\""), "{label}");
+        let anyone = describe_verification(&json!({ "success": true }), None).unwrap();
+        assert!(anyone.starts_with("signed by someone"), "{anyone}");
+    }
+
+    #[test]
+    fn a_skill_needs_an_artifact_of_a_known_type() {
+        let no_artifact = json!({
+            "name": "r",
+            "modules": [{ "name": AGENT_SKILLS_MODULE, "data": { "skill_manifest": { "name": "s" } } }]
+        });
+        let err = skill_modules(&no_artifact).unwrap_err().to_string();
+        assert!(err.contains("carries no artifact"), "{err}");
+
+        let _guard = dirctl_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let module = SkillModule {
+            name: "odd".into(),
+            media_type: "application/x-odd".into(),
+            data: Vec::new(),
+        };
+        let err = write_skill(&module, dir.path()).unwrap_err().to_string();
+        assert!(err.contains("unknown artifact type"), "{err}");
+        cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unwritable_directories_are_reported_with_a_hint() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let base = tempfile::tempdir().unwrap();
+
+        // A parent whose own parent is missing can't be created.
+        let err = private_parent(&base.path().join("missing/agentbridge-record"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("could not create"), "{err}");
+
+        // A read-only parent: no config root inside it.
+        let parent = base.path().join("agentbridge-record");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::env::set_var("SHADI_TMP_DIR", base.path());
+        let err = config_root_for("codex-isolated");
+        std::env::remove_var("SHADI_TMP_DIR");
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("could not create a config root"), "{err}");
+
+        // Nor a directory to rebuild inside it.
+        let err = rebuild_dir(&parent.join("skills")).unwrap_err().to_string();
+        assert!(err.contains("Under `shadictl`, allow it"), "{err}");
+
+        // A skill directory that can't be made.
+        let module = SkillModule {
+            name: "s".into(),
+            media_type: MEDIA_TYPE_MARKDOWN.into(),
+            data: Vec::new(),
+        };
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(parent.join("file"), "").unwrap();
+        let err = write_skill(&module, &parent.join("file")).unwrap_err().to_string();
+        assert!(err.contains("could not create"), "{err}");
+        cleanup();
+    }
+
+    #[test]
+    fn rebuild_dir_starts_from_an_empty_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("root");
+        rebuild_dir(&dir).unwrap();
+        std::fs::write(dir.join("stale"), "").unwrap();
+        rebuild_dir(&dir).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
 }
