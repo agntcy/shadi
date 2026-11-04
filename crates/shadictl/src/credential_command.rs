@@ -167,6 +167,11 @@ fn run_fetch_jwks(idp: &str, out: &std::path::Path) -> ExitCode {
 
 /// Checks the document before `out` exists, so a rejected one leaves no file.
 /// The issuer line is the exact string the policy's `iss` must carry.
+///
+/// Written to a temp file in `out`'s own directory and renamed into place,
+/// rather than truncated in place: a refresh interrupted mid-write (crash,
+/// disk full) must leave the previously-pinned JWKS intact, not a corrupt
+/// file that takes a live `AdmissionPolicy` down with it.
 pub(crate) fn fetch_jwks_file(
     http: &dyn crate::credential_issue::Http,
     idp: &str,
@@ -185,8 +190,16 @@ pub(crate) fn fetch_jwks_file(
         .filter_map(|jwk| jwk["kid"].as_str())
         .filter(|kid| store.key(&issuer, Some(kid)).is_ok())
         .count();
-    std::fs::write(out, &text)
+
+    let dir = out.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = dir.unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|err| format!("failed to create a temp file in {}: {}", dir.display(), err))?;
+    std::io::Write::write_all(&mut tmp, text.as_bytes())
         .map_err(|err| format!("failed to write {}: {}", out.display(), err))?;
+    tmp.persist(out)
+        .map_err(|err| format!("failed to write {}: {}", out.display(), err.error))?;
+
     Ok(format!(
         "issuer: {issuer}\nusable keys: {usable}\nwrote: {}",
         out.display()

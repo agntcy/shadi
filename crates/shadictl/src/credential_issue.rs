@@ -1305,6 +1305,45 @@ mod tests {
     }
 
     #[test]
+    fn fetch_jwks_refresh_replaces_the_file_atomically_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        std::fs::write(&out, "stale-content").expect("seed");
+
+        let fake = jwks_fake(config(IDP, CERTS), jwks_doc(json!([ed_key("a")])));
+        crate::credential_command::fetch_jwks_file(&fake, IDP, &out).expect("fetch");
+
+        let mut store = shadi_credential::JwksStore::new();
+        store.add_file(IDP, &out).expect("load");
+        assert!(store.key(IDP, Some("a")).is_ok());
+
+        // Nothing but the final file is left beside it.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("jwks.json")]);
+    }
+
+    #[test]
+    fn fetch_jwks_refresh_keeps_the_old_file_when_the_new_one_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        std::fs::write(&out, "previously-pinned-jwks").expect("seed");
+
+        let fake = jwks_fake(
+            config("https://idp.example/realms/rogue", CERTS),
+            jwks_doc(json!([ed_key("a")])),
+        );
+        crate::credential_command::fetch_jwks_file(&fake, IDP, &out).expect_err("refused");
+
+        assert_eq!(
+            std::fs::read_to_string(&out).expect("read"),
+            "previously-pinned-jwks"
+        );
+    }
+
+    #[test]
     fn fetch_jwks_refuses_a_malformed_document() {
         for body in [json!("not json"), json!({ "keys": "nope" })] {
             refused(&jwks_fake(config(IDP, CERTS), body));
