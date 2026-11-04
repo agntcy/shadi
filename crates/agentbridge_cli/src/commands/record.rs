@@ -13,6 +13,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use agentbridge::{load_profile, CliProfile};
@@ -39,6 +40,54 @@ static CREATED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 /// Parents created on the way to a skills directory (e.g. `.claude/skills` in
 /// the work directory), removed only if they are empty again.
 static CREATED_PARENTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Set once a listener handles Ctrl-C itself (and returns through the cleanup
+/// in `main`); until then [`on_sigint_until_listening`] does.
+static LISTENING: AtomicBool = AtomicBool::new(false);
+
+/// A listener now handles Ctrl-C.
+pub fn listening() {
+    LISTENING.store(true, Ordering::SeqCst);
+}
+
+/// Ctrl-C while the record is provisioned or the card validated, before any
+/// listener waits for it, would end the process without removing what was
+/// provisioned. Until [`listening`], remove it and exit as SIGINT would.
+fn on_sigint_until_listening() {
+    static HANDLER: OnceLock<()> = OnceLock::new();
+    HANDLER.get_or_init(|| {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let mut first = Some(ready_tx);
+                loop {
+                    let signal = tokio::signal::ctrl_c();
+                    tokio::pin!(signal);
+                    // Registered on the first poll.
+                    if let Some(tx) = first.take() {
+                        let _ = futures::poll!(&mut signal);
+                        let _ = tx.send(());
+                    }
+                    if signal.await.is_err() {
+                        return;
+                    }
+                    if !LISTENING.load(Ordering::SeqCst) {
+                        cleanup();
+                        std::process::exit(130);
+                    }
+                }
+            });
+        });
+        // A runtime that can't start never registers a handler; don't wait for it.
+        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
+    });
+}
 
 /// `--record` settings from the command line.
 #[derive(Clone, Debug, Default)]
@@ -93,8 +142,10 @@ pub fn prepare(
     let profile = load_profile(tool)
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("--record needs a harness profile; '{tool}' has none"))?;
-    // Remove what was provisioned on SIGTERM, with or without --dir-announce.
+    // Remove what was provisioned on SIGTERM, with or without --dir-announce,
+    // and on Ctrl-C before a listener handles it.
     super::announce::on_sigterm();
+    on_sigint_until_listening();
     let config_root = if profile.is_isolated() {
         Some(config_root_for(tool)?)
     } else {
@@ -244,7 +295,7 @@ fn create_parents(dir: &Path) -> std::io::Result<()> {
 
 /// A record's text for the log, with control characters (a `\r`, ANSI
 /// escapes) shown escaped instead of acting on the terminal.
-fn printable(text: &str) -> String {
+pub fn printable(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
             if c.is_control() {
@@ -343,6 +394,15 @@ fn private_parent(dir: &Path) -> anyhow::Result<()> {
                 "{} belongs to another user (uid {}); not putting a config root there",
                 dir.display(),
                 meta.uid()
+            );
+        }
+        // Others who can write here could swap a run's directory for their own.
+        if meta.mode() & 0o022 != 0 {
+            anyhow::bail!(
+                "{} is writable by its group or others (mode {:o}); not putting a config \
+                 root there",
+                dir.display(),
+                meta.mode() & 0o7777
             );
         }
     }
@@ -495,7 +555,7 @@ fn pull(cid: &str, server: &str) -> anyhow::Result<Value> {
 
 /// Check the record's signature and say what it shows, for the log. An
 /// unsigned record runs (signing is optional), but a signature that doesn't
-/// verify stops it. Without `signer`, a valid signature only shows *someone*
+/// verify, or a check that fails, stops it. Without `signer`, a valid signature only shows *someone*
 /// signed the record, which the label says; with it, the signature must be
 /// that identity's.
 fn check_signature(cid: &str, server: &str, signer: Option<&Signer>) -> anyhow::Result<String> {
@@ -509,7 +569,9 @@ fn check_signature(cid: &str, server: &str, signer: Option<&Signer>) -> anyhow::
         Err(e) if signer.is_some() => {
             anyhow::bail!("could not check record {cid}'s signature against the pinned signer: {e}")
         }
-        Err(e) => return Ok(format!("unknown ({e})")),
+        // Unsigned is an answer (`no signatures found`), not a failure: a
+        // failed check doesn't say the record is unsigned.
+        Err(e) => anyhow::bail!("could not check record {cid}'s signature: {e}"),
     };
     describe_verification(&value, signer).map_err(|e| anyhow::anyhow!("record {cid}: {e}"))
 }
@@ -829,6 +891,7 @@ mod tests {
 
     #[test]
     fn a_markdown_skill_is_written_as_skill_md() {
+        let _guard = dirctl_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let record = json!({
             "name": "code-review",
@@ -847,6 +910,7 @@ mod tests {
 
     #[test]
     fn a_bundle_is_unpacked_into_the_skill_folder() {
+        let _guard = dirctl_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let module = SkillModule {
             name: "tools".into(),
@@ -868,6 +932,7 @@ mod tests {
 
     #[test]
     fn a_bundle_without_skill_md_is_rejected() {
+        let _guard = dirctl_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let module = SkillModule {
             name: "empty".into(),
@@ -974,6 +1039,24 @@ mod tests {
                 "bafytestcid"
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_signature_check_stops_the_record() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let script = bin.path().join("dirctl");
+        std::fs::write(&script, "#!/bin/sh\necho 'connection refused' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+
+        let result = check_signature("bafytestcid", "localhost:1", None);
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("could not check record bafytestcid's signature"), "{err}");
     }
 
     #[test]
@@ -1290,6 +1373,16 @@ mod tests {
         let err = config_root_for("codex-isolated").unwrap_err().to_string();
         std::env::remove_var("SHADI_TMP_DIR");
         assert!(err.contains("not a directory"), "{err}");
+
+        // A parent others can write to is refused.
+        let shared = tempfile::tempdir().unwrap();
+        let parent = shared.path().join("agentbridge-record");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::env::set_var("SHADI_TMP_DIR", shared.path());
+        let err = config_root_for("codex-isolated").unwrap_err().to_string();
+        std::env::remove_var("SHADI_TMP_DIR");
+        assert!(err.contains("writable by its group or others"), "{err}");
 
         // Without SHADI_TMP_DIR, each user has a parent of their own.
         let root = config_root_for("codex-isolated").unwrap();

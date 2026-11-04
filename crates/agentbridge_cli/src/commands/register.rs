@@ -1206,6 +1206,7 @@ fn run_slim_listener(
         println!("[agentbridge] ready — listening on {agent_name}");
         super::announce::listener_ready();
         println!("[agentbridge] Press Ctrl-C to stop.");
+        super::record::listening();
 
         // Serve until Ctrl-C, or until the server stops on its own: then stop
         // the task in flight and return, so the announcement is withdrawn
@@ -1670,6 +1671,7 @@ fn run_unicast_listener(
         );
         super::announce::listener_ready();
         println!("[agentbridge] Press Ctrl-C to stop.");
+        super::record::listening();
         tokio::select! {
             result = serve => result,
             _ = tokio::signal::ctrl_c() => {

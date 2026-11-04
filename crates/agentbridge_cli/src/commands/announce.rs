@@ -160,6 +160,7 @@ pub fn listener_ready() {
             // what was started.
             let _ = writeln!(std::io::stderr(), "[agentbridge] {e}; stopping");
             stop_in_flight();
+            super::record::cleanup();
             std::process::exit(1);
         }
     }
@@ -686,6 +687,7 @@ fn card_listener_stopped(error: Option<String>) {
     );
     withdraw(&written);
     stop_in_flight();
+    super::record::cleanup();
     std::process::exit(1);
 }
 

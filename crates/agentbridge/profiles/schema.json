@@ -55,6 +55,11 @@
       "description": "Copy every host env var whose name ends with one of these suffixes (e.g. `_API_KEY`)."
     },
     "stdin_null": { "type": "boolean", "default": false },
+    "require_sandbox": {
+      "type": "boolean",
+      "default": false,
+      "description": "Refuse to run outside an enforced SHADI sandbox (e.g. a harness run without its own approvals or sandbox)."
+    },
     "isolation": {
       "type": "object",
       "additionalProperties": false,

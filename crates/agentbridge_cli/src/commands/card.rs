@@ -61,7 +61,9 @@ impl CardOptions {
             eprintln!(
                 "[agentbridge] warning: record {} uses OASF {}, the card OASF {}; \
                  its skills and domains are not advertised (pass them with --skill / --domain)",
-                record.name, record.schema_version, self.oasf_schema_version
+                super::record::printable(&record.name),
+                super::record::printable(&record.schema_version),
+                self.oasf_schema_version
             );
             return;
         }
