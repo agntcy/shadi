@@ -1024,6 +1024,17 @@ fn spec_needs_directory(spec: &str) -> bool {
 }
 
 
+/// A candidate's group-session identity: a bare agent name, as runtime
+/// discovery reports it (`codex`), is `agntcy/shadi/<name>`, the form
+/// `/slim invite-from` invites in the CLI; a full SLIM name is kept.
+fn group_member_name(name: &str) -> String {
+    if name.contains('/') {
+        name.to_string()
+    } else {
+        format!("agntcy/shadi/{name}")
+    }
+}
+
 /// Resolve `--members`-style specs into members. Directory-discovered
 /// candidates are agents; an `explicit:` entry names a member by hand and is
 /// treated as human — see [`SlimGroupMember::kind`].
@@ -1051,7 +1062,7 @@ fn resolve_candidates(
         out.extend(candidates.into_iter().map(|c| {
             (
                 SlimGroupMember {
-                    name: c.name,
+                    name: group_member_name(&c.name),
                     did: c.did,
                     endpoint: c.slim_endpoint.clone(),
                     kind: kind.to_string(),
@@ -1859,6 +1870,13 @@ mod tests {
             .expect("explicit source resolves locally");
         assert_eq!(resolved[0].did, "did:key:z6MkTest");
         assert!(resolved[0].slim_endpoint.is_none());
+    }
+
+    #[test]
+    fn a_bare_candidate_name_becomes_its_group_session_identity() {
+        assert_eq!(group_member_name("codex"), "agntcy/shadi/codex");
+        assert_eq!(group_member_name("agntcy/shadi/reviewer"), "agntcy/shadi/reviewer");
+        assert!(parse_name(&group_member_name("codex")).is_ok());
     }
 
     #[test]

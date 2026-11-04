@@ -366,6 +366,17 @@ pub fn find_running_peer(
     query: &str,
     runtime: &DirLookupOptions,
 ) -> Result<Option<CandidateMember>, String> {
+    find_running_peer_at(query, runtime, None)
+}
+
+/// [`find_running_peer`], where `at` (`--a2a-url`) picks among several
+/// matching instances the one with that locator, so the instance keeps its
+/// announced name, endpoint and binding.
+pub fn find_running_peer_at(
+    query: &str,
+    runtime: &DirLookupOptions,
+    at: Option<&A2ALocator>,
+) -> Result<Option<CandidateMember>, String> {
     let running = RunningAgentSource {
         skills: Vec::new(),
         runtime: runtime.clone(),
@@ -379,6 +390,13 @@ pub fn find_running_peer(
             None => matches_local_alias(&c.name, query),
         })
         .collect();
+    let picked: Vec<&CandidateMember> = match at {
+        Some(at) if matches.len() > 1 => matches.iter().filter(|c| has_locator(c, at)).collect(),
+        _ => Vec::new(),
+    };
+    if let [one] = picked.as_slice() {
+        return Ok(Some((*one).clone()));
+    }
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.into_iter().next()),
@@ -409,6 +427,17 @@ pub fn find_running_peer(
             ))
         }
     }
+}
+
+/// Whether `candidate` is reachable at `at`: the same SLIM node, or the same
+/// unicast URL whatever binding `at` was parsed with.
+pub fn has_locator(candidate: &CandidateMember, at: &A2ALocator) -> bool {
+    let own = if at.binding == A2ABinding::Slim {
+        candidate.slim_locator()
+    } else {
+        candidate.unicast_locator()
+    };
+    own.is_some_and(|own| own.url == at.url)
 }
 
 /// Discover a candidate by an already-known DID: `dirctl search --author
@@ -1906,7 +1935,20 @@ esac
         let two = serde_json::json!([workload(1), workload(2)]).to_string();
         std::fs::write(&script, format!("#!/bin/sh\necho '{two}'\n")).unwrap();
         let ambiguous = find_running_peer("copilot", &test_dir()).unwrap_err();
+        let at = A2ALocator::parse("http://127.0.0.1:2").unwrap();
+        let picked = find_running_peer_at("did:key:zCopilot", &test_dir(), Some(&at))
+            .unwrap()
+            .unwrap();
+        let elsewhere = A2ALocator::parse("http://127.0.0.1:3").unwrap();
+        let still_ambiguous =
+            find_running_peer_at("copilot", &test_dir(), Some(&elsewhere)).unwrap_err();
         std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        // Picked by URL, with its announced name and binding.
+        assert_eq!(picked.name, "copilot");
+        assert_eq!(picked.a2a_url.as_deref(), Some("http://127.0.0.1:2"));
+        assert_eq!(picked.a2a_binding, Some(A2ABinding::HttpJson));
+        assert!(still_ambiguous.contains("ambiguous"), "{still_ambiguous}");
 
         assert_eq!(by_name.a2a_url.as_deref(), Some("http://127.0.0.1:1"));
         assert_eq!(by_did.did, "did:key:zCopilot");

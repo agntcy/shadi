@@ -716,11 +716,12 @@ cargo run -p agntcy-shadi-cli -- slim create-group \
 
 - `--members SPEC` (repeatable): `skill:<skill>` (Directory search by skill),
   `running:<skill>` (running agents announced with `register --dir-announce`,
-  through runtime discovery on `--dir-server`, e.g. a local `dirctl daemon`),
+  through runtime discovery on `--runtime`, not `--dir-server`),
   `did:<did>` (Directory search by author DID), or
   `explicit:<name>=<did>[@<endpoint>]` (no Directory round trip). Every
   resolved candidate's DID is unioned into the group's trust set.
 - `--dir-server`: Agent Directory address (default `prod.gateway.ads.outshift.io:443`).
+- `--runtime`: dir-runtime address for `running:` specs (default `localhost:8888`, a local `dirctl daemon`); it gets no DIR credentials.
 - `--gh-token` / `--limit`: DIR auth token and max results per source.
 - `--write-config PATH`: persist the resolved trust set as a `slim_mas`
   `GroupConfig` TOML — see [`shadictl slim-mas`](#shadictl-slim-mas-shadictl-slim-mas) below.
