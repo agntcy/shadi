@@ -40,3 +40,4 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = "3.27"
+shadi_credential = { package = "agntcy-shadi-credential", version = "0.1.0", path = "../shadi_credential", features = ["testkit"] }

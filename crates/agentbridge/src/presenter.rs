@@ -169,4 +169,101 @@ mod tests {
             .expect_err("no audience to check");
         assert!(err.contains("peer's DID is unknown"), "{err}");
     }
+
+    /// Sets every env var `present` reads, restoring each on drop so a panic
+    /// mid-test cannot leak state into a sibling.
+    struct FullEnv {
+        prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl FullEnv {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let prev = vars
+                .iter()
+                .map(|(k, v)| {
+                    let prev = std::env::var_os(k);
+                    std::env::set_var(k, v);
+                    (*k, prev)
+                })
+                .collect();
+            Self { prev }
+        }
+    }
+
+    impl Drop for FullEnv {
+        fn drop(&mut self) {
+            for (k, v) in &self.prev {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn present_builds_a_real_presentation_the_listener_can_verify() {
+        use shadi_credential::testkit;
+
+        let _guard = crate::env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        let agent_id = "presenter-test-agent";
+        let seed = "presenter-test-seed";
+        let identity = shadi_identity::AgentIdentity::derive(seed.as_bytes(), agent_id).unwrap();
+
+        // The kit's own `exp` is in the past; `present` reads the real clock.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let discs = [testkit::disclosure("groups", "platform-admins")];
+        let mut claims = testkit::base_claims(&identity, &discs);
+        claims["exp"] = (now + 3_600).into();
+        let cred = testkit::credential(&testkit::issuer_key(), &testkit::base_header(), &claims, &discs);
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        let vault = shadi_credential::default_vault(
+            shadi_credential::VaultBackend::SqlCipher,
+            Some(&db),
+            Some("test-key"),
+        )
+        .unwrap();
+        shadi_credential::import(vault.as_ref(), &cred, now).unwrap();
+
+        let peer_did = "did:key:zPeer";
+        let dcql_query = serde_json::json!({
+            "credentials": [{
+                "id": "admission",
+                "format": shadi_credential::SD_JWT_FORMAT,
+                "meta": {"vct_values": [claims["vct"].clone()]},
+                "claims": [{"path": ["groups"]}],
+            }]
+        })
+        .to_string();
+        // `Challenge` is `#[non_exhaustive]`; a real listener mints one the
+        // same way, through the store it stamps `aud` and the query from.
+        let nonces = shadi_credential::NonceStore::new(peer_did, dcql_query);
+        let challenge = nonces.issue("t1", "did:key:unused", now).unwrap();
+        let challenge_json = serde_json::to_string(&challenge).unwrap();
+
+        let _env = FullEnv::set(&[
+            ("SHADI_RELEASE_CLAIMS", "groups"),
+            ("SHADI_CREDENTIAL_BACKEND", "sqlcipher"),
+            ("SHADI_CREDENTIAL_DB", db.to_str().unwrap()),
+            ("SHADI_CREDENTIAL_KEY", "test-key"),
+            ("SHADI_SLIM_AUTH", "did"),
+            ("SLIM_HUMAN_SEED", seed),
+        ]);
+
+        let token = present(&challenge_json, agent_id, Some(peer_did)).expect("presents");
+
+        // Exactly the one disclosure the release policy allowed, verbatim,
+        // followed by a three-part KB-JWT: confirms the vault lookup, the
+        // claim-release intersection, and the signing all actually ran.
+        let parts: Vec<&str> = token.split('~').collect();
+        assert_eq!(parts.len(), 3, "{token}");
+        assert_eq!(parts[1], discs[0]);
+        assert_eq!(parts[2].split('.').count(), 3);
+    }
 }
