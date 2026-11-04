@@ -9,6 +9,7 @@ use std::{
 use crate::{
     adapter::{CliAdapter, CliAdapterError},
     context::ContextPacket,
+    subprocess::withhold_shadi_secrets,
 };
 
 // --- Wire protocol ----------------------------------------------------------
@@ -124,8 +125,7 @@ impl GenericStdioAdapter {
         command: &str,
         args: &[&str],
     ) -> Result<Self, CliAdapterError> {
-        let mut child = Command::new(command)
-            .args(args)
+        let mut child = withhold_shadi_secrets(Command::new(command).args(args))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -373,6 +373,31 @@ mod tests {
     fn agent_id_returns_configured_id() {
         let adapter = make_adapter(r#"{"ok":true}"#);
         assert_eq!(adapter.agent_id().0, "test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spawned_harness_does_not_inherit_shadis_secrets() {
+        let _guard = crate::env_lock().lock().unwrap();
+        let prior = std::env::var_os("SLIM_HUMAN_SEED");
+        std::env::set_var("SLIM_HUMAN_SEED", "root-secret");
+        // A child speaking the protocol: answer one request with the
+        // variable as it sees it.
+        let adapter = GenericStdioAdapter::spawn(
+            "env-probe",
+            "/bin/sh",
+            &[
+                "-c",
+                r#"read -r _; printf '{"ok":true,"data":"seed=%s"}\n' "${SLIM_HUMAN_SEED-unset}""#,
+            ],
+        );
+        match prior {
+            Some(value) => std::env::set_var("SLIM_HUMAN_SEED", value),
+            None => std::env::remove_var("SLIM_HUMAN_SEED"),
+        }
+
+        let out = adapter.unwrap().execute_prompt("ignored").unwrap();
+        assert_eq!(out, "seed=unset");
     }
 
     #[test]
