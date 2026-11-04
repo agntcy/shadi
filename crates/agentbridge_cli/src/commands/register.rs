@@ -586,7 +586,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                 format!("stored handoff ({})", preview(&prompt, 80))
             } else {
                 let prompt_for_cli = prompt;
-                let conversation = context_id.clone();
+                let conversation = conversation_key(sender_did.as_deref(), &context_id);
                 match tokio::task::spawn_blocking(move || {
                     adapter.execute_prompt_in(&conversation, &prompt_for_cli)
                 })
@@ -1205,6 +1205,13 @@ fn allowed_human_dids() -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// The harness session a task continues. The peer picks `context_id`, so the
+/// session is scoped to the DID that proved the message: another sender naming
+/// the same context gets a session of its own, not this one.
+fn conversation_key(sender_did: Option<&str>, context_id: &str) -> String {
+    format!("{} {context_id}", sender_did.unwrap_or("-"))
 }
 
 /// Application-layer gate: the payload must be signed by the claimed agent DID.
@@ -2168,6 +2175,80 @@ test push ... FAILED
         fn execute_prompt(&self, _: &str) -> Result<String, agentbridge::CliAdapterError> {
             Ok("the reply".to_string())
         }
+    }
+
+    /// Records the conversation each prompt runs in.
+    struct ConversationAdapter {
+        id: shadi_mas::AgentId,
+        conversations: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CliAdapter for ConversationAdapter {
+        fn agent_id(&self) -> &shadi_mas::AgentId {
+            &self.id
+        }
+        fn snapshot_context(
+            &self,
+        ) -> Result<agentbridge::ContextPacket, agentbridge::CliAdapterError> {
+            Err(agentbridge::CliAdapterError::Subprocess("not used".into()))
+        }
+        fn inject_context(
+            &self,
+            _: &agentbridge::ContextPacket,
+        ) -> Result<(), agentbridge::CliAdapterError> {
+            Ok(())
+        }
+        fn execute_prompt(&self, _: &str) -> Result<String, agentbridge::CliAdapterError> {
+            unreachable!("the listener runs prompts in a conversation")
+        }
+        fn execute_prompt_in(
+            &self,
+            conversation: &str,
+            _: &str,
+        ) -> Result<String, agentbridge::CliAdapterError> {
+            self.conversations
+                .lock()
+                .unwrap()
+                .push(conversation.to_string());
+            Ok("ok".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn senders_naming_the_same_context_get_separate_sessions() {
+        let adapter = Arc::new(ConversationAdapter {
+            id: shadi_mas::AgentId("claude-code".to_string()),
+            conversations: std::sync::Mutex::new(Vec::new()),
+        });
+        let handler = AgentBridgeRequestHandler::new(
+            adapter.clone(),
+            "claude-code",
+            None,
+            None,
+            Some("127.0.0.1:4312"),
+            A2ABinding::Jsonrpc,
+            Arc::new(Notify::new()),
+            false,
+            egress::policy(),
+        );
+        let (alice, mallory) = (
+            shadi_identity::AgentIdentity::generate().unwrap(),
+            shadi_identity::AgentIdentity::generate().unwrap(),
+        );
+        for sender in [&alice, &mallory, &alice] {
+            let envelope = shadi_identity::wrap_signed_message(sender, b"task").unwrap();
+            let mut request = sample_request(String::from_utf8(envelope).unwrap());
+            request.message.context_id = Some("shared-context".to_string());
+            handler
+                .send_message(&A2AServiceParams::default(), request)
+                .await
+                .unwrap();
+        }
+
+        let seen = adapter.conversations.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_ne!(seen[0], seen[1], "another sender continued alice's session");
+        assert_eq!(seen[0], seen[2], "alice lost her own session");
     }
 
     /// Reads the reply text and keeps the last request it was shown.
