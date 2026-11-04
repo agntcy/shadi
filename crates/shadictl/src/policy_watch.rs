@@ -875,6 +875,63 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
+    fn control_socket_refuses_a_peer_with_no_new_privs() {
+        use std::os::unix::process::CommandExt;
+
+        let live = test_live_policy();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("test.sock");
+        let _handle = start_control_socket(&sock_path, Arc::clone(&live)).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        let mut child = std::process::Command::new("/usr/bin/env");
+        unsafe {
+            child.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let reply = patch_from(&mut child, &sock_path);
+        assert!(
+            reply.contains("unauthorized control socket peer"),
+            "{reply}"
+        );
+        if !no_new_privs("self").expect("read own status") {
+            assert!(reply.contains("no_new_privs"), "{reply}");
+        }
+        assert!(!live.lock().unwrap().allow.contains("node"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn control_socket_accepts_an_unsandboxed_peer_it_did_not_start() {
+        let live = test_live_policy();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("test.sock");
+        let _handle = start_control_socket(&sock_path, Arc::clone(&live)).expect("start socket");
+        wait_for_socket_ready(&sock_path);
+
+        // The shell exits at once, so the client is orphaned before it connects
+        // and no longer descends from this process.
+        let mut orphan = std::process::Command::new("/bin/sh");
+        orphan.args(["-c", r#"(sleep 1; exec "$0" "$@") &"#]);
+        let reply = patch_from(&mut orphan, &sock_path);
+        assert!(reply.contains("patch applied"), "{reply}");
+        assert!(live.lock().unwrap().allow.contains("node"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn descent_is_traced_through_proc() {
+        let own = std::process::id() as libc::pid_t;
+        assert!(!descends_from(own, own));
+        assert!(!descends_from(libc::pid_t::MAX, own));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
     fn proc_fields_are_read_past_an_awkward_command_name() {
         assert_eq!(
             parse_parent_pid("4242 (a) b (c)) S 17 4242 4242 0 -1"),
