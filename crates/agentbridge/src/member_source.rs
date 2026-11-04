@@ -148,7 +148,7 @@ impl MemberSource for RunningAgentSource {
             cmd.args(["--skill", skill]);
         }
         cmd.args(["--server-addr", &self.runtime.server_addr]);
-        apply_dir_auth(&mut cmd, &self.runtime);
+        without_dir_auth(&mut cmd);
 
         let output = match run_bounded(cmd, RUNTIME_LIST_TIMEOUT, RUNTIME_LIST_MAX_BYTES) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -668,6 +668,20 @@ pub fn resolve_unicast_locator(
 // dirctl-backed resolution
 // ---------------------------------------------------------------------------
 
+/// Keep DIR credentials away from a dir-runtime: drop every inherited
+/// `DIRECTORY_CLIENT_*` setting (the token, the auth mode, OIDC) and set
+/// `insecure`, which dir-runtime serves and which skips dirctl's
+/// auto-detection of a cached `dirctl auth login` token. A saved context
+/// can't put them back, since the environment overrides it.
+fn without_dir_auth(cmd: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("DIRECTORY_CLIENT_") {
+            cmd.env_remove(name);
+        }
+    }
+    cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "insecure");
+}
+
 fn apply_dir_auth(cmd: &mut Command, dir: &DirLookupOptions) {
     if let Some(token) = &dir.gh_token {
         cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "github")
@@ -1163,6 +1177,48 @@ mod tests {
     fn extract_candidate_returns_none_without_a2a_module() {
         let record = serde_json::json!({"authors": ["did:key:z6Mk..."], "modules": []});
         assert!(extract_candidate(&record).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_discovery_gets_no_dir_credentials() {
+        let _guard = crate::dir_registry::dirctl_env_lock().lock().expect("lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("env.log");
+        let path = dir.path().join("fake_dirctl.sh");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nenv | grep ^DIRECTORY_CLIENT_ > '{}'\necho '[]'\n", log.display()),
+        )
+        .expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+        std::env::set_var("DIRECTORY_CLIENT_AUTH_MODE", "github");
+        std::env::set_var("DIRECTORY_CLIENT_GITHUB_TOKEN", "dir-token");
+        std::env::set_var("DIRECTORY_CLIENT_AUTH_TOKEN", "oidc-token");
+
+        let result = RunningAgentSource {
+            skills: Vec::new(),
+            runtime: DirLookupOptions {
+                gh_token: Some("passed-token".to_string()),
+                ..test_dir()
+            },
+        }
+        .resolve();
+
+        for name in [
+            "SHADI_DIRCTL_BINARY",
+            "DIRECTORY_CLIENT_AUTH_MODE",
+            "DIRECTORY_CLIENT_GITHUB_TOKEN",
+            "DIRECTORY_CLIENT_AUTH_TOKEN",
+        ] {
+            std::env::remove_var(name);
+        }
+        assert!(result.expect("no workloads").is_empty());
+        let env = std::fs::read_to_string(&log).expect("dirctl was called");
+        assert_eq!(env.trim(), "DIRECTORY_CLIENT_AUTH_MODE=insecure");
     }
 
     fn test_dir() -> DirLookupOptions {

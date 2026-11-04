@@ -691,7 +691,7 @@ pub async fn slim_group_invite(
     with_state(&state, move |inner| {
         let mut resolved = if is_member_spec(&member_spec) {
             // Only Directory-backed specs need a server; `explicit:` carries its
-            // own DID and resolves locally.
+            // own DID and `running:` asks the dir-runtime.
             let dir_server = if spec_needs_directory(&member_spec) {
                 dir_server.ok_or_else(|| {
                     format!(
@@ -1017,9 +1017,10 @@ fn is_member_spec(spec: &str) -> bool {
 }
 
 /// Whether a spec has to be resolved against the Agent Directory. `explicit:`
-/// already names `{name, did, endpoint}`, so it resolves without a server.
+/// already names `{name, did, endpoint}`, and `running:` asks the local
+/// dir-runtime, so they resolve without a server.
 fn spec_needs_directory(spec: &str) -> bool {
-    spec.starts_with("skill:") || spec.starts_with("running:") || spec.starts_with("did:")
+    spec.starts_with("skill:") || spec.starts_with("did:")
 }
 
 
@@ -1821,6 +1822,8 @@ mod tests {
         // `explicit:` already carries the DID — requiring a DIR server for it
         // would block admitting an already-discovered candidate.
         assert!(!spec_needs_directory("explicit:alice=did:key:z6Mk"));
+        // `running:` asks the dir-runtime, not the Directory.
+        assert!(!spec_needs_directory("running:agent_orchestration/x"));
         assert!(!spec_needs_directory("agntcy/shadi/reviewer"));
     }
 

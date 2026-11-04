@@ -51,8 +51,12 @@ pub fn run(opts: &ListOptions<'_>) -> anyhow::Result<()> {
     for runtime in opts.runtimes {
         let source = RunningAgentSource {
             skills: opts.skills.to_vec(),
-            // The DIR token is for DIR, not for whatever answers --runtime.
-            runtime: lookup(runtime, None),
+            // The DIR token is for DIR, not for whatever answers --runtime;
+            // and every running agent is listed, not the first 20.
+            runtime: DirLookupOptions {
+                limit: 0,
+                ..lookup(runtime, None)
+            },
         };
         match source.resolve() {
             Ok(candidates) => {

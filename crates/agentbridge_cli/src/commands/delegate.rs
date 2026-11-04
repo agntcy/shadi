@@ -45,7 +45,11 @@ pub fn run(
     let locator = peer.preferred_locator();
 
     let (slim_node, unicast) = match locator.as_ref() {
-        Some(loc) if loc.binding == A2ABinding::Slim => (loc.slim_node(), None),
+        // The endpoint as the peer gave it: its scheme says whether to use TLS.
+        Some(loc) if loc.binding == A2ABinding::Slim => (
+            peer.slim_endpoint.clone().unwrap_or_else(|| loc.slim_node()),
+            None,
+        ),
         Some(loc) => (endpoint.to_string(), Some(loc.clone())),
         None => (endpoint.to_string(), None),
     };
