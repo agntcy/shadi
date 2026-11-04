@@ -135,7 +135,7 @@ fn poll_token(
     device: &Value,
 ) -> Result<Token, String> {
     let device_code = str_field(device, "device_code")?;
-    let expires_in = device["expires_in"].as_u64().unwrap_or(600);
+    let expires_in = device["expires_in"].as_u64().unwrap_or(600).clamp(1, 600);
     let mut interval = device["interval"].as_u64().unwrap_or(5).clamp(1, 60);
     let mut elapsed = 0;
     loop {
@@ -149,7 +149,7 @@ fn poll_token(
         )?;
         match body["error"].as_str() {
             Some("authorization_pending") => {}
-            Some("slow_down") => interval += 5,
+            Some("slow_down") => interval = (interval + 5).clamp(1, 60),
             Some(code) => return Err(format!("the token endpoint refused: {code}")),
             None => {
                 return Ok(Token {
