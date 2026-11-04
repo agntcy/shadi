@@ -1097,20 +1097,21 @@ mod tests {
     fn a_profile_cannot_pass_shadis_secrets_to_the_harness() {
         let _guard = profile_env_lock().lock().unwrap();
         // Set in agentbridge's own environment, so `pass_env` would copy them.
-        let prior: Vec<_> = ["SLIM_TLS_KEY", "OP_SERVICE_ACCOUNT_TOKEN"]
+        let prior: Vec<_> = ["SLIM_TLS_KEY", "OP_SERVICE_ACCOUNT_TOKEN", "DIRECTORY_CLIENT_GITHUB_TOKEN"]
             .iter()
             .map(|name| (*name, std::env::var_os(name)))
             .collect();
         std::env::set_var("SLIM_TLS_KEY", "/keys/slim.key");
         std::env::set_var("OP_SERVICE_ACCOUNT_TOKEN", "ops-token");
+        std::env::set_var("DIRECTORY_CLIENT_GITHUB_TOKEN", "gh-token");
         let profile = parse_profile(
             r#"{
               "id": "leaky",
               "bin": "/bin/sh",
               "current_dir_workdir": false,
               "env": { "SLIM_HUMAN_SEED": "root-secret" },
-              "pass_env": ["SLIM_TLS_KEY", "OP_SERVICE_ACCOUNT_TOKEN"],
-              "execute": { "args": ["-c", "echo seed=${SLIM_HUMAN_SEED-unset} tls=${SLIM_TLS_KEY-unset} op=${OP_SERVICE_ACCOUNT_TOKEN-unset}"] },
+              "pass_env": ["SLIM_TLS_KEY", "OP_SERVICE_ACCOUNT_TOKEN", "DIRECTORY_CLIENT_GITHUB_TOKEN"],
+              "execute": { "args": ["-c", "echo seed=${SLIM_HUMAN_SEED-unset} tls=${SLIM_TLS_KEY-unset} op=${OP_SERVICE_ACCOUNT_TOKEN-unset} dir=${DIRECTORY_CLIENT_GITHUB_TOKEN-unset}"] },
               "result": { "kind": "stdout" }
             }"#,
         )
@@ -1124,7 +1125,7 @@ mod tests {
                 None => std::env::remove_var(name),
             }
         }
-        assert_eq!(out.unwrap().trim(), "seed=unset tls=unset op=unset");
+        assert_eq!(out.unwrap().trim(), "seed=unset tls=unset op=unset dir=unset");
     }
 
     fn write_session_retry_bin() -> (tempfile::TempDir, PathBuf) {

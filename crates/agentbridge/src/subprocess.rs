@@ -30,6 +30,11 @@ pub const WITHHELD_FROM_HARNESS: &[&str] = &[
     "SLIM_TLS_KEY",
     "A2A_TLS_KEY",
     "SLIM_AUTH_TOKEN_FILE",
+    // The channel manager's API token, as a path (SHADI desktop).
+    "SHADI_CHANNEL_MANAGER_TOKEN_FILE",
+    // The GitHub token SHADI publishes to and looks up in the Agent
+    // Directory with; agentbridge sets it only on the `dirctl` it runs.
+    "DIRECTORY_CLIENT_GITHUB_TOKEN",
     // The 1Password service account token SHADI's 1Password backend uses:
     // it can read the whole vault.
     "OP_SERVICE_ACCOUNT_TOKEN",
