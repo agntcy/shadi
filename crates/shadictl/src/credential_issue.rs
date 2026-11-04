@@ -352,6 +352,7 @@ fn login(
     let token = poll_token(http, &token_url, args.client_id, &device)?;
 
     let claims = shadi_credential::check_id_token(
+        &origin,
         &token.id_token,
         oidc_issuer,
         args.client_id,
