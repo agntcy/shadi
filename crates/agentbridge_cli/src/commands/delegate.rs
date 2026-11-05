@@ -210,7 +210,7 @@ fn resolve_peer_found(
     let ask_runtime = |running: Box<dyn FnOnce() -> Result<Option<CandidateMember>, String> + '_>| {
         match running() {
             Ok(found) => Ok(found),
-            Err(e) if e.contains("ambiguous") => Err(e),
+            Err(e) if agentbridge::local_registry::is_ambiguous(&e) => Err(e),
             // No dir-runtime running is normal (it's optional); report
             // anything else.
             Err(e) if runtime_not_running(&e) => Ok(None),
@@ -222,7 +222,7 @@ fn resolve_peer_found(
     };
 
     let resolved = match leased {
-        Err(err) if err.contains("ambiguous") => Err(err),
+        Err(err) if agentbridge::local_registry::is_ambiguous(&err) => Err(err),
         // A DID: its published record, which took DIR access to publish,
         // before what dir-runtime reports, which anything on the host can.
         // dir-runtime only when DIR answered that it has no such record: a
@@ -249,7 +249,7 @@ fn resolve_peer_found(
                  dir-runtime {runtime} ({}). Pass --to <did> to pick one",
                 other.did
             )),
-            Err(e) if e.contains("ambiguous") => Err(e),
+            Err(e) if agentbridge::local_registry::is_ambiguous(&e) => Err(e),
             _ => fallback().map(|peer| (peer, Found::Local)),
         },
         Ok(_) => fallback().map(|peer| (peer, Found::Local)),
@@ -400,6 +400,22 @@ mod tests {
         assert!(err.contains("ambiguous"), "{err}");
         assert!(err.contains("did:key:zLease") && err.contains("did:key:zOther"), "{err}");
         assert!(resolve("did:key:zLease").is_ok(), "the same agent, announced");
+    }
+
+    #[test]
+    fn a_name_containing_ambiguous_is_still_asked_of_dir_runtime() {
+        let (peer, found) = resolve_peer_found(
+            "ambiguous-reviewer",
+            Err("no live adapter matching 'ambiguous-reviewer'".to_string()),
+            || Ok(Some(instance(3))),
+            || panic!("dir-runtime knows the name, so DIR isn't asked"),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Runtime);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:3"));
     }
 
     #[test]

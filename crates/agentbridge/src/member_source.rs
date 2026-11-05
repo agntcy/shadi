@@ -659,7 +659,7 @@ pub fn resolve_adapter_peer(
 ) -> Result<CandidateMember, String> {
     match registry.resolve_live(query) {
         Ok(record) => return Ok(record.to_candidate()),
-        Err(err) if err.contains("ambiguous") => return Err(err),
+        Err(err) if crate::local_registry::is_ambiguous(&err) => return Err(err),
         Err(_) => {}
     }
     let Some(did) = parse_peer_did(query) else {
