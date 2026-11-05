@@ -73,7 +73,9 @@ agentbridge register --tool claude-code \
 # The isolated harness doesn't see your login: pass a credential it reads
 # (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for claude, OPENAI_API_KEY for
 # codex). Allow SHADI_TMP_DIR, which holds the run's config and the work dir,
-# and claude's install under ~/.local.
+# and claude's install under ~/.local. The harness keeps its temp files under
+# the run's config, so the work dir may also be a repo it can only read
+# (`--read` it and pass it as --command).
 mkdir -p "$SHADI_TMP_DIR/work"
 shadictl --net-block --net-allow 127.0.0.1:50051 --net-allow localhost:8888 \
   --net-allow schema.oasf.outshift.com:443 --net-allow api.anthropic.com:443 \

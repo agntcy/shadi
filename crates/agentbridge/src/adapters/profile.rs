@@ -192,7 +192,7 @@ pub struct EnvFlag {
 /// `{config_root}` instead of the user's own configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct IsolationSpec {
-    /// Set on the child; `{config_root}` and `{workdir}` are substituted.
+    /// Set on the child; `{config_root}`, `{workdir}` and `{tmpdir}` are substituted.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Put before the profile's `execute.args`; `{config_root}` is substituted.
@@ -335,6 +335,23 @@ impl ProfileAdapter {
         ))
     }
 
+    /// Where the harness keeps temp files (`{tmpdir}`, and the pinned
+    /// `TMPDIR`): `<config root>/tmp` for an isolated run, so the work dir can
+    /// be read-only, otherwise the work dir.
+    fn temp_dir(&self) -> Result<PathBuf, CliAdapterError> {
+        let Some((_, root)) = self.isolation() else {
+            return Ok(self.work_dir.clone());
+        };
+        let dir = root.join("tmp");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            CliAdapterError::Subprocess(format!(
+                "could not create the temp dir {}: {e}",
+                dir.display()
+            ))
+        })?;
+        Ok(dir)
+    }
+
     fn session_id(&self, conversation: &str) -> Result<Option<String>, CliAdapterError> {
         self.state
             .lock()
@@ -431,20 +448,26 @@ impl ProfileAdapter {
                 }
             }
         }
+        let tmpdir = self.temp_dir()?;
         if self.profile.pin_tmpdir {
-            pin_tmpdir(&mut cmd, &self.work_dir);
+            pin_tmpdir(&mut cmd, &tmpdir);
         }
         let workdir = self.work_dir.to_string_lossy();
+        let tmpdir = tmpdir.to_string_lossy();
+        let substitute = |value: &str| {
+            value
+                .replace("{tmpdir}", &tmpdir)
+                .replace("{workdir}", &workdir)
+        };
         for (key, value) in &self.profile.env {
-            cmd.env(key, value.replace("{workdir}", workdir.as_ref()));
+            cmd.env(key, substitute(value));
         }
         for (key, value) in collect_pass_env(&self.profile, self.isolation().is_some()) {
             cmd.env(key, value);
         }
         if let Some((isolation, root)) = self.isolation() {
             for (key, value) in &isolation.env {
-                let value = substitute_config_root(value, root).replace("{workdir}", &workdir);
-                cmd.env(key, value);
+                cmd.env(key, substitute(&substitute_config_root(value, root)));
             }
             cmd.args(
                 isolation
@@ -920,6 +943,23 @@ mod tests {
                 Some("{config_root}"),
                 "{id} must not read ~/.agents/skills or ~/.claude/skills"
             );
+        }
+    }
+
+    #[test]
+    fn bundled_profiles_keep_temp_files_out_of_an_isolated_work_dir() {
+        for id in bundled_profile_ids() {
+            let p = load_bundled(id);
+            let isolation_env = p.isolation.iter().flat_map(|i| i.env.iter());
+            for (key, value) in p.env.iter().chain(isolation_env) {
+                if key.contains("TMP") || key.contains("TEMP") {
+                    assert!(
+                        !value.contains("{workdir}"),
+                        "{id}: {key} should use {{tmpdir}}, which an isolated run moves out \
+                         of the work dir"
+                    );
+                }
+            }
         }
     }
 
@@ -1472,6 +1512,59 @@ echo '{"result":"ok","session_id":"sid-9"}'
             .unwrap_err()
             .to_string();
         assert!(err.contains("only runs under the SHADI sandbox"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_isolated_harness_keeps_temp_files_under_its_config_root() {
+        let profile = parse_profile(
+            r#"{
+              "id": "iso-tmp",
+              "bin": "/bin/sh",
+              "pin_tmpdir": true,
+              "current_dir_workdir": false,
+              "env": { "HARNESS_TMP": "{tmpdir}" },
+              "isolation": { "env": { "HOME": "{config_root}" } },
+              "execute": { "args": [
+                "-c",
+                "echo tmp=$TMPDIR temp=$TEMP harness=$HARNESS_TMP; test -d \"$TMPDIR\" && echo exists",
+                "sh",
+                "{prompt}"
+              ] }
+            }"#,
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let tmp = root.path().join("tmp");
+        let tmp = tmp.to_string_lossy();
+        let work_str = work.path().to_string_lossy();
+
+        let isolated = ProfileAdapter::new(profile.clone(), work.path())
+            .with_config_root(root.path())
+            .execute_prompt("x")
+            .unwrap();
+        assert!(
+            isolated.contains(&format!("tmp={tmp} temp={tmp} harness={tmp}")),
+            "the work dir may be read-only, so temp files go under the config root: {isolated}"
+        );
+        assert!(isolated.contains("exists"), "{isolated}");
+
+        let plain = ProfileAdapter::new(
+            CliProfile {
+                isolation: None,
+                ..profile
+            },
+            work.path(),
+        )
+        .execute_prompt("x")
+        .unwrap();
+        assert!(
+            plain.contains(&format!(
+                "tmp={work_str} temp={work_str} harness={work_str}"
+            )),
+            "a plain profile keeps temp files in the work dir: {plain}"
+        );
     }
 
     fn isolated_env_profile() -> CliProfile {

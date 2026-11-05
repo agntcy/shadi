@@ -5,9 +5,9 @@
   "pass_env": ["CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}"
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
   },
   "current_dir_workdir": true,
   "stdin_null": true,

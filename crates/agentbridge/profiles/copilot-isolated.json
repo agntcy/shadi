@@ -8,9 +8,9 @@
   ],
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}",
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}",
     "COPILOT_AUTO_UPDATE": "false"
   },
   "workdir_flags": ["-C", "{workdir}", "--add-dir", "{workdir}"],

@@ -7,11 +7,11 @@
   ],
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}",
-    "CLAUDE_CODE_TMPDIR": "{workdir}",
-    "CLAUDE_TMPDIR": "{workdir}"
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}",
+    "CLAUDE_CODE_TMPDIR": "{tmpdir}",
+    "CLAUDE_TMPDIR": "{tmpdir}"
   },
   "workdir_flags": ["--add-dir", "{workdir}"],
   "workdir_flags_on_execute": true,

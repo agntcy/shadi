@@ -8,11 +8,15 @@
   "properties": {
     "id": { "type": "string", "minLength": 1 },
     "bin": { "type": "string", "minLength": 1 },
-    "pin_tmpdir": { "type": "boolean", "default": false },
+    "pin_tmpdir": {
+      "type": "boolean",
+      "default": false,
+      "description": "Set TMPDIR, TMP and TEMP to `{tmpdir}`."
+    },
     "env": {
       "type": "object",
       "additionalProperties": { "type": "string" },
-      "description": "Environment values; `{workdir}` is substituted."
+      "description": "Environment values; `{workdir}` and `{tmpdir}` are substituted. `{tmpdir}` is `{config_root}/tmp` for an isolated run, so the work dir can be read-only, and the work dir otherwise."
     },
     "workdir_flags": {
       "type": "array",
@@ -68,7 +72,7 @@
         "env": {
           "type": "object",
           "additionalProperties": { "type": "string" },
-          "description": "Set on the child; `{config_root}` and `{workdir}` are substituted."
+          "description": "Set on the child; `{config_root}`, `{workdir}` and `{tmpdir}` are substituted."
         },
         "args": {
           "type": "array",
