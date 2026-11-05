@@ -308,9 +308,10 @@ Response from 'fake-harness-isolated' (488ms):
 The harness answered with the skill it was given. `--to` takes an agent name
 or DID: a name that isn't a listener on this host is looked up at the
 dir-runtime (`--runtime`, default `localhost:8888`), which reports this
-announced agent with its DID and locator. A DID is looked up in its signed
-DIR record first. Whatever dir-runtime reports is what the agent says about
-itself, so `delegate` marks it as unverified
+announced agent with its DID and locator. A DID is looked up in its
+published DIR record first. Neither is verified: whatever dir-runtime reports
+is what the agent says about itself, and the DIR record's signature and DID
+aren't checked, so `delegate` marks both as unverified
 ([shadi#504](https://github.com/agntcy/shadi/issues/504)).
 
 Press **Ctrl-C** in Terminal R: after the next scan, `dirctl runtime list` no

@@ -98,7 +98,11 @@ shadictl --net-block \
   -- agentbridge register --tool fake-harness-isolated \
      --a2a-listen 127.0.0.1:19960 --a2a-binding http+json \
      --record code-review --record-server localhost:8888 --dir-announce
+```
 
+`register` keeps running. In another terminal, with the same `PATH` and `AGENTBRIDGE_PROFILES_DIR`:
+
+```sh
 dirctl runtime list --label org.agntcy/agent-record=.
 agentbridge delegate --to fake-harness-isolated "Review: return a / b"   # answers with the code-review skill
 ```
