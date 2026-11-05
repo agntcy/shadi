@@ -86,6 +86,12 @@ function AddToRoom({ adapter }: { adapter: AdapterInfo }) {
     }
   }
 
+  // A room is a SLIM group: an agent reached only over HTTP or gRPC can't
+  // be invited into one.
+  if (!adapter.endpoint) {
+    return <span className="ab-hint">no SLIM endpoint</span>;
+  }
+
   if (targets.length === 0) {
     // Distinguish "you moderate nothing" from "rejoin the room you moderate".
     const needsRejoin = rooms.some((r) => r.role === "moderator");
