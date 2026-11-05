@@ -13,7 +13,13 @@
   "stdin_null": true,
   "extra_args_env": "CODEX_ARGS",
   "isolation": {
-    "env": { "HOME": "{config_root}", "CODEX_HOME": "{config_root}/.codex" }
+    "env": {
+      "HOME": "{config_root}",
+      "USERPROFILE": "{config_root}",
+      "APPDATA": "{config_root}/AppData/Roaming",
+      "LOCALAPPDATA": "{config_root}/AppData/Local",
+      "CODEX_HOME": "{config_root}/.codex"
+    }
   },
   "provision": { "skills": { "dir": "{config_root}/.codex/skills" } },
   "execute": {

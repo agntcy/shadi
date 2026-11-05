@@ -415,7 +415,7 @@ impl ProfileAdapter {
             // sockets) but the basics and what the profile names.
             cmd.env_clear();
             for (key, value) in std::env::vars_os() {
-                if key.to_str().is_some_and(is_basic_env) {
+                if key.to_str().is_some_and(|key| is_basic_env(key, cfg!(windows))) {
                     cmd.env(key, value);
                 }
             }
@@ -427,7 +427,7 @@ impl ProfileAdapter {
         for (key, value) in &self.profile.env {
             cmd.env(key, value.replace("{workdir}", workdir.as_ref()));
         }
-        for (key, value) in collect_pass_env(&self.profile) {
+        for (key, value) in collect_pass_env(&self.profile, self.isolation().is_some()) {
             cmd.env(key, value);
         }
         if let Some((isolation, root)) = self.isolation() {
@@ -506,19 +506,33 @@ fn split_large_prompt(
 /// What an isolated harness gets from the environment besides what its
 /// profile names: how to find programs, the locale and terminal, who the user
 /// is, temp, TLS trust and proxy settings.
-fn is_basic_env(key: &str) -> bool {
+/// On Windows, names are compared case-insensitively (`Path`), and the
+/// system's own variables count too. `USERPROFILE` and `APPDATA` don't: they
+/// name the user's configuration, which an isolated profile points at its
+/// config root instead.
+fn is_basic_env(key: &str, windows: bool) -> bool {
     const BASIC: &[&str] = &[
         "PATH", "LANG", "LANGUAGE", "TERM", "COLORTERM", "TZ", "USER", "LOGNAME", "SHELL",
         "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "HTTP_PROXY",
         "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy",
         "all_proxy", "__CF_USER_TEXT_ENCODING",
     ];
+    const WINDOWS: &[&str] = &[
+        "SystemRoot", "SystemDrive", "windir", "PATHEXT", "ComSpec", "TEMP", "TMP",
+        "USERNAME", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    ];
+    if windows {
+        return BASIC.iter().chain(WINDOWS).any(|basic| basic.eq_ignore_ascii_case(key))
+            || key.to_ascii_uppercase().starts_with("LC_");
+    }
     BASIC.contains(&key) || key.starts_with("LC_")
 }
 
-fn collect_pass_env(profile: &CliProfile) -> BTreeMap<String, String> {
+/// `isolated`: the run uses a fresh configuration, so the host's Goose
+/// providers (and the variables they name) aren't looked up.
+fn collect_pass_env(profile: &CliProfile, isolated: bool) -> BTreeMap<String, String> {
     let mut names: Vec<String> = profile.pass_env.clone();
-    if profile.bin == "goose" {
+    if profile.bin == "goose" && !isolated {
         names.extend(goose_provider_api_key_env_names());
     }
     let mut out = BTreeMap::new();
@@ -1055,7 +1069,7 @@ mod tests {
         let p = load_bundled("goose");
         let _guard = profile_env_lock().lock().unwrap();
         std::env::set_var("AGENTBRIDGE_FAKE_API_KEY", "test-key-not-a-secret");
-        let env = collect_pass_env(&p);
+        let env = collect_pass_env(&p, false);
         std::env::remove_var("AGENTBRIDGE_FAKE_API_KEY");
         assert_eq!(
             env.get("AGENTBRIDGE_FAKE_API_KEY").map(String::as_str),
@@ -1093,7 +1107,9 @@ mod tests {
         std::env::set_var("GOOSE_DEMO_FLAG", "1");
         std::env::set_var("GOOSE_EMPTY", "");
         let names = goose_provider_api_key_env_names();
-        let env = collect_pass_env(&p);
+        let env = collect_pass_env(&p, false);
+        // An isolated run doesn't read the host's providers.
+        let isolated_env = collect_pass_env(&p, true);
         std::env::remove_var("AGENTBRIDGE_TEST_GOOSE_KEY");
         std::env::remove_var("GOOSE_DEMO_FLAG");
         std::env::remove_var("GOOSE_EMPTY");
@@ -1109,6 +1125,28 @@ mod tests {
         );
         assert_eq!(env.get("GOOSE_DEMO_FLAG").map(String::as_str), Some("1"));
         assert!(!env.contains_key("GOOSE_EMPTY"));
+        assert!(!isolated_env.contains_key("AGENTBRIDGE_TEST_GOOSE_KEY"));
+    }
+
+    #[test]
+    fn windows_basics_are_matched_whatever_their_case() {
+        assert!(is_basic_env("Path", true));
+        assert!(is_basic_env("SYSTEMROOT", true));
+        assert!(is_basic_env("PATHEXT", true));
+        assert!(!is_basic_env("Path", false));
+        assert!(!is_basic_env("SystemRoot", false));
+        // The user's own configuration stays out.
+        assert!(!is_basic_env("USERPROFILE", true));
+        assert!(!is_basic_env("APPDATA", true));
+    }
+
+    #[test]
+    fn isolated_profiles_name_their_credentials() {
+        for id in ["goose-isolated", "opencode-isolated"] {
+            let profile = load_bundled(id);
+            assert!(profile.pass_env_prefixes.is_empty(), "{id}");
+            assert!(profile.pass_env_suffixes.is_empty(), "{id}");
+        }
     }
 
     #[test]
@@ -1132,7 +1170,7 @@ mod tests {
         p.pass_env = vec!["AGENTBRIDGE_TEST_PASS".into()];
         let _guard = profile_env_lock().lock().unwrap();
         std::env::set_var("AGENTBRIDGE_TEST_PASS", "test-key-not-a-secret");
-        let env = collect_pass_env(&p);
+        let env = collect_pass_env(&p, false);
         std::env::remove_var("AGENTBRIDGE_TEST_PASS");
         assert_eq!(
             env.get("AGENTBRIDGE_TEST_PASS").map(String::as_str),

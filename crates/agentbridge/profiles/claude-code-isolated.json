@@ -20,9 +20,12 @@
   "isolation": {
     "env": {
       "HOME": "{config_root}",
+      "USERPROFILE": "{config_root}",
+      "APPDATA": "{config_root}/AppData/Roaming",
+      "LOCALAPPDATA": "{config_root}/AppData/Local",
       "CLAUDE_CONFIG_DIR": "{config_root}/.claude"
     },
-    "args": ["--strict-mcp-config"]
+    "args": ["--strict-mcp-config", "--setting-sources", "user"]
   },
   "provision": { "skills": { "dir": "{config_root}/.claude/skills" } },
   "execute": {
