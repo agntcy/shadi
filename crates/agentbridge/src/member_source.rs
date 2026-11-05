@@ -383,13 +383,17 @@ pub fn find_running_peer_at(
     }
     .resolve()?;
     let did = parse_peer_did(query);
-    let matches: Vec<CandidateMember> = running
-        .into_iter()
-        .filter(|c| match &did {
-            Some(did) => &c.did == did,
-            None => matches_local_alias(&c.name, query),
-        })
-        .collect();
+    let mut matches: Vec<CandidateMember> = Vec::new();
+    for c in running.into_iter().filter(|c| match &did {
+        Some(did) => &c.did == did,
+        None => matches_local_alias(&c.name, query),
+    }) {
+        // Workloads that say the same thing (name, DID, locators) are one
+        // agent to talk to, as `list` shows them.
+        if !matches.contains(&c) {
+            matches.push(c);
+        }
+    }
     let picked: Vec<&CandidateMember> = match at {
         Some(at) if matches.len() > 1 => matches.iter().filter(|c| has_locator(c, at)).collect(),
         _ => Vec::new(),
@@ -650,20 +654,23 @@ pub fn resolve_adapter_peer(
              pass --a2a-url as a locator override (the DID remains the name)"
         ));
     };
-    let found = DidLookupSource {
-        did: did.clone(),
-        dir: dir.clone(),
+    let (members, records) = resolve_via_dirctl_query_counted(&["--author", &did], dir)?;
+    let unread = records.saturating_sub(members.len());
+    if let Some(peer) = members.into_iter().find(|c| c.did == did) {
+        return Ok(peer);
     }
-    .resolve()?;
-    found
-        .into_iter()
-        .find(|c| c.did == did)
-        .ok_or_else(|| {
-            format!(
-                "DID {did} {NOT_IN_DIRECTORY}. \
-                 Re-register the adapter (new URL, same DID) or pass --a2a-url"
-            )
-        })
+    if unread > 0 {
+        // Records that couldn't be pulled or read: not an answer that the
+        // Directory has none, so callers don't fall back to another source.
+        return Err(format!(
+            "{unread} Agent Directory record(s) by DID {did} could not be read as an A2A agent \
+             (see above)"
+        ));
+    }
+    Err(format!(
+        "DID {did} {NOT_IN_DIRECTORY}. \
+         Re-register the adapter (new URL, same DID) or pass --a2a-url"
+    ))
 }
 
 const NOT_IN_DIRECTORY: &str = "was not found locally or in the Agent Directory";
@@ -1719,6 +1726,19 @@ esac
     }
 
     #[test]
+    #[cfg(unix)]
+    fn an_unreadable_dir_record_isnt_reported_as_missing() {
+        let _guard = env_lock().lock().expect("lock");
+        let (script, _dir) = fake_dirctl_script_pull_behavior("bafkreiwanted", 1, "pull failed");
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let (_tmp, registry) = temp_registry();
+        let err = resolve_adapter_peer("did:key:zWanted", &registry, Some(&test_dir())).unwrap_err();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        assert!(err.contains("could not be read"), "{err}");
+        assert!(!not_in_directory(&err), "{err}");
+    }
+
+    #[test]
     fn search_cids_returns_dirctl_not_found_when_missing() {
         let _guard = env_lock().lock().expect("lock");
         std::env::set_var("SHADI_DIRCTL_BINARY", "/nonexistent/shadi_test_dirctl");
@@ -1954,6 +1974,11 @@ esac
             .unwrap();
         let none = find_running_peer("codex", &test_dir()).unwrap();
 
+        // Two workloads announcing the same agent at the same locator are one.
+        let same = serde_json::json!([workload(1), workload(1)]).to_string();
+        std::fs::write(&script, format!("#!/bin/sh\necho '{same}'\n")).unwrap();
+        let deduplicated = find_running_peer("copilot", &test_dir()).unwrap();
+
         let two = serde_json::json!([workload(1), workload(2)]).to_string();
         std::fs::write(&script, format!("#!/bin/sh\necho '{two}'\n")).unwrap();
         let ambiguous = find_running_peer("copilot", &test_dir()).unwrap_err();
@@ -1975,6 +2000,7 @@ esac
         assert_eq!(by_name.a2a_url.as_deref(), Some("http://127.0.0.1:1"));
         assert_eq!(by_did.did, "did:key:zCopilot");
         assert!(none.is_none());
+        assert!(deduplicated.is_some(), "identical instances aren't ambiguous");
         assert!(ambiguous.contains("ambiguous"), "{ambiguous}");
     }
 }
