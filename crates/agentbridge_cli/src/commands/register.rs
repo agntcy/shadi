@@ -238,7 +238,7 @@ fn start_listeners(
             let http_slim = slim_endpoint.map(str::to_string);
             let announced = announcement.as_ref().map(|a| a.written());
             std::thread::spawn(move || {
-                if let Err(err) = run_unicast_listener(
+                let result = run_unicast_listener(
                     &http_tool,
                     http_adapter,
                     &http_listen,
@@ -247,19 +247,28 @@ fn start_listeners(
                     None,
                     false,
                     verbose,
-                ) {
-                    let binding = a2a_binding.as_protocol_binding();
-                    // Announced, don't keep serving (and announcing) only half
-                    // the agent; otherwise SLIM carries on, as before.
-                    let Some(written) = announced else {
+                );
+                let binding = a2a_binding.as_protocol_binding();
+                // Announced, don't keep serving (and announcing) only half the
+                // agent; otherwise SLIM carries on, as before. That holds for
+                // a Ctrl-C too (`Ok`): SLIM may still be connecting, and would
+                // otherwise announce this listener's locator once it is ready.
+                let Some(written) = announced else {
+                    if let Err(err) = result {
                         eprintln!("[agentbridge] {binding} listener: {err}");
-                        return;
-                    };
-                    eprintln!("[agentbridge] {binding} listener: {err}; stopping");
-                    super::announce::withdraw(&written);
-                    super::announce::stop_in_flight();
-                    std::process::exit(1);
-                }
+                    }
+                    return;
+                };
+                let code = match result {
+                    Ok(()) => 130,
+                    Err(err) => {
+                        eprintln!("[agentbridge] {binding} listener: {err}; stopping");
+                        1
+                    }
+                };
+                super::announce::withdraw(&written);
+                super::announce::stop_in_flight();
+                std::process::exit(code);
             });
         } else {
             run_unicast_listener(
