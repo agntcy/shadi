@@ -458,6 +458,15 @@ const DEFAULT_EXEC_PATH: &str = "/usr/bin:/bin";
 /// working directory), or the first match on its `PATH`, with symlinks
 /// resolved. `None` when it can't be found; the spawn then reports that.
 fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
+    resolve_program_inheriting(command, std::env::var_os("PATH"))
+}
+
+/// [`resolve_program`], with `inherited` as the parent's `PATH`, so tests
+/// don't have to change the process's own.
+fn resolve_program_inheriting(
+    command: &Command,
+    inherited: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
     let program = std::path::Path::new(command.get_program());
     let candidate = if program.components().count() > 1 || program.is_absolute() {
         let base = command
@@ -473,7 +482,7 @@ fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
             Some((_, Some(value))) => value.to_os_string(),
             Some((_, None)) => std::ffi::OsString::from(DEFAULT_EXEC_PATH),
             None if env_cleared(command) => std::ffi::OsString::from(DEFAULT_EXEC_PATH),
-            None => std::env::var_os("PATH")?,
+            None => inherited?,
         };
         // As exec looks it up: relative entries against the command's working
         // directory, and only files it may execute.
@@ -977,15 +986,13 @@ mod tests {
 
         // With PATH removed, exec searches the system default, not the
         // parent's PATH, so a tool only on the inherited PATH isn't the one.
-        let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let mut with_tool = vec![dir.clone()];
-        with_tool.extend(std::env::split_paths(&inherited));
-        std::env::set_var("PATH", std::env::join_paths(with_tool).unwrap());
+        // The parent's PATH is passed in rather than set: other tests spawn
+        // programs from it in parallel.
+        let inherited = Some(std::env::join_paths([&dir]).unwrap());
         let mut cmd = Command::new("my-tool");
-        let on_inherited = resolve_program(&cmd);
+        let on_inherited = resolve_program_inheriting(&cmd, inherited.clone());
         cmd.env_remove("PATH");
-        let removed = resolve_program(&cmd);
-        std::env::set_var("PATH", &inherited);
+        let removed = resolve_program_inheriting(&cmd, inherited.clone());
         assert_eq!(on_inherited, Some(std::fs::canonicalize(&exe).unwrap()));
         assert_eq!(removed, None, "my-tool is only on the inherited PATH");
         let mut cmd = Command::new("sh");
@@ -996,16 +1003,19 @@ mod tests {
         );
         // The same with the whole environment cleared: get_envs() then lists
         // no PATH at all, but exec still searches only the default.
-        std::env::set_var("PATH", std::env::join_paths([&dir]).unwrap());
         let mut cleared = Command::new("my-tool");
         cleared.env_clear();
-        let cleared_tool = resolve_program(&cleared);
+        assert_eq!(
+            resolve_program_inheriting(&cleared, inherited.clone()),
+            None,
+            "my-tool is only on the inherited PATH"
+        );
         let mut cleared_sh = Command::new("sh");
         cleared_sh.env_clear().env("HOME", "/tmp");
-        let cleared_sh = resolve_program(&cleared_sh);
-        std::env::set_var("PATH", &inherited);
-        assert_eq!(cleared_tool, None, "my-tool is only on the inherited PATH");
-        assert_eq!(cleared_sh, Some(std::fs::canonicalize("/bin/sh").unwrap()));
+        assert_eq!(
+            resolve_program_inheriting(&cleared_sh, inherited),
+            Some(std::fs::canonicalize("/bin/sh").unwrap())
+        );
 
         // A file of one's own without the owner's execute bit is skipped, as
         // exec skips it, though others may execute it.
