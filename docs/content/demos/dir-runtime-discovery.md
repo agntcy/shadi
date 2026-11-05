@@ -173,6 +173,7 @@ source docs/content/demos/demo-env-runtime.sh
 target/debug/shadictl --net-block \
   --net-allow 127.0.0.1:19960 --net-allow schema.oasf.outshift.com:443 \
   --net-allow localhost:8888 --read ~/.dir --read ~/.config/dirctl \
+  --read "$SHADI_DIRCTL_BINARY" \
   --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
   -- target/debug/agentbridge register --tool fake-harness-isolated \
      --a2a-listen 127.0.0.1:19960 --a2a-binding http+json \
@@ -218,6 +219,8 @@ What happened before the listener started:
 The sandbox flags grant exactly that: the listener and the OASF server
 (`--net-allow`), the Directory node and `dirctl`'s own files for `--record`
 (`--net-allow localhost:8888 --read ~/.dir --read ~/.config/dirctl`), the
+`dirctl` binary itself (`--read "$SHADI_DIRCTL_BINARY"`; on Linux, Landlock
+only runs programs under a granted path, and `~/go/bin` isn't one), the
 demo's working state (`--allow "$SHADI_TMP_DIR"`), and the descriptor
 directory (`--write`).
 
@@ -381,7 +384,7 @@ export ANTHROPIC_API_KEY=…            # or CLAUDE_CODE_OAUTH_TOKEN=…
 target/debug/shadictl --net-block \
   --net-allow 127.0.0.1:19970 --net-allow schema.oasf.outshift.com:443 \
   --net-allow localhost:8888 --net-allow api.anthropic.com:443 \
-  --read ~/.dir --read ~/.config/dirctl \
+  --read ~/.dir --read ~/.config/dirctl --read "$SHADI_DIRCTL_BINARY" \
   --read ~/.local/bin --read ~/.local/share/claude \
   --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
   -- target/debug/agentbridge register --tool claude-code-isolated \
@@ -398,7 +401,7 @@ export CODEX_API_KEY=…
 target/debug/shadictl --net-block \
   --net-allow 127.0.0.1:19971 --net-allow schema.oasf.outshift.com:443 \
   --net-allow localhost:8888 --net-allow api.openai.com:443 \
-  --read ~/.dir --read ~/.config/dirctl \
+  --read ~/.dir --read ~/.config/dirctl --read "$SHADI_DIRCTL_BINARY" \
   --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
   -- target/debug/agentbridge register --tool codex-isolated \
      --command "$SHADI_TMP_DIR/work" \
