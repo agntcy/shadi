@@ -2,7 +2,7 @@
   "id": "codex-isolated",
   "bin": "codex",
   "require_sandbox": true,
-  "pass_env_prefixes": ["CODEX_", "OPENAI_"],
+  "pass_env": ["CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
   "pin_tmpdir": true,
   "env": {
     "TMPDIR": "{workdir}",

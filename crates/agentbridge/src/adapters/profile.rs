@@ -1142,7 +1142,7 @@ mod tests {
 
     #[test]
     fn isolated_profiles_name_their_credentials() {
-        for id in ["goose-isolated", "opencode-isolated"] {
+        for id in ["claude-code-isolated", "codex-isolated", "goose-isolated", "opencode-isolated"] {
             let profile = load_bundled(id);
             assert!(profile.pass_env_prefixes.is_empty(), "{id}");
             assert!(profile.pass_env_suffixes.is_empty(), "{id}");
