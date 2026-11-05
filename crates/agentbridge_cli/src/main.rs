@@ -300,6 +300,11 @@ fn parse_http_url(raw: &str) -> Result<String, String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("must be an http:// or https:// URL with a host".to_string());
     }
+    // A `user:token@` would be sent as Basic auth and copied into the card,
+    // the published record and error messages.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("must not carry credentials (`user:password@`)".to_string());
+    }
     // As `Url` normalizes it (`HTTPS://` → `https://`, `https:host` →
     // `https://host`), since locators compare the scheme as is; without the
     // root `/` it adds when none was given.
@@ -632,6 +637,16 @@ mod tests {
         assert!(parse_validator_url("http://[::1]:8080").is_ok());
         assert!(parse_validator_url("http://schema.example.com").is_err());
         assert!(parse_validator_url("http://192.168.1.5:8080").is_err());
+    }
+
+    #[test]
+    fn urls_with_credentials_are_refused() {
+        for raw in ["https://user:token@schema.example.com", "https://token@schema.example.com"] {
+            let err = parse_validator_url(raw).unwrap_err();
+            assert!(err.contains("credentials"), "{err}");
+            assert!(!err.contains("token"), "the token isn't repeated: {err}");
+            assert!(parse_http_url(raw).is_err());
+        }
     }
 
     #[test]
