@@ -191,40 +191,61 @@ fn run_bounded(
     use std::io::Read;
     use std::process::Stdio;
 
+    // Its own process group, so a helper it leaves behind holding the pipes
+    // open is killed with it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
     let read = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(pipe) = pipe {
                 let _ = pipe.take(max_bytes + 1).read_to_end(&mut buf);
             }
-            buf
-        })
+            let _ = tx.send(buf);
+        });
+        rx
     };
     let stdout = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
     let stderr = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
 
     let deadline = std::time::Instant::now() + timeout;
+    let timed_out = |child: &mut std::process::Child| {
+        #[cfg(unix)]
+        // SAFETY: killpg only sends a signal to the group the child leads.
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("no answer within {}s", timeout.as_secs()),
+        )
+    };
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("no answer within {}s", timeout.as_secs()),
-            ));
+            return Err(timed_out(&mut child));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
+    // The deadline holds for the output too: something that outlives the
+    // child can keep its pipes open.
+    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        rx.recv_timeout(left).map_err(|_| ())
+    };
+    let (Ok(stdout), Ok(stderr)) = (collect(stdout), collect(stderr)) else {
+        return Err(timed_out(&mut child));
+    };
     if stdout.len() as u64 > max_bytes {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1880,6 +1901,14 @@ esac
         cmd.args(["-c", "head -c 4096 /dev/zero"]);
         let err = run_bounded(cmd, std::time::Duration::from_secs(5), 1024).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        // It exits at once, but a helper it started keeps stdout open.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5 & echo '[]'"]);
+        let started = std::time::Instant::now();
+        let err = run_bounded(cmd, std::time::Duration::from_millis(300), 1024).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 
     #[test]
