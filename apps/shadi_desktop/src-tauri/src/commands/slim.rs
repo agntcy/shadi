@@ -1027,7 +1027,7 @@ fn spec_needs_directory(spec: &str) -> bool {
 /// A candidate's group-session identity: a bare agent name, as runtime
 /// discovery reports it (`codex`), is `agntcy/shadi/<name>`, the form
 /// `/slim invite-from` invites in the CLI; a full SLIM name is kept.
-fn group_member_name(name: &str) -> String {
+pub(crate) fn group_member_name(name: &str) -> String {
     if name.contains('/') {
         name.to_string()
     } else {
