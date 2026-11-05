@@ -580,7 +580,32 @@ fn resolve_cid(reference: &str, server: &str) -> anyhow::Result<String> {
             printable(cid)
         );
     }
+    // The node answers `info`, and everything after is checked against its
+    // answer, so a CID the user pinned has to be the one it names.
+    if let Some(pinned) = pinned_cid(reference) {
+        if pinned != cid {
+            anyhow::bail!(
+                "dirctl info '{}' returned record {cid}, not the pinned {}",
+                printable(reference),
+                printable(pinned)
+            );
+        }
+    }
     Ok(cid.to_string())
+}
+
+/// The CID a reference pins: what follows its `@`, or the reference itself
+/// when it is a CID (CIDv1, base32: `b` and 58 more).
+fn pinned_cid(reference: &str) -> Option<&str> {
+    match reference.rsplit_once('@') {
+        Some((_, digest)) => Some(digest),
+        None => (reference.len() == 59
+            && reference.starts_with('b')
+            && reference
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+        .then_some(reference),
+    }
 }
 
 /// A CID as DIR prints it (multibase, letters and digits only), so it can't
@@ -832,13 +857,14 @@ fn skill_modules(record: &Value) -> anyhow::Result<Vec<SkillModule>> {
             .and_then(Value::as_str)
             .unwrap_or(&record_name)
             .to_string();
+        let shown = printable(&name);
         let artifact = module.get("artifact").ok_or_else(|| {
-            anyhow::anyhow!("agent skill '{name}' in the record carries no artifact")
+            anyhow::anyhow!("agent skill '{shown}' in the record carries no artifact")
         })?;
         let media_type = text(artifact, "media_type");
         let data = base64::engine::general_purpose::STANDARD
             .decode(text(artifact, "data"))
-            .map_err(|e| anyhow::anyhow!("agent skill '{name}': artifact isn't base64: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("agent skill '{shown}': artifact isn't base64: {e}"))?;
 
         modules.push(SkillModule {
             name,
@@ -849,8 +875,9 @@ fn skill_modules(record: &Value) -> anyhow::Result<Vec<SkillModule>> {
 
     if modules.is_empty() {
         anyhow::bail!(
-            "record '{record_name}' has no agent skill ({AGENT_SKILLS_MODULE} module); \
-             only agent-skill records can be run"
+            "record '{}' has no agent skill ({AGENT_SKILLS_MODULE} module); \
+             only agent-skill records can be run",
+            printable(&record_name)
         );
     }
 
@@ -937,19 +964,24 @@ fn unpack_bundle(archive: &[u8], dir: &Path, limit: u64) -> std::io::Result<u64>
     }
 
     let mut archive = tar::Archive::new(tar_bytes.as_slice());
-    for (count, entry) in archive.entries()?.enumerate() {
-        if count >= MAX_BUNDLE_ENTRIES {
-            return Err(invalid(format!(
-                "bundle has more than {MAX_BUNDLE_ENTRIES} entries"
-            )));
-        }
+    // What unpacking creates: each entry, and the folders above it, which
+    // `unpack_in` makes too (a deep path is many folders in one entry).
+    let mut paths = std::collections::HashSet::new();
+    for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
+        for created in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            if paths.insert(created.to_path_buf()) && paths.len() > MAX_BUNDLE_ENTRIES {
+                return Err(invalid(format!(
+                    "bundle has more than {MAX_BUNDLE_ENTRIES} entries"
+                )));
+            }
+        }
         let kind = entry.header().entry_type();
         if !(kind.is_file() || kind.is_dir()) {
             return Err(invalid(format!(
                 "bundle entry {} is not a regular file or directory",
-                path.display()
+                printable(&path.display().to_string())
             )));
         }
         if path.is_absolute()
@@ -959,13 +991,13 @@ fn unpack_bundle(archive: &[u8], dir: &Path, limit: u64) -> std::io::Result<u64>
         {
             return Err(invalid(format!(
                 "bundle entry {} would land outside the skill folder",
-                path.display()
+                printable(&path.display().to_string())
             )));
         }
         if !entry.unpack_in(dir)? {
             return Err(invalid(format!(
                 "bundle entry {} would land outside the skill folder",
-                path.display()
+                printable(&path.display().to_string())
             )));
         }
         // A directory the owner can't write to would keep its files, and
@@ -1508,6 +1540,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("entries"), "{err}");
+
+        // One entry, but the folders above it count too.
+        let deep = format!("{}SKILL.md", "a/".repeat(MAX_BUNDLE_ENTRIES));
+        let deep_dir = tempfile::tempdir().unwrap();
+        let err = unpack_bundle(&bundle(&[(deep.as_str(), "")]), deep_dir.path(), MAX_BUNDLE_BYTES)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("entries"), "{err}");
+        assert!(!deep_dir.path().join("a").exists());
     }
 
     #[test]
@@ -1663,10 +1704,10 @@ mod tests {
         (script, bin)
     }
 
-    /// `SHADI_DIRCTL_BINARY` and friends are process-global.
+    /// `SHADI_DIRCTL_BINARY` and friends are process-global, and
+    /// `register`'s tests set some of the same variables.
     fn dirctl_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        super::super::test_env_lock()
     }
 
     #[cfg(unix)]
@@ -1728,6 +1769,64 @@ mod tests {
 
         assert!(answer(r#"{"name":"x"}"#).contains("returned no CID"));
         assert!(answer(r#"{"cid":"not a cid"}"#).contains("which isn't a CID"));
+    }
+
+    #[test]
+    fn a_reference_pins_the_cid_after_its_at_or_itself_when_a_cid() {
+        let cid = "baeareiackl4kjbdnpw2fxofkujd4y5q4akumi6f6jczrb7s26hz5nj636m";
+        assert_eq!(pinned_cid(cid), Some(cid));
+        assert_eq!(pinned_cid(&format!("code-review:1.0.0@{cid}")), Some(cid));
+        assert_eq!(pinned_cid("code-review"), None);
+        assert_eq!(pinned_cid("code-review:1.0.0"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirctl_info_must_return_the_pinned_cid() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let pinned = "baeareiackl4kjbdnpw2fxofkujd4y5q4akumi6f6jczrb7s26hz5nj636m";
+        let other = "baeareihdr6ffjmzgzrukinxj2iqdc5rgbgusqxdbc2nnzj6igjhvtnuvkq";
+        let bin = tempfile::tempdir().unwrap();
+        let script = bin.path().join("dirctl");
+        std::fs::write(&script, format!("#!/bin/sh\necho '{{\"cid\":\"{other}\"}}'\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+
+        let by_cid = resolve_cid(pinned, "localhost:1");
+        let by_digest = resolve_cid(&format!("code-review:1.0.0@{pinned}"), "localhost:1");
+        let by_name = resolve_cid("code-review", "localhost:1");
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+        for result in [by_cid, by_digest] {
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains(&format!("not the pinned {pinned}")), "{err}");
+        }
+        assert_eq!(by_name.unwrap(), other);
+    }
+
+    #[test]
+    fn record_errors_escape_the_records_names() {
+        let record = json!({
+            "name": "evil\u{1b}[2J",
+            "modules": [{
+                "name": AGENT_SKILLS_MODULE,
+                "data": { "skill_manifest": { "name": "skill\u{1b}[2K" } },
+                "artifact": { "media_type": MEDIA_TYPE_MARKDOWN, "data": "not base64!" }
+            }]
+        });
+        let err = skill_modules(&record).unwrap_err().to_string();
+        assert!(!err.contains('\u{1b}'), "{err}");
+        assert!(err.contains("skill\\u{1b}[2K"), "{err}");
+
+        let empty = json!({ "name": "evil\u{1b}[2J", "modules": [] });
+        let err = skill_modules(&empty).unwrap_err().to_string();
+        assert!(!err.contains('\u{1b}'), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let bad = raw_bundle(&[("x\u{1b}[2J/../y", tar::EntryType::Regular, "", "")]);
+        let err = unpack_bundle(&bad, dir.path(), MAX_BUNDLE_BYTES).unwrap_err().to_string();
+        assert!(!err.contains('\u{1b}'), "{err}");
     }
 
     #[cfg(unix)]
