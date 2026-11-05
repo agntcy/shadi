@@ -2,9 +2,11 @@
 # (docs/content/demos/dir-runtime-discovery.md). Source this in EVERY terminal.
 export SHADI_SLIM_AUTH=did                         # select DID-JWT admission
 export SLIM_HUMAN_SEED="shadi-runtime-demo-human-root-secret"
-# The only DID the demo agents accept tasks from: the "avatar" agent derived
-# from the seed above (what `agentbridge delegate` signs as). Re-derive with
-# `/slim whoami` if you change the seed.
+# The only DID the demo agents accept tasks from over SLIM: the "avatar" agent
+# derived from the seed above (what `agentbridge delegate` signs as). It isn't
+# an allowlist for `--a2a-listen` listeners, which accept any DID that proves
+# itself unless SHADI_MEMBER_HUMAN_DIDS is set (agntcy/shadi#500). Re-derive
+# with `/slim whoami` if you change the seed.
 export SLIM_MEMBER_DIDS="did:key:z6Mkf19ViBaFJEbgVNY9oWqED71Wnr4kYLQiwvYbtEnEGHJC"
 
 # The demo's working state: each run's harness configuration

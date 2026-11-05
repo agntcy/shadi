@@ -335,9 +335,11 @@ CLIs. For a record, prefer the isolated ones:
     harness doesn't see your own skills (including user-level ones in
     `~/.agents/skills` or `~/.claude/skills`), settings, MCP servers or login.
     It starts from an empty environment too: only the basics (`PATH`, locale,
-    terminal, user, temp, TLS trust and proxy settings) and its tool's
-    credential variables (table below) reach it, not your tokens or agent
-    sockets. Files the sandbox grants stay readable by absolute path.
+    terminal, user, temp, TLS trust and proxy settings) and the variables
+    its profile names reach it: its tool's credentials (table below), plus
+    the endpoint and model settings next to them (`ANTHROPIC_BASE_URL`,
+    `ANTHROPIC_MODEL`, `OPENAI_BASE_URL`, …; the full list is `pass_env` in
+    each profile). Not your other tokens, keys or agent sockets. Files the sandbox grants stay readable by absolute path.
     `codex-isolated` runs codex without its own approvals or sandbox, so it
     refuses to run outside `shadictl`.
 
