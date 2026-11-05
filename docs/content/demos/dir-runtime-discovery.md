@@ -343,11 +343,12 @@ CLIs. For a record, prefer the isolated ones:
     `codex-isolated` runs codex without its own approvals or sandbox, so it
     refuses to run outside `shadictl`.
 
-- `claude-code`, `codex`, `goose`, `opencode`
+- `claude-code`, `codex`, `goose`, `opencode`, `copilot`, `cursor-agent`
 
     These work too, with a warning: the record's skills go into the working
     directory (`.claude/skills`, `.agents/skills`, `.goose/skills`,
-    `.opencode/skills`; an existing skill of the same name is never replaced,
+    `.opencode/skills`, `.github/skills`, `.cursor/skills`; an existing skill
+    of the same name is never replaced,
     and they are removed when `register` stops), and the harness also reads
     your own configuration and login. Whoever can send it a task can try to
     make it reveal or use them.
@@ -434,11 +435,10 @@ target/debug/agentbridge delegate --to claude-code-isolated \
 
 ### Harnesses without isolation
 
-`copilot` and `cursor-agent` have neither `isolation` nor a place for skills
-(`provision.skills`), so they refuse `--record`. That is only because neither
-has been implemented for these harnesses yet; their login lives in the
-keychain or their own configuration, which an isolated profile has to bring
-along. They still run as agents from flags (step 7's
+`copilot` and `cursor-agent` have no isolated variant yet: their login lives
+in the keychain or their own configuration, which an isolated profile has to
+bring along. They run a `--record` as plain profiles (above), and as agents
+from flags (step 7's
 command with `--tool <name>`), using your own configuration and login: the
 sandbox then has to allow the harness's configuration and wherever its login
 is stored. For a login kept in the macOS keychain, that means
@@ -557,7 +557,7 @@ step 3 unless noted.
 | A record without an agent skill | An A2A-card record (`dirctl import --type=a2a`) as `--record` | `record '…' has no agent skill (core/language_model/agentskills module); only agent-skill records can be run` |
 | `$SHADI_TMP_DIR` not allowed | Step 3 without `--allow "$SHADI_TMP_DIR"` | `could not create …/agentbridge-record: Operation not permitted … Under shadictl, allow its parent with --allow` |
 | A harness that isn't isolated | `register --tool claude-code … --record code-review …` | Starts, with `warning: profile 'claude-code' isn't isolated. The harness also reads your own configuration …`; the skill goes into `<workdir>/.claude/skills` |
-| A harness with nowhere to put skills | `register --tool copilot … --record code-review …` | `profile 'copilot' can't run a DIR record: it has no provision.skills section, so there is nowhere to put the record's skills` |
+| A harness with nowhere to put skills | A profile in `AGENTBRIDGE_PROFILES_DIR` without `provision.skills`, with `--record code-review` | `profile '…' can't run a DIR record: it has no provision.skills section, so there is nowhere to put the record's skills` |
 | A record in another OASF version | A record imported with `schema_version: "1.0.0"` | Starts, but `warning: record … uses OASF 1.0.0, the card OASF 1.1.0; its skills and domains are not advertised` |
 
 An agent without any skill (no `--skill`, no `--record`) starts, but its card
