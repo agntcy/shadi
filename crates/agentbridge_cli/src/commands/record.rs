@@ -146,10 +146,16 @@ pub fn prepare(
     // and on Ctrl-C before a listener handles it.
     super::announce::on_sigterm();
     on_sigint_until_listening();
-    let config_root = if profile.is_isolated() {
-        Some(config_root_for(tool)?)
-    } else {
-        None
+    let config_root = match &profile.isolation {
+        Some(isolation) => {
+            let root = config_root_for()?;
+            if let Err(e) = fits(&root, isolation.max_root_len, tool) {
+                cleanup();
+                return Err(e);
+            }
+            Some(root)
+        }
+        None => None,
     };
     let source = provision(
         reference,
@@ -191,7 +197,8 @@ fn provision(
              your own configuration (skills, settings, MCP servers, login), and whoever sends \
              it a task can try to make it reveal or use them. The record's skills go into \
              {} and are removed when register stops. Use a profile with `isolation` \
-             (claude-code-isolated, codex-isolated) to run the record on its own.",
+             (claude-code-isolated, codex-isolated, copilot-isolated, …) to run the \
+             record on its own.",
             skills_dir.display()
         );
     }
@@ -320,13 +327,26 @@ pub fn printable(text: &str) -> String {
         .collect()
 }
 
-/// Per run: a fresh, private (0700) directory with a random name under
+/// Whether `root` is within the length `tool`'s profile allows.
+fn fits(root: &Path, max: Option<usize>, tool: &str) -> anyhow::Result<()> {
+    let len = root.as_os_str().len();
+    match max {
+        Some(max) if len > max => anyhow::bail!(
+            "profile '{tool}' needs a config root of at most {max} characters, and {} has \
+             {len}: set SHADI_TMP_DIR to a shorter directory",
+            root.display()
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Per run: a fresh, private (0700) directory with a short random name under
 /// `$SHADI_TMP_DIR/agentbridge-record` (writable in the SHADI sandbox), or
 /// `agentbridge-record-<uid>` in the temp dir, which on Linux is the shared
 /// `/tmp`: one parent for every user would belong to whoever came first. The
 /// parent must be this user's own real directory, so nobody else can plant
 /// configuration (hooks, skills) the harness would load.
-fn config_root_for(tool: &str) -> anyhow::Result<PathBuf> {
+fn config_root_for() -> anyhow::Result<PathBuf> {
     let parent = match std::env::var_os("SHADI_TMP_DIR") {
         Some(base) => real_path(Path::new(&base)).join("agentbridge-record"),
         None => real_path(&std::env::temp_dir()).join(shared_parent_name()),
@@ -334,9 +354,10 @@ fn config_root_for(tool: &str) -> anyhow::Result<PathBuf> {
     let base = parent.parent().map(Path::to_path_buf).unwrap_or_default();
     private_parent(&parent)?;
 
-    let prefix = format!("{}-{}-", sanitize(tool), std::process::id());
+    // Short: some harnesses keep sockets and other state under it, and
+    // socket paths are limited (`max_root_len`). The log names the tool.
     let mut builder = tempfile::Builder::new();
-    builder.prefix(&prefix);
+    builder.prefix("").rand_bytes(8);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1533,8 +1554,8 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         std::env::set_var("SHADI_TMP_DIR", base.path());
 
-        let root = config_root_for("codex-isolated").unwrap();
-        let other = config_root_for("codex-isolated").unwrap();
+        let root = config_root_for().unwrap();
+        let other = config_root_for().unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_ne!(root, other, "a random name per run");
         assert_eq!(mode(&root), 0o700);
@@ -1547,7 +1568,7 @@ mod tests {
         std::os::unix::fs::symlink(elsewhere.path(), link_base.path().join("agentbridge-record"))
             .unwrap();
         std::env::set_var("SHADI_TMP_DIR", link_base.path());
-        let err = config_root_for("codex-isolated").unwrap_err().to_string();
+        let err = config_root_for().unwrap_err().to_string();
         std::env::remove_var("SHADI_TMP_DIR");
         assert!(err.contains("not a directory"), "{err}");
 
@@ -1557,12 +1578,12 @@ mod tests {
         std::fs::create_dir(&parent).unwrap();
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
         std::env::set_var("SHADI_TMP_DIR", shared.path());
-        let err = config_root_for("codex-isolated").unwrap_err().to_string();
+        let err = config_root_for().unwrap_err().to_string();
         std::env::remove_var("SHADI_TMP_DIR");
         assert!(err.contains("writable by its group or others"), "{err}");
 
         // Without SHADI_TMP_DIR, each user has a parent of their own.
-        let root = config_root_for("codex-isolated").unwrap();
+        let root = config_root_for().unwrap();
         let me = unsafe { libc::geteuid() };
         assert_eq!(
             root.parent().unwrap().file_name().unwrap().to_string_lossy(),
@@ -1782,7 +1803,7 @@ mod tests {
         std::fs::create_dir(&parent).unwrap();
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
         std::env::set_var("SHADI_TMP_DIR", base.path());
-        let err = config_root_for("codex-isolated");
+        let err = config_root_for();
         std::env::remove_var("SHADI_TMP_DIR");
         let err = err.unwrap_err().to_string();
         assert!(err.contains("could not create a config root"), "{err}");
@@ -1953,5 +1974,14 @@ mod tests {
         let mode = std::fs::metadata(skill.join("docs")).unwrap().permissions().mode();
         assert_eq!(mode & 0o700, 0o700, "{mode:o}");
         std::fs::remove_dir_all(&skill).unwrap();
+    }
+
+    #[test]
+    fn a_config_root_too_long_for_its_profile_is_refused() {
+        let root = Path::new("/private/tmp/a-long-shadi-tmp-dir/agentbridge-record/abcdefgh");
+        assert!(fits(root, None, "codex-isolated").is_ok());
+        assert!(fits(root, Some(200), "cursor-agent-isolated").is_ok());
+        let err = fits(root, Some(40), "cursor-agent-isolated").unwrap_err().to_string();
+        assert!(err.contains("set SHADI_TMP_DIR to a shorter directory"), "{err}");
     }
 }

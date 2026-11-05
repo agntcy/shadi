@@ -74,6 +74,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Put before `execute.args`; `{config_root}` is substituted."
+        },
+        "max_root_len": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Longest config root path (in bytes) the harness works with; a longer one is refused with a hint to shorten $SHADI_TMP_DIR."
         }
       }
     },

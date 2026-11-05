@@ -23,9 +23,11 @@ use super::workdir::pin_tmpdir;
 const BUNDLED_CLAUDE: &str = include_str!("../../profiles/claude-code.json");
 const BUNDLED_CLAUDE_ISOLATED: &str = include_str!("../../profiles/claude-code-isolated.json");
 const BUNDLED_COPILOT: &str = include_str!("../../profiles/copilot.json");
+const BUNDLED_COPILOT_ISOLATED: &str = include_str!("../../profiles/copilot-isolated.json");
 const BUNDLED_CODEX: &str = include_str!("../../profiles/codex.json");
 const BUNDLED_CODEX_ISOLATED: &str = include_str!("../../profiles/codex-isolated.json");
 const BUNDLED_CURSOR: &str = include_str!("../../profiles/cursor-agent.json");
+const BUNDLED_CURSOR_ISOLATED: &str = include_str!("../../profiles/cursor-agent-isolated.json");
 const BUNDLED_GOOSE: &str = include_str!("../../profiles/goose.json");
 const BUNDLED_GOOSE_ISOLATED: &str = include_str!("../../profiles/goose-isolated.json");
 const BUNDLED_OPENCODE: &str = include_str!("../../profiles/opencode.json");
@@ -37,9 +39,11 @@ pub fn bundled_profile_ids() -> &'static [&'static str] {
         "claude-code",
         "claude-code-isolated",
         "copilot",
+        "copilot-isolated",
         "codex",
         "codex-isolated",
         "cursor-agent",
+        "cursor-agent-isolated",
         "goose",
         "goose-isolated",
         "opencode",
@@ -52,9 +56,11 @@ fn bundled_json(id: &str) -> Option<&'static str> {
         "claude-code" => Some(BUNDLED_CLAUDE),
         "claude-code-isolated" => Some(BUNDLED_CLAUDE_ISOLATED),
         "copilot" => Some(BUNDLED_COPILOT),
+        "copilot-isolated" => Some(BUNDLED_COPILOT_ISOLATED),
         "codex" => Some(BUNDLED_CODEX),
         "codex-isolated" => Some(BUNDLED_CODEX_ISOLATED),
         "cursor-agent" => Some(BUNDLED_CURSOR),
+        "cursor-agent-isolated" => Some(BUNDLED_CURSOR_ISOLATED),
         "goose" => Some(BUNDLED_GOOSE),
         "goose-isolated" => Some(BUNDLED_GOOSE_ISOLATED),
         "opencode" => Some(BUNDLED_OPENCODE),
@@ -192,6 +198,11 @@ pub struct IsolationSpec {
     /// Put before the profile's `execute.args`; `{config_root}` is substituted.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Longest config root path the harness works with: cursor-agent puts
+    /// per-project state under its data directory only while the path stays
+    /// short, and falls back to a shared `/tmp/.cursor` otherwise.
+    #[serde(default)]
+    pub max_root_len: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -870,6 +881,8 @@ mod tests {
         let (root, work) = (Path::new("/r"), Path::new("/w"));
         for (id, isolated, dir) in [
             ("claude-code-isolated", true, Some("/r/.claude/skills")),
+            ("copilot-isolated", true, Some("/r/.copilot/skills")),
+            ("cursor-agent-isolated", true, Some("/r/.cursor/skills")),
             ("codex-isolated", true, Some("/r/.codex/skills")),
             ("goose-isolated", true, Some("/r/.config/goose/skills")),
             ("opencode-isolated", true, Some("/r/.config/opencode/skills")),
@@ -896,6 +909,8 @@ mod tests {
         for id in [
             "claude-code-isolated",
             "codex-isolated",
+            "copilot-isolated",
+            "cursor-agent-isolated",
             "goose-isolated",
             "opencode-isolated",
         ] {
@@ -1142,7 +1157,14 @@ mod tests {
 
     #[test]
     fn isolated_profiles_name_their_credentials() {
-        for id in ["claude-code-isolated", "codex-isolated", "goose-isolated", "opencode-isolated"] {
+        for id in [
+            "claude-code-isolated",
+            "codex-isolated",
+            "copilot-isolated",
+            "cursor-agent-isolated",
+            "goose-isolated",
+            "opencode-isolated",
+        ] {
             let profile = load_bundled(id);
             assert!(profile.pass_env_prefixes.is_empty(), "{id}");
             assert!(profile.pass_env_suffixes.is_empty(), "{id}");

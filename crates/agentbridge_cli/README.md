@@ -106,7 +106,8 @@ What the agent card advertises:
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 `cursor-agent`, `goose`, `opencode`, and `claude-code-isolated` / `codex-isolated` /
-`goose-isolated` / `opencode-isolated` (the same harnesses started with a fresh
+`copilot-isolated` / `cursor-agent-isolated` / `goose-isolated` / `opencode-isolated`
+(the same harnesses started with a fresh
 `HOME` and configuration per run, so they read none of your own skills or
 settings, for `--record`).
 

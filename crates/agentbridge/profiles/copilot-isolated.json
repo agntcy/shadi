@@ -1,0 +1,43 @@
+{
+  "id": "copilot-isolated",
+  "bin": "copilot",
+  "require_sandbox": true,
+  "pass_env": [
+    "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_MODEL", "GH_HOST",
+    "COPILOT_GH_HOST"
+  ],
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{workdir}",
+    "TMP": "{workdir}",
+    "TEMP": "{workdir}",
+    "COPILOT_AUTO_UPDATE": "false"
+  },
+  "workdir_flags": ["-C", "{workdir}", "--add-dir", "{workdir}"],
+  "workdir_flags_on_execute": true,
+  "workdir_flags_on_snapshot": true,
+  "workdir_flags_on_inject": true,
+  "current_dir_workdir": true,
+  "system_flag": "--system-prompt",
+  "isolation": {
+    "env": {
+      "HOME": "{config_root}",
+      "USERPROFILE": "{config_root}",
+      "APPDATA": "{config_root}/AppData/Roaming",
+      "LOCALAPPDATA": "{config_root}/AppData/Local",
+      "XDG_CONFIG_HOME": "{config_root}/.config",
+      "COPILOT_HOME": "{config_root}/.copilot"
+    }
+  },
+  "provision": { "skills": { "dir": "{config_root}/.copilot/skills" } },
+  "execute": {
+    "args": [
+      "--prompt",
+      "{prompt}",
+      "--allow-all-tools",
+      "{workdir_flags}",
+      "{system}"
+    ]
+  },
+  "result": { "kind": "strip_suffix", "prefix": "Changes" }
+}
