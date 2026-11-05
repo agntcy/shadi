@@ -467,10 +467,12 @@ fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
         base.join(program)
     } else {
         // The command's PATH if it sets one; the system default when it
-        // removes it (what execvp searches without a PATH); else the parent's.
+        // removes it or clears the environment (what execvp searches without
+        // a PATH); else the parent's.
         let path = match command.get_envs().find(|(key, _)| *key == "PATH") {
             Some((_, Some(value))) => value.to_os_string(),
             Some((_, None)) => std::ffi::OsString::from(DEFAULT_EXEC_PATH),
+            None if env_cleared(command) => std::ffi::OsString::from(DEFAULT_EXEC_PATH),
             None => std::env::var_os("PATH")?,
         };
         // As exec looks it up: relative entries against the command's working
@@ -490,9 +492,29 @@ fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(candidate).ok()
 }
 
+/// Whether `command` starts from an empty environment (`env_clear()`), which
+/// `get_envs()` doesn't show. std has no stable getter yet
+/// (`Command::get_env_clear`, rust-lang/rust#149070), so this reads it from
+/// the pretty `Debug` form, where it is the first field of `env` on a line of
+/// its own (arguments and values are quoted, so they can't forge that line).
+/// `command_debug_shows_a_cleared_environment` fails if std changes the form.
+fn env_cleared(command: &Command) -> bool {
+    format!("{command:#?}").contains("\n    env: CommandEnv {\n        clear: true,\n")
+}
+
+/// A regular file the process may execute, as exec decides it: by the
+/// effective user and the file's ACL, not just its mode bits (a `0601` file of
+/// one's own isn't executable by its owner).
 fn is_executable_file(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    use std::os::unix::ffi::OsStrExt;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated string for the call's duration.
+    unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 fn seatbelt_spellings(path: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -972,7 +994,46 @@ mod tests {
             resolve_program(&cmd),
             Some(std::fs::canonicalize("/bin/sh").unwrap())
         );
+        // The same with the whole environment cleared: get_envs() then lists
+        // no PATH at all, but exec still searches only the default.
+        std::env::set_var("PATH", std::env::join_paths([&dir]).unwrap());
+        let mut cleared = Command::new("my-tool");
+        cleared.env_clear();
+        let cleared_tool = resolve_program(&cleared);
+        let mut cleared_sh = Command::new("sh");
+        cleared_sh.env_clear().env("HOME", "/tmp");
+        let cleared_sh = resolve_program(&cleared_sh);
+        std::env::set_var("PATH", &inherited);
+        assert_eq!(cleared_tool, None, "my-tool is only on the inherited PATH");
+        assert_eq!(cleared_sh, Some(std::fs::canonicalize("/bin/sh").unwrap()));
+
+        // A file of one's own without the owner's execute bit is skipped, as
+        // exec skips it, though others may execute it.
+        let owner_only = dir.join("owner-only");
+        std::fs::create_dir_all(&owner_only).unwrap();
+        let denied = owner_only.join("my-tool");
+        std::fs::write(&denied, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o601)).unwrap();
+        let mut cmd = Command::new("my-tool");
+        cmd.env("PATH", std::env::join_paths([&owner_only, &dir]).unwrap());
+        assert_eq!(
+            resolve_program(&cmd),
+            Some(std::fs::canonicalize(&exe).unwrap())
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_debug_shows_a_cleared_environment() {
+        let mut cleared = Command::new("sh");
+        cleared.env_clear().env("A", "1").current_dir("/");
+        assert!(env_cleared(&cleared));
+        // An argument can't pass for the field.
+        let mut forged = Command::new("sh");
+        forged.arg("\n    env: CommandEnv {\n        clear: true,\n");
+        forged.env("A", "1");
+        assert!(!env_cleared(&forged));
+        assert!(!env_cleared(&Command::new("sh")));
     }
 
     // ── mach-lookup gating tests ───────────────────────────────────────────
