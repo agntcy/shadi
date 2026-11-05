@@ -343,8 +343,8 @@ CLIs. For a record, prefer the isolated ones:
     the endpoint and model settings next to them (`ANTHROPIC_BASE_URL`,
     `ANTHROPIC_MODEL`, `OPENAI_BASE_URL`, …; the full list is `pass_env` in
     each profile). Not your other tokens, keys or agent sockets. Files the sandbox grants stay readable by absolute path.
-    `codex-isolated` runs codex without its own approvals or sandbox, so it
-    refuses to run outside `shadictl`.
+    A fresh `HOME` keeps out your configuration, not the rest of the host,
+    so every isolated profile refuses to run outside `shadictl`.
 
 - `claude-code`, `codex`, `goose`, `opencode`, `copilot`, `cursor-agent`
 
