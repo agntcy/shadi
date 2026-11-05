@@ -182,7 +182,7 @@ target/debug/shadictl --net-block \
 ```text
 [agentbridge] running DIR record code-review 1.0.0 (baeareigguj5x…) from localhost:8888; signature: unsigned
 [agentbridge] 'code-review' resolved to baeareigguj5x…; pass --record baeareigguj5x… to run exactly this record
-[agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/fake-harness-isolated-21162-Xp3kQ9/skills/code-review
+[agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/Xp3kQ9ab/skills/code-review
 Registered fake-harness-isolated adapter from profile (agent id: fake-harness-isolated, dir: …)
 [agentbridge] announced to dir-runtime as fake-harness-isolated-<DID suffix>-21162 (…/workloads.d/fake-harness-isolated-<DID suffix>-21162.json)
 Starting A2A HTTP+JSON listener on 127.0.0.1:19960 ...
@@ -327,8 +327,8 @@ removes that directory.
 The bundled profiles under `crates/agentbridge/profiles/` drive real coding
 CLIs. For a record, prefer the isolated ones:
 
-- `claude-code-isolated`, `codex-isolated`, `goose-isolated`,
-  `opencode-isolated`
+- `claude-code-isolated`, `codex-isolated`, `copilot-isolated`,
+  `cursor-agent-isolated`, `goose-isolated`, `opencode-isolated`
 
     They run the same CLIs as their plain profiles with a fresh `HOME` and
     configuration directory per run, holding only the record's skills. The
@@ -360,6 +360,8 @@ login, so give it a credential it reads from its environment:
 | --- | --- | --- | --- |
 | `claude-code-isolated` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `api.anthropic.com:443` |
 | `codex-isolated` | [Codex CLI](https://github.com/openai/codex) (`codex`) | `CODEX_API_KEY` | `api.openai.com:443` |
+| `copilot-isolated` | [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) | `COPILOT_GITHUB_TOKEN`: a fine-grained PAT with the Copilot Requests permission (classic PATs aren't accepted), or `gh auth token`'s OAuth token; `COPILOT_GH_HOST` for a `*.ghe.com` account | `api.github.com:443` and the Copilot API hosts, e.g. `api.githubcopilot.com:443`, `api.individual.githubcopilot.com:443`, `api.business.githubcopilot.com:443`, `api.enterprise.githubcopilot.com:443` |
+| `cursor-agent-isolated` | [Cursor CLI](https://cursor.com/cli) (`cursor-agent`) | `CURSOR_API_KEY` from the Cursor dashboard (Integrations) | `api2.cursor.sh:443` and Cursor's other API hosts, e.g. `api3.cursor.sh:443`, `repo42.cursor.sh:443` |
 | `goose-isolated` | [goose](https://goose-docs.ai/) (`brew install block-goose-cli`) | `GOOSE_PROVIDER` and `GOOSE_MODEL` (passed as `--provider` / `--model`) and that provider's key: one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (with `OPENAI_HOST`, `OPENAI_BASE_PATH`), `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` | The provider's API, e.g. `api.anthropic.com:443` |
 | `opencode-isolated` | [opencode](https://opencode.ai) (`brew install opencode`) | The provider's key: one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`; the model via `OPENCODE_ARGS="--model anthropic/<model>"` | The provider's API, plus `models.dev:443` |
 
@@ -433,15 +435,20 @@ target/debug/agentbridge delegate --to claude-code-isolated \
     out of the harness is [shadi#486](https://github.com/agntcy/shadi/issues/486); SHADI's own secrets (such as
     `SLIM_HUMAN_SEED`) are kept out of its environment by [shadi#487](https://github.com/agntcy/shadi/issues/487).
 
-### Harnesses without isolation
+The sandbox also has to let the harness read its own installation:
+`--read /opt/homebrew` for a Homebrew `copilot`, `--read ~/.local/bin --read
+~/.local/share/cursor-agent` for `cursor-agent`. cursor-agent keeps
+per-project state under its data directory only while that path is short, so
+`cursor-agent-isolated` refuses a config root longer than 67 characters: keep
+`$SHADI_TMP_DIR` short (the demo's `/private/tmp/shadi-runtime-demo` fits).
 
-`copilot` and `cursor-agent` have no isolated variant yet: their login lives
-in the keychain or their own configuration, which an isolated profile has to
-bring along. They run a `--record` as plain profiles (above), and as agents
-from flags (step 7's
-command with `--tool <name>`), using your own configuration and login: the
-sandbox then has to allow the harness's configuration and wherever its login
-is stored. For a login kept in the macOS keychain, that means
+### Plain profiles and the keychain
+
+The plain `copilot` and `cursor-agent` use your own login, which they keep in
+the keychain or their own configuration. They run a `--record` as plain
+profiles (above), and as agents from flags (step 7's command with
+`--tool <name>`): the sandbox then has to allow the harness's configuration
+and wherever its login is stored. For a login kept in the macOS keychain, that means
 `--allow ~/Library/Keychains`, which exposes every keychain item, SHADI's
 own included ([shadi#320](https://github.com/agntcy/shadi/issues/320)).
 
