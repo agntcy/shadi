@@ -719,7 +719,11 @@ cargo run -p agntcy-shadi-cli -- slim create-group \
   through runtime discovery on `--runtime`, not `--dir-server`),
   `did:<did>` (Directory search by author DID), or
   `explicit:<name>=<did>[@<endpoint>]` (no Directory round trip). Every
-  resolved candidate's DID is unioned into the group's trust set.
+  resolved candidate's DID is unioned into the group's trust set. A
+  `running:` agent's skills and DID are what the workload announces about
+  itself, and nothing checks them: any workload the runtime reports with a
+  matching skill joins the trust set, so use it only on a runtime whose
+  workloads you trust.
 - `--dir-server`: Agent Directory address (default `prod.gateway.ads.outshift.io:443`).
 - `--runtime`: dir-runtime address for `running:` specs (default `localhost:8888`, a local `dirctl daemon`); it gets no DIR credentials.
 - `--gh-token` / `--limit`: DIR auth token and max results per source.

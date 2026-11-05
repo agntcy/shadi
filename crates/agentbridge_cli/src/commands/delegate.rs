@@ -1,6 +1,6 @@
 use agentbridge::local_registry::LocalAdapterRegistry;
 use agentbridge::member_source::{
-    find_running_peer_at, has_locator, parse_peer_did, runtime_not_running, resolve_adapter_peer, CandidateMember, DirLookupOptions,
+    find_running_peer_at, has_locator, not_in_directory, parse_peer_did, runtime_not_running, resolve_adapter_peer, CandidateMember, DirLookupOptions,
 };
 use shadi_a2a::{A2ABinding, A2ALocator};
 use shadi_mas::{
@@ -225,13 +225,18 @@ fn resolve_peer_found(
         Err(err) if err.contains("ambiguous") => Err(err),
         // A DID: its published record, which took DIR access to publish,
         // before what dir-runtime reports, which anything on the host can.
+        // dir-runtime only when DIR answered that it has no such record: a
+        // failed lookup (gateway down, auth, no dirctl) is reported instead.
         Err(_) if is_did => match fallback() {
             Ok(peer) => Ok((peer, Found::Directory)),
-            Err(not_in_dir) => match ask_runtime(Box::new(running)) {
-                Ok(Some(peer)) => Ok((peer, Found::Runtime)),
-                Ok(None) => Err(not_in_dir),
-                Err(e) => Err(e),
-            },
+            Err(not_in_dir) if not_in_directory(&not_in_dir) => {
+                match ask_runtime(Box::new(running)) {
+                    Ok(Some(peer)) => Ok((peer, Found::Runtime)),
+                    Ok(None) => Err(not_in_dir),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
         },
         Err(_) => match ask_runtime(Box::new(running)) {
             Ok(Some(peer)) => Ok((peer, Found::Runtime)),
@@ -290,7 +295,12 @@ fn apply_locator_override(
                 } else {
                     // A bare http(s) URL defaults to gRPC; when it is the
                     // peer's own URL, keep the binding the peer advertised.
-                    if a2a_binding.is_none() && has_locator(&peer, &locator) {
+                    // A scheme that names one (`jsonrpc://`) is kept.
+                    let bare = a2a_url_override.is_some_and(|raw| {
+                        let raw = raw.trim().to_ascii_lowercase();
+                        raw.starts_with("http://") || raw.starts_with("https://")
+                    });
+                    if bare && a2a_binding.is_none() && has_locator(&peer, &locator) {
                         if let Some(binding) = peer.a2a_binding {
                             locator.binding = binding;
                         }
@@ -411,7 +421,7 @@ mod tests {
             "did:key:zTwice",
             Err("no live adapter".to_string()),
             || Ok(Some(instance(1))),
-            || Err("DID not found in DIR".to_string()),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
             None,
             None,
             "localhost:8888",
@@ -442,7 +452,7 @@ mod tests {
                 to,
                 Err("no live adapter".to_string()),
                 || Err("ambiguous: 2 running agents match".to_string()),
-                || Err("DID not found in DIR".to_string()),
+                || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
                 url,
                 Some(A2ABinding::HttpJson),
                 "localhost:8888",
@@ -469,7 +479,7 @@ mod tests {
             "did:key:zTwice",
             Err("no live adapter".to_string()),
             || Ok(Some(slim.clone())),
-            || Err("DID not found in DIR".to_string()),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
             Some("slim://node-b:47357"),
             None,
             "localhost:8888",
@@ -484,7 +494,7 @@ mod tests {
             "did:key:zTwice",
             Err("no live adapter".to_string()),
             || Ok(Some(instance(2))),
-            || Err("DID not found in DIR".to_string()),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
             Some("http://127.0.0.1:2"),
             None,
             "localhost:8888",
@@ -492,6 +502,36 @@ mod tests {
         .unwrap();
         assert_eq!(peer.name, "copilot");
         assert_eq!(peer.a2a_binding, Some(A2ABinding::HttpJson));
+    }
+
+    #[test]
+    fn a_failed_directory_lookup_is_reported_not_passed_to_dir_runtime() {
+        let err = resolve_peer_with(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(2))),
+            || Err("dirctl not found in PATH".to_string()),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap_err();
+        assert!(err.contains("dirctl not found"), "{err}");
+    }
+
+    #[test]
+    fn a_scheme_naming_a_binding_is_kept_for_a_peers_own_url() {
+        let peer = resolve_peer_with(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(2))),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
+            Some("jsonrpc://127.0.0.1:2"),
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(peer.a2a_binding, Some(A2ABinding::Jsonrpc));
     }
 
     #[test]

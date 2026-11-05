@@ -401,20 +401,7 @@ pub fn find_running_peer_at(
         0 => Ok(None),
         1 => Ok(matches.into_iter().next()),
         n => {
-            let rows: Vec<String> = matches
-                .iter()
-                .map(|c| {
-                    format!(
-                        "  {}  {}  {}",
-                        c.name,
-                        c.did,
-                        c.a2a_url
-                            .as_deref()
-                            .or(c.slim_endpoint.as_deref())
-                            .unwrap_or("-")
-                    )
-                })
-                .collect();
+            let rows: Vec<String> = matches.iter().map(instance_row).collect();
             let hint = if did.is_some() {
                 "Pass --a2a-url with one of these URLs to pick an instance"
             } else {
@@ -427,6 +414,17 @@ pub fn find_running_peer_at(
             ))
         }
     }
+}
+
+/// One instance in an ambiguity error, with the locator `--a2a-url` takes to
+/// pick it (`slim://node:47357` for a SLIM-only one).
+fn instance_row(c: &CandidateMember) -> String {
+    let locator = c
+        .a2a_url
+        .clone()
+        .or_else(|| c.slim_locator().map(|l| l.url))
+        .unwrap_or_else(|| "-".to_string());
+    format!("  {}  {}  {locator}", c.name, c.did)
 }
 
 /// Whether `candidate` is reachable at `at`: the same SLIM node, or the same
@@ -662,10 +660,19 @@ pub fn resolve_adapter_peer(
         .find(|c| c.did == did)
         .ok_or_else(|| {
             format!(
-                "DID {did} was not found locally or in the Agent Directory. \
+                "DID {did} {NOT_IN_DIRECTORY}. \
                  Re-register the adapter (new URL, same DID) or pass --a2a-url"
             )
         })
+}
+
+const NOT_IN_DIRECTORY: &str = "was not found locally or in the Agent Directory";
+
+/// Whether [`resolve_adapter_peer`]'s error says the Directory answered and has
+/// no record for the DID, as opposed to the lookup failing (no `dirctl`, the
+/// gateway down, auth).
+pub fn not_in_directory(err: &str) -> bool {
+    err.contains(NOT_IN_DIRECTORY)
 }
 
 /// Resolve a portable name (DID, tool name, or SLIM channel) to locators.
@@ -1170,6 +1177,21 @@ mod tests {
         assert_eq!(locators[0].binding, A2ABinding::Slim);
         assert_eq!(locators[0].display_uri(), "slim://127.0.0.1:47357");
         assert_eq!(peer.preferred_locator(), Some(locators[0].clone()));
+    }
+
+    #[test]
+    fn an_ambiguous_slim_instance_is_listed_with_its_slim_locator() {
+        let slim = CandidateMember {
+            name: "codex".to_string(),
+            did: "did:key:zCodex".to_string(),
+            slim_endpoint: Some("https://node-a:47357".to_string()),
+            a2a_url: None,
+            a2a_binding: None,
+        };
+        let row = instance_row(&slim);
+        assert!(row.ends_with("slim://node-a:47357"), "{row}");
+        let at = A2ALocator::parse("slim://node-a:47357").unwrap();
+        assert!(has_locator(&slim, &at), "the listed locator picks it");
     }
 
     #[test]
