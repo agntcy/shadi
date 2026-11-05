@@ -165,6 +165,6 @@ To try the public schema's classes offline, pass `--skip-oasf-validation` rather
 ## Notes
 
 - Everything listed is a claim made by whoever started the workload; nothing is verified yet (agntcy/dir-runtime#94).
-- The card names no author yet, so `dirctl runtime list --author` finds no agentbridge agents; the author comes with card signatures (#482).
-- Skill names are OASF 1.1.0 classes. An agent advertises only the skills it is given with `--skill`; without one it has no `discovery` extension and isn't found by skill.
+- Without `--record` the card names no author, so `dirctl runtime list --author` finds no such agent; with `--record` the author is the record's. An author of the agent itself comes with card signatures (#482).
+- Skill names are OASF 1.1.0 classes. An agent advertises the skills it is given with `--skill`, plus a `--record`'s skills when the record uses the card's OASF version; without either it has no `discovery` extension and isn't found by skill.
 - The card carries no DID yet; a container's agent DID is in its local lease, which `docker exec <container> agentbridge list --local` prints.

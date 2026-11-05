@@ -182,7 +182,7 @@ target/debug/shadictl --net-block \
 ```text
 [agentbridge] running DIR record code-review 1.0.0 (baeareigguj5x…) from localhost:8888; signature: unsigned
 [agentbridge] 'code-review' resolved to baeareigguj5x…; pass --record baeareigguj5x… to run exactly this record
-[agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/fake-harness-isolated-21162/skills/code-review
+[agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/fake-harness-isolated-21162-Xp3kQ9/skills/code-review
 Registered fake-harness-isolated adapter from profile (agent id: fake-harness-isolated, dir: …)
 [agentbridge] announced to dir-runtime as fake-harness-isolated-<DID suffix>-21162 (…/workloads.d/fake-harness-isolated-<DID suffix>-21162.json)
 Starting A2A HTTP+JSON listener on 127.0.0.1:19960 ...
@@ -197,15 +197,19 @@ What happened before the listener started:
    doesn't verify stops `register`. A valid signature only shows that
    *someone* signed the record, so it is logged as "identity not checked"
    unless you name the signer with `--record-oidc-issuer` and
-   `--record-oidc-subject` (patterns, as `dirctl verify` takes them): then
-   only a record signed by that identity runs. A name resolves to the
+   `--record-oidc-subject` (matched exactly): then only a record signed by
+   that identity runs. The record `pull` returns must also be the CID's: its
+   CID is recomputed and compared. A name resolves to the
    highest version; pin the CID it prints to run exactly that record.
 2. Every agent skill in the record (its `core/language_model/agentskills`
    modules) was written into a fresh configuration directory for this run.
    The harness's profile points it there (`isolation` and `provision.skills`
    in `examples/agentbridge-container/profiles/fake-harness-isolated.json`), so it
    doesn't see your own skills or settings. The directory is removed when
-   `register` stops.
+   `register` stops by itself: on SIGTERM to `agentbridge`, or on an error.
+   Ctrl-C at `shadictl` kills `agentbridge` outright (SIGKILL), which leaves
+   the directory under `$SHADI_TMP_DIR/agentbridge-record`; stop it with
+   `kill <agentbridge PID>` instead, or remove that run's directory after.
 3. The card was built with the record's version, skills and domains, and
    checked against the OASF schema server.
 4. `--dir-announce` wrote a process descriptor for runtime discovery, labelled
@@ -312,8 +316,10 @@ itself, so `delegate` marks it as unverified
 Press **Ctrl-C** in Terminal R: after the next scan, `dirctl runtime list` no
 longer shows the agent. Ctrl-C reaches `shadictl`, which kills `agentbridge`
 outright, so the descriptor is left behind until `dirctl daemon` sees the
-process is gone and removes it. SIGTERM sent to `agentbridge` itself
-withdraws the announcement at once, with no scan to wait for.
+process is gone and removes it, and the run's configuration directory under
+`$SHADI_TMP_DIR/agentbridge-record` stays too. SIGTERM sent to `agentbridge`
+itself (`kill <agentbridge PID>`) withdraws the announcement at once and
+removes that directory.
 
 ## 6. With a real harness
 
@@ -350,8 +356,8 @@ login, so give it a credential it reads from its environment:
 | --- | --- | --- | --- |
 | `claude-code-isolated` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `api.anthropic.com:443` |
 | `codex-isolated` | [Codex CLI](https://github.com/openai/codex) (`codex`) | `CODEX_API_KEY` | `api.openai.com:443` |
-| `goose-isolated` | [goose](https://goose-docs.ai/) (`brew install block-goose-cli`) | `GOOSE_PROVIDER` and `GOOSE_MODEL` (passed as `--provider` / `--model`) and that provider's key, e.g. `ANTHROPIC_API_KEY` | The provider's API, e.g. `api.anthropic.com:443` |
-| `opencode-isolated` | [opencode](https://opencode.ai) (`brew install opencode`) | The provider's key, e.g. `ANTHROPIC_API_KEY`; the model via `OPENCODE_ARGS="--model anthropic/<model>"` | The provider's API, plus `models.dev:443` |
+| `goose-isolated` | [goose](https://goose-docs.ai/) (`brew install block-goose-cli`) | `GOOSE_PROVIDER` and `GOOSE_MODEL` (passed as `--provider` / `--model`) and that provider's key: one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (with `OPENAI_HOST`, `OPENAI_BASE_PATH`), `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` | The provider's API, e.g. `api.anthropic.com:443` |
+| `opencode-isolated` | [opencode](https://opencode.ai) (`brew install opencode`) | The provider's key: one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`; the model via `OPENCODE_ARGS="--model anthropic/<model>"` | The provider's API, plus `models.dev:443` |
 
 !!! warning "opencode doesn't run inside the SHADI sandbox yet"
     opencode 2.x starts a local server on a random port for every run, and
@@ -546,7 +552,7 @@ step 3 unless noted.
 | `dirctl` blocked by the sandbox | Step 3 without `--read ~/.dir --read ~/.config/dirctl` | `dirctl info code-review failed: panic: mkdir …/.dir: file exists`, with the flags to add |
 | `dirctl` under `/tmp` | `SHADI_DIRCTL_BINARY=/tmp/dirctl …` | `could not run dirctl (/tmp/dirctl): Operation not permitted …` |
 | A record without an agent skill | An A2A-card record (`dirctl import --type=a2a`) as `--record` | `record '…' has no agent skill (core/language_model/agentskills module); only agent-skill records can be run` |
-| `$SHADI_TMP_DIR` not allowed | Step 3 without `--allow "$SHADI_TMP_DIR"` | `could not create …/agentbridge-record/fake-harness-isolated-<pid>: Operation not permitted. Under shadictl, allow it with --allow …` |
+| `$SHADI_TMP_DIR` not allowed | Step 3 without `--allow "$SHADI_TMP_DIR"` | `could not create …/agentbridge-record: Operation not permitted … Under shadictl, allow its parent with --allow` |
 | A harness that isn't isolated | `register --tool claude-code … --record code-review …` | Starts, with `warning: profile 'claude-code' isn't isolated. The harness also reads your own configuration …`; the skill goes into `<workdir>/.claude/skills` |
 | A harness with nowhere to put skills | `register --tool copilot … --record code-review …` | `profile 'copilot' can't run a DIR record: it has no provision.skills section, so there is nowhere to put the record's skills` |
 | A record in another OASF version | A record imported with `schema_version: "1.0.0"` | Starts, but `warning: record … uses OASF 1.0.0, the card OASF 1.1.0; its skills and domains are not advertised` |
