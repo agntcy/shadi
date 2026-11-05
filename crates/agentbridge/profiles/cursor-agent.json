@@ -19,6 +19,7 @@
   "workdir_flags_on_inject": true,
   "current_dir_workdir": true,
   "system_flag": "--system-prompt",
+  "provision": { "skills": { "dir": "{workdir}/.cursor/skills" } },
   "execute": {
     "args": [
       "--print",

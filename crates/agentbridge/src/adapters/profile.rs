@@ -877,8 +877,8 @@ mod tests {
             ("codex", false, Some("/w/.agents/skills")),
             ("goose", false, Some("/w/.goose/skills")),
             ("opencode", false, Some("/w/.opencode/skills")),
-            ("copilot", false, None),
-            ("cursor-agent", false, None),
+            ("copilot", false, Some("/w/.github/skills")),
+            ("cursor-agent", false, Some("/w/.cursor/skills")),
         ] {
             let profile = load_bundled(id);
             assert_eq!(profile.is_isolated(), isolated, "{id}");
