@@ -101,7 +101,7 @@ pub struct RecordOptions {
 }
 
 /// The identity a record must be signed by (`dirctl verify --oidc-issuer
-/// --oidc-subject`; both are patterns dirctl matches).
+/// --oidc-subject`), matched exactly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signer {
     pub issuer: String,
@@ -199,6 +199,14 @@ fn provision(
     let cid = resolve_cid(reference, server)?;
     let signature = check_signature(&cid, server, signer)?;
     let record = pull(&cid, server)?;
+    // The signature is on the CID: the body must be that CID's, or a hostile
+    // server could pair a signed CID with another record.
+    let actual = record_cid(&record);
+    if actual != cid {
+        anyhow::bail!(
+            "the record {server} returned for {cid} is another record ({actual}); not running it"
+        );
+    }
     let modules = skill_modules(&record)?;
     let source = source_record(&cid, &record);
 
@@ -549,6 +557,116 @@ fn is_cid(cid: &str) -> bool {
     (8..=128).contains(&cid.len()) && cid.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
+/// The CID Directory gives `record`: CIDv1 (codec 1) of the SHA-256 of its
+/// canonical JSON, as Go's `encoding/json` writes it (`Record.GetCid` in
+/// agntcy/dir `api/core/v1`).
+fn record_cid(record: &Value) -> String {
+    use sha2::Digest;
+    let mut canonical = String::new();
+    write_go_json(record, &mut canonical);
+    let digest = sha2::Sha256::digest(canonical.as_bytes());
+    // version 1, codec 1, multihash sha2-256 (0x12) of 32 bytes.
+    let mut bytes = vec![0x01, 0x01, 0x12, 0x20];
+    bytes.extend_from_slice(&digest);
+    format!("b{}", base32_lower(&bytes))
+}
+
+/// `value` as Go's `json.Marshal` of a decoded JSON value writes it: map keys
+/// sorted, no spaces, `<`, `>`, `&`, U+2028 and U+2029 escaped, and numbers
+/// as float64.
+fn write_go_json(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&go_number(n)),
+        Value::String(s) => write_go_string(s, out),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_go_json(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_go_string(key, out);
+                out.push(':');
+                write_go_json(&map[key], out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn write_go_string(s: &str, out: &mut String) {
+    use std::fmt::Write;
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '<' | '>' | '&' | '\u{2028}' | '\u{2029}' => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// A number as Go writes a float64: plain digits from 1e-6 up to 1e21, an
+/// exponent (`1e+21`, `1e-7`) outside that.
+fn go_number(n: &serde_json::Number) -> String {
+    let Some(f) = n.as_f64() else {
+        return n.to_string();
+    };
+    let abs = f.abs();
+    if f == 0.0 || (1e-6..1e21).contains(&abs) {
+        return format!("{f}");
+    }
+    let e = format!("{f:e}");
+    match e.split_once('e') {
+        Some((mantissa, exp)) if !exp.starts_with('-') => format!("{mantissa}e+{exp}"),
+        _ => e,
+    }
+}
+
+/// RFC 4648 base32, lowercase, without padding (multibase `b`).
+fn base32_lower(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::new();
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 31) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
 fn pull(cid: &str, server: &str) -> anyhow::Result<Value> {
     dirctl_json(&["pull", cid], server)
 }
@@ -559,10 +677,13 @@ fn pull(cid: &str, server: &str) -> anyhow::Result<Value> {
 /// signed the record, which the label says; with it, the signature must be
 /// that identity's.
 fn check_signature(cid: &str, server: &str, signer: Option<&Signer>) -> anyhow::Result<String> {
+    // dirctl matches a value that compiles as a regex as an unanchored one, so
+    // `alice@example.com` alone would accept `malice@example.com`.
+    let pinned = signer.map(|s| (exact_pattern(&s.issuer), exact_pattern(&s.subject)));
     let mut flags = Vec::new();
-    if let Some(signer) = signer {
-        flags.extend(["--oidc-issuer", signer.issuer.as_str()]);
-        flags.extend(["--oidc-subject", signer.subject.as_str()]);
+    if let Some((issuer, subject)) = &pinned {
+        flags.extend(["--oidc-issuer", issuer.as_str()]);
+        flags.extend(["--oidc-subject", subject.as_str()]);
     }
     let value = match dirctl_json_with(&["verify", cid], &flags, server) {
         Ok(value) => value,
@@ -576,15 +697,23 @@ fn check_signature(cid: &str, server: &str, signer: Option<&Signer>) -> anyhow::
     describe_verification(&value, signer).map_err(|e| anyhow::anyhow!("record {cid}: {e}"))
 }
 
+/// `value` as a Go regex that matches only itself (`^…$` around
+/// `regexp.QuoteMeta`).
+fn exact_pattern(value: &str) -> String {
+    let mut out = String::from("^");
+    for c in value.chars() {
+        if "\\.+*?()|[]{}^$".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('$');
+    out
+}
+
 fn describe_verification(value: &Value, signer: Option<&Signer>) -> Result<String, String> {
     if value.get("success").and_then(Value::as_bool) == Some(true) {
-        if let Some(signer) = signer {
-            return Ok(format!(
-                "verified, signed by issuer {} subject {}",
-                printable(&signer.issuer),
-                printable(&signer.subject)
-            ));
-        }
+        // Who signed, as dirctl reports it, not the pin it was checked against.
         let signers: Vec<String> = value
             .get("signers")
             .and_then(Value::as_array)
@@ -595,6 +724,9 @@ fn describe_verification(value: &Value, signer: Option<&Signer>) -> Result<Strin
         } else {
             signers.join(", ")
         };
+        if signer.is_some() {
+            return Ok(format!("verified, signed by {by}, the pinned signer"));
+        }
         return Ok(format!(
             "signed by {by} (identity not checked; pin it with --record-oidc-issuer and \
              --record-oidc-subject)"
@@ -1028,9 +1160,9 @@ mod tests {
             [
                 "verify",
                 "--oidc-issuer",
-                "https://issuer",
+                "^https://issuer$",
                 "--oidc-subject",
-                "me@example.com",
+                "^me@example\\.com$",
                 "--server-addr",
                 "localhost:1",
                 "--output",
@@ -1087,8 +1219,9 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafytestcid\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"errorMessage\":\"no signatures found\"}}' ;;\nesac\n",
-                bin.path().join("record.json").display()
+                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"{cid}\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"errorMessage\":\"no signatures found\"}}' ;;\nesac\n",
+                bin.path().join("record.json").display(),
+                cid = record_cid(&record),
             ),
         )
         .unwrap();
@@ -1120,7 +1253,7 @@ mod tests {
             CREATED.lock().unwrap().contains(&root.path().to_path_buf()),
             "an isolated run removes its root"
         );
-        assert_eq!(source.cid, "bafytestcid");
+        assert_eq!(source.cid, record_cid(&record));
         assert_eq!(
             source.skills,
             vec!["software_engineering/code_debugging/error_handling"]
@@ -1451,8 +1584,9 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafytestcid\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"errorMessage\":\"no signatures found\"}}' ;;\nesac\n",
-                bin.path().join("record.json").display()
+                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"{cid}\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"errorMessage\":\"no signatures found\"}}' ;;\nesac\n",
+                bin.path().join("record.json").display(),
+                cid = record_cid(&record),
             ),
         )
         .unwrap();
@@ -1497,7 +1631,7 @@ mod tests {
         assert!(none.is_none());
         assert!(no_profile.is_err());
         let source = source.unwrap().unwrap();
-        assert_eq!(source.cid, "bafytestcid");
+        assert!(source.cid.starts_with("baeare"), "{}", source.cid);
         assert_eq!(source.name, "code-review");
         // A plain profile runs without a config root.
         assert!(config_root().is_none());
@@ -1630,5 +1764,78 @@ mod tests {
         std::fs::write(dir.join("stale"), "").unwrap();
         rebuild_dir(&dir).unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_record_cid_matches_directory_s() {
+        // CIDs agntcy/dir's `Record.GetCid` gives these records.
+        let html = json!({
+            "name": "code-review", "version": "1.0.0", "schema_version": "1.1.0",
+            "description": "a <b> & c \u{2028} tab\t", "n": 1, "f": 1.5, "big": 1e21,
+            "authors": ["did:key:z6Mk"], "modules": [{ "name": "x", "data": { "k": "v" } }]
+        });
+        assert_eq!(
+            record_cid(&html),
+            "baeareiaetbctpuekrps3lz23oqqwvkq4xwy3qtiwkpgj672cjcn4b3uyv4"
+        );
+        let escapes = json!({
+            "name": "x", "schema_version": "1.1.0", "s": "b\u{8}f\u{c}del\u{7f}nul\u{1}",
+            "neg": -0.0000001, "z": 0, "i": 12345678901u64, "half": 0.5
+        });
+        assert_eq!(
+            record_cid(&escapes),
+            "baeareifszojvrlzjniqcirbq6wey5dgla6p3ezyl65tlqqdrsjww425swa"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_that_isnt_the_cids_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = dirctl_env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let record = json!({
+            "name": "code-review", "version": "1.0.0", "schema_version": "1.1.0",
+            "modules": [markdown_module("code-review", "---\nname: code-review\n---\n")]
+        });
+        std::fs::write(bin.path().join("record.json"), record.to_string()).unwrap();
+        let script = bin.path().join("dirctl");
+        // A signed CID, served with another record.
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"cid\":\"bafysignedcid\"}}' ;;\n  pull) cat '{}' ;;\n  verify) echo '{{\"success\":true}}' ;;\nesac\n",
+                bin.path().join("record.json").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile: CliProfile = serde_json::from_str(
+            r#"{"id":"record-test","bin":"true",
+                "isolation":{"env":{"HOME_DIR":"{config_root}"}},
+                "provision":{"skills":{"dir":"{config_root}/skills"}},
+                "execute":{"args":[]}}"#,
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        std::env::set_var("SHADI_DIRCTL_BINARY", &script);
+        let result = provision("code-review", "localhost:1", &profile, Some(root.path()), Path::new("/unused"), None);
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("is another record"), "{err}");
+        assert!(!root.path().join("skills").exists(), "nothing was provisioned");
+        cleanup();
+    }
+
+    #[test]
+    fn a_pinned_signer_is_matched_exactly() {
+        assert_eq!(exact_pattern("alice@example.com"), r"^alice@example\.com$");
+        assert_eq!(
+            exact_pattern("https://token.actions.githubusercontent.com"),
+            r"^https://token\.actions\.githubusercontent\.com$"
+        );
+        assert_eq!(exact_pattern(r"a+b*(c)|[d]{e}^$\"), r"^a\+b\*\(c\)\|\[d\]\{e\}\^\$\\$");
     }
 }
