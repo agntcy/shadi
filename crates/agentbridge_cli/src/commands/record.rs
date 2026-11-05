@@ -239,15 +239,16 @@ fn provision(
                     anyhow::bail!(
                         "{} already exists; not replacing it with the record's skill '{}'",
                         dir.display(),
-                        module.name
+                        printable(&module.name)
                     );
                 }
             }
         }
     }
 
+    let mut budget = MAX_BUNDLE_BYTES;
     for module in &modules {
-        let dir = write_skill(module, &skills_dir)?;
+        let dir = write_skill_within(module, &skills_dir, &mut budget)?;
         eprintln!(
             "[agentbridge] provisioned agent skill '{}' into {}",
             printable(&module.name),
@@ -306,7 +307,11 @@ fn create_parents(dir: &Path) -> std::io::Result<()> {
 pub fn printable(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
-            if c.is_control() {
+            // Control characters, and the format characters `escape_debug`
+            // escapes too (a U+202E bidi override reorders the line).
+            let hidden = c.is_control()
+                || (!matches!(c, '"' | '\'' | '\\') && c.escape_debug().nth(1).is_some());
+            if hidden {
                 c.escape_default().collect::<Vec<_>>()
             } else {
                 vec![c]
@@ -481,11 +486,17 @@ fn dirctl_json_with(args: &[&str], flags: &[&str], server: &str) -> anyhow::Resu
         .args(flags)
         .args(["--server-addr", server, "--output", "json", "--"])
         .args(operands);
-    // dirctl needs none of SHADI's or SLIM's settings, seeds included.
+    // dirctl needs none of SHADI's or SLIM's settings, seeds included, nor
+    // SHADI's other secrets; only the DIR token is its own.
     for (key, _) in std::env::vars_os() {
         let key_str = key.to_string_lossy();
         if key_str.starts_with("SHADI_") || key_str.starts_with("SLIM_") {
             cmd.env_remove(&key);
+        }
+    }
+    for name in agentbridge::subprocess::WITHHELD_FROM_HARNESS {
+        if *name != "DIRECTORY_CLIENT_GITHUB_TOKEN" {
+            cmd.env_remove(name);
         }
     }
     let output = cmd
@@ -828,7 +839,29 @@ fn skill_modules(record: &Value) -> anyhow::Result<Vec<SkillModule>> {
 /// Write one skill to `<skills_dir>/<name>/`, which must not exist yet (another
 /// registration's skill, or a module whose name sanitizes the same); returns
 /// that directory.
+#[cfg(test)]
 fn write_skill(module: &SkillModule, skills_dir: &Path) -> anyhow::Result<PathBuf> {
+    let mut budget = MAX_BUNDLE_BYTES;
+    write_skill_within(module, skills_dir, &mut budget)
+}
+
+/// [`write_skill`], taking what it writes from `budget`: the bytes all of a
+/// record's skills may take together, so many modules can't add up to more.
+fn write_skill_within(
+    module: &SkillModule,
+    skills_dir: &Path,
+    budget: &mut u64,
+) -> anyhow::Result<PathBuf> {
+    let name = printable(&module.name);
+    if module.media_type == MEDIA_TYPE_MARKDOWN {
+        let size = module.data.len() as u64;
+        if size > *budget {
+            anyhow::bail!(
+                "agent skill '{name}' takes the record's skills past {MAX_BUNDLE_BYTES} bytes"
+            );
+        }
+        *budget -= size;
+    }
     let dir = skills_dir.join(sanitize(&module.name));
     create_parents(skills_dir)
         .map_err(|e| anyhow::anyhow!("could not create {}: {e}", skills_dir.display()))?;
@@ -837,46 +870,48 @@ fn write_skill(module: &SkillModule, skills_dir: &Path) -> anyhow::Result<PathBu
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(
             "{} already exists; not replacing it with the record's skill '{}'",
             dir.display(),
-            module.name
+            printable(&module.name)
         ),
         Err(e) => anyhow::bail!("could not create {}: {e}", dir.display()),
     }
 
     match module.media_type.as_str() {
         MEDIA_TYPE_MARKDOWN => std::fs::write(dir.join("SKILL.md"), &module.data)
-            .map_err(|e| anyhow::anyhow!("could not write SKILL.md for '{}': {e}", module.name))?,
-        MEDIA_TYPE_BUNDLE => unpack_bundle(&module.data, &dir)
-            .map_err(|e| anyhow::anyhow!("could not unpack skill bundle '{}': {e}", module.name))?,
+            .map_err(|e| anyhow::anyhow!("could not write SKILL.md for '{name}': {e}"))?,
+        MEDIA_TYPE_BUNDLE => *budget -= unpack_bundle(&module.data, &dir, *budget)
+            .map_err(|e| anyhow::anyhow!("could not unpack skill bundle '{name}': {e}"))?,
         other => anyhow::bail!(
-            "agent skill '{}' has an unknown artifact type '{other}'",
-            module.name
+            "agent skill '{name}' has an unknown artifact type '{}'",
+            printable(other)
         ),
     }
 
     if !dir.join("SKILL.md").is_file() {
-        anyhow::bail!("agent skill '{}' has no SKILL.md", module.name);
+        anyhow::bail!("agent skill '{name}' has no SKILL.md");
     }
 
     Ok(dir)
 }
 
-/// Most a bundle may unpack to, and how many entries it may have: a skill is
-/// a few files, and a small gzip can expand to fill the disk.
+/// Most a record's skills may take together (a bundle unpacked, or a
+/// SKILL.md), and how many entries a bundle may have: a skill is a few files,
+/// and a small gzip, or many modules, can fill the disk.
 const MAX_BUNDLE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_BUNDLE_ENTRIES: usize = 1000;
 
 /// Unpack a gzip-compressed tar of the skill folder into `dir`. Only regular
 /// files and directories are taken, each inside `dir` (no absolute paths, no
 /// `..`), within [`MAX_BUNDLE_BYTES`] and [`MAX_BUNDLE_ENTRIES`].
-fn unpack_bundle(archive: &[u8], dir: &Path) -> std::io::Result<()> {
+/// Returns the bundle's unpacked size, which must be within `limit`.
+fn unpack_bundle(archive: &[u8], dir: &Path, limit: u64) -> std::io::Result<u64> {
     let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     // One byte over the limit tells an oversize bundle from one that fits.
-    let decoder = flate2::read::GzDecoder::new(archive).take(MAX_BUNDLE_BYTES + 1);
+    let decoder = flate2::read::GzDecoder::new(archive).take(limit + 1);
     let mut tar_bytes = Vec::new();
     std::io::BufReader::new(decoder).read_to_end(&mut tar_bytes)?;
-    if tar_bytes.len() as u64 > MAX_BUNDLE_BYTES {
+    if tar_bytes.len() as u64 > limit {
         return Err(invalid(format!(
-            "bundle unpacks to more than {MAX_BUNDLE_BYTES} bytes"
+            "bundle unpacks to more than the {limit} bytes left of the record's {MAX_BUNDLE_BYTES}"
         )));
     }
 
@@ -912,8 +947,17 @@ fn unpack_bundle(archive: &[u8], dir: &Path) -> std::io::Result<()> {
                 path.display()
             )));
         }
+        // A directory the owner can't write to would keep its files, and
+        // the config root, from being removed.
+        #[cfg(unix)]
+        if kind.is_dir() {
+            use std::os::unix::fs::PermissionsExt;
+            let unpacked = dir.join(&path);
+            let mode = std::fs::metadata(&unpacked)?.permissions().mode();
+            std::fs::set_permissions(&unpacked, std::fs::Permissions::from_mode(mode | 0o700))?;
+        }
     }
-    Ok(())
+    Ok(tar_bytes.len() as u64)
 }
 
 /// A directory name from a skill or tool name.
@@ -1417,7 +1461,7 @@ mod tests {
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let err = unpack_bundle(&raw_bundle(&entries), dir.path())
+            let err = unpack_bundle(&raw_bundle(&entries), dir.path(), MAX_BUNDLE_BYTES)
                 .expect_err(what)
                 .to_string();
             assert!(
@@ -1432,14 +1476,14 @@ mod tests {
     fn an_oversize_or_crowded_bundle_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let big = "x".repeat(MAX_BUNDLE_BYTES as usize + 1);
-        let err = unpack_bundle(&bundle(&[("SKILL.md", big.as_str())]), dir.path())
+        let err = unpack_bundle(&bundle(&[("SKILL.md", big.as_str())]), dir.path(), MAX_BUNDLE_BYTES)
             .unwrap_err()
             .to_string();
         assert!(err.contains("more than"), "{err}");
 
         let names: Vec<String> = (0..=MAX_BUNDLE_ENTRIES).map(|i| format!("f{i}")).collect();
         let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "")).collect();
-        let err = unpack_bundle(&bundle(&files), dir.path())
+        let err = unpack_bundle(&bundle(&files), dir.path(), MAX_BUNDLE_BYTES)
             .unwrap_err()
             .to_string();
         assert!(err.contains("entries"), "{err}");
@@ -1538,7 +1582,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{log}'\nenv | grep -c '^SLIM_HUMAN_SEED=' >> '{log}'\necho '{{}}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{log}'\nenv | grep -c '^SLIM_HUMAN_SEED=\\|^OP_SERVICE_ACCOUNT_TOKEN=\\|^A2A_TLS_KEY=' >> '{log}'\necho '{{}}'\n",
                 log = log.display()
             ),
         )
@@ -1546,10 +1590,14 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("SHADI_DIRCTL_BINARY", &script);
         std::env::set_var("SLIM_HUMAN_SEED", "secret-seed");
+        std::env::set_var("OP_SERVICE_ACCOUNT_TOKEN", "ops-token");
+        std::env::set_var("A2A_TLS_KEY", "/keys/a2a.key");
 
         let result = pull("bafytestcid", "localhost:1");
 
-        std::env::remove_var("SLIM_HUMAN_SEED");
+        for name in ["SLIM_HUMAN_SEED", "OP_SERVICE_ACCOUNT_TOKEN", "A2A_TLS_KEY"] {
+            std::env::remove_var(name);
+        }
         std::env::remove_var("SHADI_DIRCTL_BINARY");
         result.unwrap();
         let lines: Vec<String> = std::fs::read_to_string(&log)
@@ -1560,7 +1608,7 @@ mod tests {
         assert_eq!(
             lines,
             ["pull", "--server-addr", "localhost:1", "--output", "json", "--", "bafytestcid", "0"],
-            "the last line counts SLIM_HUMAN_SEED in dirctl's environment"
+            "the last line counts SHADI's secrets in dirctl's environment"
         );
     }
 
@@ -1837,5 +1885,73 @@ mod tests {
             r"^https://token\.actions\.githubusercontent\.com$"
         );
         assert_eq!(exact_pattern(r"a+b*(c)|[d]{e}^$\"), r"^a\+b\*\(c\)\|\[d\]\{e\}\^\$\\$");
+    }
+
+    #[test]
+    fn format_characters_are_escaped_for_the_log() {
+        assert_eq!(printable("evil\u{202e}txt.md"), "evil\\u{202e}txt.md");
+        assert_eq!(printable("zero\u{200b}width"), "zero\\u{200b}width");
+        assert_eq!(printable(r#"plain "quoted" 'text' \ ok"#), r#"plain "quoted" 'text' \ ok"#);
+    }
+
+    #[test]
+    fn a_records_skills_share_one_size_budget() {
+        let _guard = dirctl_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let half = "x".repeat(MAX_BUNDLE_BYTES as usize / 2 + 1);
+        let module = |name: &str| SkillModule {
+            name: name.into(),
+            media_type: MEDIA_TYPE_BUNDLE.into(),
+            data: bundle(&[("SKILL.md", half.as_str())]),
+        };
+        let mut budget = MAX_BUNDLE_BYTES;
+
+        write_skill_within(&module("one"), dir.path(), &mut budget).unwrap();
+        let err = write_skill_within(&module("two"), dir.path(), &mut budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bytes left"), "{err}");
+
+        let markdown = SkillModule {
+            name: "three".into(),
+            media_type: MEDIA_TYPE_MARKDOWN.into(),
+            data: half.clone().into_bytes(),
+        };
+        let err = write_skill_within(&markdown, dir.path(), &mut budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("past"), "{err}");
+        cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_directory_in_a_bundle_stays_removable() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut file = tar::Header::new_gnu();
+        file.set_size(4);
+        file.set_mode(0o644);
+        file.set_cksum();
+        builder.append_data(&mut file, "docs/a.md", &b"text"[..]).unwrap();
+        let mut dir_header = tar::Header::new_gnu();
+        dir_header.set_entry_type(tar::EntryType::Directory);
+        dir_header.set_size(0);
+        dir_header.set_mode(0o555);
+        dir_header.set_cksum();
+        builder.append_data(&mut dir_header, "docs/", &b""[..]).unwrap();
+        let tar_bytes = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar_bytes).unwrap();
+        let archive = gz.finish().unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let skill = root.path().join("skill");
+        std::fs::create_dir(&skill).unwrap();
+        unpack_bundle(&archive, &skill, MAX_BUNDLE_BYTES).unwrap();
+
+        let mode = std::fs::metadata(skill.join("docs")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o700, 0o700, "{mode:o}");
+        std::fs::remove_dir_all(&skill).unwrap();
     }
 }

@@ -464,11 +464,14 @@ fn main() {
             record_oidc_issuer,
             record_oidc_subject,
         } => {
-            // Both serve or announce a listener, so they need one.
+            // All three serve or announce a listener, so they need one; a
+            // --record without one would be provisioned and removed at once.
             let needs_listener = slim_endpoint.is_none()
                 && a2a_listen.is_none()
-                && (dir_announce || card_listen.is_some());
-            let listener_flag = if dir_announce {
+                && (dir_announce || card_listen.is_some() || record.is_some());
+            let listener_flag = if record.is_some() {
+                "--record"
+            } else if dir_announce {
                 "--dir-announce"
             } else {
                 "--card-listen"
