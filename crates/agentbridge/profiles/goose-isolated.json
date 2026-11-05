@@ -1,6 +1,7 @@
 {
   "id": "goose-isolated",
   "bin": "goose",
+  "require_sandbox": true,
   "pin_tmpdir": true,
   "env": {
     "TMPDIR": "{tmpdir}",

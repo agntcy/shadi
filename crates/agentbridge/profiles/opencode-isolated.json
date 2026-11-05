@@ -1,6 +1,7 @@
 {
   "id": "opencode-isolated",
   "bin": "opencode",
+  "require_sandbox": true,
   "pass_env": [
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY",
     "OPENROUTER_API_KEY", "GROQ_API_KEY"

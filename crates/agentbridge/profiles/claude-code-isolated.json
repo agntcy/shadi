@@ -1,6 +1,7 @@
 {
   "id": "claude-code-isolated",
   "bin": "claude",
+  "require_sandbox": true,
   "pass_env": [
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"

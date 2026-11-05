@@ -111,7 +111,8 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 `copilot-isolated` / `cursor-agent-isolated` / `goose-isolated` / `opencode-isolated`
 (the same harnesses started with a fresh
 `HOME` and configuration per run, so they read none of your own skills or
-settings, for `--record`).
+settings, for `--record`). They only run under `shadictl --net-block`, where
+`opencode-isolated` can't run yet (shadi#496).
 
 ### `list` — discover registered adapters
 

@@ -162,8 +162,9 @@ pub struct CliProfile {
     /// Copy every host env var whose name ends with one of these suffixes.
     #[serde(default)]
     pub pass_env_suffixes: Vec<String>,
-    /// Refuse to run outside an enforced SHADI sandbox (e.g. a harness run
-    /// without its own approvals or sandbox).
+    /// Refuse to run outside an enforced SHADI sandbox: a harness run without
+    /// its own approvals or sandbox, and every isolated profile, which runs a
+    /// DIR record's skills.
     #[serde(default)]
     pub require_sandbox: bool,
     #[serde(default)]
@@ -431,8 +432,8 @@ impl ProfileAdapter {
 
         if self.profile.require_sandbox && !shadi_sandbox::sandbox_enforced() {
             return Err(CliAdapterError::Subprocess(format!(
-                "profile '{}' runs {} without its own approvals or sandbox, so it only runs \
-                 under the SHADI sandbox (shadictl --net-block)",
+                "profile '{}' ({}) only runs under the SHADI sandbox (shadictl --net-block): \
+                 it runs without its own approvals or sandbox, or runs a DIR record's skills",
                 self.profile.id, self.profile.bin
             )));
         }
@@ -959,6 +960,18 @@ mod tests {
                          of the work dir"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_isolated_profiles_require_the_sandbox() {
+        // They run a DIR record's skills; a fresh HOME keeps out the user's
+        // configuration, not the rest of the host.
+        for id in bundled_profile_ids() {
+            let p = load_bundled(id);
+            if p.is_isolated() {
+                assert!(p.require_sandbox, "{id} should set require_sandbox");
             }
         }
     }

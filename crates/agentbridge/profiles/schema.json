@@ -62,7 +62,7 @@
     "require_sandbox": {
       "type": "boolean",
       "default": false,
-      "description": "Refuse to run outside an enforced SHADI sandbox (e.g. a harness run without its own approvals or sandbox)."
+      "description": "Refuse to run outside an enforced SHADI sandbox: a harness run without its own approvals or sandbox, and every isolated profile, which runs a DIR record's skills."
     },
     "isolation": {
       "type": "object",
