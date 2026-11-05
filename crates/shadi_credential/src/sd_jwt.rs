@@ -10,11 +10,16 @@
 //! store".
 //!
 //! The one binding that is checked: every disclosure must be committed to by
-//! a digest in the issuer JWT (or in another disclosure). A disclosure the
-//! issuer never committed to would read as an issuer claim to anyone who
-//! pulls the credential out of the vault, so it is refused here rather than
-//! left to each caller. Only `sha-256` digests can be checked; any other
-//! `_sd_alg` is refused.
+//! a digest in the issuer JWT's top-level `_sd`, or by a `{"...": digest}`
+//! array-element marker. A disclosure the issuer never committed to would read
+//! as an issuer claim to anyone who pulls the credential out of the vault, so
+//! it is refused here rather than left to each caller. Only `sha-256` digests
+//! can be checked; any other `_sd_alg` is refused.
+//!
+//! Recursive and nested selective disclosure are not supported, so every named
+//! disclosure that survives parsing is a top-level claim, and a claim name
+//! occurs at most once. That is what makes matching by name sound for both the
+//! holder and the verifier.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -116,29 +121,40 @@ pub fn parse_sd_jwt(raw: &str) -> Result<ParsedCredential, CredentialError> {
     // everything else here, so `typ` is the only thing that says this is an
     // SD-JWT VC the vault can read back.
     let header = decode_json(issuer_jwt[0], "the issuer JWT header")?;
-    let format = required_str(&header, "typ")?;
+    check_issuer_format(&header)?;
+    let payload = decode_json(issuer_jwt[1], "the issuer JWT payload")?;
+    read_credential(&payload, &parts[1..parts.len() - 1])
+}
+
+fn check_issuer_format(header: &Value) -> Result<(), CredentialError> {
+    let format = required_str(header, "typ")?;
     if format != SD_JWT_FORMAT {
         return Err(CredentialError::Malformed(format!(
             "the issuer JWT `typ` is {format}, expected {SD_JWT_FORMAT}"
         )));
     }
+    Ok(())
+}
 
-    let payload = decode_json(issuer_jwt[1], "the issuer JWT payload")?;
-    let issuer = required_str(&payload, "iss")?;
-    let credential_type = required_str(&payload, "vct")?;
+/// The claims and disclosures shared by the issued and presented paths.
+fn read_credential(
+    payload: &Value,
+    disclosure_parts: &[&str],
+) -> Result<ParsedCredential, CredentialError> {
+    // Shared so a credential imported with an excessive disclosure count
+    // cannot turn every later `dcql::select` over it into unbounded digest
+    // work — `parse_presentation` also checks this, but earlier callers must
+    // not be able to store their way past it.
+    if disclosure_parts.len() > MAX_DISCLOSURES {
+        return Err(CredentialError::Malformed(format!(
+            "more than {MAX_DISCLOSURES} disclosures"
+        )));
+    }
+    let issuer = required_str(payload, "iss")?;
+    let credential_type = required_str(payload, "vct")?;
 
-    let expires_at = match payload.get("exp") {
-        None | Some(Value::Null) => None,
-        // NumericDate may be fractional; floor so it can only expire earlier.
-        Some(value) => Some(
-            value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|f| f.floor() as i64))
-                .ok_or_else(|| {
-                    CredentialError::Malformed("`exp` is not a number of seconds".to_string())
-                })?,
-        ),
-    };
+    // Floored, so a fractional `exp` can only expire earlier.
+    let expires_at = seconds(payload, "exp", f64::floor)?;
 
     let jwk = payload
         .get("cnf")
@@ -149,28 +165,119 @@ pub fn parse_sd_jwt(raw: &str) -> Result<ParsedCredential, CredentialError> {
                     .to_string(),
             )
         })?;
-    let agent_did = did_from_jwk(jwk)?;
+    // The `did:key` is what `find_valid` filters on and what the operator sees.
+    let agent_did = shadi_identity::encode_did_key(&ed25519_from_jwk(jwk, "cnf.jwk")?);
 
-    let disclosures = parts[1..parts.len() - 1]
+    let disclosures = disclosure_parts
         .iter()
         .map(|part| parse_disclosure(part))
         .collect::<Result<Vec<_>, _>>()?;
-    check_committed(&payload, &disclosures)?;
+    check_committed(payload, &disclosures)?;
 
     Ok(ParsedCredential {
         issuer,
         credential_type,
-        format,
+        format: SD_JWT_FORMAT.to_string(),
         agent_did,
         expires_at,
         disclosures,
     })
 }
 
-/// Every disclosure's digest must appear in the issuer payload or in another
-/// disclosure's value. The digests are pooled, so this proves the issuer
-/// committed to each disclosure somewhere, not that it attaches where a reader
-/// will interpret it.
+/// A presentation arrives from the wire, so it is bounded. Framed, one cannot
+/// exceed `VP_MAX_BYTES` (the framing admits a token of at most 8169), so a
+/// larger token can never have arrived that way.
+pub const MAX_PRESENTATION_BYTES: usize = shadi_identity::VP_MAX_BYTES;
+
+/// Far above the claims a credential realistically discloses, far below what
+/// the byte cap alone would let through.
+pub const MAX_DISCLOSURES: usize = 32;
+
+/// One JWT, split once.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Jwt {
+    pub header: Value,
+    pub payload: Value,
+    /// `<header>.<payload>` — exactly the bytes the signature covers.
+    pub signing_input: String,
+    pub signature: Vec<u8>,
+}
+
+/// A presentation read in one pass, nothing verified.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ParsedPresentation {
+    pub credential: ParsedCredential,
+    /// Everything through the final `~`: the bytes `sd_hash` covers.
+    pub sd_hash_input: String,
+    pub issuer_jwt: Jwt,
+    pub key_binding_jwt: Jwt,
+}
+
+fn split_jwt(jwt: &str, what: &str) -> Result<Jwt, CredentialError> {
+    let segments: Vec<&str> = jwt.split('.').collect();
+    let [header, payload, signature] = segments[..] else {
+        return Err(CredentialError::Malformed(format!(
+            "{what} is not three dot-separated segments"
+        )));
+    };
+    Ok(Jwt {
+        header: decode_json(header, &format!("{what} header"))?,
+        payload: decode_json(payload, &format!("{what} payload"))?,
+        signing_input: format!("{header}.{payload}"),
+        signature: decode_segment(signature, &format!("{what} signature"))?,
+    })
+}
+
+/// Split a compact SD-JWT presentation, `<issuer-jwt>~<disclosure>~…~<kb-jwt>`,
+/// in one pass, without verifying any signature, `sd_hash` or expiry.
+pub fn parse_presentation(raw: &str) -> Result<ParsedPresentation, CredentialError> {
+    if raw.len() > MAX_PRESENTATION_BYTES {
+        return Err(CredentialError::Malformed(format!(
+            "the presentation exceeds {MAX_PRESENTATION_BYTES} bytes"
+        )));
+    }
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(CredentialError::Malformed("empty input".to_string()));
+    }
+
+    let parts: Vec<&str> = raw.split('~').collect();
+    let (Some(&kb), true) = (parts.last(), parts.len() > 1) else {
+        return Err(CredentialError::Malformed(
+            "not a presentation: no `~` separator".to_string(),
+        ));
+    };
+    if kb.is_empty() {
+        return Err(CredentialError::Malformed(
+            "this is an issued credential, not a presentation: it carries no key-binding JWT"
+                .to_string(),
+        ));
+    }
+    let disclosure_parts = &parts[1..parts.len() - 1];
+    if disclosure_parts.len() > MAX_DISCLOSURES {
+        return Err(CredentialError::Malformed(format!(
+            "the presentation has more than {MAX_DISCLOSURES} disclosures"
+        )));
+    }
+
+    let key_binding_jwt = split_jwt(kb, "the key-binding JWT")?;
+    let issuer_jwt = split_jwt(parts[0], "the issuer JWT")?;
+    check_issuer_format(&issuer_jwt.header)?;
+    let credential = read_credential(&issuer_jwt.payload, disclosure_parts)?;
+
+    Ok(ParsedPresentation {
+        credential,
+        // The literal prefix of the input, never a re-join of parts.
+        sd_hash_input: raw[..raw.len() - kb.len()].to_string(),
+        issuer_jwt,
+        key_binding_jwt,
+    })
+}
+
+/// Every disclosure's digest must be in the top-level `_sd` or be an
+/// array-element marker, and no claim name may repeat.
 fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), CredentialError> {
     match payload.get("_sd_alg") {
         None => {}
@@ -182,11 +289,20 @@ fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), Cr
         }
     }
 
-    let mut committed = HashSet::new();
-    collect_digests(payload, &mut committed);
-    for d in disclosures {
-        collect_digests(&d.value, &mut committed);
+    let mut names = HashSet::new();
+    for name in disclosures.iter().filter_map(|d| d.name.as_deref()) {
+        if !names.insert(name) {
+            return Err(CredentialError::Malformed(format!(
+                "the claim `{name}` is disclosed more than once"
+            )));
+        }
     }
+
+    let mut committed = HashSet::new();
+    if let Some(Value::Array(items)) = payload.get("_sd") {
+        committed.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+    }
+    collect_markers(payload, &mut committed);
     for d in disclosures {
         if !committed.contains(&URL_SAFE_NO_PAD.encode(Sha256::digest(d.raw.as_bytes()))) {
             let claim = d.name.as_deref().map_or_else(
@@ -201,20 +317,44 @@ fn check_committed(payload: &Value, disclosures: &[Disclosure]) -> Result<(), Cr
     Ok(())
 }
 
-/// Gather `_sd` array entries and `{"...": digest}` array-element markers.
-fn collect_digests(value: &Value, out: &mut HashSet<String>) {
+/// Gather `{"...": digest}` objects that are elements of an array.
+fn collect_markers(value: &Value, out: &mut HashSet<String>) {
     match value {
-        Value::Object(map) => {
-            if let Some(Value::Array(items)) = map.get("_sd") {
-                out.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+        Value::Object(map) => map
+            .iter()
+            .filter(|(k, _)| *k != "_sd")
+            .for_each(|(_, v)| collect_markers(v, out)),
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::Object(m) if m.len() == 1 => {
+                        if let Some(Value::String(d)) = m.get("...") {
+                            out.insert(d.clone());
+                        }
+                    }
+                    _ => collect_markers(item, out),
+                }
             }
-            if let (1, Some(Value::String(digest))) = (map.len(), map.get("...")) {
-                out.insert(digest.clone());
-            }
-            map.values().for_each(|v| collect_digests(v, out));
         }
-        Value::Array(items) => items.iter().for_each(|v| collect_digests(v, out)),
         _ => {}
+    }
+}
+
+/// A NumericDate claim, which may be fractional; `round` picks the safe side.
+pub(crate) fn seconds(
+    payload: &Value,
+    claim: &str,
+    round: fn(f64) -> f64,
+) -> Result<Option<i64>, CredentialError> {
+    match payload.get(claim) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .or_else(|| v.as_f64().map(|f| round(f) as i64))
+            .map(Some)
+            .ok_or_else(|| {
+                CredentialError::Malformed(format!("`{claim}` is not a number of seconds"))
+            }),
     }
 }
 
@@ -226,27 +366,25 @@ fn required_str(value: &Value, claim: &str) -> Result<String, CredentialError> {
         .ok_or_else(|| CredentialError::Malformed(format!("no `{claim}` claim")))
 }
 
-/// `cnf.jwk` must be the Ed25519 key the credential is bound to; the `did:key`
-/// is what `find_valid` filters on and what the operator sees.
-fn did_from_jwk(jwk: &Value) -> Result<String, CredentialError> {
+/// Decode an `OKP`/`Ed25519` JWK; `what` names it in errors, which never carry
+/// the key itself.
+pub(crate) fn ed25519_from_jwk(jwk: &Value, what: &str) -> Result<VerifyingKey, CredentialError> {
     let kty = jwk.get("kty").and_then(Value::as_str).unwrap_or_default();
     let crv = jwk.get("crv").and_then(Value::as_str).unwrap_or_default();
     if kty != "OKP" || crv != "Ed25519" {
         return Err(CredentialError::Malformed(format!(
-            "`cnf.jwk` is {kty}/{crv}, not OKP/Ed25519"
+            "`{what}` is {kty}/{crv}, not OKP/Ed25519"
         )));
     }
     let x = jwk
         .get("x")
         .and_then(Value::as_str)
-        .ok_or_else(|| CredentialError::Malformed("`cnf.jwk` has no `x`".to_string()))?;
-    let bytes: [u8; 32] = decode_segment(x, "`cnf.jwk.x`")?
+        .ok_or_else(|| CredentialError::Malformed(format!("`{what}` has no `x`")))?;
+    let bytes: [u8; 32] = decode_segment(x, &format!("`{what}.x`"))?
         .try_into()
-        .map_err(|_| CredentialError::Malformed("`cnf.jwk.x` is not 32 bytes".to_string()))?;
-    let key = VerifyingKey::from_bytes(&bytes).map_err(|_| {
-        CredentialError::Malformed("`cnf.jwk.x` is not an Ed25519 public key".to_string())
-    })?;
-    Ok(shadi_identity::encode_did_key(&key))
+        .map_err(|_| CredentialError::Malformed(format!("`{what}.x` is not 32 bytes")))?;
+    VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| CredentialError::Malformed(format!("`{what}.x` is not an Ed25519 public key")))
 }
 
 fn parse_disclosure(segment: &str) -> Result<Disclosure, CredentialError> {
@@ -313,11 +451,10 @@ pub fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{
+        b64, base_claims, base_header, credential, disclosure, issuer_key, present_n,
+    };
     use crate::vault::tests::sqlcipher_vault;
-
-    fn b64(bytes: &[u8]) -> String {
-        URL_SAFE_NO_PAD.encode(bytes)
-    }
 
     /// The agent key the fixture credentials are bound to. Fixed bytes so the
     /// expected `did:key` is stable.
@@ -334,13 +471,7 @@ mod tests {
     }
 
     fn digest_of(segment: &str) -> String {
-        b64(&Sha256::digest(segment.as_bytes()))
-    }
-
-    fn disclosure(name: &str, value: Value) -> String {
-        b64(serde_json::json!(["c2FsdA", name, value])
-            .to_string()
-            .as_bytes())
+        b64(Sha256::digest(segment.as_bytes()))
     }
 
     /// A credential in the shape the vault stores: issuer JWT, disclosures,
@@ -410,6 +541,21 @@ mod tests {
             parsed.disclosures[0].value,
             serde_json::json!("platform-admins")
         );
+    }
+
+    /// An issuer could craft (or an import could otherwise carry) a credential
+    /// with an excessive disclosure count; this must be refused at import so
+    /// it never sits in the vault, where every `dcql::select` over it would
+    /// re-pay the same unbounded digest-check cost.
+    #[test]
+    fn refuses_too_many_disclosures_on_import() {
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload(),
+            &vec!["x".to_string(); MAX_DISCLOSURES + 1],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("more than"), "{err}");
     }
 
     /// Only `dc+sd-jwt` is readable: a plain JWT with a trailing `~` must be
@@ -507,8 +653,8 @@ mod tests {
         off_curve[31] = 1;
 
         for (x, needle) in [
-            (b64(&off_curve), "not an Ed25519 public key"),
-            (b64(&[7u8; 31]), "not 32 bytes"),
+            (b64(off_curve), "not an Ed25519 public key"),
+            (b64([7u8; 31]), "not 32 bytes"),
         ] {
             let mut payload = payload();
             payload["cnf"]["jwk"]["x"] = serde_json::json!(x);
@@ -626,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_disclosure_committed_inside_another_disclosure() {
+    fn rejects_a_disclosure_committed_inside_another_disclosure() {
         let inner = disclosure("city", serde_json::json!("Oslo"));
         let outer = disclosure(
             "address",
@@ -639,7 +785,39 @@ mod tests {
             payload,
             &[outer, inner],
         );
-        assert_eq!(parse_sd_jwt(&raw).expect("parse").disclosures.len(), 2);
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("`city`"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_disclosure_committed_in_a_nested_object() {
+        let groups = disclosure("groups", serde_json::json!("platform-admins"));
+        let mut payload = payload();
+        payload["address"] = serde_json::json!({"_sd": [digest_of(&groups)]});
+        let raw = credential_with_header(
+            serde_json::json!({"alg": "EdDSA", "typ": "dc+sd-jwt"}),
+            payload,
+            &[groups],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("`groups`"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_repeated_claim_name_but_not_repeated_array_elements() {
+        let raw = credential_with(
+            payload(),
+            &[
+                disclosure("groups", serde_json::json!("interns")),
+                disclosure("groups", serde_json::json!("platform-admins")),
+            ],
+        );
+        let err = parse_sd_jwt(&raw).expect_err("reject");
+        assert!(err.to_string().contains("more than once"), "{err}");
+
+        let el = |v: &str| b64(serde_json::json!(["c2FsdA", v]).to_string().as_bytes());
+        let raw = credential_with(payload(), &[el("a"), el("b")]);
+        assert!(parse_sd_jwt(&raw).is_ok());
     }
 
     #[test]
@@ -736,5 +914,124 @@ mod tests {
         let second = import(&vault, &fixture(), 1_000).expect("import");
         assert_ne!(first.id, second.id);
         assert_eq!(vault.list().expect("list").len(), 2);
+    }
+
+    fn presented(take: usize) -> (shadi_identity::AgentIdentity, String, String) {
+        let id = shadi_identity::AgentIdentity::generate().unwrap();
+        let d = [
+            disclosure("groups", "platform-admins"),
+            disclosure("email", "alice@example.test"),
+        ];
+        let raw = credential(&issuer_key(), &base_header(), &base_claims(&id, &d), &d);
+        let pres = present_n(&id, &raw, take, "n-1", "did:key:v", 1_500);
+        (id, raw, pres)
+    }
+
+    #[test]
+    fn a_built_presentation_round_trips() {
+        let (id, raw, pres) = presented(2);
+        let got = parse_presentation(&pres).expect("parse");
+        assert_eq!(got.credential, parse_sd_jwt(&raw).unwrap());
+        assert_eq!(got.credential.agent_did, id.did());
+        let names: Vec<_> = got
+            .credential
+            .disclosures
+            .iter()
+            .map(|d| d.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, vec!["groups", "email"]);
+        assert_eq!(got.issuer_jwt.header["typ"], "dc+sd-jwt");
+        assert_eq!(got.key_binding_jwt.header["typ"], "kb+jwt");
+        assert_eq!(got.key_binding_jwt.payload["nonce"], "n-1");
+    }
+
+    #[test]
+    fn a_presentation_may_disclose_a_subset() {
+        let (_, _, pres) = presented(1);
+        let got = parse_presentation(&pres).expect("parse");
+        assert_eq!(got.credential.disclosures.len(), 1);
+    }
+
+    #[test]
+    fn the_parsed_output_is_enough_to_verify_the_key_binding() {
+        use ed25519_dalek::{Signature, Verifier};
+        let (id, _, pres) = presented(1);
+        let got = parse_presentation(&pres).expect("parse");
+
+        let sig = Signature::from_slice(&got.key_binding_jwt.signature).expect("sig");
+        id.verifying_key()
+            .verify(got.key_binding_jwt.signing_input.as_bytes(), &sig)
+            .expect("kb signature");
+
+        // Hash the bytes the holder sent, cut off at the last tilde.
+        let sent = &pres[..=pres.rfind('~').unwrap()];
+        assert_eq!(got.sd_hash_input, sent);
+        assert_eq!(
+            got.key_binding_jwt.payload["sd_hash"],
+            b64(Sha256::digest(sent.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn refuses_an_issued_credential_as_a_presentation() {
+        let err = parse_presentation(&fixture()).expect_err("reject");
+        assert!(err.to_string().contains("no key-binding JWT"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_last_element_that_is_not_a_jwt() {
+        let (_, _, pres) = presented(1);
+        let (head, _) = pres.rsplit_once('~').unwrap();
+        for last in ["kb.jwt", "a.b.c.d", "plain"] {
+            let err = parse_presentation(&format!("{head}~{last}")).expect_err("reject");
+            assert!(
+                err.to_string().contains("three dot-separated"),
+                "{last}: {err}"
+            );
+        }
+        assert!(parse_presentation("no-tilde").is_err());
+        assert!(parse_presentation("").is_err());
+    }
+
+    #[test]
+    fn refuses_a_disclosure_appended_to_a_presentation() {
+        let (_, _, pres) = presented(1);
+        let (head, kb) = pres.rsplit_once('~').unwrap();
+        let appended = disclosure("admin", serde_json::json!("sekrit-value"));
+        let err = parse_presentation(&format!("{head}~{appended}~{kb}"))
+            .expect_err("reject")
+            .to_string();
+        assert!(err.contains("`admin`"), "{err}");
+        assert!(!err.contains("sekrit-value"), "{err}");
+    }
+
+    #[test]
+    fn refuses_oversized_and_over_disclosed_presentations() {
+        let (_, _, pres) = presented(1);
+        let err = parse_presentation(&format!("{pres}{}", "a".repeat(MAX_PRESENTATION_BYTES)))
+            .expect_err("reject");
+        assert!(err.to_string().contains("exceeds"), "{err}");
+
+        let (head, kb) = pres.rsplit_once('~').unwrap();
+        let many = format!("{head}~{}{kb}", "x~".repeat(MAX_DISCLOSURES));
+        assert!(many.len() <= MAX_PRESENTATION_BYTES);
+        let err = parse_presentation(&many).expect_err("reject");
+        assert!(err.to_string().contains("more than"), "{err}");
+    }
+
+    #[test]
+    fn presentation_errors_never_contain_the_token() {
+        let (_, _, pres) = presented(1);
+        let (head, _) = pres.rsplit_once('~').unwrap();
+        let raw = format!("{head}~secret.secret");
+        let err = parse_presentation(&raw).expect_err("reject").to_string();
+        assert!(!err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn parse_sd_jwt_still_refuses_a_built_presentation() {
+        let (_, _, pres) = presented(1);
+        let err = parse_sd_jwt(&pres).expect_err("reject");
+        assert!(err.to_string().contains("key-binding JWT"), "{err}");
     }
 }
