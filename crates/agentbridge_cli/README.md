@@ -61,8 +61,30 @@ shadictl --net-block --net-allow 127.0.0.1:47357 --read "$SHADI_TMP_DIR" -- \
   agentbridge register --tool opencode --slim-endpoint 127.0.0.1:47357
 
 # Publish an OASF record to the Agent Directory after registering
-agentbridge register --tool claude-code --dir-publish
+# (a record needs at least one OASF skill)
+agentbridge register --tool claude-code \
+  --skill software_engineering/code_generation --dir-publish
 ```
+
+What the agent card advertises:
+
+- `--skill <OASF skill>` (repeatable) and `--domain <OASF domain>` (repeatable,
+  needs a skill) go into the card's OASF `discovery` extension. Nothing is
+  advertised by default; an agent without a skill isn't found by skill.
+- `--version <semver>` is the agent's version (default: agentbridge's).
+- `--advertise-url <url>` is the address clients use for `--a2a-listen` when
+  it differs from the listen address, e.g. a published container port.
+  Publishing a wildcard listen address (`0.0.0.0`) to DIR needs it.
+- `--oasf-schema-url` and `--oasf-schema-version` (default
+  `https://schema.oasf.outshift.com` 1.1.0) name the schema the skills and
+  domains come from: the card's extension is
+  `<url>/<version>/objects/discovery`, and that server checks them once at
+  startup (plain http only on loopback). Consumers such as dir-runtime read the
+  extension only for schema servers they accept, so a private schema is found
+  only where it is accepted. Under `shadictl --net-block` validation needs
+  `--net-allow schema.oasf.outshift.com:443` for the listener's lifetime;
+  `--skip-oasf-validation` advertises them unchecked instead, which is also the
+  way to test offline.
 
 Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 `cursor-agent`, `goose`, `opencode`.
@@ -70,8 +92,9 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 ### `list` — discover registered adapters
 
 ```bash
-# Query DIR for registered adapters
+# Query DIR for A2A agents, optionally only those with an OASF skill
 agentbridge list
+agentbridge list --skill ai_ml_engineering/agent_orchestration/multi_agent_coordination
 
 # List listeners this machine started with register --slim-endpoint / --a2a-listen
 agentbridge list --local

@@ -102,6 +102,34 @@ impl MemberSource for SkillSearchSource {
     }
 }
 
+/// Discover A2A agents in the Directory: records with an `integration/a2a`
+/// module, narrowed to those with any of `skills` when given (`dirctl search
+/// --module integration/a2a [--skill …]`). Nothing is assumed about which
+/// skills an agent has.
+pub struct A2AAgentSearchSource {
+    pub skills: Vec<String>,
+    pub dir: DirLookupOptions,
+}
+
+impl A2AAgentSearchSource {
+    /// The candidates, and how many records the search returned (at most
+    /// `dir.limit`), including ones skipped as unusable: a full page means
+    /// there may be more.
+    pub fn resolve_counted(&self) -> Result<(Vec<CandidateMember>, usize), String> {
+        let mut args = vec!["--module", "integration/a2a"];
+        for skill in &self.skills {
+            args.extend(["--skill", skill.as_str()]);
+        }
+        resolve_via_dirctl_query_counted(&args, &self.dir)
+    }
+}
+
+impl MemberSource for A2AAgentSearchSource {
+    fn resolve(&self) -> Result<Vec<CandidateMember>, String> {
+        self.resolve_counted().map(|(members, _)| members)
+    }
+}
+
 /// Discover a candidate by an already-known DID: `dirctl search --author
 /// <did>` resolves its current name/skills/SLIM endpoint from the Directory
 /// without the moderator needing to know anything but the DID up front.
@@ -327,7 +355,17 @@ fn resolve_via_dirctl_query(
     query_args: &[&str],
     dir: &DirLookupOptions,
 ) -> Result<Vec<CandidateMember>, String> {
+    resolve_via_dirctl_query_counted(query_args, dir).map(|(members, _)| members)
+}
+
+/// [`resolve_via_dirctl_query`], with how many records the search returned
+/// before unusable ones were skipped.
+fn resolve_via_dirctl_query_counted(
+    query_args: &[&str],
+    dir: &DirLookupOptions,
+) -> Result<(Vec<CandidateMember>, usize), String> {
     let cids = search_cids(query_args, dir)?;
+    let found = cids.len();
     let mut members = Vec::with_capacity(cids.len());
     for cid in cids {
         match pull_record_json(&cid, dir) {
@@ -343,7 +381,7 @@ fn resolve_via_dirctl_query(
             Err(e) => eprintln!("[member_source] failed to pull {cid}: {e}"),
         }
     }
-    Ok(members)
+    Ok((members, found))
 }
 
 /// The CIDs `dirctl search <query_args>` finds.
@@ -1023,6 +1061,54 @@ mod tests {
                 .status()
                 .is_ok(),
             "the script should be runnable once the wait returns"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg(unix)]
+    fn a2a_agent_search_asks_dirctl_for_the_a2a_module_and_each_skill() {
+        let _guard = crate::dir_registry::dirctl_env_lock().lock().expect("lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("args.log");
+        let path = dir.path().join("fake_dirctl.sh");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n", log.display()),
+        )
+        .expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+
+        let result = A2AAgentSearchSource {
+            skills: vec![
+                "software_engineering/code_generation".to_string(),
+                "language_processing/language_generation/summarization".to_string(),
+            ],
+            dir: test_dir(),
+        }
+        .resolve();
+
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        assert!(result.expect("no records").is_empty());
+        let args: Vec<String> = std::fs::read_to_string(&log)
+            .expect("dirctl was called")
+            .lines()
+            .skip_while(|a| *a != "search") // after wait_until_executable's probe
+            .map(str::to_string)
+            .collect();
+        let pair = |flag: &str, value: &str| {
+            args.windows(2).any(|w| w[0] == flag && w[1] == value)
+        };
+        assert_eq!(args.first().map(String::as_str), Some("search"), "{args:?}");
+        assert!(pair("--module", "integration/a2a"), "{args:?}");
+        assert!(pair("--skill", "software_engineering/code_generation"), "{args:?}");
+        assert!(
+            pair("--skill", "language_processing/language_generation/summarization"),
+            "{args:?}"
         );
     }
 
