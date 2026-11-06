@@ -2583,6 +2583,7 @@ test push ... FAILED
             Arc::new(Notify::new()),
             false,
             egress::policy(),
+            None,
         );
         let (alice, mallory) = (
             shadi_identity::AgentIdentity::generate().unwrap(),
