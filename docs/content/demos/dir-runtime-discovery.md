@@ -110,6 +110,11 @@ In fish, start a shell that inherits it with
 - **`PATH`** and **`AGENTBRIDGE_PROFILES_DIR`** for the stand-in harness and
   its profile.
 
+It also creates, private to you, the paths the agent terminals grant to the
+sandbox and a fresh install may not have yet (`~/.dir`, `~/.config/dirctl`,
+`~/.agntcy/dir-runtime/workloads.d`): `shadictl` refuses a grant on a path
+that doesn't exist.
+
 `SHADI_DIRCTL_BINARY` picks the `dirctl` agentbridge runs inside the sandbox,
 where an older one (e.g. from Homebrew) can come first on `PATH`.
 

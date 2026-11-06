@@ -86,9 +86,10 @@ EOF
 dirctl import --config /tmp/import-code-review.yaml
 ```
 
-Run it. Inside the sandbox, `dirctl` needs the DIR node and read access to its own state; `SHADI_DIRCTL_BINARY` picks the `dirctl` to run when the sandbox's `PATH` would find another. The fresh configuration goes under `$SHADI_TMP_DIR`, which the sandbox must let it write:
+Run it. Inside the sandbox, `dirctl` needs the DIR node and read access to its own state; `SHADI_DIRCTL_BINARY` picks the `dirctl` to run when the sandbox's `PATH` would find another. The fresh configuration goes under `$SHADI_TMP_DIR`, which the sandbox must let it write. `shadictl` refuses a grant on a path that doesn't exist, so create the ones a fresh install may not have yet, privately:
 
 ```sh
+(umask 077 && mkdir -p ~/.dir ~/.config/dirctl ~/.agntcy/dir-runtime/workloads.d)
 mkdir -p /tmp/agentbridge-example
 export SHADI_TMP_DIR="$(cd /tmp/agentbridge-example && pwd -P)"   # the real path: /tmp is a symlink on macOS
 shadictl --net-block \

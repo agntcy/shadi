@@ -23,6 +23,12 @@ export DIRCTL="${DIRCTL:-$HOME/go/bin/dirctl-dev}"
 export SHADI_DIRCTL_BINARY="$DIRCTL"
 export DIRECTORY_CLIENT_SERVER_ADDRESS=localhost:8888
 
+# What the agent terminals grant to the sandbox (--read ~/.dir
+# --read ~/.config/dirctl, --write .../workloads.d): shadictl refuses a path
+# that doesn't exist, which a fresh install may not have yet. Private, as
+# they hold dirctl's state and tokens.
+(umask 077 && mkdir -p "$HOME/.dir" "$HOME/.config/dirctl" "$HOME/.agntcy/dir-runtime/workloads.d")
+
 # The stand-in harness and its profile
 export PATH="$PWD/target/debug:$PWD/examples/agentbridge-container:$PATH"
 export AGENTBRIDGE_PROFILES_DIR="$PWD/examples/agentbridge-container/profiles"
