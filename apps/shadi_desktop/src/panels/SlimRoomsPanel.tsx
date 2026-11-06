@@ -242,7 +242,7 @@ function RoomCard({ room, onChanged }: { room: SlimGroupInfo; onChanged: () => v
           <div className="sl-row sl-invite">
             <input
               className="sl-input"
-              placeholder="Member: skill:… | did:… | explicit:name=did | org/ns/app"
+              placeholder="Member: skill:… | running:… | did:… | explicit:name=did | org/ns/app"
               value={memberSpec}
               onChange={(e) => setMemberSpec(e.target.value)}
             />
@@ -255,6 +255,13 @@ function RoomCard({ room, onChanged }: { room: SlimGroupInfo; onChanged: () => v
             <button onClick={onInvite} disabled={busy || !memberSpec}>
               {busy ? "Inviting…" : "Invite"}
             </button>
+            {memberSpec.startsWith("running:") && (
+              <p className="sl-muted sl-note">
+                running: agents come from the local dir-runtime, and their DIDs are what
+                they announce about themselves: any workload claiming the skill is
+                admitted. Use it only where you trust every workload the runtime reports.
+              </p>
+            )}
           </div>
         ) : (
           <p className="sl-muted sl-invite">

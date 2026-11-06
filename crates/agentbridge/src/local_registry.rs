@@ -96,6 +96,13 @@ impl Drop for LocalAdapterLease {
     }
 }
 
+/// Whether a lookup failed because more than one agent matched: those
+/// errors start with `ambiguous:`, while a plain miss only quotes the query,
+/// which may itself contain the word (`ambiguous-reviewer`).
+pub fn is_ambiguous(err: &str) -> bool {
+    err.starts_with("ambiguous:")
+}
+
 impl LocalAdapterRegistry {
     /// `$SHADI_TMP_DIR/agentbridge-local`, else `<temp>/agentbridge-local`.
     /// Prefer `SHADI_TMP_DIR` so a sandboxed `register` can write the lease
@@ -241,7 +248,7 @@ impl MemberSource for LocalRegistrySource {
     }
 }
 
-fn is_safe_agent_name(name: &str) -> bool {
+pub(crate) fn is_safe_agent_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('-')
@@ -571,7 +578,7 @@ mod tests {
         let _la = registry.publish(&a).unwrap();
         let _lb = registry.publish(&b).unwrap();
         let err = registry.resolve_live("did:key:zShared").unwrap_err();
-        assert!(err.contains("ambiguous"), "{err}");
+        assert!(is_ambiguous(&err), "{err}");
         assert!(registry.resolve_live("copilot").is_ok());
     }
 

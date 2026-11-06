@@ -252,21 +252,24 @@ fn strip_http_scheme(url: &str) -> &str {
         .unwrap_or(url)
 }
 
+/// The `host:port` of a SLIM node, from `slim://node/<channel>` or an
+/// endpoint as given to SLIM (`node`, `http://node`, `https://node/`). The
+/// connection scheme comes off before the path, or `https://node` would be
+/// cut at its first `/`.
 fn strip_slim_scheme(url: &str) -> &str {
     let rest = url
         .strip_prefix("slim://")
         .or_else(|| url.strip_prefix("SLIM://"))
         .unwrap_or(url);
+    let rest = rest
+        .strip_prefix("https://")
+        .or_else(|| rest.strip_prefix("http://"))
+        .unwrap_or(rest);
     rest.split('/').next().unwrap_or(rest)
 }
 
 fn slim_node_uri(raw: &str) -> String {
-    let node = strip_slim_scheme(raw.trim());
-    let node = node
-        .strip_prefix("https://")
-        .or_else(|| node.strip_prefix("http://"))
-        .unwrap_or(node);
-    format!("slim://{node}")
+    format!("slim://{}", strip_slim_scheme(raw.trim()))
 }
 
 fn http_origin(host: &str, https: bool) -> String {
@@ -329,6 +332,15 @@ mod tests {
         assert_eq!(slim.url, "slim://127.0.0.1:47357");
         assert_eq!(slim.slim_node(), "127.0.0.1:47357");
         assert_eq!(slim.display_uri(), "slim://127.0.0.1:47357");
+    }
+
+    #[test]
+    fn a_slim_endpoint_with_a_connection_scheme_names_its_node() {
+        for endpoint in ["node:47357", "http://node:47357", "https://node:47357/"] {
+            let slim = A2ALocator::slim(endpoint);
+            assert_eq!(slim.url, "slim://node:47357", "{endpoint}");
+            assert_eq!(slim.slim_node(), "node:47357", "{endpoint}");
+        }
     }
 
     #[test]

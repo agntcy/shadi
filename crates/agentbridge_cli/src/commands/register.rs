@@ -507,7 +507,7 @@ fn resolve_handoff_target(
                 slim_endpoint,
             })
         }
-        Err(err) if err.contains("ambiguous") => Err(err),
+        Err(err) if agentbridge::local_registry::is_ambiguous(&err) => Err(err),
         Err(_) => match slim_fallback {
             Some(endpoint) => Ok(HandoffTarget {
                 peer_agent_id: to.to_string(),
@@ -518,7 +518,9 @@ fn resolve_handoff_target(
             }),
             None => Err(format!(
                 "no live locator for '{to}'; peer must appear in `list --local` \
-                 (A2A locator or SLIM endpoint) so NEXT can be dispatched without a SLIM node"
+                 (A2A locator or SLIM endpoint) so NEXT can be dispatched without a SLIM node. \
+                 NEXT doesn't use agents announced to dir-runtime (`--dir-announce`), whose \
+                 DID nothing checks yet (agntcy/shadi#504)"
             )),
         },
     }

@@ -715,10 +715,17 @@ cargo run -p agntcy-shadi-cli -- slim create-group \
 ```
 
 - `--members SPEC` (repeatable): `skill:<skill>` (Directory search by skill),
+  `running:<skill>` (running agents announced with `register --dir-announce`,
+  through runtime discovery on `--runtime`, not `--dir-server`),
   `did:<did>` (Directory search by author DID), or
   `explicit:<name>=<did>[@<endpoint>]` (no Directory round trip). Every
-  resolved candidate's DID is unioned into the group's trust set.
+  resolved candidate's DID is unioned into the group's trust set. A
+  `running:` agent's skills and DID are what the workload announces about
+  itself, and nothing checks them: any workload the runtime reports with a
+  matching skill joins the trust set, so use it only on a runtime whose
+  workloads you trust.
 - `--dir-server`: Agent Directory address (default `prod.gateway.ads.outshift.io:443`).
+- `--runtime`: dir-runtime address for `running:` specs (default `localhost:8888`, a local `dirctl daemon`); it gets no DIR credentials.
 - `--gh-token` / `--limit`: DIR auth token and max results per source.
 - `--write-config PATH`: persist the resolved trust set as a `slim_mas`
   `GroupConfig` TOML — see [`shadictl slim-mas`](#shadictl-slim-mas-shadictl-slim-mas) below.
@@ -735,7 +742,7 @@ hands off *into* this same shell once its discovered group is created):
 
 - `/slim create <org/namespace/app>`: creates a channel; the caller becomes its moderator.
 - `/slim invite <org/namespace/app>`: moderator-only, invites a participant into the channel.
-- `/slim invite-from <spec>`: moderator-only, re-resolves one `skill:`/`did:`/`explicit:` spec
+- `/slim invite-from <spec>`: moderator-only, re-resolves one `skill:`/`running:`/`did:`/`explicit:` spec
   live and invites whichever matches are already in the group's trust set — the way to pull a
   newly-discovered agent into an already-running group.
 - `/slim join <org/namespace/app> [--timeout SECONDS]`: blocks until invited; caller becomes a participant.

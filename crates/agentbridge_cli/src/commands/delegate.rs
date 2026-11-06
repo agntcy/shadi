@@ -1,6 +1,6 @@
 use agentbridge::local_registry::LocalAdapterRegistry;
 use agentbridge::member_source::{
-    parse_peer_did, resolve_adapter_peer, CandidateMember, DirLookupOptions,
+    find_running_peer_at, has_locator, not_in_directory, parse_peer_did, runtime_not_running, resolve_adapter_peer, CandidateMember, DirLookupOptions,
 };
 use shadi_a2a::{A2ABinding, A2ALocator};
 use shadi_mas::{
@@ -31,12 +31,32 @@ pub fn run(
     endpoint: &str,
     a2a_url: Option<&str>,
     a2a_binding: Option<A2ABinding>,
+    runtime: &str,
 ) -> anyhow::Result<()> {
-    let peer = resolve_delegate_peer(to_agent_id, a2a_url, a2a_binding)?;
+    let (peer, found) = resolve_delegate_peer(to_agent_id, a2a_url, a2a_binding, runtime)?;
+    match found {
+        Found::Runtime => eprintln!(
+            "[agentbridge] '{}' ({}) was found through dir-runtime {runtime}: its DID and \
+             address are what it announced about itself, and nothing checks that the DID \
+             answers there yet (agntcy/shadi#504)",
+            peer.name, peer.did
+        ),
+        Found::Directory => eprintln!(
+            "[agentbridge] '{}' ({}) was found in the Agent Directory: its DID and address \
+             are what the published record claims, its signature isn't checked, and nothing \
+             checks that the DID answers there yet (agntcy/shadi#504)",
+            peer.name, peer.did
+        ),
+        Found::Local => {}
+    }
     let locator = peer.preferred_locator();
 
     let (slim_node, unicast) = match locator.as_ref() {
-        Some(loc) if loc.binding == A2ABinding::Slim => (loc.slim_node(), None),
+        // The endpoint as the peer gave it: its scheme says whether to use TLS.
+        Some(loc) if loc.binding == A2ABinding::Slim => (
+            peer.slim_endpoint.clone().unwrap_or_else(|| loc.slim_node()),
+            None,
+        ),
         Some(loc) => (endpoint.to_string(), Some(loc.clone())),
         None => (endpoint.to_string(), None),
     };
@@ -93,11 +113,28 @@ pub fn run(
     Ok(())
 }
 
+/// Where a delegate peer was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Found {
+    /// A listener on this host, through its lease.
+    Local,
+    /// A record published in DIR: only someone with DIR access could publish
+    /// it, but its signature and DID aren't checked (#504).
+    Directory,
+    /// A workload dir-runtime reports, as the agent announced itself:
+    /// unverified.
+    Runtime,
+}
+
+/// Find `to`: a listener on this host (its lease); for a DID, else its
+/// published record in DIR, else what dir-runtime reports; for a name, else dir-runtime,
+/// else DIR.
 fn resolve_delegate_peer(
     to: &str,
     a2a_url_override: Option<&str>,
     a2a_binding: Option<A2ABinding>,
-) -> anyhow::Result<CandidateMember> {
+    runtime: &str,
+) -> anyhow::Result<(CandidateMember, Found)> {
     let registry = LocalAdapterRegistry::from_env();
     let dir = DirLookupOptions {
         server_addr: std::env::var("DIRECTORY_SERVER")
@@ -106,12 +143,152 @@ fn resolve_delegate_peer(
         limit: 5,
     };
 
-    match resolve_adapter_peer(to, &registry, Some(&dir)) {
-        Ok(peer) => apply_locator_override(to, Ok(peer), a2a_url_override, a2a_binding)
-            .map_err(|e| anyhow::anyhow!("{e}")),
-        Err(err) => apply_locator_override(to, Err(err), a2a_url_override, a2a_binding)
-            .map_err(|e| anyhow::anyhow!("{e}")),
-    }
+    let runtime_opts = DirLookupOptions {
+        server_addr: runtime.to_string(),
+        gh_token: None,
+        limit: 0,
+    };
+    resolve_peer_found(
+        to,
+        registry.resolve_live(to).map(|r| r.did),
+        || {
+            // `--a2a-url` picks among several running instances; a bad one
+            // is reported when the override is applied.
+            let at = a2a_url_override
+                .and_then(|raw| A2ALocator::parse_with_hint(raw, a2a_binding).ok());
+            find_running_peer_at(to, &runtime_opts, at.as_ref())
+        },
+        || resolve_adapter_peer(to, &registry, Some(&dir)),
+        a2a_url_override,
+        a2a_binding,
+        runtime,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// [`resolve_peer_found`] without saying where the peer was found.
+#[cfg(test)]
+fn resolve_peer_with(
+    to: &str,
+    leased: Result<String, String>,
+    running: impl FnOnce() -> Result<Option<CandidateMember>, String>,
+    fallback: impl FnOnce() -> Result<CandidateMember, String>,
+    a2a_url_override: Option<&str>,
+    a2a_binding: Option<A2ABinding>,
+    runtime: &str,
+) -> Result<CandidateMember, String> {
+    resolve_peer_found(
+        to,
+        leased,
+        running,
+        fallback,
+        a2a_url_override,
+        a2a_binding,
+        runtime,
+    )
+    .map(|(peer, _)| peer)
+}
+
+/// Pick the peer and say where it was found: a local lease (`leased`: its
+/// DID, if one matches); then, for a DID, `fallback` (the lease again, or the
+/// published DIR record) before `running` (dir-runtime), and for a name,
+/// `running` before `fallback`. Then apply `--a2a-url` / `--a2a-binding`.
+/// Several matching instances are an error unless `to` is a DID and
+/// `--a2a-url` picks the instance; so is a name that a lease and a running
+/// agent with another DID share.
+fn resolve_peer_found(
+    to: &str,
+    leased: Result<String, String>,
+    running: impl FnOnce() -> Result<Option<CandidateMember>, String>,
+    fallback: impl FnOnce() -> Result<CandidateMember, String>,
+    a2a_url_override: Option<&str>,
+    a2a_binding: Option<A2ABinding>,
+    runtime: &str,
+) -> Result<(CandidateMember, Found), String> {
+    let is_did = parse_peer_did(to).is_some();
+    // dir-runtime's answer, or why there is none to use.
+    let ask_runtime = |running: Box<dyn FnOnce() -> Result<Option<CandidateMember>, String> + '_>| {
+        match running() {
+            Ok(found) => Ok(found),
+            Err(e) if agentbridge::local_registry::is_ambiguous(&e) => Err(e),
+            // No dir-runtime running is normal (it's optional); report
+            // anything else.
+            Err(e) if runtime_not_running(&e) => Ok(None),
+            Err(e) => {
+                eprintln!("[agentbridge] couldn't ask dir-runtime {runtime}: {e}");
+                Ok(None)
+            }
+        }
+    };
+
+    let resolved = match leased {
+        Err(err) if agentbridge::local_registry::is_ambiguous(&err) => Err(err),
+        // A DID: its published record, which took DIR access to publish,
+        // before what dir-runtime reports, which anything on the host can.
+        // dir-runtime only when DIR answered that it has no such record: a
+        // failed lookup (gateway down, auth, no dirctl) is reported instead.
+        Err(_) if is_did => match fallback() {
+            Ok(peer) => Ok((peer, Found::Directory)),
+            Err(not_in_dir) if not_in_directory(&not_in_dir) => {
+                match ask_runtime(Box::new(running)) {
+                    Ok(Some(peer)) => Ok((peer, Found::Runtime)),
+                    Ok(None) => Err(not_in_dir),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        },
+        Err(_) => match ask_runtime(Box::new(running)) {
+            Ok(Some(peer)) => Ok((peer, Found::Runtime)),
+            Ok(None) => fallback().map(|peer| (peer, Found::Directory)),
+            Err(e) => Err(e),
+        },
+        Ok(lease_did) if !is_did => match running() {
+            Ok(Some(other)) if other.did != lease_did => Err(format!(
+                "ambiguous: '{to}' is a local listener ({lease_did}) and a running agent at \
+                 dir-runtime {runtime} ({}). Pass --to <did> to pick one",
+                other.did
+            )),
+            Err(e) if agentbridge::local_registry::is_ambiguous(&e) => Err(e),
+            // One agent, leased here and announced there. The lease wins,
+            // unless --a2a-url names the announced listener alone: taking
+            // the lease would drop the binding it announced.
+            Ok(Some(other)) => fallback().map(|lease| {
+                if names_only(&other, &lease, a2a_url_override, a2a_binding) {
+                    (other, Found::Runtime)
+                } else {
+                    (lease, Found::Local)
+                }
+            }),
+            _ => fallback().map(|peer| (peer, Found::Local)),
+        },
+        Ok(_) => fallback().map(|peer| (peer, Found::Local)),
+    };
+    let found = resolved.as_ref().map_or(Found::Local, |(_, found)| *found);
+    apply_locator_override(
+        to,
+        resolved.map(|(peer, _)| peer),
+        a2a_url_override,
+        a2a_binding,
+    )
+    .map(|peer| (peer, found))
+}
+
+/// `--a2a-url` is `announced`'s locator and not `lease`'s.
+///
+/// A malformed override is nobody's: `apply_locator_override` reports it.
+fn names_only(
+    announced: &CandidateMember,
+    lease: &CandidateMember,
+    a2a_url_override: Option<&str>,
+    a2a_binding: Option<A2ABinding>,
+) -> bool {
+    let Some(Ok(locator)) =
+        a2a_url_override.map(|raw| A2ALocator::parse_with_hint(raw, a2a_binding))
+    else {
+        return false;
+    };
+    has_locator(announced, &locator) && !has_locator(lease, &locator)
 }
 
 fn apply_parsed_locator(peer: &mut CandidateMember, locator: A2ALocator) {
@@ -136,8 +313,27 @@ fn apply_locator_override(
         .transpose()?;
     match resolved {
         Ok(mut peer) => {
-            if let Some(locator) = parsed {
-                apply_parsed_locator(&mut peer, locator);
+            if let Some(mut locator) = parsed {
+                if has_locator(&peer, &locator) && locator.binding == A2ABinding::Slim {
+                    // The peer's own node: keep its endpoint as announced
+                    // (scheme included), and go over SLIM.
+                    peer.a2a_url = None;
+                    peer.a2a_binding = None;
+                } else {
+                    // A bare http(s) URL defaults to gRPC; when it is the
+                    // peer's own URL, keep the binding the peer advertised.
+                    // A scheme that names one (`jsonrpc://`) is kept.
+                    let bare = a2a_url_override.is_some_and(|raw| {
+                        let raw = raw.trim().to_ascii_lowercase();
+                        raw.starts_with("http://") || raw.starts_with("https://")
+                    });
+                    if bare && a2a_binding.is_none() && has_locator(&peer, &locator) {
+                        if let Some(binding) = peer.a2a_binding {
+                            locator.binding = binding;
+                        }
+                    }
+                    apply_parsed_locator(&mut peer, locator);
+                }
             } else if let Some(binding) = a2a_binding {
                 if binding.is_unicast() {
                     peer.a2a_binding = Some(binding);
@@ -171,6 +367,259 @@ fn apply_locator_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn instance(port: u16) -> CandidateMember {
+        CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zTwice".to_string(),
+            slim_endpoint: None,
+            a2a_url: Some(format!("http://127.0.0.1:{port}")),
+            a2a_binding: Some(A2ABinding::HttpJson),
+        }
+    }
+
+    #[test]
+    fn a_locator_picks_one_of_several_local_instances_of_a_did() {
+        let ambiguous = || Err("ambiguous: 2 live adapters match".to_string());
+        let resolve = |to: &str, url: Option<&str>| {
+            resolve_peer_with(
+                to,
+                ambiguous(),
+                || panic!("a local match doesn't ask dir-runtime"),
+                || panic!("nor fall back"),
+                url,
+                Some(A2ABinding::HttpJson),
+                "localhost:8888",
+            )
+        };
+
+        let picked = resolve("did:key:zTwice", Some("http://127.0.0.1:2")).unwrap();
+        assert_eq!(picked.did, "did:key:zTwice");
+        assert_eq!(picked.a2a_url.as_deref(), Some("http://127.0.0.1:2"));
+        assert!(resolve("did:key:zTwice", None)
+            .unwrap_err()
+            .contains("ambiguous"));
+        assert!(resolve("copilot", Some("http://127.0.0.1:2"))
+            .unwrap_err()
+            .contains("ambiguous"));
+    }
+
+    #[test]
+    fn a_name_shared_by_a_lease_and_another_running_agent_is_ambiguous() {
+        let resolve = |running_did: &'static str| {
+            resolve_peer_with(
+                "copilot",
+                Ok("did:key:zLease".to_string()),
+                move || {
+                    Ok(Some(CandidateMember {
+                        did: running_did.to_string(),
+                        ..instance(1)
+                    }))
+                },
+                || Ok(instance(2)),
+                None,
+                None,
+                "localhost:8888",
+            )
+        };
+
+        let err = resolve("did:key:zOther").unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("did:key:zLease") && err.contains("did:key:zOther"), "{err}");
+        assert!(resolve("did:key:zLease").is_ok(), "the same agent, announced");
+    }
+
+    /// The bug this guards: the lease won even when `--a2a-url` named the
+    /// announced listener, and `A2ABinding`'s `#[default]` is `Grpc`, so the
+    /// dropped binding failed silently rather than loudly.
+    #[test]
+    fn an_a2a_url_naming_only_the_announced_instance_keeps_its_binding() {
+        let resolve = |at: Option<&str>| {
+            resolve_peer_found(
+                "copilot",
+                Ok("did:key:zTwice".to_string()),
+                || Ok(Some(instance(3))),
+                || Ok(instance(2)),
+                at,
+                None,
+                "localhost:8888",
+            )
+            .unwrap()
+        };
+
+        let (peer, found) = resolve(Some("http://127.0.0.1:3"));
+        assert_eq!(found, Found::Runtime);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:3"));
+        assert_eq!(peer.a2a_binding, Some(A2ABinding::HttpJson));
+
+        // Without the override the lease still wins.
+        let (peer, found) = resolve(None);
+        assert_eq!(found, Found::Local);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:2"));
+    }
+
+    #[test]
+    fn a_name_containing_ambiguous_is_still_asked_of_dir_runtime() {
+        let (peer, found) = resolve_peer_found(
+            "ambiguous-reviewer",
+            Err("no live adapter matching 'ambiguous-reviewer'".to_string()),
+            || Ok(Some(instance(3))),
+            || panic!("dir-runtime knows the name, so DIR isn't asked"),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Runtime);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:3"));
+    }
+
+    #[test]
+    fn a_did_is_taken_from_its_published_record_before_dir_runtime() {
+        let (peer, found) = resolve_peer_found(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || panic!("DIR knows the DID, so dir-runtime isn't asked"),
+            || Ok(instance(7)),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Directory);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:7"));
+
+        let (_, found) = resolve_peer_found(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(1))),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Runtime, "only dir-runtime has it: unverified");
+    }
+
+    #[test]
+    fn a_name_found_through_dir_runtime_is_marked_unverified() {
+        let (_, found) = resolve_peer_found(
+            "copilot",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(1))),
+            || panic!("found in dir-runtime"),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(found, Found::Runtime);
+    }
+
+    #[test]
+    fn a_locator_picks_one_of_several_running_instances_of_a_did() {
+        let resolve = |to: &str, url: Option<&str>| {
+            resolve_peer_with(
+                to,
+                Err("no live adapter".to_string()),
+                || Err("ambiguous: 2 running agents match".to_string()),
+                || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
+                url,
+                Some(A2ABinding::HttpJson),
+                "localhost:8888",
+            )
+        };
+
+        let picked = resolve("did:key:zTwice", Some("http://127.0.0.1:2")).unwrap();
+        assert_eq!(picked.a2a_url.as_deref(), Some("http://127.0.0.1:2"));
+        assert!(resolve("did:key:zTwice", None)
+            .unwrap_err()
+            .contains("ambiguous"));
+    }
+
+    #[test]
+    fn a_running_instance_picked_by_its_locator_keeps_its_name_and_binding() {
+        let slim = CandidateMember {
+            name: "codex".to_string(),
+            did: "did:key:zTwice".to_string(),
+            slim_endpoint: Some("https://node-b:47357".to_string()),
+            a2a_url: None,
+            a2a_binding: None,
+        };
+        let (peer, found) = resolve_peer_found(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(slim.clone())),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
+            Some("slim://node-b:47357"),
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(peer.name, "codex");
+        assert_eq!(peer.slim_endpoint.as_deref(), Some("https://node-b:47357"));
+        assert_eq!(found, Found::Runtime);
+
+        // A bare URL keeps the binding the instance advertised.
+        let peer = resolve_peer_with(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(2))),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
+            Some("http://127.0.0.1:2"),
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(peer.name, "copilot");
+        assert_eq!(peer.a2a_binding, Some(A2ABinding::HttpJson));
+    }
+
+    #[test]
+    fn a_failed_directory_lookup_is_reported_not_passed_to_dir_runtime() {
+        let err = resolve_peer_with(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(2))),
+            || Err("dirctl not found in PATH".to_string()),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap_err();
+        assert!(err.contains("dirctl not found"), "{err}");
+    }
+
+    #[test]
+    fn a_scheme_naming_a_binding_is_kept_for_a_peers_own_url() {
+        let peer = resolve_peer_with(
+            "did:key:zTwice",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(2))),
+            || Err("DID did:key:zTwice was not found locally or in the Agent Directory".to_string()),
+            Some("jsonrpc://127.0.0.1:2"),
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(peer.a2a_binding, Some(A2ABinding::Jsonrpc));
+    }
+
+    #[test]
+    fn a_running_agent_is_used_when_no_lease_matches() {
+        let peer = resolve_peer_with(
+            "copilot",
+            Err("no live adapter".to_string()),
+            || Ok(Some(instance(1))),
+            || panic!("found in dir-runtime"),
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:1"));
+    }
 
     #[test]
     fn locator_override_keeps_did_as_the_name() {

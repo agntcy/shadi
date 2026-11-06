@@ -691,7 +691,7 @@ pub async fn slim_group_invite(
     with_state(&state, move |inner| {
         let mut resolved = if is_member_spec(&member_spec) {
             // Only Directory-backed specs need a server; `explicit:` carries its
-            // own DID and resolves locally.
+            // own DID and `running:` asks the dir-runtime.
             let dir_server = if spec_needs_directory(&member_spec) {
                 dir_server.ok_or_else(|| {
                     format!(
@@ -1010,15 +1010,30 @@ fn describe_proto_name(name: &ProtoName) -> String {
 // --- Member resolution -------------------------------------------------------
 
 fn is_member_spec(spec: &str) -> bool {
-    spec.starts_with("skill:") || spec.starts_with("did:") || spec.starts_with("explicit:")
+    spec.starts_with("skill:")
+        || spec.starts_with("running:")
+        || spec.starts_with("did:")
+        || spec.starts_with("explicit:")
 }
 
 /// Whether a spec has to be resolved against the Agent Directory. `explicit:`
-/// already names `{name, did, endpoint}`, so it resolves without a server.
+/// already names `{name, did, endpoint}`, and `running:` asks the local
+/// dir-runtime, so they resolve without a server.
 fn spec_needs_directory(spec: &str) -> bool {
     spec.starts_with("skill:") || spec.starts_with("did:")
 }
 
+
+/// A candidate's group-session identity: a bare agent name, as runtime
+/// discovery reports it (`codex`), is `agntcy/shadi/<name>`, the form
+/// `/slim invite-from` invites in the CLI; a full SLIM name is kept.
+pub(crate) fn group_member_name(name: &str) -> String {
+    if name.contains('/') {
+        name.to_string()
+    } else {
+        format!("agntcy/shadi/{name}")
+    }
+}
 
 /// Resolve `--members`-style specs into members. Directory-discovered
 /// candidates are agents; an `explicit:` entry names a member by hand and is
@@ -1047,7 +1062,7 @@ fn resolve_candidates(
         out.extend(candidates.into_iter().map(|c| {
             (
                 SlimGroupMember {
-                    name: c.name,
+                    name: group_member_name(&c.name),
                     did: c.did,
                     endpoint: c.slim_endpoint.clone(),
                     kind: kind.to_string(),
@@ -1818,6 +1833,8 @@ mod tests {
         // `explicit:` already carries the DID — requiring a DIR server for it
         // would block admitting an already-discovered candidate.
         assert!(!spec_needs_directory("explicit:alice=did:key:z6Mk"));
+        // `running:` asks the dir-runtime, not the Directory.
+        assert!(!spec_needs_directory("running:agent_orchestration/x"));
         assert!(!spec_needs_directory("agntcy/shadi/reviewer"));
     }
 
@@ -1853,6 +1870,13 @@ mod tests {
             .expect("explicit source resolves locally");
         assert_eq!(resolved[0].did, "did:key:z6MkTest");
         assert!(resolved[0].slim_endpoint.is_none());
+    }
+
+    #[test]
+    fn a_bare_candidate_name_becomes_its_group_session_identity() {
+        assert_eq!(group_member_name("codex"), "agntcy/shadi/codex");
+        assert_eq!(group_member_name("agntcy/shadi/reviewer"), "agntcy/shadi/reviewer");
+        assert!(parse_name(&group_member_name("codex")).is_ok());
     }
 
     #[test]

@@ -24,16 +24,17 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let prefix = ["skill:", "did:", "explicit:"]
+    let prefix = ["skill:", "running:", "did:", "explicit:"]
         .into_iter()
         .find(|p| spec.starts_with(p));
     assert!(
         prefix.is_some(),
-        "parse_member_spec accepted {spec:?}, which names none of the three source kinds"
+        "parse_member_spec accepted {spec:?}, which names none of the four source kinds"
     );
 
-    // Only ExplicitListSource::resolve is pure; the directory-backed sources
-    // would shell out to dirctl, so they stay unresolved here.
+    // Only ExplicitListSource::resolve is pure; the directory- and
+    // runtime-backed sources would shell out to dirctl, so they stay
+    // unresolved here.
     if prefix == Some("explicit:") {
         let members = source
             .resolve()

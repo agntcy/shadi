@@ -305,6 +305,13 @@ impl ToolAdapter for SlimToolAdapter {
     }
 }
 
+/// The agent ID in a `slim:` spec: a room roster names a member by its
+/// group-session identity (`agntcy/shadi/codex`), and its listener is
+/// `agntcy/shadi/<agent id>-a2a`, so the prefix comes off.
+fn slim_agent_id(name: &str) -> String {
+    name.strip_prefix("agntcy/shadi/").unwrap_or(name).to_string()
+}
+
 fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>, String> {
     let mut agents = Vec::new();
     for spec in specs {
@@ -330,8 +337,8 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
         } else if let Some(rest) = spec.strip_prefix("slim:") {
             let (agent_id, endpoint) = rest
                 .split_once('@')
-                .map(|(id, ep)| (id.to_string(), ep.to_string()))
-                .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
+                .map(|(id, ep)| (slim_agent_id(id), ep.to_string()))
+                .unwrap_or_else(|| (slim_agent_id(rest), slim_endpoint.to_string()));
             std::env::set_var("SLIM_ENDPOINT", &endpoint);
             let config = LiveA2ATaskAdapterConfig {
                 endpoint,
@@ -599,6 +606,18 @@ pub async fn agentbridge_coordinate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_roster_name_becomes_the_agent_id_its_listener_uses() {
+        // Discovery → roster (`agntcy/shadi/codex`) → coordination.
+        assert_eq!(slim_agent_id("agntcy/shadi/codex"), "codex");
+        assert_eq!(slim_agent_id("codex"), "codex");
+        let roster_name = crate::commands::slim::group_member_name("codex");
+        assert_eq!(
+            format!("agntcy/shadi/{}-a2a", slim_agent_id(&roster_name)),
+            "agntcy/shadi/codex-a2a"
+        );
+    }
 
     fn candidates(n: usize) -> Vec<agentbridge::member_source::CandidateMember> {
         (0..n)
