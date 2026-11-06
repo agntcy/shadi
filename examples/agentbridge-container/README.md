@@ -88,15 +88,17 @@ EOF
 dirctl import --config /tmp/import-code-review.yaml
 ```
 
-Run it. Inside the sandbox, `dirctl` needs the DIR node and read access to its own state; `SHADI_DIRCTL_BINARY` picks the `dirctl` to run when the sandbox's `PATH` would find another. The fresh configuration goes under `$SHADI_TMP_DIR`, which the sandbox must let it write. `shadictl` refuses a grant on a path that doesn't exist, so create the ones a fresh install may not have yet, privately:
+Run it. Inside the sandbox, `dirctl` needs the DIR node, read access to its own state, and its binary granted: on Linux, Landlock lets the sandbox run only programs from the system directories and the ones you grant, so a `dirctl` under `~/go/bin` doesn't start otherwise. `SHADI_DIRCTL_BINARY` picks that `dirctl`, also when the sandbox's `PATH` would find another; it is the real path, since the sandbox matches real paths, not symlinks. The fresh configuration goes under `$SHADI_TMP_DIR`, which the sandbox must let it write. `shadictl` refuses a grant on a path that doesn't exist, so create the ones a fresh install may not have yet, privately:
 
 ```sh
 (umask 077 && mkdir -p ~/.dir ~/.config/dirctl ~/.agntcy/dir-runtime/workloads.d)
 mkdir -p /tmp/agentbridge-example
 export SHADI_TMP_DIR="$(cd /tmp/agentbridge-example && pwd -P)"   # the real path: /tmp is a symlink on macOS
+export SHADI_DIRCTL_BINARY="$(realpath "$(command -v dirctl)")"
 shadictl --net-block \
   --net-allow 127.0.0.1:19960 --net-allow schema.oasf.outshift.com:443 \
   --net-allow localhost:8888 --read ~/.dir --read ~/.config/dirctl \
+  --read "$SHADI_DIRCTL_BINARY" \
   --allow "$SHADI_TMP_DIR" --write ~/.agntcy/dir-runtime/workloads.d \
   -- agentbridge register --tool fake-harness-isolated \
      --a2a-listen 127.0.0.1:19960 --a2a-binding http+json \
