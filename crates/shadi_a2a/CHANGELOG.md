@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.4.0...agntcy-shadi-a2a-v0.4.1) - 2026-11-06
+
+### Added
+
+- *(agentbridge)* find running agents through dir-runtime ([#490](https://github.com/agntcy/shadi/pull/490))
+
 ## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.3.0...agntcy-shadi-a2a-v0.4.0) - 2026-10-16
 
 ### Added

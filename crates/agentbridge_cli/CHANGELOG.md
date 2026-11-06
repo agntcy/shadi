@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.3.0...agntcy-agentbridge-cli-v0.4.0) - 2026-11-06
+
+### Added
+
+- *(agentbridge)* find running agents through dir-runtime ([#490](https://github.com/agntcy/shadi/pull/490))
+- *(agentbridge)* register --record runs an agent skill from DIR ([#483](https://github.com/agntcy/shadi/pull/483))
+- *(agentbridge)* announce a running register to dir-runtime ([#478](https://github.com/agntcy/shadi/pull/478))
+- *(agentbridge)* [**breaking**] advertise OASF skills, domains and version in the agent card ([#477](https://github.com/agntcy/shadi/pull/477))
+
+### Fixed
+
+- *(agentbridge)* scope harness sessions to the sender's DID ([#528](https://github.com/agntcy/shadi/pull/528))
+
+### Other
+
+- *(agentbridge)* add the runtime discovery demo and container example ([#493](https://github.com/agntcy/shadi/pull/493))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.2.0...agntcy-agentbridge-cli-v0.3.0) - 2026-10-16
 
 ### Added

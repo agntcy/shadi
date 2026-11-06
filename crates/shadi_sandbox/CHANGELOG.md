@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.3.0...agntcy-shadi-sandbox-v0.3.1) - 2026-11-06
+
+### Fixed
+
+- *(shadictl)* refuse sandboxed peers on the policy control socket ([#527](https://github.com/agntcy/shadi/pull/527))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.2.1...agntcy-shadi-sandbox-v0.3.0) - 2026-10-09
 
 ### Added
