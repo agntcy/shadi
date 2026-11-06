@@ -207,7 +207,7 @@ tool the adapter spawns to run a task, with no extra code:
 
 ```bash
 SHADI_AGENT_ID=claude-code target/debug/shadictl --net-block --net-allow "$SLIM_ENDPOINT" \
-  --read "$SHADI_TMP_DIR" -- \
+  --read "$SHADI_TMP_DIR" --allow "$SHADI_TMP_DIR/agentbridge-local" -- \
   target/debug/agentbridge register --tool claude-code \
   --command "$(pwd)" --slim-endpoint "$SLIM_ENDPOINT"
 ```
@@ -219,6 +219,9 @@ Starting SLIM A2A listener on 127.0.0.1:47560 as agntcy/shadi/claude-code-a2a ..
 ```
 
 Repeat for `codex`, `copilot`, and `cursor-agent` (same shape, `--tool <name>`).
+`--allow "$SHADI_TMP_DIR/agentbridge-local"` lets the listener write its lease
+there, which `agentbridge list --local` reads; the rest of `$SHADI_TMP_DIR`
+(the mTLS material) stays read-only.
 
 Then, from any terminal, list the listeners this machine just started:
 
