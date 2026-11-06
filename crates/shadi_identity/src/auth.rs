@@ -92,6 +92,10 @@ pub fn build_did_auth(
     member_dids: &str,
     agent_id: &str,
 ) -> Result<SlimAuth, IdentityError> {
+    did_auth_for(&AgentIdentity::derive(human_seed, agent_id)?, member_dids)
+}
+
+fn did_auth_for(agent: &AgentIdentity, member_dids: &str) -> Result<SlimAuth, IdentityError> {
     let dids: Vec<&str> = member_dids
         .split(',')
         .map(str::trim)
@@ -102,8 +106,7 @@ pub fn build_did_auth(
             "member DID allow-list is empty".to_string(),
         ));
     }
-    let agent = AgentIdentity::derive(human_seed, agent_id)?;
-    SlimAuth::did(&agent, dids)
+    SlimAuth::did(agent, dids)
 }
 
 /// Resolve how `agent_id` should authenticate to the SLIM mesh, from the environment.
@@ -138,14 +141,28 @@ pub fn require_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityErr
     })
 }
 
-fn resolve_did_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
+/// The agent's own key from the environment: `SHADI_SLIM_AUTH=did` plus
+/// `SLIM_HUMAN_SEED`. Unlike [`did_auth_from_env`] it needs no peer allow-list,
+/// so callers that only sign or name themselves do not depend on one.
+pub fn agent_identity_from_env(agent_id: &str) -> Result<AgentIdentity, IdentityError> {
+    let mode = std::env::var("SHADI_SLIM_AUTH").unwrap_or_default();
+    if !mode.eq_ignore_ascii_case("did") {
+        return Err(IdentityError::Config(
+            "an agent identity requires SHADI_SLIM_AUTH=did and SLIM_HUMAN_SEED".to_string(),
+        ));
+    }
     let human_seed = std::env::var("SLIM_HUMAN_SEED").map_err(|_| {
         IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED".to_string())
     })?;
+    AgentIdentity::derive(human_seed.as_bytes(), agent_id)
+}
+
+fn resolve_did_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
+    let agent = agent_identity_from_env(agent_id)?;
     let members = std::env::var("SLIM_MEMBER_DIDS").map_err(|_| {
         IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_MEMBER_DIDS".to_string())
     })?;
-    build_did_auth(human_seed.as_bytes(), &members, agent_id)
+    did_auth_for(&agent, &members)
 }
 
 #[cfg(test)]
@@ -235,5 +252,29 @@ mod tests {
 
         env::remove_var("SHADI_SLIM_AUTH");
         env::remove_var("SLIM_MEMBER_DIDS");
+    }
+
+    #[test]
+    fn agent_identity_from_env_requires_did_mode_not_members() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        env::remove_var("SLIM_MEMBER_DIDS");
+
+        env::remove_var("SHADI_SLIM_AUTH");
+        assert!(matches!(
+            agent_identity_from_env("avatar"),
+            Err(IdentityError::Config(_))
+        ));
+        env::set_var("SHADI_SLIM_AUTH", "shared-secret");
+        assert!(agent_identity_from_env("avatar").is_err());
+
+        env::set_var("SHADI_SLIM_AUTH", "DID");
+        let id = agent_identity_from_env("avatar").expect("no member list needed");
+        let expected = AgentIdentity::derive(b"human", "avatar").unwrap().did();
+        assert_eq!(id.did(), expected);
+
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_HUMAN_SEED");
     }
 }

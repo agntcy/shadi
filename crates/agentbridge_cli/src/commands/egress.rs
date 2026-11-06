@@ -24,7 +24,7 @@ pub(crate) fn policy() -> Arc<dyn AgentVerifier> {
 
 /// A live adapter whose every send passes [`policy`].
 pub(crate) fn live_adapter(config: LiveA2ATaskAdapterConfig) -> LiveA2ATaskAdapter {
-    LiveA2ATaskAdapter::new(config).with_verifier(policy())
+    agentbridge::live_adapter(config).with_verifier(policy())
 }
 
 /// Check a message sent without an A2A channel, which is a listener's reply.

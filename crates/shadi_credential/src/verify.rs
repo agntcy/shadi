@@ -66,7 +66,7 @@ pub fn verify(
         .and_then(Value::as_str)
         .ok_or_else(|| CredentialError::Malformed("no `nonce` claim".to_string()))?;
     // The only audience accepted below; never one the token names.
-    let audience = nonces.consume(nonce, task_id, now)?;
+    let audience = nonces.consume(nonce, task_id, signer_did, now)?;
 
     // 3. Algorithm allow-list (no `none`, no alg confusion) and KB `typ`.
     check_alg(issuer_jwt, "issuer JWT")?;
@@ -220,22 +220,31 @@ mod tests {
         fn new() -> Self {
             Self {
                 holder: AgentIdentity::generate().unwrap(),
-                nonces: NonceStore::new(AUD),
+                nonces: NonceStore::new(AUD, "{}"),
                 jwks: jwks(),
             }
         }
 
         fn challenge(&self) -> Challenge {
-            self.nonces.issue(TASK, NOW).unwrap()
+            self.challenge_for(&self.holder.did())
+        }
+
+        fn challenge_for(&self, did: &str) -> Challenge {
+            self.nonces.issue(TASK, did, NOW).unwrap()
         }
 
         /// A valid presentation, with the credential edited by `edit` first.
         fn pres(&self, edit: impl FnOnce(&mut Value, &mut Value)) -> String {
+            self.pres_to(&self.holder.did(), edit)
+        }
+
+        /// As `pres`, with the nonce issued to `did`.
+        fn pres_to(&self, did: &str, edit: impl FnOnce(&mut Value, &mut Value)) -> String {
             let d = discs();
             let (mut header, mut claims) = (base_header(), base_claims(&self.holder, &d));
             edit(&mut header, &mut claims);
             let cred = credential(&issuer_key(), &header, &claims, &d);
-            let c = self.challenge();
+            let c = self.challenge_for(did);
             present_n(&self.holder, &cred, d.len(), &c.nonce, &c.aud, NOW)
         }
 
@@ -377,7 +386,7 @@ mod tests {
         let e = Env::new();
         let other = AgentIdentity::generate().unwrap();
         e.rejects_as(
-            &e.pres(|_, _| {}),
+            &e.pres_to(&other.did(), |_, _| {}),
             &other.did(),
             "not bound to the key that signed",
         );
@@ -387,7 +396,7 @@ mod tests {
     fn rejects_an_envelope_signer_that_is_not_a_did_key() {
         let e = Env::new();
         e.rejects_as(
-            &e.pres(|_, _| {}),
+            &e.pres_to("did:web:example.com", |_, _| {}),
             "did:web:example.com",
             "not a usable did:key",
         );
@@ -424,7 +433,7 @@ mod tests {
         let e = Env::new();
         let d = discs();
         let cred = e.cred(&d);
-        let c = e.nonces.issue("task-2", NOW).unwrap();
+        let c = e.nonces.issue("task-2", &e.holder.did(), NOW).unwrap();
         let pres = present_n(&e.holder, &cred, d.len(), &c.nonce, &c.aud, NOW);
         e.rejects(&pres, "challenge nonce is not valid");
     }
@@ -540,5 +549,39 @@ mod tests {
         let err = e.verify(&pres).expect_err("must reject");
         assert!(!err.contains("secret-audience"), "{err}");
         assert!(!err.contains(&pres), "{err}");
+    }
+
+    #[test]
+    fn an_attacker_chosen_issuer_is_not_echoed() {
+        let e = Env::new();
+        let pres = e.pres(|_, c| c["iss"] = json!("https://evil.test/\nINFO forged"));
+        let err = e.verify(&pres).expect_err("must reject");
+        assert!(!err.contains("evil.test"), "{err}");
+        assert!(!err.contains('\n'), "{err}");
+    }
+
+    #[test]
+    fn an_attacker_chosen_kid_is_sanitised_and_bounded() {
+        let e = Env::new();
+        let kid = format!("k\nINFO forged admission {}", "z".repeat(4_000));
+        let pres = e.pres(|h, _| h["kid"] = json!(kid));
+        let err = e.verify(&pres).expect_err("must reject");
+        assert!(err.contains("kid"), "{err}");
+        assert!(!err.contains(&kid), "{err}");
+        assert!(!err.chars().any(char::is_control), "{err:?}");
+        assert!(err.chars().count() < 200, "{}", err.len());
+    }
+
+    #[test]
+    fn an_uncommitted_claim_name_carries_no_control_character() {
+        let e = Env::new();
+        let pres = e.pres(|_, _| {});
+        let (head, kb) = pres.rsplit_once('~').unwrap();
+        let appended = disclosure("ad\u{1b}min\nINFO forged", "v");
+        let err = e
+            .verify(&format!("{head}~{appended}~{kb}"))
+            .expect_err("must reject");
+        assert!(err.contains("not committed"), "{err}");
+        assert!(!err.chars().any(char::is_control), "{err:?}");
     }
 }

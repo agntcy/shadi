@@ -8,7 +8,7 @@
 //! signature. This module is that binding. It does not invent a new identity
 //! system — it signs with the existing [`AgentIdentity`] Ed25519 key.
 
-use crate::{parse_did_key, AgentIdentity, IdentityError, SlimAuth};
+use crate::{parse_did_key, AgentIdentity, IdentityError};
 use base64::Engine as _;
 use ed25519_dalek::Signature;
 
@@ -99,25 +99,7 @@ pub fn unwrap_signed_message(envelope: &[u8]) -> Result<VerifiedPayload, Identit
 /// Uses the same `SHADI_SLIM_AUTH=did` / `SLIM_HUMAN_SEED` contract as mesh
 /// join. Shared-secret node auth cannot produce an application-layer proof.
 pub fn sign_message_from_env(agent_id: &str, payload: &[u8]) -> Result<Vec<u8>, IdentityError> {
-    sign_message_with_auth(crate::require_did_auth_from_env(agent_id)?, payload)
-}
-
-fn sign_message_with_auth(auth: SlimAuth, payload: &[u8]) -> Result<Vec<u8>, IdentityError> {
-    match auth {
-        SlimAuth::Did { signing_pem, did, .. } => {
-            let identity = AgentIdentity::from_pkcs8_pem(&signing_pem)?;
-            if identity.did() != did {
-                return Err(IdentityError::Proof(
-                    "env-derived identity DID does not match SlimAuth DID".to_string(),
-                ));
-            }
-            wrap_signed_message(&identity, payload)
-        }
-        SlimAuth::SharedSecret(_) => Err(IdentityError::Config(
-            "DID proof requires SHADI_SLIM_AUTH=did; shared-secret node auth is not application auth"
-                .to_string(),
-        )),
-    }
+    wrap_signed_message(&crate::agent_identity_from_env(agent_id)?, payload)
 }
 
 fn canonical(did: &str, payload: &[u8]) -> Vec<u8> {
@@ -274,24 +256,5 @@ mod tests {
         assert!(matches!(err, IdentityError::Config(_)));
         std::env::remove_var("SLIM_HUMAN_SEED");
         std::env::remove_var("SLIM_MEMBER_DIDS");
-    }
-
-    #[test]
-    fn sign_with_auth_rejects_shared_secret_and_mismatched_did() {
-        let err = sign_message_with_auth(SlimAuth::SharedSecret(String::new()), b"x").unwrap_err();
-        assert!(matches!(err, IdentityError::Config(_)));
-
-        let signer = AgentIdentity::generate().unwrap();
-        let other = AgentIdentity::generate().unwrap();
-        let mismatched = SlimAuth::Did {
-            signing_pem: signer.to_pkcs8_pem().unwrap(),
-            did: other.did(),
-            member_jwks: String::new(),
-        };
-        let err = sign_message_with_auth(mismatched, b"x").unwrap_err();
-        match err {
-            IdentityError::Proof(msg) => assert!(msg.contains("does not match"), "{msg}"),
-            other => panic!("expected Proof, got {other}"),
-        }
     }
 }

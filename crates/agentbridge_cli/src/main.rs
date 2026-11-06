@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -61,6 +63,10 @@ enum Cmd {
         /// Official A2A binding for `--a2a-listen`: grpc, jsonrpc, or http+json.
         #[arg(long, default_value = "grpc", value_parser = shadi_a2a::A2ABinding::parse_unicast)]
         a2a_binding: shadi_a2a::A2ABinding,
+
+        /// Admission policy file; a caller must present a credential it accepts.
+        #[arg(long, env = "SHADI_ADMISSION_POLICY")]
+        admission_policy: Option<PathBuf>,
 
         /// Print the full text of every A2A request/response instead of a
         /// truncated one-line preview.
@@ -255,6 +261,7 @@ fn main() {
             slim_endpoint,
             a2a_listen,
             a2a_binding,
+            admission_policy,
             verbose,
         } => {
             let publish_opts = dir_publish.then_some(commands::register::DirPublishOptions {
@@ -269,6 +276,7 @@ fn main() {
                 a2a_listen.as_deref(),
                 a2a_binding,
                 publish_opts,
+                admission_policy.as_deref(),
                 verbose,
             )
         }

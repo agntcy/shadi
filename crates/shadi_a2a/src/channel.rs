@@ -30,25 +30,31 @@ pub const A2A_SRC_DID_METADATA_KEY: &str = "a2a-src-did";
 /// DID does not match must not execute the task.
 pub const A2A_DST_DID_METADATA_KEY: &str = "a2a-dst-did";
 
+/// `Message.metadata` key carrying an `AUTH_REQUIRED` challenge.
+pub const A2A_CHALLENGE_METADATA_KEY: &str = "a2a-challenge";
+
 fn secret_err_to_a2a(err: SecretError) -> A2AError {
     A2AError::internal(format!("SHADI auth error: {err}"))
 }
 
-fn insert_metadata_did(mut message: Message, key: &str, did: &str) -> Message {
+fn insert_metadata_str(mut message: Message, key: &str, value: &str) -> Message {
     message
         .metadata
         .get_or_insert_with(std::collections::HashMap::new)
-        .insert(key.to_string(), serde_json::Value::String(did.to_string()));
+        .insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
     message
 }
 
 fn insert_sender_did(message: Message, did: &str) -> Message {
-    insert_metadata_did(message, A2A_SRC_DID_METADATA_KEY, did)
+    insert_metadata_str(message, A2A_SRC_DID_METADATA_KEY, did)
 }
 
 /// Tag an outbound A2A message with the recipient DID (the portable name).
 pub fn insert_dest_did(message: Message, did: &str) -> Message {
-    insert_metadata_did(message, A2A_DST_DID_METADATA_KEY, did)
+    insert_metadata_str(message, A2A_DST_DID_METADATA_KEY, did)
 }
 
 /// Recipient DID from `Message.metadata`, if the caller set one.
@@ -59,6 +65,22 @@ pub fn dest_did_from_message(message: &Message) -> Option<&str> {
         .and_then(|metadata| metadata.get(A2A_DST_DID_METADATA_KEY))
         .and_then(|value| value.as_str())
         .filter(|did| !did.is_empty())
+}
+
+/// Attach an `AUTH_REQUIRED` challenge to a parked task's status message. The
+/// challenge is an opaque JSON string; this crate never parses it.
+pub fn insert_challenge(message: Message, challenge: &str) -> Message {
+    insert_metadata_str(message, A2A_CHALLENGE_METADATA_KEY, challenge)
+}
+
+/// Challenge from `Message.metadata`, if the listener attached one.
+pub fn challenge_from_message(message: &Message) -> Option<&str> {
+    message
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(A2A_CHALLENGE_METADATA_KEY))
+        .and_then(|value| value.as_str())
+        .filter(|c| !c.is_empty())
 }
 
 /// What a verifier sees of an outbound message, on an [`A2AChannel`] or in a

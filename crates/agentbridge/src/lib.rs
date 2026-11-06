@@ -9,6 +9,7 @@ pub mod local_registry;
 pub mod member_source;
 pub mod owner;
 pub mod owner_intake;
+mod presenter;
 pub mod subprocess;
 
 pub use shadi_mas;
@@ -31,6 +32,7 @@ pub use adapters::profile::{
     bundled_profile_ids, load_profile, open_profile_adapter, CliProfile, ProfileAdapter,
 };
 pub use context::{ArtifactPayload, CodeContext, ContextPacket, ConversationMessage, FileSnapshot};
+pub use presenter::live_adapter;
 pub use subprocess::TrackedSubprocess;
 
 /// Re-export the shadi_mas coordination primitives most commonly used with

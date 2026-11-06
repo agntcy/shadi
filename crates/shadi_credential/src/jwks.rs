@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::sd_jwt::ed25519_from_jwk;
 use crate::vault::pin_issuer;
-use crate::CredentialError;
+use crate::{printable, CredentialError};
 
 /// A real realm's JWKS is a few KiB; this bounds what a bad path can make us
 /// read into memory.
@@ -115,32 +115,34 @@ impl JwksStore {
     /// The key to verify a token from `issuer` carrying header `kid` with.
     pub fn key(&self, issuer: &str, kid: Option<&str>) -> Result<VerifyingKey, CredentialError> {
         let issuer = pin_issuer(issuer);
-        let entries = self
-            .issuers
-            .get(issuer)
-            .ok_or_else(|| CredentialError::Refused(format!("issuer {issuer} is not pinned")))?;
+        let entries = self.issuers.get(issuer).ok_or_else(|| {
+            CredentialError::Refused("the credential's issuer is not pinned".into())
+        })?;
         let entry = match kid {
             Some(kid) => entries
                 .iter()
                 .find(|(k, _)| k == kid)
                 .map(|(_, e)| e)
                 .ok_or_else(|| {
-                    CredentialError::Refused(format!("issuer {issuer} has no key with kid {kid}"))
+                    CredentialError::Refused(format!(
+                        "the issuer has no key with kid {}",
+                        printable(kid)
+                    ))
                 })?,
             None => match entries.as_slice() {
                 [(_, only)] => only,
                 _ => {
-                    return Err(CredentialError::Refused(format!(
-                        "token names no kid and issuer {issuer} has several keys"
-                    )))
+                    return Err(CredentialError::Refused(
+                        "token names no kid and its issuer has several keys".into(),
+                    ))
                 }
             },
         };
         match entry {
             Entry::Usable(key) => Ok(*key),
-            Entry::Unsupported => Err(CredentialError::Refused(format!(
-                "unsupported key type for issuer {issuer}: only OKP/Ed25519 (EdDSA) verifies"
-            ))),
+            Entry::Unsupported => Err(CredentialError::Refused(
+                "unsupported key type for the issuer: only OKP/Ed25519 (EdDSA) verifies".into(),
+            )),
         }
     }
 }
