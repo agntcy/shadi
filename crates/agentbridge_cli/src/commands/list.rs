@@ -145,11 +145,7 @@ fn lookup(server_addr: &str, gh_token: Option<&str>) -> DirLookupOptions {
 fn merge(found: Vec<(CandidateMember, String)>) -> Vec<(CandidateMember, Vec<String>)> {
     let mut out: Vec<(CandidateMember, Vec<String>)> = Vec::new();
     for (candidate, source) in found {
-        let same = |c: &CandidateMember| {
-            c.did == candidate.did
-                && c.slim_endpoint == candidate.slim_endpoint
-                && c.a2a_url == candidate.a2a_url
-        };
+        let same = |c: &CandidateMember| c.same_agent(&candidate);
         match out.iter_mut().find(|(c, _)| same(c)) {
             Some((_, sources)) if !sources.contains(&source) => sources.push(source),
             Some(_) => {}

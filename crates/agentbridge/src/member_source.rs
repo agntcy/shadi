@@ -70,6 +70,15 @@ impl CandidateMember {
         out
     }
 
+    /// The same agent to talk to: name, DID and every locator agree.
+    ///
+    /// Locators are compared, never the endpoints they came from. An
+    /// announcing workload spells its endpoint as it likes, and
+    /// `A2ALocator` is what settles the scheme and trailing slash.
+    pub fn same_agent(&self, other: &Self) -> bool {
+        self.name == other.name && self.did == other.did && self.locators() == other.locators()
+    }
+
     /// Dispatch locator: prefer unicast when both exist (same as NEXT).
     pub fn preferred_locator(&self) -> Option<A2ALocator> {
         self.unicast_locator().or_else(|| self.slim_locator())
@@ -411,7 +420,7 @@ pub fn find_running_peer_at(
     }) {
         // Workloads that say the same thing (name, DID, locators) are one
         // agent to talk to, as `list` shows them.
-        if !matches.contains(&c) {
+        if !matches.iter().any(|m| m.same_agent(&c)) {
             matches.push(c);
         }
     }
@@ -2031,5 +2040,38 @@ esac
         assert!(none.is_none());
         assert!(deduplicated.is_some(), "identical instances aren't ambiguous");
         assert!(ambiguous.contains("ambiguous"), "{ambiguous}");
+    }
+
+    /// The bug this guards: a workload spells its endpoint as it likes, and
+    /// comparing those strings split one agent into two ambiguous matches.
+    #[test]
+    fn endpoint_spelling_does_not_split_one_agent() {
+        let slim_at = |endpoint: &str| CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zCopilot".to_string(),
+            slim_endpoint: Some(endpoint.to_string()),
+            a2a_url: None,
+            a2a_binding: None,
+        };
+        let plain = slim_at("node:47357");
+        for other in [
+            "https://node:47357",
+            "https://node:47357/",
+            "http://node:47357",
+            "slim://node:47357",
+        ] {
+            assert!(plain.same_agent(&slim_at(other)), "{other}");
+        }
+        assert!(!plain.same_agent(&slim_at("node:47358")));
+
+        let http_at = |url: &str| CandidateMember {
+            name: "copilot".to_string(),
+            did: "did:key:zCopilot".to_string(),
+            slim_endpoint: None,
+            a2a_url: Some(url.to_string()),
+            a2a_binding: Some(A2ABinding::HttpJson),
+        };
+        assert!(http_at("http://127.0.0.1:9").same_agent(&http_at("http://127.0.0.1:9/")));
+        assert!(!http_at("http://127.0.0.1:9").same_agent(&http_at("http://127.0.0.1:8")));
     }
 }
