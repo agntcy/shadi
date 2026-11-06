@@ -177,7 +177,15 @@ impl MemberSource for RunningAgentSource {
         if !output.status.success() {
             return Err(stderr.trim().to_string());
         }
-        let mut candidates = running_candidates(&output.stdout)?;
+        // Deduplicate before the limit, not after it: an agent that
+        // announces itself repeatedly would otherwise fill the page and
+        // push the other agents off it.
+        let mut candidates: Vec<CandidateMember> = Vec::new();
+        for c in running_candidates(&output.stdout)? {
+            if !candidates.iter().any(|seen| seen.same_agent(&c)) {
+                candidates.push(c);
+            }
+        }
         if self.runtime.limit > 0 {
             candidates.truncate(self.runtime.limit);
         }
@@ -1307,6 +1315,64 @@ mod tests {
         assert!(result.expect("no workloads").is_empty());
         let env = std::fs::read_to_string(&log).expect("dirctl was called");
         assert_eq!(env.trim(), "DIRECTORY_CLIENT_AUTH_MODE=insecure");
+    }
+
+    /// The bug this guards: the limit was applied to the raw list, so one
+    /// agent announcing itself repeatedly pushed the others off the page.
+    #[test]
+    #[cfg(unix)]
+    fn repeated_announcements_do_not_crowd_out_other_agents() {
+        let _guard = crate::dir_registry::dirctl_env_lock().lock().expect("lock");
+        let workload = |name: &str, did: &str, endpoint: &str| {
+            serde_json::json!({
+                "name": name,
+                "labels": { "org.agntcy/agent-type": "a2a" },
+                "annotations": {
+                    "agntcy.dir/identity": did,
+                    "org.agntcy/slim-endpoint": endpoint
+                },
+                "locators": []
+            })
+        };
+        let workloads = serde_json::json!([
+            workload("noisy", "did:key:zNoisy", "node:47357"),
+            workload("noisy", "did:key:zNoisy", "https://node:47357"),
+            workload("noisy", "did:key:zNoisy", "slim://node:47357/"),
+            workload("wanted", "did:key:zWanted", "node:47358"),
+        ]);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fake_dirctl.sh");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ncat <<'JSON'\n{workloads}\nJSON\n"),
+        )
+        .expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+
+        let resolved = RunningAgentSource {
+            skills: Vec::new(),
+            runtime: DirLookupOptions {
+                limit: 2,
+                ..test_dir()
+            },
+        }
+        .resolve();
+        std::env::remove_var("SHADI_DIRCTL_BINARY");
+
+        let names: Vec<String> = resolved
+            .expect("resolve")
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["noisy", "wanted"],
+            "an agent takes one slot however often it announces"
+        );
     }
 
     fn test_dir() -> DirLookupOptions {
