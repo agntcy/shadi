@@ -43,6 +43,8 @@ export AGENTBRIDGE_PROFILES_DIR=$PWD/examples/agentbridge-container/profiles
 export PATH=$PWD/target/debug:$PWD/examples/agentbridge-container:$PATH   # agentbridge, shadictl, fake-harness
 export FAKE_HARNESS_SKILLS=software_engineering/code_debugging/error_handling   # what fake-harness prints
 
+(umask 077 && mkdir -p ~/.agntcy/dir-runtime/workloads.d)   # shadictl refuses a grant that isn't there
+
 shadictl --net-block \
   --net-allow 127.0.0.1:19950 --net-allow schema.oasf.outshift.com:443 \
   --write ~/.agntcy/dir-runtime/workloads.d \
