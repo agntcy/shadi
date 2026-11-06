@@ -250,6 +250,16 @@ fn resolve_peer_found(
                 other.did
             )),
             Err(e) if agentbridge::local_registry::is_ambiguous(&e) => Err(e),
+            // One agent, leased here and announced there. The lease wins,
+            // unless --a2a-url names the announced listener alone: taking
+            // the lease would drop the binding it announced.
+            Ok(Some(other)) => fallback().map(|lease| {
+                if names_only(&other, &lease, a2a_url_override, a2a_binding) {
+                    (other, Found::Runtime)
+                } else {
+                    (lease, Found::Local)
+                }
+            }),
             _ => fallback().map(|peer| (peer, Found::Local)),
         },
         Ok(_) => fallback().map(|peer| (peer, Found::Local)),
@@ -262,6 +272,23 @@ fn resolve_peer_found(
         a2a_binding,
     )
     .map(|peer| (peer, found))
+}
+
+/// `--a2a-url` is `announced`'s locator and not `lease`'s.
+///
+/// A malformed override is nobody's: `apply_locator_override` reports it.
+fn names_only(
+    announced: &CandidateMember,
+    lease: &CandidateMember,
+    a2a_url_override: Option<&str>,
+    a2a_binding: Option<A2ABinding>,
+) -> bool {
+    let Some(Ok(locator)) =
+        a2a_url_override.map(|raw| A2ALocator::parse_with_hint(raw, a2a_binding))
+    else {
+        return false;
+    };
+    has_locator(announced, &locator) && !has_locator(lease, &locator)
 }
 
 fn apply_parsed_locator(peer: &mut CandidateMember, locator: A2ALocator) {
@@ -400,6 +427,35 @@ mod tests {
         assert!(err.contains("ambiguous"), "{err}");
         assert!(err.contains("did:key:zLease") && err.contains("did:key:zOther"), "{err}");
         assert!(resolve("did:key:zLease").is_ok(), "the same agent, announced");
+    }
+
+    /// The bug this guards: the lease won even when `--a2a-url` named the
+    /// announced listener, and `A2ABinding`'s `#[default]` is `Grpc`, so the
+    /// dropped binding failed silently rather than loudly.
+    #[test]
+    fn an_a2a_url_naming_only_the_announced_instance_keeps_its_binding() {
+        let resolve = |at: Option<&str>| {
+            resolve_peer_found(
+                "copilot",
+                Ok("did:key:zTwice".to_string()),
+                || Ok(Some(instance(3))),
+                || Ok(instance(2)),
+                at,
+                None,
+                "localhost:8888",
+            )
+            .unwrap()
+        };
+
+        let (peer, found) = resolve(Some("http://127.0.0.1:3"));
+        assert_eq!(found, Found::Runtime);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:3"));
+        assert_eq!(peer.a2a_binding, Some(A2ABinding::HttpJson));
+
+        // Without the override the lease still wins.
+        let (peer, found) = resolve(None);
+        assert_eq!(found, Found::Local);
+        assert_eq!(peer.a2a_url.as_deref(), Some("http://127.0.0.1:2"));
     }
 
     #[test]
