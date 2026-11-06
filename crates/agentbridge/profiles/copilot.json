@@ -3,9 +3,9 @@
   "bin": "copilot",
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}"
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
   },
   "workdir_flags": ["-C", "{workdir}", "--add-dir", "{workdir}"],
   "workdir_flags_on_execute": true,
@@ -13,6 +13,7 @@
   "workdir_flags_on_inject": true,
   "current_dir_workdir": true,
   "system_flag": "--system-prompt",
+  "provision": { "skills": { "dir": "{workdir}/.github/skills" } },
   "execute": {
     "args": [
       "--prompt",

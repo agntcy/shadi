@@ -3,9 +3,9 @@
   "bin": "cursor-agent",
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}"
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
   },
   "workdir_flags": [
     "--workspace",
@@ -19,6 +19,7 @@
   "workdir_flags_on_inject": true,
   "current_dir_workdir": true,
   "system_flag": "--system-prompt",
+  "provision": { "skills": { "dir": "{workdir}/.cursor/skills" } },
   "execute": {
     "args": [
       "--print",

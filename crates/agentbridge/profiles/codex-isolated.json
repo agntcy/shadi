@@ -1,0 +1,36 @@
+{
+  "id": "codex-isolated",
+  "bin": "codex",
+  "require_sandbox": true,
+  "pass_env": ["CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
+  },
+  "current_dir_workdir": true,
+  "stdin_null": true,
+  "extra_args_env": "CODEX_ARGS",
+  "isolation": {
+    "env": {
+      "HOME": "{config_root}",
+      "USERPROFILE": "{config_root}",
+      "APPDATA": "{config_root}/AppData/Roaming",
+      "LOCALAPPDATA": "{config_root}/AppData/Local",
+      "CODEX_HOME": "{config_root}/.codex"
+    }
+  },
+  "provision": { "skills": { "dir": "{config_root}/.codex/skills" } },
+  "execute": {
+    "args": [
+      "exec",
+      "{prompt}",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "{extra_args}"
+    ]
+  },
+  "result": { "kind": "strip_after_first_line", "line": "--------" }
+}

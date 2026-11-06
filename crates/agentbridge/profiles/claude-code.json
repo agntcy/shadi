@@ -3,11 +3,11 @@
   "bin": "claude",
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}",
-    "CLAUDE_CODE_TMPDIR": "{workdir}",
-    "CLAUDE_TMPDIR": "{workdir}"
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}",
+    "CLAUDE_CODE_TMPDIR": "{tmpdir}",
+    "CLAUDE_TMPDIR": "{tmpdir}"
   },
   "workdir_flags": ["--add-dir", "{workdir}"],
   "workdir_flags_on_execute": true,
@@ -16,6 +16,7 @@
   "current_dir_workdir": true,
   "system_flag": "--system-prompt",
   "split_large_prompt": true,
+  "provision": { "skills": { "dir": "{workdir}/.claude/skills" } },
   "execute": {
     "args": [
       "--print",

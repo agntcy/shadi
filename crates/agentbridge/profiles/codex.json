@@ -3,13 +3,14 @@
   "bin": "codex",
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}"
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
   },
   "current_dir_workdir": true,
   "stdin_null": true,
   "extra_args_env": "CODEX_ARGS",
+  "provision": { "skills": { "dir": "{workdir}/.agents/skills" } },
   "execute": {
     "args": [
       "exec",

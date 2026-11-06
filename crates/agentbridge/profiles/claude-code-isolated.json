@@ -1,0 +1,53 @@
+{
+  "id": "claude-code-isolated",
+  "bin": "claude",
+  "require_sandbox": true,
+  "pass_env": [
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"
+  ],
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}",
+    "CLAUDE_CODE_TMPDIR": "{tmpdir}",
+    "CLAUDE_TMPDIR": "{tmpdir}"
+  },
+  "workdir_flags": ["--add-dir", "{workdir}"],
+  "workdir_flags_on_execute": true,
+  "workdir_flags_on_snapshot": true,
+  "workdir_flags_on_inject": false,
+  "current_dir_workdir": true,
+  "system_flag": "--system-prompt",
+  "split_large_prompt": true,
+  "isolation": {
+    "env": {
+      "HOME": "{config_root}",
+      "USERPROFILE": "{config_root}",
+      "APPDATA": "{config_root}/AppData/Roaming",
+      "LOCALAPPDATA": "{config_root}/AppData/Local",
+      "CLAUDE_CONFIG_DIR": "{config_root}/.claude"
+    },
+    "args": ["--strict-mcp-config", "--setting-sources", "user"]
+  },
+  "provision": { "skills": { "dir": "{config_root}/.claude/skills" } },
+  "execute": {
+    "args": [
+      "--print",
+      "--output-format",
+      "json",
+      "{workdir_flags}",
+      "{system}",
+      "{session}",
+      "--",
+      "{prompt}"
+    ]
+  },
+  "session": {
+    "json_field": "session_id",
+    "flag": "--session-id",
+    "retry_stderr_contains": "already in use"
+  },
+  "result": { "kind": "json_field", "field": "result" }
+}

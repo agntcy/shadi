@@ -3,9 +3,9 @@
   "bin": "goose",
   "pin_tmpdir": true,
   "env": {
-    "TMPDIR": "{workdir}",
-    "TMP": "{workdir}",
-    "TEMP": "{workdir}"
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
   },
   "current_dir_workdir": true,
   "system_flag": "--system",
@@ -17,6 +17,7 @@
   "pass_env_prefixes": ["GOOSE_", "OPENAI_"],
   "pass_env_suffixes": ["_API_KEY"],
   "stdin_null": true,
+  "provision": { "skills": { "dir": "{workdir}/.goose/skills" } },
   "execute": {
     "args": [
       "run",

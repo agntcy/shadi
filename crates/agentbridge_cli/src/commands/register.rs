@@ -68,9 +68,21 @@ pub fn run(
     // for local handoff/coordinate; register no longer constructs them.
     if tool != "generic-stdio" {
         if let Some(profile) = load_profile(tool).map_err(|e| anyhow::anyhow!("{e}"))? {
-            let work_dir = register_work_dir(command);
+            // Every task would fail without its config root; don't announce
+            // an agent that can't run any.
+            if profile.is_isolated() && super::record::config_root().is_none() {
+                anyhow::bail!(
+                    "profile '{tool}' runs isolated, and its config root comes from `--record`; \
+                     pass `--record <CID or name>`, or use a profile without isolation"
+                );
+            }
+            let work_dir = work_dir(command);
             let id = profile.id.clone();
-            let adapter = Arc::new(ProfileAdapter::new(profile, work_dir.clone()));
+            let adapter = ProfileAdapter::new(profile, work_dir.clone());
+            let adapter = Arc::new(match super::record::config_root() {
+                Some(root) => adapter.with_config_root(root),
+                None => adapter,
+            });
             println!(
                 "Registered {id} adapter from profile (agent id: {}, dir: {})",
                 adapter.agent_id().0,
@@ -136,7 +148,8 @@ pub fn run(
     Ok(())
 }
 
-fn register_work_dir(command: Option<&str>) -> PathBuf {
+/// The harness's working directory: `--command`, or the current directory.
+pub fn work_dir(command: Option<&str>) -> PathBuf {
     command
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
@@ -249,25 +262,27 @@ fn start_listeners(
                     verbose,
                 );
                 let binding = a2a_binding.as_protocol_binding();
-                // Announced, don't keep serving (and announcing) only half the
-                // agent; otherwise SLIM carries on, as before. That holds for
-                // a Ctrl-C too (`Ok`): SLIM may still be connecting, and would
-                // otherwise announce this listener's locator once it is ready.
-                let Some(written) = announced else {
-                    if let Err(err) = result {
-                        eprintln!("[agentbridge] {binding} listener: {err}");
-                    }
-                    return;
-                };
-                let code = match result {
-                    Ok(()) => 130,
-                    Err(err) => {
+                // A Ctrl-C (`Ok`) stops the whole agent: SLIM may still be
+                // connecting, without a handler of its own yet, and would
+                // otherwise serve (or announce) on. A listener error stops it
+                // too when announced, so as not to announce only half the
+                // agent; unannounced, SLIM carries on, as before.
+                let code = match (result, &announced) {
+                    (Ok(()), _) => 130,
+                    (Err(err), Some(_)) => {
                         eprintln!("[agentbridge] {binding} listener: {err}; stopping");
                         1
                     }
+                    (Err(err), None) => {
+                        eprintln!("[agentbridge] {binding} listener: {err}");
+                        return;
+                    }
                 };
-                super::announce::withdraw(&written);
+                if let Some(written) = &announced {
+                    super::announce::withdraw(written);
+                }
                 super::announce::stop_in_flight();
+                super::record::cleanup();
                 std::process::exit(code);
             });
         } else {
@@ -1200,6 +1215,7 @@ fn run_slim_listener(
         println!("[agentbridge] ready — listening on {agent_name}");
         super::announce::listener_ready();
         println!("[agentbridge] Press Ctrl-C to stop.");
+        super::record::listening();
 
         // Serve until Ctrl-C, or until the server stops on its own: then stop
         // the task in flight and return, so the announcement is withdrawn
@@ -1664,6 +1680,7 @@ fn run_unicast_listener(
         );
         super::announce::listener_ready();
         println!("[agentbridge] Press Ctrl-C to stop.");
+        super::record::listening();
         tokio::select! {
             result = serve => result,
             _ = tokio::signal::ctrl_c() => {
@@ -3081,11 +3098,10 @@ test push ... FAILED
         );
     }
 
-    /// `A2A_TLS_CERT` / `A2A_TLS_KEY` are process-global and
-    /// `a2a_server_tls_paths` reads them inside the call under test, so these
-    /// tests have to hold this across both the mutation and the call. Guarding
-    /// only the mutation still lets a sibling's value reach the reader.
-    static TLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `A2A_TLS_CERT` / `A2A_TLS_KEY` are process-global and
+    // `a2a_server_tls_paths` reads them inside the call under test, so these
+    // tests hold `test_env_lock` across both the mutation and the call.
+    // Guarding only the mutation still lets a sibling's value reach the reader.
 
     #[test]
     fn grpc_server_tls_loopback_is_plaintext() {
@@ -3097,7 +3113,7 @@ test push ... FAILED
 
     #[test]
     fn grpc_server_tls_non_loopback_requires_cert_files() {
-        let _guard = TLS_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = super::super::test_env_lock();
         let prev_cert = std::env::var_os("A2A_TLS_CERT");
         let prev_key = std::env::var_os("A2A_TLS_KEY");
         let prev_tmp = std::env::var_os("SHADI_TMP_DIR");
@@ -3135,7 +3151,7 @@ test push ... FAILED
 
     #[test]
     fn grpc_server_tls_rejects_empty_pem() {
-        let _guard = TLS_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = super::super::test_env_lock();
         let prev_cert = std::env::var_os("A2A_TLS_CERT");
         let prev_key = std::env::var_os("A2A_TLS_KEY");
         let tmp = std::env::temp_dir().join(format!(

@@ -1,0 +1,49 @@
+{
+  "id": "goose-isolated",
+  "bin": "goose",
+  "require_sandbox": true,
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
+  },
+  "current_dir_workdir": true,
+  "system_flag": "--system",
+  "extra_args_env": "GOOSE_ARGS",
+  "env_flags": [
+    { "flag": "--provider", "env": "GOOSE_PROVIDER" },
+    { "flag": "--model", "env": "GOOSE_MODEL" }
+  ],
+  "pass_env": [
+    "GOOSE_PROVIDER", "GOOSE_MODEL", "OPENAI_API_KEY", "OPENAI_HOST", "OPENAI_BASE_PATH",
+    "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY"
+  ],
+  "stdin_null": true,
+  "isolation": {
+    "env": {
+      "HOME": "{config_root}",
+      "USERPROFILE": "{config_root}",
+      "APPDATA": "{config_root}/AppData/Roaming",
+      "LOCALAPPDATA": "{config_root}/AppData/Local",
+      "XDG_CONFIG_HOME": "{config_root}/.config",
+      "XDG_DATA_HOME": "{config_root}/.local/share",
+      "XDG_STATE_HOME": "{config_root}/.local/state",
+      "XDG_CACHE_HOME": "{config_root}/.cache"
+    }
+  },
+  "provision": { "skills": { "dir": "{config_root}/.config/goose/skills" } },
+  "execute": {
+    "args": [
+      "run",
+      "--text",
+      "{prompt}",
+      "--no-session",
+      "--quiet",
+      "{env_flags}",
+      "{system}",
+      "{extra_args}"
+    ]
+  },
+  "result": { "kind": "stdout" }
+}

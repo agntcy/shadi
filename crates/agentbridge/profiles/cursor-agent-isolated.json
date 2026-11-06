@@ -1,0 +1,52 @@
+{
+  "id": "cursor-agent-isolated",
+  "bin": "cursor-agent",
+  "require_sandbox": true,
+  "pass_env": ["CURSOR_API_KEY", "CURSOR_API_ENDPOINT"],
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}"
+  },
+  "workdir_flags": [
+    "--workspace",
+    "{workdir}",
+    "--trust",
+    "--sandbox",
+    "disabled"
+  ],
+  "workdir_flags_on_execute": true,
+  "workdir_flags_on_snapshot": true,
+  "workdir_flags_on_inject": true,
+  "current_dir_workdir": true,
+  "system_flag": "--system-prompt",
+  "isolation": {
+    "env": {
+      "HOME": "{config_root}",
+      "USERPROFILE": "{config_root}",
+      "APPDATA": "{config_root}/AppData/Roaming",
+      "LOCALAPPDATA": "{config_root}/AppData/Local",
+      "XDG_CONFIG_HOME": "{config_root}/.config",
+      "CURSOR_DATA_DIR": "{config_root}/.cursor"
+    },
+    "max_root_len": 67
+  },
+  "provision": { "skills": { "dir": "{config_root}/.cursor/skills" } },
+  "execute": {
+    "args": [
+      "--print",
+      "--output-format",
+      "text",
+      "{workdir_flags}",
+      "{system}",
+      "{session}",
+      "{prompt}"
+    ]
+  },
+  "session": {
+    "json_field": "session_id",
+    "flag": "--session-id"
+  },
+  "result": { "kind": "stdout" }
+}
