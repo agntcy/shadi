@@ -1,3 +1,6 @@
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+
 use agentbridge::local_registry::{LocalAdapterRecord, LocalAdapterRegistry};
 use agentbridge::member_source::{
     A2AAgentSearchSource, CandidateMember, DirLookupOptions, MemberSource, RunningAgentSource,
@@ -144,12 +147,19 @@ fn lookup(server_addr: &str, gh_token: Option<&str>) -> DirLookupOptions {
 /// dir-runtimes that reported it.
 fn merge(found: Vec<(CandidateMember, String)>) -> Vec<(CandidateMember, Vec<String>)> {
     let mut out: Vec<(CandidateMember, Vec<String>)> = Vec::new();
+    let mut at: HashMap<_, usize> = HashMap::new();
     for (candidate, source) in found {
-        let same = |c: &CandidateMember| c.same_agent(&candidate);
-        match out.iter_mut().find(|(c, _)| same(c)) {
-            Some((_, sources)) if !sources.contains(&source) => sources.push(source),
-            Some(_) => {}
-            None => out.push((candidate, vec![source])),
+        match at.entry(candidate.identity_key()) {
+            Entry::Occupied(slot) => {
+                let sources = &mut out[*slot.get()].1;
+                if !sources.contains(&source) {
+                    sources.push(source);
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(out.len());
+                out.push((candidate, vec![source]));
+            }
         }
     }
     out.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name).then(a.did.cmp(&b.did)));

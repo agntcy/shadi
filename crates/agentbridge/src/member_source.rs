@@ -10,6 +10,7 @@
 //! small, independent implementation, and a group's candidate pool can come
 //! from any combination of them.
 
+use std::collections::HashSet;
 use std::process::Command;
 
 use serde_json::Value;
@@ -70,13 +71,28 @@ impl CandidateMember {
         out
     }
 
-    /// The same agent to talk to: name, DID and every locator agree.
+    /// What two announcements must share to be one agent: name, DID and
+    /// every locator.
     ///
     /// Locators are compared, never the endpoints they came from. An
     /// announcing workload spells its endpoint as it likes, and
-    /// `A2ALocator` is what settles the scheme and trailing slash.
+    /// `A2ALocator` is what settles the scheme and trailing slash. Built
+    /// once per candidate, so deduplicating a list the runtime sized is a
+    /// single hashing pass rather than a growing scan.
+    pub fn identity_key(&self) -> (String, String, Vec<(A2ABinding, String)>) {
+        (
+            self.name.clone(),
+            self.did.clone(),
+            self.locators()
+                .into_iter()
+                .map(|l| (l.binding, l.url))
+                .collect(),
+        )
+    }
+
+    /// The same agent to talk to.
     pub fn same_agent(&self, other: &Self) -> bool {
-        self.name == other.name && self.did == other.did && self.locators() == other.locators()
+        self.identity_key() == other.identity_key()
     }
 
     /// Dispatch locator: prefer unicast when both exist (same as NEXT).
@@ -179,10 +195,12 @@ impl MemberSource for RunningAgentSource {
         }
         // Deduplicate before the limit, not after it: an agent that
         // announces itself repeatedly would otherwise fill the page and
-        // push the other agents off it.
+        // push the other agents off it. The runtime decides how long this
+        // list is, so the pass is keyed rather than quadratic.
+        let mut seen = HashSet::new();
         let mut candidates: Vec<CandidateMember> = Vec::new();
         for c in running_candidates(&output.stdout)? {
-            if !candidates.iter().any(|seen| seen.same_agent(&c)) {
+            if seen.insert(c.identity_key()) {
                 candidates.push(c);
             }
         }
@@ -421,17 +439,15 @@ pub fn find_running_peer_at(
     }
     .resolve()?;
     let did = parse_peer_did(query);
-    let mut matches: Vec<CandidateMember> = Vec::new();
-    for c in running.into_iter().filter(|c| match &did {
-        Some(did) => &c.did == did,
-        None => matches_local_alias(&c.name, query),
-    }) {
-        // Workloads that say the same thing (name, DID, locators) are one
-        // agent to talk to, as `list` shows them.
-        if !matches.iter().any(|m| m.same_agent(&c)) {
-            matches.push(c);
-        }
-    }
+    // `resolve` already merged the workloads that say the same thing, so
+    // narrowing its answer cannot bring a duplicate back.
+    let matches: Vec<CandidateMember> = running
+        .into_iter()
+        .filter(|c| match &did {
+            Some(did) => &c.did == did,
+            None => matches_local_alias(&c.name, query),
+        })
+        .collect();
     let picked: Vec<&CandidateMember> = match at {
         Some(at) if matches.len() > 1 => matches.iter().filter(|c| has_locator(c, at)).collect(),
         _ => Vec::new(),
