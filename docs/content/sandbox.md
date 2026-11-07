@@ -471,6 +471,22 @@ AppContainer's network capability entirely and `net_allow` is not applied.
 `net_blocked` disables all TCP/IP; Unix-domain sockets can still be selectively
 allowed.
 
+!!! warning "Proxy mode is refused on Windows"
+
+    `--watch-policy` cannot be enforced inside an AppContainer, and a launch
+    that asks for it fails rather than running unenforced.
+
+    An AppContainer cannot connect to `127.0.0.1` unless its container SID holds
+    a loopback exemption (`CheckNetIsolation LoopbackExempt`), which needs
+    administrator rights, and each sandbox here gets a fresh SID. The capability
+    that would let the child reach the network, `internetClient`, lets it reach
+    every host directly and skip the proxy, so no setting confines it to the
+    proxy. Measured on Windows: with `internetClient` a public host is reachable
+    and loopback is not; with no capabilities neither is.
+
+    Use `--net-block`, or `--net-allow` on macOS or Linux, where the kernel
+    enforces the port.
+
 ## Notes
 
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
