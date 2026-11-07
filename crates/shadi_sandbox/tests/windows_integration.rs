@@ -40,30 +40,55 @@ mod windows_integration {
         }
     }
 
+    /// Read the shared file until the parent drops `go.txt` beside it, then
+    /// read it once more. The first failed read ends the run, so a grant lost
+    /// at any point stops A where it happened. The loop is bounded so a parent
+    /// that never signals cannot hang the suite.
+    const READER_SCRIPT: &str = concat!(
+        "@echo off\r\n",
+        "for /l %%i in (1,1,1000000) do (\r\n",
+        "  type \"%~dp0shared.txt\" >nul || exit /b 1\r\n",
+        "  if exist \"%~dp0go.txt\" (\r\n",
+        "    type \"%~dp0shared.txt\" || exit /b 1\r\n",
+        "    exit /b 0\r\n",
+        "  )\r\n",
+        ")\r\n",
+        "exit /b 2\r\n",
+    );
+
     /// Two sandboxes that share a path keep their grants whatever order they
     /// start and exit in (#335). B's startup must not reset A's ACL from a
     /// journal A still owns, and B's exit must not take A's grant with it.
+    ///
+    /// A reads for as long as B lives, and once more after `b.wait()` has
+    /// revoked B's grant, so both moments are covered. It spins on the file
+    /// instead of sleeping between reads because an AppContainer has nothing
+    /// to sleep with: `ping` exits at once with `Access is denied`, and
+    /// `timeout` wants a console the test runner does not give it.
     #[test]
     fn sandboxes_sharing_a_path_keep_their_grants() {
         let dir = tempfile::tempdir().expect("tempdir");
         let shared = dir.path().join("shared.txt");
         std::fs::write(&shared, b"shared").expect("write shared file");
+        let script = dir.path().join("reader.cmd");
+        std::fs::write(&script, READER_SCRIPT).expect("write reader script");
+
+        let script_arg = script.display().to_string();
+        let mut a = spawn_reader(dir.path(), &[&script_arg]);
+        thread::sleep(Duration::from_millis(500));
 
         let shared_arg = shared.display().to_string();
-        let mut a = spawn_reader(
-            dir.path(),
-            &["ping", "-n", "4", "127.0.0.1", ">NUL", "&", "type", &shared_arg],
-        );
-        thread::sleep(Duration::from_millis(500));
         let mut b = spawn_reader(dir.path(), &["type", &shared_arg]);
-
         assert!(
             b.wait().expect("wait for B").success(),
             "B could not read the shared file"
         );
-        assert!(
-            a.wait().expect("wait for A").success(),
-            "A lost its grant on the shared file when B started or exited"
+
+        std::fs::write(dir.path().join("go.txt"), b"go").expect("write go file");
+        assert_eq!(
+            a.wait().expect("wait for A").code(),
+            Some(0),
+            "A lost its grant on the shared file (1) or never saw the signal (2)"
         );
     }
 
