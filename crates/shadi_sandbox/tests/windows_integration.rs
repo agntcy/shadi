@@ -71,6 +71,22 @@ mod windows_integration {
         assert!(child.wait().expect("wait").success());
     }
 
+    /// Proxy mode cannot be enforced inside an AppContainer, so it must fail
+    /// rather than run with proxy env vars nothing honours (agntcy/shadi#530).
+    #[test]
+    fn proxy_mode_is_refused() {
+        let policy = SandboxPolicy::new().with_net_proxy_port(9050);
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        match spawn_sandboxed(&mut command, &policy) {
+            Err(SandboxError::ApplyFailed(message)) => {
+                assert!(message.contains("loopback exemption"), "{message}");
+            }
+            Err(error) => panic!("proxy mode should be refused, got {error:?}"),
+            Ok(_) => panic!("proxy mode should be refused, but the sandbox started"),
+        }
+    }
+
     #[test]
     fn appcontainer_smoke_test() {
         let enabled = std::env::var("SHADI_WINDOWS_INTEGRATION")
