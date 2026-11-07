@@ -41,6 +41,7 @@ windows-sys = { version = "0.61", features = [
 	"Win32_Security_Isolation",
 	"Win32_Storage_FileSystem",
 	"Win32_System_Memory",
+	"Win32_System_SystemServices",
 	"Win32_System_WindowsProgramming"
 ] }
 
