@@ -21,13 +21,19 @@ mod windows_integration {
         Ok(())
     }
 
-    /// Spawn `script` under `cmd /C` in a sandbox that may read `dir`.
+    /// Spawn `cmd /C <argv>` in a sandbox that may read `dir`.
+    ///
+    /// The arguments are passed one by one, never as a single quoted script:
+    /// `quote_arg` escapes an embedded quote the MSVC way, as `\"`, and
+    /// `cmd` reads that as a literal backslash, so the path never parses.
+    ///
     /// win32=87 used to be skipped as a runner quirk; it was a malformed
     /// capability array (agntcy/shadi#531), so it now fails the test.
-    fn spawn_reader(dir: &std::path::Path, script: &str) -> shadi_sandbox::SandboxedChild {
+    fn spawn_reader(dir: &std::path::Path, argv: &[&str]) -> shadi_sandbox::SandboxedChild {
         let policy = SandboxPolicy::new().allow_read_path(dir);
         let mut command = Command::new("cmd");
-        command.args(["/C", script]);
+        command.arg("/C");
+        command.args(argv);
         match spawn_sandboxed(&mut command, &policy) {
             Ok(child) => child,
             Err(error) => panic!("sandboxed reader should start: {error:?}"),
@@ -43,11 +49,13 @@ mod windows_integration {
         let shared = dir.path().join("shared.txt");
         std::fs::write(&shared, b"shared").expect("write shared file");
 
-        let a_script = format!("ping -n 4 127.0.0.1 >NUL & type \"{}\"", shared.display());
-        let mut a = spawn_reader(dir.path(), &a_script);
+        let shared_arg = shared.display().to_string();
+        let mut a = spawn_reader(
+            dir.path(),
+            &["ping", "-n", "4", "127.0.0.1", ">NUL", "&", "type", &shared_arg],
+        );
         thread::sleep(Duration::from_millis(500));
-        let b_script = format!("type \"{}\"", shared.display());
-        let mut b = spawn_reader(dir.path(), &b_script);
+        let mut b = spawn_reader(dir.path(), &["type", &shared_arg]);
 
         assert!(
             b.wait().expect("wait for B").success(),
