@@ -40,31 +40,27 @@ mod windows_integration {
         }
     }
 
-    /// Read the shared file until the parent drops `go.txt` beside it, then
-    /// read it once more. The first failed read ends the run, so a grant lost
-    /// at any point stops A where it happened. The loop is bounded so a parent
-    /// that never signals cannot hang the suite.
+    /// Wait for the parent to drop `go.txt` beside the script, then read the
+    /// shared file: 0 if the grant still works, 1 if it was lost, 2 if the
+    /// parent never signalled. Nothing here leaves cmd's own builtins, because
+    /// a sandboxed process cannot start another image.
     const READER_SCRIPT: &str = concat!(
         "@echo off\r\n",
-        "for /l %%i in (1,1,1000000) do (\r\n",
-        "  type \"%~dp0shared.txt\" >nul || exit /b 1\r\n",
-        "  if exist \"%~dp0go.txt\" (\r\n",
-        "    type \"%~dp0shared.txt\" || exit /b 1\r\n",
-        "    exit /b 0\r\n",
-        "  )\r\n",
-        ")\r\n",
+        "for /l %%i in (1,1,1000000) do if exist \"%~dp0go.txt\" goto signalled\r\n",
         "exit /b 2\r\n",
+        ":signalled\r\n",
+        "type \"%~dp0shared.txt\" || exit /b 1\r\n",
+        "exit /b 0\r\n",
     );
 
     /// Two sandboxes that share a path keep their grants whatever order they
     /// start and exit in (#335). B's startup must not reset A's ACL from a
     /// journal A still owns, and B's exit must not take A's grant with it.
     ///
-    /// A reads for as long as B lives, and once more after `b.wait()` has
-    /// revoked B's grant, so both moments are covered. It spins on the file
-    /// instead of sleeping between reads because an AppContainer has nothing
-    /// to sleep with: `ping` exits at once with `Access is denied`, and
-    /// `timeout` wants a console the test runner does not give it.
+    /// A stays alive across both moments and only then reads, so a grant lost
+    /// to either one fails the run. It spins rather than sleeping because a
+    /// sandboxed `timeout` or `ping` never starts, and it is reached through
+    /// `call`: `cmd /C <script>` alone is refused.
     #[test]
     fn sandboxes_sharing_a_path_keep_their_grants() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -74,7 +70,7 @@ mod windows_integration {
         std::fs::write(&script, READER_SCRIPT).expect("write reader script");
 
         let script_arg = script.display().to_string();
-        let mut a = spawn_reader(dir.path(), &[&script_arg]);
+        let mut a = spawn_reader(dir.path(), &["call", &script_arg]);
         thread::sleep(Duration::from_millis(500));
 
         let shared_arg = shared.display().to_string();
