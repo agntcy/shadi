@@ -118,14 +118,19 @@ mod windows_integration {
         );
     }
 
-    /// The DACL `icacls` prints for `path`, used to compare one moment to
-    /// another rather than to parse.
+    /// The DACL `icacls` prints for `path`, with the inherited marker dropped.
+    ///
+    /// A grant and the revoke that follows leave the path's pre-existing ACEs
+    /// marked inherited where they had been explicit, so the raw output does
+    /// not compare equal even when nothing was left behind. Dropping `(I)`
+    /// keeps the comparison sensitive to a trustee arriving or leaving, which
+    /// is what a leaked grant looks like whatever name `icacls` gives it.
     fn dacl(path: &std::path::Path) -> String {
         let output = Command::new("icacls")
             .arg(path.as_os_str())
             .output()
             .expect("run icacls");
-        String::from_utf8_lossy(&output.stdout).to_string()
+        String::from_utf8_lossy(&output.stdout).replace("(I)", "")
     }
 
     /// An exited sandbox leaves no ACE behind (agntcy/shadi#540).
