@@ -43,7 +43,7 @@ mod windows_integration {
     /// Wait for the parent to drop `go.txt` beside the script, then read the
     /// shared file: 0 if the grant still works, 1 if it was lost, 2 if the
     /// parent never signalled. Nothing here leaves cmd's own builtins, because
-    /// a sandboxed process cannot start another image.
+    /// a sandboxed process cannot start another image (agntcy/shadi#538).
     const READER_SCRIPT: &str = concat!(
         "@echo off\r\n",
         "for /l %%i in (1,1,1000000) do if exist \"%~dp0go.txt\" goto signalled\r\n",
