@@ -366,7 +366,7 @@ fn derive_internet_client_capabilities(
     // The call returns arrays of PSID, but SECURITY_CAPABILITIES.Capabilities
     // is an array of SID_AND_ATTRIBUTES. Reinterpreting one as the other left
     // Attributes holding whatever followed the SID pointer, and CreateProcessW
-    // rejected the attribute list with ERROR_INVALID_PARAMETER (agntcy/shadi#530).
+    // rejected the attribute list with ERROR_INVALID_PARAMETER (agntcy/shadi#531).
     let sids = unsafe { std::slice::from_raw_parts(caps_raw, cap_count as usize).to_vec() };
     unsafe { LocalFree(caps_raw as *mut _) };
 
