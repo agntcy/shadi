@@ -251,8 +251,8 @@ fn redeem_code(
     ))
 }
 
-/// First `credential_identifiers` entry in the access token's `authorization_details`.
-fn credential_identifier(access_token: &str) -> Option<String> {
+/// First `credential_identifiers` entry for `configuration_id`'s own `authorization_details` entry.
+fn credential_identifier(access_token: &str, configuration_id: &str) -> Option<String> {
     let part = access_token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(part)
@@ -261,20 +261,33 @@ fn credential_identifier(access_token: &str) -> Option<String> {
     payload["authorization_details"]
         .as_array()?
         .iter()
-        .filter_map(|detail| detail["credential_identifiers"].as_array())
-        .flatten()
-        .find_map(|id| id.as_str().map(str::to_string))
+        .find(|detail| detail["credential_configuration_id"].as_str() == Some(configuration_id))?
+        ["credential_identifiers"]
+        .as_array()?
+        .first()?
+        .as_str()
+        .map(str::to_string)
 }
 
-/// Accepts a bare string, a list of strings, or a list of `{credential}` objects.
+/// Accepts a bare string, or a single-element list of strings or `{credential}` objects.
 fn extract_credential(body: &Value) -> Result<String, String> {
-    let found = body["credential"].as_str().or_else(|| {
-        let first = body["credentials"].as_array()?.first()?;
-        first.as_str().or_else(|| first["credential"].as_str())
-    });
-    found
-        .map(str::to_string)
-        .ok_or_else(|| "the credential response held no credential".to_string())
+    if let Some(found) = body["credential"].as_str() {
+        return Ok(found.to_string());
+    }
+    match body["credentials"].as_array().map(Vec::as_slice) {
+        Some([one]) => one
+            .as_str()
+            .or_else(|| one["credential"].as_str())
+            .map(str::to_string),
+        Some(many) => {
+            return Err(format!(
+                "the credential response held {} credentials for 1 proof",
+                many.len()
+            ));
+        }
+        None => None,
+    }
+    .ok_or_else(|| "the credential response held no credential".to_string())
 }
 
 /// What the shared login leg yields; each agent's issuance runs from it.
@@ -407,7 +420,7 @@ fn issue_for(
         session.now,
     );
     let proofs = json!({ "jwt": [proof] });
-    let body = match credential_identifier(&access_token) {
+    let body = match credential_identifier(&access_token, args.configuration_id) {
         Some(id) => json!({ "credential_identifier": id, "proofs": proofs }),
         None => json!({ "credential_configuration_id": args.configuration_id, "proofs": proofs }),
     };
@@ -521,7 +534,10 @@ mod tests {
     }
 
     fn default_details() -> Value {
-        json!([{ "credential_identifiers": ["agent-admission_0000"] }])
+        json!([{
+            "credential_configuration_id": "agent-admission",
+            "credential_identifiers": ["agent-admission_0000"],
+        }])
     }
 
     fn second_token() -> Value {
@@ -1162,13 +1178,18 @@ mod tests {
     }
 
     #[test]
-    fn the_first_identifier_across_all_entries_is_used() {
+    fn only_the_matching_configuration_s_identifier_is_used() {
         let jwt = access_jwt(json!([
-            { "credential_identifiers": [] },
-            { "credential_identifiers": ["second_0000", "second_0001"] },
+            { "credential_configuration_id": "other", "credential_identifiers": ["other_0000"] },
+            { "credential_configuration_id": "agent-admission", "credential_identifiers": ["second_0000", "second_0001"] },
         ]));
-        assert_eq!(credential_identifier(&jwt).as_deref(), Some("second_0000"));
-        assert_eq!(credential_identifier("opaque"), None);
+        assert_eq!(
+            credential_identifier(&jwt, "agent-admission").as_deref(),
+            Some("second_0000")
+        );
+        assert_eq!(credential_identifier(&jwt, "other").as_deref(), Some("other_0000"));
+        assert_eq!(credential_identifier(&jwt, "unknown"), None);
+        assert_eq!(credential_identifier("opaque", "agent-admission"), None);
     }
 
     #[test]
@@ -1200,5 +1221,7 @@ mod tests {
             assert_eq!(extract_credential(&body).expect("parse"), raw);
         }
         assert!(extract_credential(&json!({ "credentials": [] })).is_err());
+        let err = extract_credential(&json!({ "credentials": [raw.clone(), raw] })).unwrap_err();
+        assert!(err.contains("2 credentials"), "{err}");
     }
 }
