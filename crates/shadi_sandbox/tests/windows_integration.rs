@@ -118,6 +118,54 @@ mod windows_integration {
         );
     }
 
+    /// The DACL `icacls` prints for `path`, with the inherited marker dropped.
+    ///
+    /// A grant and the revoke that follows leave the path's pre-existing ACEs
+    /// marked inherited where they had been explicit, so the raw output does
+    /// not compare equal even when nothing was left behind. Dropping `(I)`
+    /// keeps the comparison sensitive to a trustee arriving or leaving, which
+    /// is what a leaked grant looks like whatever name `icacls` gives it.
+    fn dacl(path: &std::path::Path) -> String {
+        let output = Command::new("icacls")
+            .arg(path.as_os_str())
+            .output()
+            .expect("run icacls");
+        String::from_utf8_lossy(&output.stdout).replace("(I)", "")
+    }
+
+    /// An exited sandbox leaves no ACE behind (agntcy/shadi#540).
+    ///
+    /// The file inside the directory matters as much as the directory: since
+    /// agntcy/shadi#532 the grant is inheritable, so revoking it has to clear
+    /// the copies Windows propagated to the children.
+    #[test]
+    fn an_exited_sandbox_leaves_no_grant_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shared = dir.path().join("shared.txt");
+        std::fs::write(&shared, b"shared").expect("write shared file");
+        let shared_arg = shared.display().to_string();
+
+        let dir_before = dacl(dir.path());
+        let file_before = dacl(&shared);
+
+        let mut child = spawn_reader(dir.path(), &["type", &shared_arg]);
+        assert!(
+            child.wait().expect("wait").success(),
+            "the grant should make the file readable"
+        );
+
+        assert_eq!(
+            dacl(dir.path()),
+            dir_before,
+            "the directory kept an ACE after the sandbox exited"
+        );
+        assert_eq!(
+            dacl(&shared),
+            file_before,
+            "the file kept an inherited ACE after the sandbox exited"
+        );
+    }
+
     /// A capability array that CreateProcessW rejects stops every sandbox that
     /// is allowed network from starting at all (agntcy/shadi#531). `net_block`
     /// is false by default, so this is the default policy.
