@@ -520,6 +520,13 @@ allowed.
     it, written to that directory only. If that grant can't be applied, the
     process still runs but can't start other programs.
 
+    A directory grant has to reach what is already inside the directory, so
+    it goes through `SetNamedSecurityInfoW`, which also applies Windows
+    auto-inheritance. Some folders, often under `%TEMP%`, hold unmarked
+    copies of their parent's ACEs. Those come out marked inherited after a
+    sandbox runs. Trustees and rights are unchanged, but those ACEs then
+    follow later changes to the parent. A protected DACL stays protected.
+
     SHADI journals each grant to disk before applying it. On the next Windows
     sandbox startup, it revokes grants whose owning process is no longer
     running, which covers a process that crashed before cleanup. Grants of
