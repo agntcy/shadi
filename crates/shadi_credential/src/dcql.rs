@@ -7,7 +7,9 @@
 //! A query arrives inside a challenge the peer wrote, and that reply is not
 //! signed, so every byte here is untrusted input: caps apply before anything
 //! is interpreted, and the release policy is intersected with the query
-//! before a credential is even looked up.
+//! before a credential is even looked up. `trusted_authorities` narrows which
+//! issuer answers rather than widening it: it can only pick among credentials
+//! the policy already allows, never release a claim the policy forbids.
 
 use std::collections::HashMap;
 
@@ -16,7 +18,7 @@ use serde_json::Value;
 
 use crate::sd_jwt::{parse_sd_jwt, Disclosure};
 use crate::store::CredentialRecord;
-use crate::vault::CredentialVault;
+use crate::vault::{pin_issuer, CredentialVault};
 use crate::CredentialError;
 
 /// Bytes of query text accepted: the whole query is peer-written.
@@ -33,6 +35,10 @@ pub const MAX_PATH_DEPTH: usize = 1;
 pub const MAX_VCT_VALUES: usize = 8;
 /// `values` entries per claim: bounds the value probe list.
 pub const MAX_CLAIM_VALUES: usize = 8;
+/// `trusted_authorities` entries per credential query.
+pub const MAX_TRUSTED_AUTHORITIES: usize = 8;
+/// `values` entries per `trusted_authorities` entry.
+pub const MAX_TRUSTED_AUTHORITY_VALUES: usize = 8;
 
 /// What a verifier asks for.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -50,6 +56,10 @@ pub struct CredentialQuery {
     pub format: String,
     pub vct_values: Vec<String>,
     pub claims: Vec<ClaimQuery>,
+    /// Empty means any held issuer may answer. Non-empty restricts selection
+    /// to a record whose issuer appears in some entry's `values` — `type` is
+    /// not interpreted, this holder only matches issuer identifiers.
+    pub trusted_authorities: Vec<TrustedAuthority>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -61,6 +71,14 @@ pub struct ClaimQuery {
     pub values: Option<Vec<Value>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct TrustedAuthority {
+    pub r#type: String,
+    pub values: Vec<String>,
+}
+
 /// The wire nests `vct_values` under `meta`; this flattens it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +87,8 @@ struct WireCredentialQuery {
     format: String,
     meta: WireMeta,
     claims: Vec<ClaimQuery>,
+    #[serde(default)]
+    trusted_authorities: Vec<TrustedAuthority>,
 }
 
 #[derive(Deserialize)]
@@ -84,13 +104,14 @@ impl From<WireCredentialQuery> for CredentialQuery {
             format: wire.format,
             vct_values: wire.meta.vct_values,
             claims: wire.claims,
+            trusted_authorities: wire.trusted_authorities,
         }
     }
 }
 
 impl DcqlQuery {
     /// Cap the text, parse it, then check the structural caps. Unknown fields
-    /// (`credential_sets`, `trusted_authorities`, …) are errors, not ignored.
+    /// (`credential_sets`, …) are errors, not ignored.
     pub fn parse(text: &str) -> Result<Self, CredentialError> {
         if text.len() > MAX_QUERY_BYTES {
             return Err(malformed(format!("query is over {MAX_QUERY_BYTES} bytes")));
@@ -143,6 +164,20 @@ impl DcqlQuery {
                     return Err(malformed(format!(
                         "claim {} has over {MAX_CLAIM_VALUES} values",
                         show(&claim.path)
+                    )));
+                }
+            }
+            let authorities = credential.trusted_authorities.len();
+            if authorities > MAX_TRUSTED_AUTHORITIES {
+                return Err(malformed(format!(
+                    "credential query {id:?} has {authorities} trusted_authorities, over the limit of {MAX_TRUSTED_AUTHORITIES}"
+                )));
+            }
+            for authority in &credential.trusted_authorities {
+                let values = authority.values.len();
+                if values > MAX_TRUSTED_AUTHORITY_VALUES {
+                    return Err(malformed(format!(
+                        "credential query {id:?} has a trusted_authorities entry with {values} values, over the limit of {MAX_TRUSTED_AUTHORITY_VALUES}"
                     )));
                 }
             }
@@ -216,9 +251,9 @@ pub struct Selection {
 
 /// Pick the credential and the minimum disclosure set that answers `query`.
 ///
-/// Reads `vault.list()` rather than `find_valid`: the query names no issuer
-/// (which issuers count is the verifier's business), and a holder's vault is
-/// small enough that filtering in memory costs nothing.
+/// Reads `vault.list()` rather than `find_valid`: a query may name the one
+/// issuer it trusts via `trusted_authorities`, and a holder's vault is small
+/// enough that filtering in memory costs nothing.
 pub fn select(
     vault: &dyn CredentialVault,
     agent_did: &str,
@@ -243,11 +278,19 @@ pub fn select(
     let mut reason = "no held credential matches the requested format and type".to_string();
     // `validate` guarantees exactly one credential query.
     let credential = &query.credentials[0];
+    let trusted = |issuer: &str| {
+        credential.trusted_authorities.is_empty()
+            || credential
+                .trusted_authorities
+                .iter()
+                .any(|a| a.values.iter().any(|v| pin_issuer(v) == pin_issuer(issuer)))
+    };
     for record in &records {
         if record.agent_did != agent_did
             || record.format != credential.format
             || !credential.vct_values.contains(&record.credential_type)
             || record.expires_at.is_some_and(|exp| exp <= now)
+            || !trusted(&record.issuer)
         {
             continue;
         }
@@ -326,6 +369,16 @@ mod tests {
     }
 
     fn credential_with(typ: &str, vct: &str, exp: i64, disclosures: &[(&str, Value)]) -> String {
+        issued_by("https://idp.example", typ, vct, exp, disclosures)
+    }
+
+    fn issued_by(
+        issuer: &str,
+        typ: &str,
+        vct: &str,
+        exp: i64,
+        disclosures: &[(&str, Value)],
+    ) -> String {
         let header = serde_json::json!({"alg": "EdDSA", "typ": typ});
         let segments: Vec<String> = disclosures
             .iter()
@@ -340,7 +393,7 @@ mod tests {
             .map(|s| b64(&sha2::Sha256::digest(s.as_bytes())))
             .collect();
         let payload = serde_json::json!({
-            "iss": "https://idp.example",
+            "iss": issuer,
             "vct": vct,
             "exp": exp,
             "_sd": sd,
@@ -440,6 +493,16 @@ mod tests {
                 ["1"; MAX_CLAIM_VALUES + 1].join(",")
             ),
         );
+        let many_authorities = format!(
+            r#"{{"credentials":[{{"id":"c","format":"dc+sd-jwt","meta":{{"vct_values":["{VCT}"]}},
+            "claims":[{claim}],"trusted_authorities":[{}]}}]}}"#,
+            vec![r#"{"type":"issuer","values":["a"]}"#; MAX_TRUSTED_AUTHORITIES + 1].join(",")
+        );
+        let many_authority_values = format!(
+            r#"{{"credentials":[{{"id":"c","format":"dc+sd-jwt","meta":{{"vct_values":["{VCT}"]}},
+            "claims":[{claim}],"trusted_authorities":[{{"type":"issuer","values":[{}]}}]}}]}}"#,
+            vec!["\"a\""; MAX_TRUSTED_AUTHORITY_VALUES + 1].join(",")
+        );
         for (text, needle) in [
             (oversized, "bytes"),
             (many_creds, "credential queries"),
@@ -449,6 +512,8 @@ mod tests {
             (empty, "0 elements"),
             (many_vcts, "vct_values"),
             (many_values, "values"),
+            (many_authorities, "trusted_authorities"),
+            (many_authority_values, "values"),
         ] {
             let err = DcqlQuery::parse(&text).expect_err("reject").to_string();
             assert!(err.contains(needle), "{needle}: {err}");
@@ -471,7 +536,7 @@ mod tests {
         let unknown_claim_field =
             query_json("dc+sd-jwt", VCT, r#"[{"path":["a"],"values":[1],"gt":3}]"#);
         let unknown_cred_field = format!(
-            r#"{{"credentials":[{{"id":"c","format":"dc+sd-jwt","trusted_authorities":[],
+            r#"{{"credentials":[{{"id":"c","format":"dc+sd-jwt","multiple":true,
             "meta":{{"vct_values":["{VCT}"]}},"claims":[]}}]}}"#
         );
         let unknown_meta = format!(
@@ -482,6 +547,63 @@ mod tests {
             let err = DcqlQuery::parse(&text).expect_err("reject").to_string();
             assert!(err.contains("unknown field"), "{err}");
         }
+    }
+
+    fn trusted_authorities_query(claims: &str, authorities: &[&str]) -> DcqlQuery {
+        let values: Vec<String> = authorities.iter().map(|a| format!("{a:?}")).collect();
+        DcqlQuery::parse(&format!(
+            r#"{{"credentials":[{{"id":"c1","format":"dc+sd-jwt",
+            "meta":{{"vct_values":["{VCT}"]}},"claims":{claims},
+            "trusted_authorities":[{{"type":"issuer","values":[{}]}}]}}]}}"#,
+            values.join(",")
+        ))
+        .expect("parse")
+    }
+
+    #[test]
+    fn trusted_authorities_pick_the_named_issuer() {
+        let vault = sqlcipher_vault();
+        let claims = &[("groups", serde_json::json!("platform-admins"))];
+        import(
+            &vault,
+            &issued_by("https://idp-a.example", "dc+sd-jwt", VCT, 2_000, claims),
+            1_000,
+        )
+        .expect("import a");
+        import(
+            &vault,
+            &issued_by("https://idp-b.example", "dc+sd-jwt", VCT, 2_000, claims),
+            1_000,
+        )
+        .expect("import b");
+
+        let query = trusted_authorities_query(
+            r#"[{"path":["groups"]}]"#,
+            &["https://idp-b.example"],
+        );
+        let selection = run(&vault, &query, &policy()).expect("select");
+        assert_eq!(selection.record.issuer, "https://idp-b.example");
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_dodge_the_trusted_authority() {
+        let query = trusted_authorities_query(
+            r#"[{"path":["groups"]}]"#,
+            &["https://idp.example/"],
+        );
+        assert!(run(&held(), &query, &policy()).is_ok());
+    }
+
+    #[test]
+    fn an_unmatched_trusted_authority_selects_nothing() {
+        let query = trusted_authorities_query(
+            r#"[{"path":["groups"]}]"#,
+            &["https://idp-c.example"],
+        );
+        let err = run(&held(), &query, &policy())
+            .expect_err("no match")
+            .to_string();
+        assert!(err.contains("matches the requested format and type"), "{err}");
     }
 
     #[test]
