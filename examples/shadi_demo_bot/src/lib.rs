@@ -861,12 +861,14 @@ fn run_sandbox_checks(
 ) {
     let allowed_read = repo_root.join("README.md");
     let allowed_write = tmp_dir.join("sandbox-probe-output.txt");
-    let blocked_read = blocked_probe_path(repo_root);
+    let blocked_read = blocked_probe_path();
     let result_file = tmp_dir.join("sandbox-probe-result.json");
     let _ = fs::remove_file(&allowed_write);
     let _ = fs::remove_file(&result_file);
 
     let outcome = (|| -> Result<SandboxProbeResult, String> {
+        seed_blocked_probe_path(&blocked_read)?;
+
         let mut command = Command::new(current_exe);
         command
             .arg("sandbox-probe")
@@ -921,6 +923,10 @@ fn run_sandbox_checks(
             )
         })
     })();
+
+    if cfg!(target_os = "windows") {
+        let _ = fs::remove_file(&blocked_read);
+    }
 
     record_sandbox_outcome(report, outcome);
 }
@@ -1608,7 +1614,7 @@ fn repo_root() -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn blocked_probe_path(repo_root: &Path) -> PathBuf {
+fn blocked_probe_path() -> PathBuf {
     if cfg!(target_os = "macos") {
         // `/private/etc` is a default Seatbelt read path (symlink target of
         // `/etc`). Use a real file that is not on that list.
@@ -1616,10 +1622,23 @@ fn blocked_probe_path(repo_root: &Path) -> PathBuf {
     } else if cfg!(target_os = "linux") {
         PathBuf::from("/proc/version")
     } else if cfg!(target_os = "windows") {
-        repo_root.join("Cargo.toml")
+        // The repo root is allowed for read and that grant is inheritable
+        // (agntcy/shadi#532), so nothing under it is blocked. The temp root is
+        // outside every grant.
+        std::env::temp_dir().join(format!("shadi-demo-blocked-{}.txt", std::process::id()))
     } else {
         PathBuf::from("/etc/hosts")
     }
+}
+
+/// Create the Windows probe file; elsewhere the blocked path is a system file
+/// that is already there.
+fn seed_blocked_probe_path(path: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(());
+    }
+    fs::write(path, b"blocked")
+        .map_err(|err| format!("failed to create {}: {}", path.display(), err))
 }
 
 fn demo_sandbox_policy(repo_root: &Path, tmp_dir: &Path, allowed_read: &Path) -> SandboxPolicy {
@@ -2507,13 +2526,13 @@ mod tests {
         let root = repo_root().expect("repo root");
         assert!(root.join("Cargo.toml").is_file());
 
-        let blocked = blocked_probe_path(&root);
+        let blocked = blocked_probe_path();
         #[cfg(target_os = "macos")]
         assert_eq!(blocked, PathBuf::from("/usr/sbin/sysctl"));
         #[cfg(target_os = "linux")]
         assert_eq!(blocked, PathBuf::from("/proc/version"));
         #[cfg(target_os = "windows")]
-        assert_eq!(blocked, root.join("Cargo.toml"));
+        assert!(blocked.starts_with(std::env::temp_dir()) && !blocked.starts_with(&root));
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         assert_eq!(blocked, PathBuf::from("/etc/hosts"));
     }
