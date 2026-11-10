@@ -47,6 +47,7 @@ mod body_b64 {
 /// A payload bound to a one-time nonce, a timestamp, and (optionally) a
 /// recipient DID — the bytes to sign, via [`wrap_signed_message`].
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sealed {
     jti: String,
     iat: u64,
@@ -67,7 +68,7 @@ impl Sealed {
     ) -> Result<Vec<u8>, IdentityError> {
         let sealed = Sealed {
             jti: Uuid::new_v4().to_string(),
-            iat: now_unix(),
+            iat: now_unix().map_err(IdentityError::Proof)?,
             aud: aud.unwrap_or_default().to_string(),
             principal_hint: principal_hint.map(str::to_string),
             body: body.to_vec(),
@@ -87,7 +88,8 @@ impl Sealed {
     ) -> Result<(Vec<u8>, Option<String>), String> {
         let sealed: Sealed = serde_json::from_slice(payload)
             .map_err(|e| format!("not a sealed payload: {e}"))?;
-        if replay.require_freshness && now_unix().abs_diff(sealed.iat) > FRESHNESS_WINDOW_SECS {
+        let now = now_unix()?;
+        if now.abs_diff(sealed.iat) > FRESHNESS_WINDOW_SECS {
             return Err("sealed payload is outside the freshness window".to_string());
         }
         if let Some(self_did) = self_did {
@@ -98,7 +100,7 @@ impl Sealed {
                 ));
             }
         }
-        if !replay.admit(sender_did, &sealed.jti) {
+        if !replay.admit(sender_did, &sealed.jti, now) {
             return Err("sealed payload already delivered (replay)".to_string());
         }
         Ok((sealed.body, sealed.principal_hint))
@@ -115,24 +117,23 @@ impl Sealed {
 pub struct ReplayCache {
     max_senders: usize,
     per_sender_capacity: usize,
-    require_freshness: bool,
     senders: Mutex<HashMap<String, HashMap<String, u64>>>,
 }
 
 impl ReplayCache {
-    pub fn new(max_senders: usize, per_sender_capacity: usize, require_freshness: bool) -> Self {
+    pub fn new(max_senders: usize, per_sender_capacity: usize) -> Self {
         Self {
             max_senders,
             per_sender_capacity,
-            require_freshness,
             senders: Mutex::new(HashMap::new()),
         }
     }
 
     /// True iff `jti` from `sender_did` had not been seen before and there was
-    /// room to remember it.
-    fn admit(&self, sender_did: &str, jti: &str) -> bool {
-        let now = now_unix();
+    /// room to remember it. `now` is the caller's already-validated clock
+    /// reading, so a clock fault is one error at [`Sealed::open`]'s boundary
+    /// rather than a second, silent one here.
+    fn admit(&self, sender_did: &str, jti: &str, now: u64) -> bool {
         let cutoff = now.saturating_sub(REPLAY_RETENTION_SECS);
         let mut senders = self.senders.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -164,11 +165,15 @@ impl ReplayCache {
     }
 }
 
-fn now_unix() -> u64 {
+/// The current time, or an error — never a fallback timestamp. `0` would
+/// make every future `iat` look impossibly old and every cache entry look
+/// permanently fresh, so a clock fault must refuse the message, not silently
+/// wedge the cache open or closed.
+fn now_unix() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_err(|e| format!("system clock is before the Unix epoch: {e}"))
 }
 
 /// Sign `body` for `identity`, sealed with a nonce, timestamp, and (when
@@ -204,7 +209,7 @@ mod tests {
     #[test]
     fn seal_and_sign_round_trips() {
         let id = AgentIdentity::generate().unwrap();
-        let replay = ReplayCache::new(16, 16, true);
+        let replay = ReplayCache::new(16, 16);
         let envelope = seal_and_sign(&id, Some("did:key:zDest"), b"hello", Some("hint")).unwrap();
         let (did, body, hint) = verify_and_open(&envelope, Some("did:key:zDest"), &replay).unwrap();
         assert_eq!(did, id.did());
@@ -215,7 +220,7 @@ mod tests {
     #[test]
     fn a_replayed_envelope_is_rejected_on_its_second_delivery() {
         let id = AgentIdentity::generate().unwrap();
-        let replay = ReplayCache::new(16, 16, true);
+        let replay = ReplayCache::new(16, 16);
         let envelope = seal_and_sign(&id, None, b"once", None).unwrap();
         verify_and_open(&envelope, None, &replay).expect("first delivery is admitted");
         let err = verify_and_open(&envelope, None, &replay).unwrap_err();
@@ -225,12 +230,12 @@ mod tests {
     #[test]
     fn an_envelope_addressed_to_someone_else_is_rejected() {
         let id = AgentIdentity::generate().unwrap();
-        let replay = ReplayCache::new(16, 16, true);
+        let replay = ReplayCache::new(16, 16);
         let envelope = seal_and_sign(&id, Some("did:key:zBob"), b"for bob", None).unwrap();
         let err = verify_and_open(&envelope, Some("did:key:zCarol"), &replay).unwrap_err();
         assert!(err.contains("not this agent"), "{err}");
         // The genuine recipient still opens the same envelope fine.
-        let replay = ReplayCache::new(16, 16, true);
+        let replay = ReplayCache::new(16, 16);
         assert!(verify_and_open(&envelope, Some("did:key:zBob"), &replay).is_ok());
     }
 
@@ -238,38 +243,58 @@ mod tests {
     fn no_known_destination_or_self_did_is_not_an_error() {
         let id = AgentIdentity::generate().unwrap();
         let unaddressed = seal_and_sign(&id, None, b"x", None).unwrap();
-        let replay = ReplayCache::new(16, 16, true);
+        let replay = ReplayCache::new(16, 16);
         assert!(verify_and_open(&unaddressed, Some("did:key:zAnyone"), &replay).is_ok());
 
         let addressed = seal_and_sign(&id, Some("did:key:zBob"), b"x", None).unwrap();
-        let replay = ReplayCache::new(16, 16, true);
+        let replay = ReplayCache::new(16, 16);
         assert!(verify_and_open(&addressed, None, &replay).is_ok());
     }
 
     #[test]
+    fn an_envelope_from_the_future_within_the_window_is_accepted() {
+        // Clock skew is symmetric: a sender whose clock runs up to
+        // FRESHNESS_WINDOW_SECS ahead is not penalized for it.
+        let id = AgentIdentity::generate().unwrap();
+        let replay = ReplayCache::new(16, 16);
+        let sealed = Sealed {
+            jti: Uuid::new_v4().to_string(),
+            iat: now_unix().unwrap() + FRESHNESS_WINDOW_SECS,
+            aud: String::new(),
+            principal_hint: None,
+            body: b"x".to_vec(),
+        };
+        let envelope =
+            wrap_signed_message(&id, &serde_json::to_vec(&sealed).unwrap()).unwrap();
+        assert!(verify_and_open(&envelope, None, &replay).is_ok());
+    }
+
+    #[test]
     fn a_sender_flooding_its_own_capacity_does_not_block_another_sender() {
-        let replay = ReplayCache::new(16, 2, true);
-        assert!(replay.admit("alice", "a1"));
-        assert!(replay.admit("alice", "a2"));
+        let replay = ReplayCache::new(16, 2);
+        let now = now_unix().unwrap();
+        assert!(replay.admit("alice", "a1", now));
+        assert!(replay.admit("alice", "a2", now));
         assert!(
-            !replay.admit("alice", "a3"),
+            !replay.admit("alice", "a3", now),
             "alice's table is already full of live entries"
         );
         assert!(
-            replay.admit("bob", "b1"),
+            replay.admit("bob", "b1", now),
             "bob has his own, untouched capacity"
         );
     }
 
     #[test]
     fn bounded_senders_fail_closed_under_load() {
-        let replay = ReplayCache::new(2, 4, true);
-        assert!(replay.admit("alice", "a1"));
-        assert!(replay.admit("bob", "b1"));
+        let replay = ReplayCache::new(2, 4);
+        let now = now_unix().unwrap();
+        assert!(replay.admit("alice", "a1", now));
+        assert!(replay.admit("bob", "b1", now));
         // Both tracked senders are still live: no room for a third.
-        assert!(!replay.admit("carol", "c1"));
+        assert!(!replay.admit("carol", "c1", now));
         // And a spent nonce from an existing sender is still a replay, not a
         // second admission that bumps capacity.
-        assert!(!replay.admit("alice", "a1"));
+        assert!(!replay.admit("alice", "a1", now));
     }
 }
