@@ -1629,7 +1629,7 @@ fn now_unix() -> u64 {
 
 /// A fresh replay cache for one listener's lifetime.
 fn default_replay_cache() -> Arc<shadi_identity::ReplayCache> {
-    Arc::new(shadi_identity::ReplayCache::new(1024, 256, true))
+    Arc::new(shadi_identity::ReplayCache::new(1024, 256))
 }
 
 fn extract_text(message: &Message) -> String {

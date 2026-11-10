@@ -126,7 +126,6 @@ impl OwnerExecutor {
             replay: Arc::new(ReplayCache::new(
                 REPLAY_MAX_SENDERS,
                 REPLAY_PER_SENDER_CAPACITY,
-                true,
             )),
         }
     }
@@ -366,14 +365,14 @@ mod tests {
             &as_task(&setup, false),
             NOW,
             Some(&setup.owner_did),
-            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY, true),
+            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY),
         )
         .unwrap();
         let with_vp = admit(
             &carried,
             NOW,
             Some(&setup.owner_did),
-            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY, true),
+            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY),
         )
         .unwrap();
         assert_eq!(with_vp.channel, plain.channel);

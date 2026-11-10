@@ -1073,7 +1073,7 @@ fn run_slim_checks(
 
             let store = InMemorySecretStore::default();
             let verifier = VerifiedSessionVerifier;
-            let replay = shadi_identity::ReplayCache::new(16, 16, true);
+            let replay = shadi_identity::ReplayCache::new(16, 16);
             let channel = SecureAgentChannel::new(&session, &verifier, &store, &replay);
             let mut ctx = SessionContext::new(bot_agent_id, "slim-feature-session");
             ctx.verified = true;
