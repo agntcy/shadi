@@ -52,19 +52,19 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
     let inherited_handles = extract_inherited_handles(command).map_err(SandboxError::ApplyFailed)?;
     let profile_name = sandbox_profile_name();
 
-    // On Windows, kernel-level TCP channel enforcement (equivalent to Linux
-    // Landlock ConnectTcp or macOS Seatbelt `remote tcp`) is not available
-    // without elevated privileges (Windows Filtering Platform / WFP requires
-    // admin).  When a net proxy port is configured, the proxy env vars
-    // (http_proxy, https_proxy, …) are the only enforcement mechanism — a
-    // process that calls connect() directly can bypass them.
+    // Proxy mode routes the child's TCP through a loopback proxy. An
+    // AppContainer cannot reach 127.0.0.1 at all without a loopback exemption
+    // for its container SID (CheckNetIsolation LoopbackExempt, admin only,
+    // and every sandbox here gets a fresh SID). The capability that would let
+    // the child out, internetClient, lets it skip the proxy entirely, so
+    // there is no setting that confines it to the proxy. Refuse rather than
+    // run with the proxy env vars set and nothing enforcing them (#530).
     if policy.net_proxy_port().is_some() {
-        warn!(
-            target: "shadi.sandbox.windows",
-            "net proxy mode: kernel-level TCP channel enforcement is not available \
-             on Windows without elevated privileges; proxy env vars are set but a \
-             process can bypass them with direct connect() calls"
-        );
+        return Err(SandboxError::ApplyFailed(
+            "network policy cannot be enforced on Windows: an AppContainer cannot reach \
+             the loopback proxy without a loopback exemption for its container SID"
+                .to_string(),
+        ));
     }
 
     match recover_windows_acl_rollbacks() {
