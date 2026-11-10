@@ -213,6 +213,37 @@ impl SandboxedChild {
         }
     }
 
+    /// Ask the child to stop: `SIGTERM` to its process group on macOS/Linux,
+    /// so it can clean up first. Follow with [`kill`](Self::kill) if it is
+    /// still running after a grace period. Windows has no such signal, so
+    /// this kills there.
+    pub fn terminate(&mut self) -> io::Result<()> {
+        let span = info_span!("shadi.sandbox.terminate", pid = self.id());
+        let _guard = span.enter();
+
+        match &mut self.inner {
+            SandboxedChildInner::Std(child) => {
+                #[cfg(unix)]
+                {
+                    let pid = child.id() as i32;
+                    // SAFETY: killpg and kill only send a signal.
+                    if unsafe { libc::killpg(pid, libc::SIGTERM) } == 0 {
+                        return Ok(());
+                    }
+                    // Not a process group leader (test/coverage mode).
+                    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+                        return Ok(());
+                    }
+                    Err(io::Error::last_os_error())
+                }
+                #[cfg(not(unix))]
+                child.kill()
+            }
+            #[cfg(target_os = "windows")]
+            SandboxedChildInner::Windows(child) => child.kill(),
+        }
+    }
+
     pub fn id(&self) -> u32 {
         match &self.inner {
             SandboxedChildInner::Std(child) => child.id(),
