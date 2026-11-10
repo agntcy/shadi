@@ -54,11 +54,12 @@ pub fn admit(signed: &[u8], now: u64) -> Result<InviteRequest, String> {
     } else {
         (None, verified.payload.clone())
     };
-    let text = String::from_utf8(payload).map_err(|_| "request is not UTF-8".to_string())?;
+    // Only the framing matters here; presentations are checked by the
+    // credential-gated listener, not by owner intake.
+    let (_, payload) = shadi_identity::split_vp(&payload).map_err(|e| e.to_string())?;
+    let text = std::str::from_utf8(payload).map_err(|_| "request is not UTF-8".to_string())?;
     // A request sent as a task has the task header before its body.
-    let body = text
-        .split_once("\nbody:\n")
-        .map_or(text.as_str(), |(_, body)| body);
+    let body = text.split_once("\nbody:\n").map_or(text, |(_, body)| body);
     let (channel, invitee_name, invitee_did) = parse_request(body)?;
     Ok(InviteRequest {
         channel,
@@ -318,6 +319,25 @@ mod tests {
         );
         let grant = verify_grant(grant, &setup.owner_did, NOW).unwrap();
         assert_eq!(grant.invitee, PEER);
+    }
+
+    #[test]
+    fn a_presentation_layer_is_stripped_before_the_request_is_read() {
+        let setup = setup("{}");
+        let body = render_request(ROOM, PEER, &setup.peer_did);
+        let task = format!("task_id: t-1\npattern: Development\nepoch: 0\nbody:\n{body}");
+        let framed = shadi_identity::wrap_vp(
+            "eyJhbGciOiJFZERTQSJ9.eyJpc3MiOiJkaWQ6d2ViOngifQ.c2ln~ZGlzYw~",
+            task.as_bytes(),
+        )
+        .unwrap();
+        let carried = wrap_signed_message(&setup.agent, &framed).unwrap();
+
+        let plain = admit(&as_task(&setup, false), NOW).unwrap();
+        let with_vp = admit(&carried, NOW).unwrap();
+        assert_eq!(with_vp.channel, plain.channel);
+        assert_eq!(with_vp.invitee_did, plain.invitee_did);
+        assert_eq!(with_vp.requester, plain.requester);
     }
 
     #[test]

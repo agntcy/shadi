@@ -1,6 +1,6 @@
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,8 +62,13 @@ pub fn run(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
+    admission_policy: Option<&Path>,
     verbose: bool,
 ) -> anyhow::Result<()> {
+    // The gate is built per listener, so with none it would be silently ignored.
+    if admission_policy.is_some() && slim_endpoint.is_none() && a2a_listen.is_none() {
+        anyhow::bail!("--admission-policy needs --slim-endpoint or --a2a-listen");
+    }
     // Coding CLIs are JSON profiles (`ProfileAdapter`). Native modules stay
     // for local handoff/coordinate; register no longer constructs them.
     if tool != "generic-stdio" {
@@ -95,6 +100,7 @@ pub fn run(
                 a2a_listen,
                 a2a_binding,
                 dir_publish,
+                admission_policy,
                 verbose,
             );
         }
@@ -120,6 +126,7 @@ pub fn run(
                     a2a_listen,
                     a2a_binding,
                     dir_publish,
+                    admission_policy,
                     verbose,
                 )?;
             } else {
@@ -162,6 +169,7 @@ fn serve_registered(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
+    admission_policy: Option<&Path>,
     verbose: bool,
 ) -> anyhow::Result<()> {
     if slim_endpoint.is_none() && a2a_listen.is_none() {
@@ -185,6 +193,7 @@ fn serve_registered(
         a2a_listen,
         a2a_binding,
         dir_publish,
+        admission_policy,
         verbose,
     )
 }
@@ -196,6 +205,7 @@ fn start_listeners(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<DirPublishOptions>,
+    admission_policy: Option<&Path>,
     verbose: bool,
 ) -> anyhow::Result<()> {
     // Don't announce an instance that can't start: the A2A address must be
@@ -250,6 +260,7 @@ fn start_listeners(
             let http_listen = listen.to_string();
             let http_slim = slim_endpoint.map(str::to_string);
             let announced = announcement.as_ref().map(|a| a.written());
+            let http_policy = admission_policy.map(Path::to_path_buf);
             std::thread::spawn(move || {
                 let result = run_unicast_listener(
                     &http_tool,
@@ -259,6 +270,7 @@ fn start_listeners(
                     a2a_binding,
                     None,
                     false,
+                    http_policy.as_deref(),
                     verbose,
                 );
                 let binding = a2a_binding.as_protocol_binding();
@@ -294,6 +306,7 @@ fn start_listeners(
                 a2a_binding,
                 dir_publish.as_ref(),
                 true,
+                admission_policy,
                 verbose,
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -309,6 +322,7 @@ fn start_listeners(
             a2a_listen,
             a2a_binding,
             dir_publish.as_ref(),
+            admission_policy,
             verbose,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -320,10 +334,9 @@ fn start_listeners(
 /// one: `Some(did)` iff DID auth is actually configured in the environment,
 /// `None` otherwise (the card is then published without an `authors` entry).
 fn best_effort_did(agent_id: &str) -> Option<String> {
-    match shadi_identity::did_auth_from_env(agent_id) {
-        Some(Ok(shadi_identity::SlimAuth::Did { did, .. })) => Some(did),
-        _ => None,
-    }
+    shadi_identity::agent_identity_from_env(agent_id)
+        .ok()
+        .map(|i| i.did())
 }
 
 // ─── SLIM A2A listener ────────────────────────────────────────────────────────
@@ -334,6 +347,54 @@ struct AgentBridgeExecutor {
     slim_endpoint: Option<String>,
     verbose: bool,
     egress: Arc<dyn AgentVerifier>,
+    gate: Option<Arc<CredentialGate>>,
+}
+
+/// What a credential-gated listener needs, built once at startup.
+struct CredentialGate {
+    policy: shadi_credential::AdmissionPolicy,
+    nonces: shadi_credential::NonceStore,
+}
+
+impl CredentialGate {
+    /// The store stamps `listener_did` as the audience, so a presentation
+    /// minted for this listener is useless against another.
+    fn load(path: &Path, listener_did: &str) -> Result<Self, String> {
+        if listener_did.is_empty() {
+            return Err("--admission-policy needs this listener to have an agent DID".to_string());
+        }
+        let policy = shadi_credential::AdmissionPolicy::from_file(path)
+            .map_err(|e| format!("admission policy: {e}"))?;
+        let query = policy
+            .challenge_query()
+            .map_err(|e| format!("admission policy: {e}"))?;
+        let nonces = shadi_credential::NonceStore::new(listener_did, query);
+        Ok(Self { policy, nonces })
+    }
+}
+
+fn credential_gate(
+    policy: Option<&Path>,
+    listener_did: &str,
+) -> Result<Option<Arc<CredentialGate>>, String> {
+    let Some(path) = policy else {
+        // With neither gate, admission is "prove the DID you claim" and
+        // nothing else — anyone can mint one for free. Refuse to start
+        // rather than let that pass for an unconfigured listener.
+        if allowed_human_dids().is_empty() {
+            return Err(
+                "refusing to start: no --admission-policy and SHADI_MEMBER_HUMAN_DIDS is unset \
+                 — this listener would admit any caller with no credential and no human binding. \
+                 Set --admission-policy, or set SHADI_MEMBER_HUMAN_DIDS to the human DIDs this \
+                 listener admits."
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    };
+    CredentialGate::load(path, listener_did)
+        .map(Arc::new)
+        .map(Some)
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -591,10 +652,17 @@ impl AgentExecutor for AgentBridgeExecutor {
             shadi_a2a::set_remote_parent(&span, message);
         }
         let _guard = span.enter();
-        let refuse = |state, reason: String| {
+        let refuse_with = |state, reason: String, challenge: Option<&str>| {
             let reason = format!("{reason} ({evaluation_id})");
-            terminal_task(task_id.clone(), context_id.clone(), state, reason)
+            terminal_task(
+                task_id.clone(),
+                context_id.clone(),
+                state,
+                reason,
+                challenge,
+            )
         };
+        let refuse = |state, reason: String| refuse_with(state, reason, None);
         if let Some(message) = ctx.message.as_ref() {
             if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
                 span.record("a2a.outcome", "rejected");
@@ -602,7 +670,11 @@ impl AgentExecutor for AgentBridgeExecutor {
                 return refuse(TaskState::Rejected, reason);
             }
         }
-        let (raw, sender_did) = match ctx.message.as_ref().map(admit_message) {
+        let (raw, sender_did) = match ctx
+            .message
+            .as_ref()
+            .map(|m| admit_message(m, self.gate.as_deref(), &task_id))
+        {
             Some(MessageAdmission::Proven {
                 did,
                 human_did,
@@ -618,16 +690,16 @@ impl AgentExecutor for AgentBridgeExecutor {
                 span.record("peer.did", did.as_str());
                 (payload, Some(did))
             }
-            Some(MessageAdmission::AuthRequired { reason }) => {
+            Some(MessageAdmission::AuthRequired { reason, challenge }) => {
                 // Non-terminal: the client re-proves and sends again with this
                 // task id, and the stored task carries on from here.
                 span.record("a2a.outcome", "auth_required");
                 tracing::info!(%reason, "parked a task until the sender proves its DID");
-                return refuse(TaskState::AuthRequired, reason);
+                return refuse_with(TaskState::AuthRequired, reason, challenge.as_deref());
             }
             Some(MessageAdmission::Forged { reason }) => {
                 span.record("a2a.outcome", "rejected");
-                tracing::warn!(%reason, "refused a task with a forged DID");
+                tracing::warn!(%reason, "refused a task that failed admission");
                 return refuse(TaskState::Rejected, reason);
             }
             None => ("(no prompt)".to_string(), None),
@@ -830,6 +902,7 @@ impl AgentBridgeRequestHandler {
         ready: Arc<Notify>,
         verbose: bool,
         egress: Arc<dyn AgentVerifier>,
+        gate: Option<Arc<CredentialGate>>,
     ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
@@ -841,6 +914,7 @@ impl AgentBridgeRequestHandler {
                     slim_endpoint: slim_endpoint.map(str::to_string),
                     verbose,
                     egress,
+                    gate,
                 },
                 InMemoryTaskStore::new(),
             ),
@@ -1092,6 +1166,7 @@ fn run_slim_listener(
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
     dir_publish: Option<&DirPublishOptions>,
+    admission_policy: Option<&Path>,
     verbose: bool,
 ) -> Result<(), String> {
     let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
@@ -1172,6 +1247,7 @@ fn run_slim_listener(
         app.notification_receiver(),
         Some(slim_bindings::get_runtime()),
     ));
+    let gate = credential_gate(admission_policy, &did)?;
     let ready = Arc::new(Notify::new());
     // Cloned before the move below so shutdown can still reach the adapter
     // to kill whatever child process its current message is running.
@@ -1186,6 +1262,7 @@ fn run_slim_listener(
         ready,
         verbose,
         egress::policy(),
+        gate,
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
@@ -1269,16 +1346,19 @@ fn terminal_task(
     context_id: String,
     state: TaskState,
     reason: String,
+    challenge: Option<&str>,
 ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+    let message = Message::new(Role::Agent, vec![Part::text(reason)]);
+    let message = match challenge {
+        Some(challenge) => shadi_a2a::insert_challenge(message, challenge),
+        None => message,
+    };
     let task = Task {
         id: task_id,
         context_id,
         status: TaskStatus {
             state,
-            message: Some(Message::new(
-                Role::Agent,
-                vec![Part::text(reason)],
-            )),
+            message: Some(message),
             timestamp: None,
         },
         artifacts: None,
@@ -1301,6 +1381,8 @@ enum MessageAdmission {
     },
     AuthRequired {
         reason: String,
+        /// A serialised challenge for the caller to answer, when one is due.
+        challenge: Option<String>,
     },
     Forged {
         reason: String,
@@ -1334,11 +1416,16 @@ fn conversation_key(sender_did: Option<&str>, context_id: &str) -> String {
 ///
 /// A mesh member that presents another agent's DID fails here — the public key
 /// comes from the claimed `did:key`, not from the caller.
-fn admit_message(message: &Message) -> MessageAdmission {
+fn admit_message(
+    message: &Message,
+    gate: Option<&CredentialGate>,
+    task_id: &str,
+) -> MessageAdmission {
     let text = extract_text(message);
     if text == "(no text parts)" || !shadi_identity::looks_like_did_proof(text.as_bytes()) {
         return MessageAdmission::AuthRequired {
             reason: "DID proof required on the message".to_string(),
+            challenge: None,
         };
     }
     let verified = match shadi_identity::unwrap_signed_message(text.as_bytes()) {
@@ -1349,15 +1436,94 @@ fn admit_message(message: &Message) -> MessageAdmission {
         Err(_) => {
             return MessageAdmission::AuthRequired {
                 reason: "DID proof required on the message".to_string(),
+                challenge: None,
             };
         }
     };
-    admit_binding(
+    match admit_binding(
         verified.did,
         &verified.payload,
         &allowed_human_dids(),
         now_unix(),
-    )
+    ) {
+        MessageAdmission::Proven {
+            did,
+            human_did,
+            payload,
+        } => admit_credential(did, human_did, payload, gate, task_id),
+        other => other,
+    }
+}
+
+/// Third gate: the credential layer. It is split off even with no gate, so a
+/// token never reaches the model as prompt text.
+fn admit_credential(
+    did: String,
+    human_did: Option<String>,
+    payload: String,
+    gate: Option<&CredentialGate>,
+    task_id: &str,
+) -> MessageAdmission {
+    let forged = |reason: String| MessageAdmission::Forged { reason };
+    let (token, rest) = match shadi_identity::split_vp(payload.as_bytes()) {
+        Ok(split) => split,
+        Err(err) => return forged(format!("credential layer is malformed: {err}")),
+    };
+    let payload = String::from_utf8_lossy(rest).into_owned();
+    let Some(gate) = gate else {
+        return MessageAdmission::Proven {
+            did,
+            human_did,
+            payload,
+        };
+    };
+    // A clock past i64 is not a real clock; saturating keeps every nonce expired.
+    let now = i64::try_from(now_unix()).unwrap_or(i64::MAX);
+    let Some(token) = token else {
+        return challenge_for(gate, task_id, &did, now);
+    };
+    let verified =
+        match shadi_credential::verify(token, &did, task_id, &gate.nonces, gate.policy.jwks(), now)
+        {
+            Ok(verified) => verified,
+            // A stale or spent nonce is the holder's to retry, not a forgery.
+            Err(shadi_credential::CredentialError::NonceNotConsumable(_)) => {
+                return challenge_for(gate, task_id, &did, now);
+            }
+            Err(err) => return forged(err.to_string()),
+        };
+    match gate.policy.evaluate(&verified) {
+        shadi_credential::Decision::Admit => {
+            tracing::info!(
+                agent_did = %did,
+                issuer = %verified.issuer,
+                "admitted A2A message through the credential gate"
+            );
+            MessageAdmission::Proven {
+                did,
+                human_did,
+                payload,
+            }
+        }
+        shadi_credential::Decision::Deny(why) => forged(why),
+        _ => forged("credential not admitted".to_string()),
+    }
+}
+
+/// Park the caller with a fresh challenge bound to `did`.
+fn challenge_for(gate: &CredentialGate, task_id: &str, did: &str, now: i64) -> MessageAdmission {
+    let forged = |reason: String| MessageAdmission::Forged { reason };
+    let challenge = match gate.nonces.issue(task_id, did, now) {
+        Ok(challenge) => challenge,
+        Err(err) => return forged(err.to_string()),
+    };
+    match serde_json::to_string(&challenge) {
+        Ok(json) => MessageAdmission::AuthRequired {
+            reason: "credential required: answer the challenge with a presentation".to_string(),
+            challenge: Some(json),
+        },
+        Err(err) => forged(err.to_string()),
+    }
 }
 
 /// Second gate: whose agent is this?
@@ -1381,6 +1547,7 @@ fn admit_binding(
         }
         return MessageAdmission::AuthRequired {
             reason: "agent binding required: this listener admits agents by human DID".to_string(),
+            challenge: None,
         };
     }
 
@@ -1389,6 +1556,7 @@ fn admit_binding(
         Err(err) => {
             return MessageAdmission::AuthRequired {
                 reason: format!("agent binding is malformed: {err}"),
+                challenge: None,
             };
         }
     };
@@ -1560,6 +1728,7 @@ fn run_unicast_listener(
     a2a_binding: A2ABinding,
     dir_publish: Option<&DirPublishOptions>,
     register_locally: bool,
+    admission_policy: Option<&Path>,
     verbose: bool,
 ) -> Result<(), String> {
     require_sandbox_enforced(agent_id, listen)?;
@@ -1567,17 +1736,9 @@ fn run_unicast_listener(
         format!("invalid --a2a-listen '{listen}' (expected host:port): {e}")
     })?;
 
-    let auth = shadi_identity::require_did_auth_from_env(agent_id)
-        .map_err(|e| format!("A2A {} auth error: {e}", a2a_binding.as_protocol_binding()))?;
-    let did = match &auth {
-        shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
-        shadi_identity::SlimAuth::SharedSecret(_) => {
-            return Err(format!(
-                "A2A {} listen requires an agent DID (SHADI_SLIM_AUTH=did); shared-secret node auth is not enough",
-                a2a_binding.as_protocol_binding()
-            ));
-        }
-    };
+    let did = shadi_identity::agent_identity_from_env(agent_id)
+        .map_err(|e| format!("A2A {} auth error: {e}", a2a_binding.as_protocol_binding()))?
+        .did();
 
     let a2a_url = advertised_a2a_url(listen);
 
@@ -1614,6 +1775,7 @@ fn run_unicast_listener(
         }
     }
 
+    let gate = credential_gate(admission_policy, &did)?;
     let ready = Arc::new(Notify::new());
     let adapter_for_shutdown = Arc::clone(&adapter);
     let handler = Arc::new(AgentBridgeRequestHandler::new(
@@ -1626,6 +1788,7 @@ fn run_unicast_listener(
         ready,
         verbose,
         egress::policy(),
+        gate,
     ));
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -1843,7 +2006,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_lists_profiles_and_generic_stdio() {
-        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None, false)
+        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None, None, false)
             .expect_err("no gemini profile");
         let msg = err.to_string();
         assert!(msg.contains("claude-code"));
@@ -2219,7 +2382,7 @@ test push ... FAILED
 
         // Once humans are listed, proving only yourself is not enough.
         match admit_binding(verified.did, &verified.payload, &[human.did()], BIND_NOW) {
-            MessageAdmission::AuthRequired { reason } => {
+            MessageAdmission::AuthRequired { reason, .. } => {
                 assert!(
                     reason.contains("binding required"),
                     "challenge should ask for a binding"
@@ -2231,8 +2394,8 @@ test push ... FAILED
 
     #[test]
     fn admit_unsigned_message_parks_auth_required() {
-        match admit_message(&sample_request("plain task").message) {
-            MessageAdmission::AuthRequired { reason } => {
+        match admit_message(&sample_request("plain task").message, None, "t") {
+            MessageAdmission::AuthRequired { reason, .. } => {
                 assert!(reason.contains("DID proof required"), "{reason}");
             }
             MessageAdmission::Proven { did, .. } => panic!("unsigned text proved as {did}"),
@@ -2269,6 +2432,7 @@ test push ... FAILED
             Arc::new(Notify::new()),
             false,
             egress::policy(),
+            None,
         )
     }
 
@@ -2419,6 +2583,7 @@ test push ... FAILED
             Arc::new(Notify::new()),
             false,
             egress::policy(),
+            None,
         );
         let (alice, mallory) = (
             shadi_identity::AgentIdentity::generate().unwrap(),
@@ -2490,6 +2655,7 @@ test push ... FAILED
             Arc::new(Notify::new()),
             false,
             policy,
+            None,
         );
         let request = sample_request(String::from_utf8(envelope).unwrap());
         let response = handler
@@ -2747,7 +2913,7 @@ test push ... FAILED
         let signature = envelope.lines().nth(2).unwrap();
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{signature}\ntask", impostor.did());
         let _ = handler.send_message(&params, sample_request(forged)).await;
-        trace.assert_has(&["shadi.a2a.receive: refused a task with a forged DID"]);
+        trace.assert_has(&["shadi.a2a.receive: refused a task that failed admission"]);
 
         let mut addressed = sample_request("task");
         addressed.message = shadi_a2a::insert_dest_did(addressed.message, "did:key:zSomeoneElse");
@@ -2925,11 +3091,11 @@ test push ... FAILED
             text.lines().nth(2).unwrap().to_string()
         };
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
-        match admit_message(&sample_request(forged).message) {
+        match admit_message(&sample_request(forged).message, None, "t") {
             MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("forged DID"), "{reason}");
             }
-            MessageAdmission::AuthRequired { reason } => {
+            MessageAdmission::AuthRequired { reason, .. } => {
                 panic!("forged DID must be rejected, not parked: {reason}");
             }
             MessageAdmission::Proven { did, .. } => {
@@ -2943,13 +3109,322 @@ test push ... FAILED
         let id = shadi_identity::AgentIdentity::generate().unwrap();
         let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
         let text = String::from_utf8(envelope).unwrap();
-        match admit_message(&sample_request(text).message) {
+        match admit_message(&sample_request(text).message, None, "t") {
             MessageAdmission::Proven { did, payload, .. } => {
                 assert_eq!(did, id.did());
                 assert_eq!(payload, "real prompt");
             }
             _ => panic!("honest proof must be admitted"),
         }
+    }
+
+    const LISTENER_DID: &str = "did:key:listener";
+
+    /// A gate over a one-issuer policy, beside the JWKS it pins.
+    fn gate_fixture() -> (tempfile::TempDir, CredentialGate) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("jwks.json"),
+            r#"{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k1","alg":"EdDSA","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaHB6PRs"}]}"#,
+        )
+        .unwrap();
+        let policy = dir.path().join("policy.json");
+        fs::write(
+            &policy,
+            r#"{"issuers":[{"iss":"https://issuer.example","jwks":"jwks.json","vct":"urn:test:vct","require_claims":{"groups":"admins"}}]}"#,
+        )
+        .unwrap();
+        let gate = CredentialGate::load(&policy, LISTENER_DID).unwrap();
+        (dir, gate)
+    }
+
+    fn signed(payload: &[u8]) -> (String, String) {
+        let id = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&id, payload).unwrap();
+        (id.did().to_string(), String::from_utf8(envelope).unwrap())
+    }
+
+    #[test]
+    fn without_a_gate_the_vp_layer_is_stripped_not_prompted() {
+        let layered = shadi_identity::wrap_vp("tok~en", b"real prompt").unwrap();
+        let (did, text) = signed(&layered);
+        match admit_message(&sample_request(text).message, None, "t") {
+            MessageAdmission::Proven {
+                did: proven,
+                payload,
+                ..
+            } => {
+                assert_eq!(proven, did);
+                assert_eq!(payload, "real prompt");
+                assert!(!payload.contains("SHADI-VP/1"), "{payload}");
+            }
+            _ => panic!("a policy-off listener must admit and strip"),
+        }
+    }
+
+    #[test]
+    fn without_a_gate_a_plain_payload_is_unchanged() {
+        let (_, text) = signed(b"real prompt");
+        match admit_message(&sample_request(text).message, None, "t") {
+            MessageAdmission::Proven { payload, .. } => assert_eq!(payload, "real prompt"),
+            _ => panic!("honest proof must be admitted"),
+        }
+    }
+
+    #[test]
+    fn a_gate_with_no_presentation_issues_a_challenge() {
+        let (_dir, gate) = gate_fixture();
+        let (_, text) = signed(b"real prompt");
+        match admit_message(&sample_request(text).message, Some(&gate), "task-7") {
+            MessageAdmission::AuthRequired {
+                reason,
+                challenge: Some(json),
+            } => {
+                assert!(reason.contains("credential required"), "{reason}");
+                let challenge: shadi_credential::Challenge = serde_json::from_str(&json).unwrap();
+                assert_eq!(challenge.aud, LISTENER_DID);
+                assert_eq!(challenge.task_id, "task-7");
+            }
+            _ => panic!("a gated listener must challenge an unpresented message"),
+        }
+    }
+
+    /// A gate over a real issuer key, and the second-pass message a sender builds
+    /// by answering the gate's own challenge.
+    fn answered_challenge() -> (tempfile::TempDir, CredentialGate, String, String) {
+        answered_challenge_with(|token| token)
+    }
+
+    /// As `answered_challenge`, with `edit` applied to the token before it is sent.
+    fn answered_challenge_with(
+        edit: impl FnOnce(String) -> String,
+    ) -> (tempfile::TempDir, CredentialGate, String, String) {
+        use shadi_credential::testkit;
+
+        let agent = shadi_identity::AgentIdentity::generate().unwrap();
+        // The kit's own `exp` is in the past; the listener reads the real clock.
+        let now = i64::try_from(now_unix()).unwrap();
+        let discs = [testkit::disclosure("groups", "platform-admins")];
+        let mut claims = testkit::base_claims(&agent, &discs);
+        claims["exp"] = (now + 3_600).into();
+        let cred = testkit::credential(
+            &testkit::issuer_key(),
+            &testkit::base_header(),
+            &claims,
+            &discs,
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let x = testkit::b64(testkit::issuer_key().verifying_key().to_bytes());
+        fs::write(
+            dir.path().join("jwks.json"),
+            serde_json::json!({"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k1","alg":"EdDSA","x":x}]})
+                .to_string(),
+        )
+        .unwrap();
+        let policy = dir.path().join("policy.json");
+        fs::write(
+            &policy,
+            serde_json::json!({"issuers":[{
+                "iss": testkit::ISS,
+                "jwks": "jwks.json",
+                "vct": claims["vct"],
+                "require_claims": {"groups": "platform-admins"},
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+        let gate = CredentialGate::load(&policy, LISTENER_DID).unwrap();
+
+        let vault =
+            shadi_credential::SqlCipherVault::open(&dir.path().join("vault.db"), "k").unwrap();
+        shadi_credential::import(&vault, &cred, now).unwrap();
+
+        let task = shadi_identity::wrap_signed_message(&agent, b"real prompt").unwrap();
+        let msg = sample_request(String::from_utf8(task).unwrap()).message;
+        let MessageAdmission::AuthRequired {
+            challenge: Some(json),
+            ..
+        } = admit_message(&msg, Some(&gate), "task-1")
+        else {
+            panic!("an unpresented message must be challenged");
+        };
+        let challenge: shadi_credential::Challenge = serde_json::from_str(&json).unwrap();
+
+        let policy = shadi_credential::ReleasePolicy::new(&[&["groups"]]);
+        let query = shadi_credential::DcqlQuery::parse(&challenge.dcql_query).unwrap();
+        let token = shadi_credential::answer_challenge(
+            &vault,
+            &agent,
+            &policy,
+            LISTENER_DID,
+            &challenge.aud,
+            &challenge.nonce,
+            &query,
+            now,
+        )
+        .unwrap();
+
+        let framed = shadi_identity::wrap_vp(&edit(token), b"real prompt").unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&agent, &framed).unwrap();
+        (
+            dir,
+            gate,
+            agent.did().to_string(),
+            String::from_utf8(envelope).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_presentation_the_sender_builds_is_admitted_by_the_listener() {
+        let (_dir, gate, did, text) = answered_challenge();
+        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+            MessageAdmission::Proven {
+                did: proven,
+                payload,
+                ..
+            } => {
+                assert_eq!(proven, did);
+                assert_eq!(payload, "real prompt");
+                assert!(!payload.contains("SHADI-VP/1"), "{payload}");
+            }
+            MessageAdmission::Forged { reason } => panic!("forged: {reason}"),
+            MessageAdmission::AuthRequired { reason, .. } => panic!("auth required: {reason}"),
+        }
+    }
+
+    /// The challenge an `AuthRequired` carries, parsed.
+    fn challenge_of(admission: MessageAdmission) -> shadi_credential::Challenge {
+        match admission {
+            MessageAdmission::AuthRequired {
+                challenge: Some(json),
+                ..
+            } => serde_json::from_str(&json).unwrap(),
+            _ => panic!("expected a fresh challenge"),
+        }
+    }
+
+    #[test]
+    fn a_replayed_presentation_is_rechallenged_because_the_nonce_is_single_use() {
+        let (_dir, gate, _, text) = answered_challenge();
+        let msg = sample_request(text).message;
+        assert!(matches!(
+            admit_message(&msg, Some(&gate), "task-1"),
+            MessageAdmission::Proven { .. }
+        ));
+        let fresh = challenge_of(admit_message(&msg, Some(&gate), "task-1"));
+        assert_eq!(fresh.task_id, "task-1");
+    }
+
+    #[test]
+    fn an_unknown_nonce_is_rechallenged_not_forged() {
+        let (_dir, _, _, text) = answered_challenge();
+        let (_other_dir, other_gate) = gate_fixture();
+        let fresh = challenge_of(admit_message(
+            &sample_request(text).message,
+            Some(&other_gate),
+            "task-1",
+        ));
+        assert_eq!(fresh.aud, LISTENER_DID);
+        assert!(!fresh.nonce.is_empty());
+    }
+
+    #[test]
+    fn a_bad_issuer_signature_is_still_forged() {
+        let (_dir, gate, _, text) = answered_challenge_with(|token| {
+            let at = token.find('~').unwrap() - 10;
+            let swap = if token.as_bytes()[at] == b'A' {
+                "B"
+            } else {
+                "A"
+            };
+            format!("{}{swap}{}", &token[..at], &token[at + 1..])
+        });
+        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+            MessageAdmission::Forged { reason } => {
+                assert!(reason.contains("signature"), "{reason}")
+            }
+            _ => panic!("a bad signature must be forged"),
+        }
+    }
+
+    #[test]
+    fn a_malformed_vp_layer_is_rejected_with_or_without_a_gate() {
+        let (_dir, gate) = gate_fixture();
+        let (_, text) = signed(b"SHADI-VP/1\nnot-a-field\n\nprompt");
+        for gate in [None, Some(&gate)] {
+            match admit_message(&sample_request(text.clone()).message, gate, "t") {
+                MessageAdmission::Forged { reason } => assert!(!reason.is_empty()),
+                _ => panic!("a malformed layer must be rejected"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_gate_needs_the_listener_to_have_a_did() {
+        let (dir, _) = gate_fixture();
+        let err = credential_gate(Some(&dir.path().join("policy.json")), "").err();
+        assert!(err.is_some());
+    }
+
+    /// `SHADI_MEMBER_HUMAN_DIDS` is process-global and `credential_gate` reads
+    /// it inside the call under test, so these tests hold this lock across
+    /// both the mutation and the call.
+    static HUMAN_DIDS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn no_gate_and_no_human_allowlist_refuses_to_start() {
+        let _guard = HUMAN_DIDS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("SHADI_MEMBER_HUMAN_DIDS");
+        std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS");
+        let err = match credential_gate(None, LISTENER_DID) {
+            Err(err) => err,
+            Ok(_) => panic!("open admission must be refused"),
+        };
+        assert!(err.contains("SHADI_MEMBER_HUMAN_DIDS"), "{err}");
+        match prev {
+            Some(v) => std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", v),
+            None => std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS"),
+        }
+    }
+
+    #[test]
+    fn no_gate_with_a_human_allowlist_starts_with_no_credential_gate() {
+        let _guard = HUMAN_DIDS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("SHADI_MEMBER_HUMAN_DIDS");
+        std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", "did:key:human");
+        let gate = credential_gate(None, LISTENER_DID).unwrap();
+        assert!(gate.is_none());
+        match prev {
+            Some(v) => std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", v),
+            None => std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS"),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_task_attaches_the_challenge_only_when_given() {
+        async fn status_message(challenge: Option<&str>) -> Message {
+            let mut stream = terminal_task(
+                "t".into(),
+                "c".into(),
+                TaskState::AuthRequired,
+                "why".into(),
+                challenge,
+            );
+            match stream.next().await {
+                Some(Ok(StreamResponse::Task(task))) => task.status.message.unwrap(),
+                _ => panic!("expected one task"),
+            }
+        }
+        let with = status_message(Some("{\"nonce\":\"n\"}")).await;
+        assert_eq!(shadi_a2a::challenge_from_message(&with), Some("{\"nonce\":\"n\"}"));
+        assert_eq!(extract_text(&with), "why");
+        let without = status_message(None).await;
+        assert_eq!(shadi_a2a::challenge_from_message(&without), None);
     }
 
     #[test]

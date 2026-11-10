@@ -1,7 +1,7 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Single-use, task-scoped challenge nonces for the verifier.
+//! Single-use challenge nonces for the verifier, bound to the peer they were issued to.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -16,18 +16,25 @@ pub const NONCE_TTL_SECS: i64 = 60;
 /// Hard bound on parked nonces; the TTL alone is bounded only by inbound rate.
 pub const MAX_NONCES: usize = 4096;
 
+/// Hard bound on nonces live for one DID. Caps a single peer's share of the
+/// store so flooding it evicts only that peer's own entries, never another's.
+pub const MAX_NONCES_PER_DID: usize = 2;
+
 /// What the listener puts in the challenge. `expires_at` is advisory for the
 /// holder; the store's own record decides.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Challenge {
     pub nonce: String,
     pub aud: String,
+    pub task_id: String,
     pub expires_at: i64,
+    pub dcql_query: String,
 }
 
 struct Issued {
     task_id: String,
+    did: String,
     expires_at: i64,
     seq: u64,
 }
@@ -41,20 +48,23 @@ struct Inner {
 /// Issues and consumes nonces. Share one per listener.
 pub struct NonceStore {
     aud: String,
+    dcql_query: String,
     inner: Mutex<Inner>,
 }
 
-// One message for unknown, expired and wrong-task: telling them apart would let
-// a caller probe which nonces are live or which task owns them.
+// One message for unknown, expired, wrong-task and wrong-peer: telling them
+// apart would let a caller probe which nonces are live or who owns them.
 fn rejected() -> CredentialError {
-    CredentialError::Refused("challenge nonce is not valid".into())
+    CredentialError::NonceNotConsumable("challenge nonce is not valid".into())
 }
 
 impl NonceStore {
     /// `aud` is this listener's own DID, the only audience it will accept.
-    pub fn new(aud: impl Into<String>) -> Self {
+    /// Every challenge is stamped with `aud` and `dcql_query`.
+    pub fn new(aud: impl Into<String>, dcql_query: impl Into<String>) -> Self {
         Self {
             aud: aud.into(),
+            dcql_query: dcql_query.into(),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -65,7 +75,8 @@ impl NonceStore {
             .map_err(|_| CredentialError::Storage("nonce store lock poisoned".into()))
     }
 
-    pub fn issue(&self, task_id: &str, now: i64) -> Result<Challenge, CredentialError> {
+    /// `did` is the peer the challenge is for; only it can consume the nonce.
+    pub fn issue(&self, task_id: &str, did: &str, now: i64) -> Result<Challenge, CredentialError> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes)
             .map_err(|e| CredentialError::Storage(format!("nonce generation failed: {e}")))?;
@@ -74,8 +85,24 @@ impl NonceStore {
 
         let mut g = self.lock()?;
         g.map.retain(|_, v| v.expires_at > now);
-        // The sweep above leaves the map at most at the cap, so one eviction
-        // makes room.
+
+        // Evict this DID's own oldest nonce first, so a flood from one peer
+        // never touches another peer's parked challenge.
+        let mut mine: Vec<(String, u64)> = g
+            .map
+            .iter()
+            .filter(|(_, v)| v.did == did)
+            .map(|(k, v)| (k.clone(), v.seq))
+            .collect();
+        if mine.len() >= MAX_NONCES_PER_DID {
+            mine.sort_by_key(|(_, seq)| *seq);
+            for (k, _) in mine.iter().take(mine.len() + 1 - MAX_NONCES_PER_DID) {
+                g.map.remove(k);
+            }
+        }
+
+        // Backstop: the sweep and the per-DID evictions above leave the map at
+        // most at the cap, so one eviction makes room.
         if g.map.len() >= MAX_NONCES {
             if let Some(oldest) = g
                 .map
@@ -92,6 +119,7 @@ impl NonceStore {
             nonce.clone(),
             Issued {
                 task_id: task_id.to_owned(),
+                did: did.to_owned(),
                 expires_at,
                 seq,
             },
@@ -99,21 +127,29 @@ impl NonceStore {
         Ok(Challenge {
             nonce,
             aud: self.aud.clone(),
+            task_id: task_id.to_owned(),
             expires_at,
+            dcql_query: self.dcql_query.clone(),
         })
     }
 
     /// Returns the audience this listener recorded, so the caller checks the
     /// presentation against a value it issued rather than one the token supplied.
-    /// A wrong-task attempt leaves the nonce live for its rightful task.
-    pub fn consume(&self, nonce: &str, task_id: &str, now: i64) -> Result<&str, CredentialError> {
+    /// A wrong-task or wrong-peer attempt leaves the nonce live for its rightful holder.
+    pub fn consume(
+        &self,
+        nonce: &str,
+        task_id: &str,
+        did: &str,
+        now: i64,
+    ) -> Result<&str, CredentialError> {
         let mut g = self.lock()?;
         let entry = g.map.get(nonce).ok_or_else(rejected)?;
         if entry.expires_at <= now {
             g.map.remove(nonce);
             return Err(rejected());
         }
-        if entry.task_id != task_id {
+        if entry.task_id != task_id || entry.did != did {
             return Err(rejected());
         }
         g.map.remove(nonce);
@@ -127,79 +163,116 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn store() -> NonceStore {
-        NonceStore::new("did:example:listener")
+        NonceStore::new("did:example:listener", "{\"fake\":true}")
     }
 
     #[test]
     fn single_use() {
         let s = store();
-        let c = s.issue("t1", 100).unwrap();
+        let c = s.issue("t1", "d", 100).unwrap();
         assert_eq!(c.expires_at, 100 + NONCE_TTL_SECS);
-        assert!(s.consume(&c.nonce, "t1", 101).is_ok());
-        assert!(s.consume(&c.nonce, "t1", 101).is_err());
+        assert!(s.consume(&c.nonce, "t1", "d", 101).is_ok());
+        assert!(s.consume(&c.nonce, "t1", "d", 101).is_err());
     }
 
     #[test]
     fn wrong_task_fails() {
         let s = store();
-        let c = s.issue("t1", 100).unwrap();
-        assert!(s.consume(&c.nonce, "t2", 101).is_err());
-        assert!(s.consume(&c.nonce, "t1", 101).is_ok());
+        let c = s.issue("t1", "d", 100).unwrap();
+        assert!(s.consume(&c.nonce, "t2", "d", 101).is_err());
+        assert!(s.consume(&c.nonce, "t1", "d", 101).is_ok());
+    }
+
+    #[test]
+    fn wrong_peer_fails_and_leaves_the_nonce_live() {
+        let s = store();
+        let c = s.issue("t1", "did:a", 100).unwrap();
+        let wrong_peer = s.consume(&c.nonce, "t1", "did:b", 101).unwrap_err();
+        let unknown = s.consume("nope", "t1", "did:a", 101).unwrap_err();
+        let wrong_task = s.consume(&c.nonce, "t2", "did:a", 101).unwrap_err();
+        assert_eq!(wrong_peer.to_string(), unknown.to_string());
+        assert_eq!(wrong_peer.to_string(), wrong_task.to_string());
+        assert!(s.consume(&c.nonce, "t1", "did:a", 101).is_ok());
     }
 
     #[test]
     fn ttl_boundary() {
         let s = store();
-        let a = s.issue("t", 100).unwrap();
-        let b = s.issue("t", 100).unwrap();
-        assert!(s.consume(&a.nonce, "t", 100 + NONCE_TTL_SECS - 1).is_ok());
-        assert!(s.consume(&b.nonce, "t", 100 + NONCE_TTL_SECS).is_err());
+        let a = s.issue("t", "d", 100).unwrap();
+        let b = s.issue("t", "d", 100).unwrap();
+        assert!(s
+            .consume(&a.nonce, "t", "d", 100 + NONCE_TTL_SECS - 1)
+            .is_ok());
+        assert!(s.consume(&b.nonce, "t", "d", 100 + NONCE_TTL_SECS).is_err());
     }
 
     #[test]
     fn returns_recorded_audience() {
         let s = store();
-        let c = s.issue("t", 0).unwrap();
+        let c = s.issue("t", "d", 0).unwrap();
         assert_eq!(c.aud, "did:example:listener");
-        assert_eq!(s.consume(&c.nonce, "t", 1).unwrap(), "did:example:listener");
+        assert_eq!(
+            s.consume(&c.nonce, "t", "d", 1).unwrap(),
+            "did:example:listener"
+        );
     }
 
     #[test]
     fn unknown_fails_without_echoing_nonce() {
-        let err = store().consume("nope-nonce", "t", 0).unwrap_err();
+        let err = store().consume("nope-nonce", "t", "d", 0).unwrap_err();
         assert!(!err.to_string().contains("nope-nonce"));
     }
 
     #[test]
     fn cap_evicts_oldest() {
         let s = store();
-        let first = s.issue("t", 0).unwrap();
-        let second = s.issue("t", 0).unwrap();
-        for _ in 0..MAX_NONCES - 1 {
-            s.issue("t", 0).unwrap();
+        let first = s.issue("t", "d0", 0).unwrap();
+        let second = s.issue("t", "d1", 0).unwrap();
+        for i in 2..=MAX_NONCES {
+            s.issue("t", &format!("d{i}"), 0).unwrap();
         }
         assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
-        assert!(s.consume(&first.nonce, "t", 1).is_err());
-        assert!(s.consume(&second.nonce, "t", 1).is_ok());
+        assert!(s.consume(&first.nonce, "t", "d0", 1).is_err());
+        assert!(s.consume(&second.nonce, "t", "d1", 1).is_ok());
     }
 
     #[test]
     fn expired_entries_reclaimed_on_issue() {
         let s = store();
-        for _ in 0..MAX_NONCES {
-            s.issue("t", 0).unwrap();
+        for i in 0..MAX_NONCES {
+            s.issue("t", &format!("d{i}"), 0).unwrap();
         }
         let now = NONCE_TTL_SECS + 1;
-        let c = s.issue("t", now).unwrap();
+        let c = s.issue("t", "d", now).unwrap();
         assert_eq!(s.inner.lock().unwrap().map.len(), 1);
-        assert!(s.consume(&c.nonce, "t", now).is_ok());
+        assert!(s.consume(&c.nonce, "t", "d", now).is_ok());
+    }
+
+    #[test]
+    fn per_did_flood_does_not_evict_other_peers() {
+        let s = store();
+        let victim = s.issue("t", "victim", 0).unwrap();
+        // The attacker mints far more nonces than its own cap allows.
+        for _ in 0..MAX_NONCES_PER_DID * 10 {
+            s.issue("t", "attacker", 0).unwrap();
+        }
+        assert!(s.consume(&victim.nonce, "t", "victim", 1).is_ok());
+        let live_for_attacker = s
+            .inner
+            .lock()
+            .unwrap()
+            .map
+            .values()
+            .filter(|v| v.did == "attacker")
+            .count();
+        assert_eq!(live_for_attacker, MAX_NONCES_PER_DID);
     }
 
     #[test]
     fn nonces_differ_and_have_expected_shape() {
         let s = store();
-        let a = s.issue("t", 0).unwrap();
-        let b = s.issue("t", 0).unwrap();
+        let a = s.issue("t", "d", 0).unwrap();
+        let b = s.issue("t", "d", 0).unwrap();
         assert_ne!(a.nonce, b.nonce);
         assert_eq!(a.nonce.len(), 22);
     }
@@ -207,17 +280,32 @@ mod tests {
     #[test]
     fn concurrent_consume_admits_one() {
         let s = store();
-        let c = s.issue("t", 0).unwrap();
+        let c = s.issue("t", "d", 0).unwrap();
         let wins = AtomicUsize::new(0);
         std::thread::scope(|sc| {
             for _ in 0..16 {
                 sc.spawn(|| {
-                    if s.consume(&c.nonce, "t", 1).is_ok() {
+                    if s.consume(&c.nonce, "t", "d", 1).is_ok() {
                         wins.fetch_add(1, Ordering::SeqCst);
                     }
                 });
             }
         });
         assert_eq!(wins.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn challenge_round_trips_through_json() {
+        let c = store().issue("t1", "d", 100).unwrap();
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"task_id\"") && json.contains("\"dcql_query\""));
+        assert_eq!(serde_json::from_str::<Challenge>(&json).unwrap(), c);
+    }
+
+    #[test]
+    fn challenge_carries_task_and_query() {
+        let c = store().issue("t1", "d", 100).unwrap();
+        assert_eq!(c.task_id, "t1");
+        assert_eq!(c.dcql_query, "{\"fake\":true}");
     }
 }

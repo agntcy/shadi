@@ -16,6 +16,7 @@ shadi_a2a = { package = "agntcy-shadi-a2a", version = "0.4.0", path = "../shadi_
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.4.0", path = "../shadi_identity" }
 url = "2"
 shadi_sandbox = { package = "agntcy-shadi-sandbox", version = "0.3.0", path = "../shadi_sandbox" }
+shadi_credential = { package = "agntcy-shadi-credential", version = "0.1.0", path = "../shadi_credential" }
 a2a = { package = "a2a-lf", version = "0.4.2" }
 a2a-server = { package = "a2a-server-lf", version = "0.5.3" }
 futures = "0.3"
@@ -39,3 +40,4 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = "3.27"
+shadi_credential = { package = "agntcy-shadi-credential", version = "0.1.0", path = "../shadi_credential", features = ["testkit"] }

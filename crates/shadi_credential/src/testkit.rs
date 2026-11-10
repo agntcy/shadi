@@ -10,31 +10,34 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use shadi_identity::AgentIdentity;
 
+#[cfg(test)]
 use crate::sd_jwt::{import, parse_sd_jwt};
+#[cfg(test)]
 use crate::vault::tests::sqlcipher_vault;
+#[cfg(test)]
 use crate::Selection;
 
-pub(crate) const ISS: &str = "https://idp.example/realms/eng";
-pub(crate) const NOW: i64 = 1_700_000_000;
+pub const ISS: &str = "https://idp.example/realms/eng";
+pub const NOW: i64 = 1_700_000_000;
 
-pub(crate) fn b64(bytes: impl AsRef<[u8]>) -> String {
+pub fn b64(bytes: impl AsRef<[u8]>) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-pub(crate) fn issuer_key() -> SigningKey {
+pub fn issuer_key() -> SigningKey {
     SigningKey::from_bytes(&[9u8; 32])
 }
 
-pub(crate) fn disclosure(name: &str, value: impl Into<Value>) -> String {
+pub fn disclosure(name: &str, value: impl Into<Value>) -> String {
     let value: Value = value.into();
     b64(json!(["c2FsdA", name, value]).to_string())
 }
 
-pub(crate) fn base_header() -> Value {
+pub fn base_header() -> Value {
     json!({"alg": "EdDSA", "typ": "dc+sd-jwt", "kid": "k1"})
 }
 
-pub(crate) fn base_claims(holder: &AgentIdentity, discs: &[String]) -> Value {
+pub fn base_claims(holder: &AgentIdentity, discs: &[String]) -> Value {
     let sd: Vec<String> = discs
         .iter()
         .map(|d| b64(Sha256::digest(d.as_bytes())))
@@ -50,12 +53,7 @@ pub(crate) fn base_claims(holder: &AgentIdentity, discs: &[String]) -> Value {
 }
 
 /// A signed credential: issuer JWT, `discs`, trailing tilde.
-pub(crate) fn credential(
-    key: &SigningKey,
-    header: &Value,
-    claims: &Value,
-    discs: &[String],
-) -> String {
+pub fn credential(key: &SigningKey, header: &Value, claims: &Value, discs: &[String]) -> String {
     let input = format!("{}.{}", b64(header.to_string()), b64(claims.to_string()));
     let mut raw = format!("{input}.{}", b64(key.sign(input.as_bytes()).to_bytes()));
     for d in discs {
@@ -67,6 +65,7 @@ pub(crate) fn credential(
 }
 
 /// `cred` imported, with its first `take` disclosures chosen.
+#[cfg(test)]
 pub(crate) fn selection(cred: &str, take: usize) -> Selection {
     Selection {
         record: import(&sqlcipher_vault(), cred, 1_000).unwrap(),
@@ -75,6 +74,7 @@ pub(crate) fn selection(cred: &str, take: usize) -> Selection {
 }
 
 /// The holder answers with the first `take` disclosures, via the real builder.
+#[cfg(test)]
 pub(crate) fn present_n(
     holder: &AgentIdentity,
     cred: &str,
