@@ -15,7 +15,7 @@ use a2a::event::StreamResponse;
 use a2a::*;
 use a2a_server::{AgentExecutor, ExecutorContext};
 use futures::stream::BoxStream;
-use shadi_identity::GrantAction;
+use shadi_identity::{GrantAction, ReplayCache};
 
 use crate::owner::{InviteRequest, Outcome, Owner};
 
@@ -34,25 +34,34 @@ pub fn render_request(channel: &str, invitee_name: &str, invitee_did: &str) -> S
 
 /// Admit a request from the text a task carried: the DID proof names the
 /// requester, and a binding inside it names the requester's human.
-pub fn admit(signed: &[u8], now: u64) -> Result<InviteRequest, String> {
+///
+/// `self_did` is the owner's own DID, so a request sealed for a different
+/// owner (or replayed) is refused the same way a forged one is.
+pub fn admit(
+    signed: &[u8],
+    now: u64,
+    self_did: Option<&str>,
+    replay: &ReplayCache,
+) -> Result<InviteRequest, String> {
     if !shadi_identity::looks_like_did_proof(signed) {
         return Err("a channel request must carry the requester's DID proof".to_string());
     }
-    let verified = shadi_identity::unwrap_signed_message(signed).map_err(|e| e.to_string())?;
-    let (requester_human_did, payload) = if shadi_identity::looks_like_binding(&verified.payload) {
+    let (requester_did, sealed_payload, _hint) =
+        shadi_identity::verify_and_open(signed, self_did, replay)?;
+    let (requester_human_did, payload) = if shadi_identity::looks_like_binding(&sealed_payload) {
         let (certificate, rest) =
-            shadi_identity::split_binding(&verified.payload).map_err(|e| e.to_string())?;
+            shadi_identity::split_binding(&sealed_payload).map_err(|e| e.to_string())?;
         let binding = shadi_identity::verify_binding(certificate, now)
             .map_err(|e| format!("agent binding rejected: {e}"))?;
-        if binding.agent_did != verified.did {
+        if binding.agent_did != requester_did {
             return Err(format!(
                 "agent binding is for {}, but the request was signed by {}",
-                binding.agent_did, verified.did
+                binding.agent_did, requester_did
             ));
         }
         (Some(binding.human_did), rest.to_vec())
     } else {
-        (None, verified.payload.clone())
+        (None, sealed_payload)
     };
     // Only the framing matters here; presentations are checked by the
     // credential-gated listener, not by owner intake.
@@ -66,7 +75,7 @@ pub fn admit(signed: &[u8], now: u64) -> Result<InviteRequest, String> {
         invitee_name,
         invitee_did: Some(invitee_did),
         action: GrantAction::Add,
-        requester: verified.did,
+        requester: requester_did,
         requester_human_did,
     })
 }
@@ -96,22 +105,42 @@ pub trait Inviter: Send + Sync {
     fn invite(&self, grant: &[u8], request: &InviteRequest) -> Result<(), String>;
 }
 
+/// Live senders this process tracks replay nonces for, and how many live
+/// nonces each may hold at once.
+const REPLAY_MAX_SENDERS: usize = 1024;
+const REPLAY_PER_SENDER_CAPACITY: usize = 256;
+
 /// Serves channel requests for one owner.
 #[derive(Clone)]
 pub struct OwnerExecutor {
     owner: Arc<Mutex<Owner>>,
     inviter: Arc<dyn Inviter>,
+    replay: Arc<ReplayCache>,
 }
 
 impl OwnerExecutor {
     pub fn new(owner: Arc<Mutex<Owner>>, inviter: Arc<dyn Inviter>) -> Self {
-        Self { owner, inviter }
+        Self {
+            owner,
+            inviter,
+            replay: Arc::new(ReplayCache::new(
+                REPLAY_MAX_SENDERS,
+                REPLAY_PER_SENDER_CAPACITY,
+                true,
+            )),
+        }
     }
 
     /// Decide one signed request, inviting when it is granted. Returns the
     /// state the requester's task ends in and the line it is told.
     pub fn handle(&self, signed: &[u8], now: u64) -> (TaskState, String) {
-        let request = match admit(signed, now) {
+        // A poisoned lock must not silently drop the audience check: `admit`
+        // treats `None` as "we don't know our own DID", not "refuse".
+        let self_did = match self.owner.lock() {
+            Ok(owner) => owner.owner_did(),
+            Err(_) => return (TaskState::Rejected, "refused: owner state is poisoned".to_string()),
+        };
+        let request = match admit(signed, now, Some(self_did.as_str()), &self.replay) {
             Ok(request) => request,
             Err(reason) => {
                 tracing::warn!(%reason, "refused a channel request before the owner's policy");
@@ -219,7 +248,7 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
     use crate::owner::OwnerPolicy;
-    use shadi_identity::{issue_binding, verify_grant, wrap_signed_message, AgentIdentity};
+    use shadi_identity::{issue_binding, seal_and_sign, verify_grant, AgentIdentity};
 
     const NOW: u64 = 1_700_000_000;
     const ROOM: &str = "agntcy/shadi/review-room";
@@ -279,7 +308,7 @@ mod tests {
             payload.push(b'\n');
         }
         payload.extend_from_slice(body.as_bytes());
-        wrap_signed_message(&setup.agent, &payload).unwrap()
+        seal_and_sign(&setup.agent, Some(&setup.owner_did), &payload, None).unwrap()
     }
 
     fn as_task(setup: &Setup, bound: bool) -> Vec<u8> {
@@ -331,10 +360,22 @@ mod tests {
             task.as_bytes(),
         )
         .unwrap();
-        let carried = wrap_signed_message(&setup.agent, &framed).unwrap();
+        let carried = seal_and_sign(&setup.agent, Some(&setup.owner_did), &framed, None).unwrap();
 
-        let plain = admit(&as_task(&setup, false), NOW).unwrap();
-        let with_vp = admit(&carried, NOW).unwrap();
+        let plain = admit(
+            &as_task(&setup, false),
+            NOW,
+            Some(&setup.owner_did),
+            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY, true),
+        )
+        .unwrap();
+        let with_vp = admit(
+            &carried,
+            NOW,
+            Some(&setup.owner_did),
+            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY, true),
+        )
+        .unwrap();
         assert_eq!(with_vp.channel, plain.channel);
         assert_eq!(with_vp.invitee_did, plain.invitee_did);
         assert_eq!(with_vp.requester, plain.requester);
@@ -387,11 +428,11 @@ mod tests {
         let mut stolen = issue_binding(&setup.human, &other_agent.did(), "x", NOW + 60).unwrap();
         stolen.push(b'\n');
         stolen.extend_from_slice(body.as_bytes());
-        let stolen = wrap_signed_message(&setup.agent, &stolen).unwrap();
+        let stolen = seal_and_sign(&setup.agent, Some(&setup.owner_did), &stolen, None).unwrap();
         let mut lapsed = issue_binding(&setup.human, &setup.agent.did(), "x", NOW - 1).unwrap();
         lapsed.push(b'\n');
         lapsed.extend_from_slice(body.as_bytes());
-        let lapsed = wrap_signed_message(&setup.agent, &lapsed).unwrap();
+        let lapsed = seal_and_sign(&setup.agent, Some(&setup.owner_did), &lapsed, None).unwrap();
 
         for (bad, why) in [
             (body.as_bytes().to_vec(), "DID proof"),
