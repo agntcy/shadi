@@ -207,7 +207,8 @@ mod windows_integration {
         assert_eq!(child.wait().expect("wait").code(), Some(7));
     }
 
-    /// The working directory gets traverse alone: nothing in it is readable,
+    /// The working directory gets traverse and its own attributes alone:
+    /// nothing in it is readable,
     /// and its DACL is as it was once the sandbox exits, inherited ACEs
     /// included (agntcy/shadi#538, #545).
     #[test]
