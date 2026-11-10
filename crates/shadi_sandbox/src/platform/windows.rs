@@ -17,8 +17,8 @@ use windows_sys::Win32::Foundation::{
     SetHandleInformation,
 };
 use windows_sys::Win32::Security::{
-    DeriveCapabilitySidsFromName, EqualSid, GetAce, GetSecurityDescriptorControl,
-    InitializeSecurityDescriptor, SetFileSecurityW, SetSecurityDescriptorControl,
+    DeriveCapabilitySidsFromName, EqualSid, GetAce, GetFileSecurityW,
+    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, InitializeSecurityDescriptor, SetFileSecurityW, SetSecurityDescriptorControl,
     SetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE, ACE_HEADER, CONTAINER_INHERIT_ACE,
     NO_INHERITANCE, OBJECT_INHERIT_ACE, SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR,
     SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED, SID_AND_ATTRIBUTES,
@@ -878,41 +878,22 @@ fn edit_dacl(
     // An inheritable ACE reaches existing children only through
     // SetNamedSecurityInfoW, which walks the whole tree and re-marks ACEs
     // copied from the parent as inherited (agntcy/shadi#545). Any other edit
-    // is written to this object alone.
+    // is made to this object alone.
     let propagate = if mode == REVOKE_ACCESS {
         holds_inheritable_ace(dacl, sid)
     } else {
         inheritance != NO_INHERITANCE
     };
-    let mut control: u16 = 0;
-    let mut revision: u32 = 0;
-    if !propagate
-        && unsafe { GetSecurityDescriptorControl(security_descriptor, &mut control, &mut revision) }
-            == 0
-    {
-        let error = last_win32_error_message("GetSecurityDescriptorControl");
+    if !propagate {
         unsafe { LocalFree(security_descriptor) };
-        return Err(error);
+        return edit_object_dacl(path_w, sid, mode, access_mask, inheritance);
     }
 
-    let entry = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: access_mask,
-        grfAccessMode: mode,
-        grfInheritance: inheritance,
-        Trustee: TRUSTEE_W {
-            pMultipleTrustee: std::ptr::null_mut(),
-            MultipleTrusteeOperation: 0,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: 0,
-            ptstrName: sid as *mut u16,
-        },
-    };
+    let entry = explicit_access(sid, mode, access_mask, inheritance);
     let mut updated: *mut ACL = std::ptr::null_mut();
     let result = unsafe { SetEntriesInAclW(1, &entry, dacl, &mut updated) };
     let result = if result != 0 {
         Err(win32_error_message("SetEntriesInAclW", result))
-    } else if !propagate {
-        set_object_dacl(path_w, updated, control)
     } else {
         let rc = unsafe {
             SetNamedSecurityInfoW(
@@ -942,6 +923,79 @@ fn edit_dacl(
     result
 }
 
+fn explicit_access(
+    sid: *mut core::ffi::c_void,
+    mode: ACCESS_MODE,
+    access_mask: u32,
+    inheritance: u32,
+) -> EXPLICIT_ACCESS_W {
+    EXPLICIT_ACCESS_W {
+        grfAccessPermissions: access_mask,
+        grfAccessMode: mode,
+        grfInheritance: inheritance,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: 0,
+            ptstrName: sid as *mut u16,
+        },
+    }
+}
+
+/// [`edit_dacl`] on `path_w` alone. The DACL is read as stored, with
+/// GetFileSecurityW: GetNamedSecurityInfoW reports ACEs copied from the
+/// parent as inherited, and writing that back would mark them so.
+fn edit_object_dacl(
+    path_w: &[u16],
+    sid: *mut core::ffi::c_void,
+    mode: ACCESS_MODE,
+    access_mask: u32,
+    inheritance: u32,
+) -> Result<(), String> {
+    let information = windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+    let path = path_w.as_ptr();
+    let mut needed: u32 = 0;
+    unsafe { GetFileSecurityW(path, information, std::ptr::null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        return Err(last_win32_error_message("GetFileSecurityW"));
+    }
+    // u64s, so the descriptor is aligned.
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+    let descriptor = buffer.as_mut_ptr() as *mut core::ffi::c_void;
+    let length = (buffer.len() * 8) as u32;
+    let fetched = unsafe { GetFileSecurityW(path, information, descriptor, length, &mut needed) };
+    if fetched == 0 {
+        return Err(last_win32_error_message("GetFileSecurityW"));
+    }
+
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut control: u16 = 0;
+    let mut revision: u32 = 0;
+    let read = unsafe {
+        GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) != 0
+            && GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) != 0
+    };
+    if !read {
+        return Err(last_win32_error_message("GetSecurityDescriptorDacl"));
+    }
+    if present == 0 {
+        dacl = std::ptr::null_mut();
+    }
+
+    let entry = explicit_access(sid, mode, access_mask, inheritance);
+    let mut updated: *mut ACL = std::ptr::null_mut();
+    let result = unsafe { SetEntriesInAclW(1, &entry, dacl, &mut updated) };
+    if result != 0 {
+        return Err(win32_error_message("SetEntriesInAclW", result));
+    }
+    let result = set_object_dacl(path_w, updated, control);
+    unsafe { LocalFree(updated as *mut _) };
+    result
+}
+
 /// Whether `dacl` has an ACE for `sid` that children inherit. An ACE that
 /// can't be read counts as one, so a revoke still reaches the children.
 fn holds_inheritable_ace(dacl: *const ACL, sid: *mut core::ffi::c_void) -> bool {
@@ -950,10 +1004,14 @@ fn holds_inheritable_ace(dacl: *const ACL, sid: *mut core::ffi::c_void) -> bool 
     }
     let count = u32::from(unsafe { (*dacl).AceCount });
     (0..count).any(|index| {
-        let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+        let mut out = std::mem::MaybeUninit::<*mut core::ffi::c_void>::uninit();
+        if unsafe { GetAce(dacl, index, out.as_mut_ptr()) } == 0 {
             return true;
         }
+        let Some(ace) = std::ptr::NonNull::new(unsafe { out.assume_init() }) else {
+            return true;
+        };
+        let ace = ace.as_ptr();
         let header = unsafe { &*(ace as *const ACE_HEADER) };
         let simple = matches!(
             u32::from(header.AceType),
