@@ -91,18 +91,36 @@ mod tests {
         assert_eq!(engine.active_epoch(), Epoch(0));
     }
 
+    fn endorsement(id: &str, voter: &str, endorsee: &str) -> SemanticEvent {
+        SemanticEvent {
+            pattern: PatternKind::Development,
+            metadata: EventMetadata {
+                event_id: EventId::from(id),
+                correlation_id: None,
+                epoch: Epoch(0),
+                source: EventSource::Peer(AgentId::from(voter)),
+            },
+            payload: SemanticPayload::ToolResult {
+                tool_name: endorsee.to_string(),
+                accepted: true,
+            },
+        }
+    }
+
     #[test]
     fn history_accumulates_all_transitions() {
         let mut rt = make_runtime();
         rt.apply(proposal("e1", "a", 10));
         rt.apply(proposal("e2", "b", 20));
+        rt.apply(endorsement("e3", "a", "b"));
+        rt.apply(endorsement("e4", "b", "b"));
 
         let h = rt.history();
-        assert_eq!(h.len(), 2);
+        assert_eq!(h.len(), 4);
         assert_eq!(h[0].event_id, EventId::from("e1"));
         assert_eq!(h[0].outcome, EventOutcome::Applied);
-        assert_eq!(h[1].event_id, EventId::from("e2"));
-        assert!(matches!(h[1].outcome, EventOutcome::Finalized(_)));
+        assert_eq!(h[3].event_id, EventId::from("e4"));
+        assert!(matches!(h[3].outcome, EventOutcome::Finalized(_)));
     }
 
     #[test]

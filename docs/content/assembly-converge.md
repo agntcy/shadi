@@ -210,8 +210,9 @@ refusal.
 
 `--pattern development` (the `coordinate` default) is CONVERGE for a
 shared code artifact. Peers propose implementations and endorse one.
-Finalization selects the artifact with the most endorsements when
-quorum is met.
+Once every peer has voted, the artifact with the most endorsements wins
+if it has quorum; otherwise the round is repeated, and the last round
+takes the most endorsed artifact.
 
 ### Preference (`PreferenceEngine`)
 
