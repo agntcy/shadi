@@ -28,6 +28,14 @@ enum Cmd {
         #[arg(long)]
         tool: String,
 
+        /// The agent's name: its card's and announced workload's name, its SLIM
+        /// name (agntcy/shadi/<NAME>-a2a), the name `delegate --to` reaches it
+        /// by, and, with SLIM_HUMAN_SEED, its DID, so each name is its own
+        /// identity. ASCII letters, digits, '-' and '_', at most 64. Defaults to
+        /// `<record name>-<tool>` with --record, else to --tool.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
         /// Subprocess command (required for generic-stdio).
         #[arg(long)]
         command: Option<String>,
@@ -454,6 +462,7 @@ fn main() {
     let result = match cli.command {
         Cmd::Register {
             tool,
+            name,
             command,
             args,
             dir_publish,
@@ -518,6 +527,7 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
+            let mut agent_name = None;
             let result = if needs_listener {
                 Err(anyhow::anyhow!(
                     "{listener_flag} needs an A2A listener: pass --slim-endpoint or --a2a-listen"
@@ -525,6 +535,10 @@ fn main() {
             } else {
                 Ok(())
             }
+            .and_then(|()| match name.as_deref() {
+                Some(name) => commands::register::validate_agent_name(name),
+                None => Ok(()),
+            })
             .and_then(|()| {
                 advertisable(
                     a2a_listen.as_deref(),
@@ -556,6 +570,11 @@ fn main() {
                 )
             })
             .and_then(|source| {
+                agent_name = Some(commands::register::agent_name(
+                    name.as_deref(),
+                    source.as_ref().map(|source| source.name.as_str()),
+                    &tool,
+                )?);
                 if let Some(source) = source {
                     card_opts.add_record(&source);
                     if !no_source_record && announce_opts.source_record.is_none() {
@@ -569,6 +588,7 @@ fn main() {
             .and_then(|()| {
                 commands::register::run(
                     &tool,
+                    agent_name.as_ref().expect("named once the record is prepared"),
                     command.as_deref(),
                     &args,
                     slim_endpoint.as_deref(),
@@ -858,6 +878,23 @@ mod tests {
                 assert_eq!(to, "copilot");
             }
             _ => panic!("expected handoff subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_register_name() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "claude-code",
+            "--name",
+            "reviewer",
+        ])
+        .expect("parse register --name");
+        match cli.command {
+            Cmd::Register { name, .. } => assert_eq!(name.as_deref(), Some("reviewer")),
+            _ => panic!("expected register subcommand"),
         }
     }
 

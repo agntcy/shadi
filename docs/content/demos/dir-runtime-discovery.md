@@ -189,8 +189,8 @@ target/debug/shadictl --net-block \
 [agentbridge] running DIR record code-review 1.0.0 (baeareigguj5x…) from localhost:8888; signature: unsigned
 [agentbridge] 'code-review' resolved to baeareigguj5x…; pass --record baeareigguj5x… to run exactly this record
 [agentbridge] provisioned agent skill 'code-review' into …/agentbridge-record/Xp3kQ9ab/skills/code-review
-Registered fake-harness-isolated adapter from profile (agent id: fake-harness-isolated, dir: …)
-[agentbridge] announced to dir-runtime as fake-harness-isolated-<DID suffix>-21162 (…/workloads.d/fake-harness-isolated-<DID suffix>-21162.json)
+Registered fake-harness-isolated adapter from profile (agent id: code-review-fake-harness-isolated, from the --record's name and the profile; dir: …)
+[agentbridge] announced to dir-runtime as code-review-fake-harness-isolated-<DID suffix>-21162 (…/workloads.d/code-review-fake-harness-isolated-<DID suffix>-21162.json)
 Starting A2A HTTP+JSON listener on 127.0.0.1:19960 ...
 [agentbridge] ready — A2A HTTP+JSON on http://127.0.0.1:19960
 ```
@@ -220,6 +220,13 @@ What happened before the listener started:
    checked against the OASF schema server.
 4. `--dir-announce` wrote a process descriptor for runtime discovery, labelled
    with the record's CID (`org.agntcy/agent-record`).
+5. The agent was named `code-review-fake-harness-isolated`: the record's name,
+   then the profile, so the same record on two harnesses gets two names. The
+   name is the agent's card and workload name, its SLIM name and what
+   `delegate --to` takes, and the agent's DID is derived from it, so two
+   records on one profile are two identities. `--name <NAME>` sets it
+   instead (ASCII letters, digits, `-` and `_`); without `--record`, the
+   agent is named after the profile.
 
 The sandbox flags grant exactly that: the listener and the OASF server
 (`--net-allow`), the Directory node and `dirctl`'s own files for `--record`
@@ -238,10 +245,10 @@ directory (`--write`).
 ```
 
 ```text
-fake-harness-isolated-<DID suffix>-21162
+code-review-fake-harness-isolated-<DID suffix>-21162
   runtime:  process
   host:     my-laptop
-  agent:    fake-harness-isolated 1.0.0
+  agent:    code-review-fake-harness-isolated 1.0.0
   locators: http://127.0.0.1:19960
   skills:   software_engineering/code_debugging/error_handling
   domains:  technology/software_engineering
@@ -280,7 +287,7 @@ target/debug/agentbridge list --skill "software_engineering/*"   # only announce
 ```
 
 ```text
-fake-harness-isolated  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [runtime (localhost:8888)]
+code-review-fake-harness-isolated  did=did:key:z6Mk…  http+json://127.0.0.1:19960  [runtime (localhost:8888)]
 ```
 
 Each line says where the agent's record is: `local` for a listener on this
@@ -303,12 +310,12 @@ later, and with an older one it says so and lists only local listeners.
 **Terminal C:**
 
 ```bash
-target/debug/agentbridge delegate --to fake-harness-isolated "Review: return a / b"
+target/debug/agentbridge delegate --to code-review-fake-harness-isolated "Review: return a / b"
 ```
 
 ```text
-[agentbridge] 'fake-harness-isolated' (did:key:z6Mk…) was found through dir-runtime localhost:8888: its DID and address are what it announced about itself, and nothing checks that the DID answers there yet (agntcy/shadi#504)
-Response from 'fake-harness-isolated' (488ms):
+[agentbridge] 'code-review-fake-harness-isolated' (did:key:z6Mk…) was found through dir-runtime localhost:8888: its DID and address are what it announced about itself, and nothing checks that the DID answers there yet (agntcy/shadi#504)
+Response from 'code-review-fake-harness-isolated' (488ms):
 [fake-harness] received: Review: return a / b
 [fake-harness] agent skill: code-review: Toolkit for performing structured code reviews. Covers identifying bugs, security issues, performance problems, and style violations. Use when asked to review code changes, pull requests, or individual files.
 ```
@@ -417,9 +424,12 @@ target/debug/shadictl --net-block \
 **Terminal C:**
 
 ```bash
-target/debug/agentbridge delegate --to claude-code-isolated \
+target/debug/agentbridge delegate --to code-review-claude-code-isolated \
   "Review this function: def div(a, b): return a / b"
 ```
+
+Both agents run the same record, so each is named after its harness:
+`code-review-claude-code-isolated` and `code-review-codex-isolated`.
 
 - `--command` is the harness's working directory: the files it may read and
   change for a task. Here it is an empty directory; point it at a checkout to

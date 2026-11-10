@@ -54,8 +54,10 @@ pub struct DirPublishOptions<'a> {
 /// (`grpc`, `jsonrpc`, or `http+json`) at that `host:port`. When `dir_publish`
 /// is provided, the adapter's real `AgentCard` is published to the Agent
 /// Directory before the adapter starts serving.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     tool: &str,
+    name: &AgentName,
     command: Option<&str>,
     args: &[String],
     slim_endpoint: Option<&str>,
@@ -77,19 +79,20 @@ pub fn run(
                 );
             }
             let work_dir = work_dir(command);
-            let id = profile.id.clone();
-            let adapter = ProfileAdapter::new(profile, work_dir.clone());
+            let adapter =
+                ProfileAdapter::new(profile, work_dir.clone()).with_agent_id(name.id.clone());
             let adapter = Arc::new(match super::record::config_root() {
                 Some(root) => adapter.with_config_root(root),
                 None => adapter,
             });
             println!(
-                "Registered {id} adapter from profile (agent id: {}, dir: {})",
+                "Registered {tool} adapter from profile (agent id: {}, {}; dir: {})",
                 adapter.agent_id().0,
+                name.source.describe(),
                 work_dir.display()
             );
             return serve_registered(
-                &id,
+                &name.id,
                 adapter,
                 slim_endpoint,
                 a2a_listen,
@@ -106,11 +109,13 @@ pub fn run(
                 anyhow::anyhow!("--command is required for tool type 'generic-stdio'")
             })?;
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let tool = name.id.as_str();
             let adapter = Arc::new(GenericStdioAdapter::spawn(tool, command, &args_ref)?);
             println!(
-                "Registered adapter '{}' (agent id: {})",
+                "Registered adapter '{}' (agent id: {}, {})",
                 tool,
-                adapter.agent_id().0
+                adapter.agent_id().0,
+                name.source.describe()
             );
             if slim_endpoint.is_some() || a2a_listen.is_some() {
                 start_listeners(
@@ -146,6 +151,105 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// Longest agent name: a local listener lease (`<name>-<pid>.json`) and
+/// runtime discovery refuse longer ones.
+const MAX_AGENT_NAME: usize = 64;
+
+/// Where the agent's name came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameSource {
+    /// `--name`.
+    Flag,
+    /// The `--record`'s name, followed by the profile id.
+    Record,
+    /// The profile id (`--tool`).
+    Profile,
+}
+
+impl NameSource {
+    fn describe(self) -> &'static str {
+        match self {
+            NameSource::Flag => "from --name",
+            NameSource::Record => "from the --record's name and the profile",
+            NameSource::Profile => "from the profile",
+        }
+    }
+}
+
+/// The id the agent runs as: its card's and descriptor's `name`, its SLIM
+/// name `agntcy/shadi/<id>-a2a`, its DID (derived from the human seed and the
+/// id), and its local listener lease.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentName {
+    pub id: String,
+    pub source: NameSource,
+}
+
+/// Check a `--name`: it becomes a SLIM name component and a file name, so it
+/// holds only ASCII letters, digits, `-` and `_`.
+pub fn validate_agent_name(name: &str) -> anyhow::Result<()> {
+    let why = if name.is_empty() {
+        "it is empty".to_string()
+    } else if name.len() > MAX_AGENT_NAME {
+        format!("it is longer than {MAX_AGENT_NAME} characters")
+    } else if name.starts_with('-') {
+        "it may not start with '-'".to_string()
+    } else if let Some(c) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        format!(
+            "it contains {c:?}; a SLIM name component holds only ASCII letters, digits, '-' and '_'"
+        )
+    } else {
+        return Ok(());
+    };
+    anyhow::bail!("invalid --name '{name}': {why}")
+}
+
+/// Name the agent: `--name`, else `<record name>-<profile id>` with `--record`
+/// (the profile keeps one record on two harnesses apart), else the profile id.
+pub fn agent_name(
+    name: Option<&str>,
+    record_name: Option<&str>,
+    tool: &str,
+) -> anyhow::Result<AgentName> {
+    if let Some(name) = name {
+        validate_agent_name(name)?;
+        return Ok(AgentName {
+            id: name.to_string(),
+            source: NameSource::Flag,
+        });
+    }
+    let profile = AgentName {
+        id: tool.to_string(),
+        source: NameSource::Profile,
+    };
+    let Some(record_name) = record_name else {
+        return Ok(profile);
+    };
+    // `org/skill` → `org-skill`: one `-` for each run of characters SLIM
+    // can't hold, none at either end.
+    let mut prefix = String::new();
+    for c in record_name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            prefix.push(c);
+        } else if !prefix.is_empty() && !prefix.ends_with('-') {
+            prefix.push('-');
+        }
+    }
+    let room = MAX_AGENT_NAME.saturating_sub(tool.len() + 1);
+    prefix.truncate(room);
+    let prefix = prefix.trim_end_matches('-');
+    if prefix.is_empty() {
+        return Ok(profile);
+    }
+    Ok(AgentName {
+        id: format!("{prefix}-{tool}"),
+        source: NameSource::Record,
+    })
 }
 
 /// The harness's working directory: `--command`, or the current directory.
@@ -1839,12 +1943,80 @@ fn publish_card_to_dir(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agent_is_named_after_its_profile_without_record_or_name() {
+        let name = agent_name(None, None, "claude-code").unwrap();
+        assert_eq!(name.id, "claude-code");
+        assert_eq!(name.source, NameSource::Profile);
+    }
+
+    #[test]
+    fn record_agent_is_named_after_record_and_profile() {
+        let name = agent_name(None, Some("code-review"), "claude-code-isolated").unwrap();
+        assert_eq!(name.id, "code-review-claude-code-isolated");
+        assert_eq!(name.source, NameSource::Record);
+    }
+
+    #[test]
+    fn record_name_characters_slim_cannot_hold_are_replaced() {
+        let name = agent_name(None, Some("agntcy/k8s.troubleshoot"), "codex-isolated").unwrap();
+        assert_eq!(name.id, "agntcy-k8s-troubleshoot-codex-isolated");
+    }
+
+    #[test]
+    fn long_record_name_is_shortened_to_keep_the_profile() {
+        let record = "a".repeat(100);
+        let name = agent_name(None, Some(&record), "claude-code-isolated").unwrap();
+        assert_eq!(name.id.len(), 64);
+        assert!(name.id.ends_with("-claude-code-isolated"), "{}", name.id);
+    }
+
+    #[test]
+    fn record_name_without_usable_characters_falls_back_to_the_profile() {
+        let name = agent_name(None, Some("/./"), "codex-isolated").unwrap();
+        assert_eq!(name.id, "codex-isolated");
+    }
+
+    #[test]
+    fn name_flag_overrides_record_and_profile() {
+        let name = agent_name(Some("reviewer"), Some("code-review"), "claude-code").unwrap();
+        assert_eq!(name.id, "reviewer");
+        assert_eq!(name.source, NameSource::Flag);
+    }
+
+    #[test]
+    fn name_flag_slim_cannot_hold_is_rejected_with_the_reason() {
+        for (bad, why) in [
+            ("", "empty"),
+            ("team/reviewer", "'/'"),
+            ("re viewer", "' '"),
+            ("-reviewer", "start with '-'"),
+            (&"r".repeat(65), "64"),
+        ] {
+            let err = agent_name(Some(bad), None, "claude-code")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("--name"), "{err}");
+            assert!(err.contains(why), "{bad:?}: {err}");
+        }
+    }
+
     use super::*;
 
     #[test]
     fn unknown_tool_lists_profiles_and_generic_stdio() {
-        let err = run("gemini", None, &[], None, None, A2ABinding::Grpc, None, false)
-            .expect_err("no gemini profile");
+        let err = run(
+            "gemini",
+            &agent_name(None, None, "gemini").unwrap(),
+            None,
+            &[],
+            None,
+            None,
+            A2ABinding::Grpc,
+            None,
+            false,
+        )
+        .expect_err("no gemini profile");
         let msg = err.to_string();
         assert!(msg.contains("claude-code"));
         assert!(msg.contains("generic-stdio"));
