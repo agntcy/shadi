@@ -21,50 +21,161 @@ mod windows_integration {
         Ok(())
     }
 
-    /// Spawn `script` under `cmd /C` in a sandbox that may read `dir`, or
-    /// `None` on the runner's known `CreateProcessW` (win32=87) failure.
-    fn spawn_reader(dir: &std::path::Path, script: &str) -> Option<shadi_sandbox::SandboxedChild> {
+    /// Spawn `cmd /C <argv>` in a sandbox that may read `dir`.
+    ///
+    /// The arguments are passed one by one, never as a single quoted script:
+    /// `quote_arg` escapes an embedded quote the MSVC way, as `\"`, and
+    /// `cmd` reads that as a literal backslash, so the path never parses.
+    ///
+    /// win32=87 used to be skipped as a runner quirk; it was a malformed
+    /// capability array (agntcy/shadi#531), so it now fails the test.
+    fn spawn_reader(dir: &std::path::Path, argv: &[&str]) -> shadi_sandbox::SandboxedChild {
         let policy = SandboxPolicy::new().allow_read_path(dir);
         let mut command = Command::new("cmd");
-        command.args(["/C", script]);
+        command.arg("/C");
+        command.args(argv);
         match spawn_sandboxed(&mut command, &policy) {
-            Ok(child) => Some(child),
-            Err(SandboxError::SpawnFailed(message)) if message.contains("win32=87") => {
-                eprintln!("skipping: CreateProcessW(win32=87) on this runner");
-                None
-            }
+            Ok(child) => child,
             Err(error) => panic!("sandboxed reader should start: {error:?}"),
         }
     }
 
+    /// Wait for the parent to drop `go.txt` beside the script, then read the
+    /// shared file: 0 if the grant still works, 1 if it was lost, 2 if the
+    /// parent never signalled. Nothing here leaves cmd's own builtins, because
+    /// a sandboxed process cannot start another image (agntcy/shadi#538).
+    const READER_SCRIPT: &str = concat!(
+        "@echo off\r\n",
+        "for /l %%i in (1,1,1000000) do if exist \"%~dp0go.txt\" goto signalled\r\n",
+        "exit /b 2\r\n",
+        ":signalled\r\n",
+        "type \"%~dp0shared.txt\" || exit /b 1\r\n",
+        "exit /b 0\r\n",
+    );
+
     /// Two sandboxes that share a path keep their grants whatever order they
     /// start and exit in (#335). B's startup must not reset A's ACL from a
     /// journal A still owns, and B's exit must not take A's grant with it.
+    ///
+    /// A stays alive across both moments and only then reads, so a grant lost
+    /// to either one fails the run. It spins rather than sleeping because a
+    /// sandboxed `timeout` or `ping` never starts, and it is reached through
+    /// `call`: `cmd /C <script>` alone is refused.
     #[test]
     fn sandboxes_sharing_a_path_keep_their_grants() {
         let dir = tempfile::tempdir().expect("tempdir");
         let shared = dir.path().join("shared.txt");
         std::fs::write(&shared, b"shared").expect("write shared file");
+        let script = dir.path().join("reader.cmd");
+        std::fs::write(&script, READER_SCRIPT).expect("write reader script");
 
-        let a_script = format!("ping -n 4 127.0.0.1 >NUL & type \"{}\"", shared.display());
-        let Some(mut a) = spawn_reader(dir.path(), &a_script) else {
-            return;
-        };
+        let script_arg = script.display().to_string();
+        let mut a = spawn_reader(dir.path(), &["call", &script_arg]);
         thread::sleep(Duration::from_millis(500));
-        let b_script = format!("type \"{}\"", shared.display());
-        let Some(mut b) = spawn_reader(dir.path(), &b_script) else {
-            let _ = a.wait();
-            return;
-        };
 
+        let shared_arg = shared.display().to_string();
+        let mut b = spawn_reader(dir.path(), &["type", &shared_arg]);
         assert!(
             b.wait().expect("wait for B").success(),
             "B could not read the shared file"
         );
-        assert!(
-            a.wait().expect("wait for A").success(),
-            "A lost its grant on the shared file when B started or exited"
+
+        std::fs::write(dir.path().join("go.txt"), b"go").expect("write go file");
+        assert_eq!(
+            a.wait().expect("wait for A").code(),
+            Some(0),
+            "A lost its grant on the shared file (1) or never saw the signal (2)"
         );
+    }
+
+    /// A path that is both allowed and denied is not granted (agntcy/shadi#541).
+    ///
+    /// The allowed run is the control: without it a temp directory the
+    /// AppContainer could already read would pass the denied run for free.
+    #[test]
+    fn a_denied_path_is_not_granted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shared = dir.path().join("shared.txt");
+        std::fs::write(&shared, b"shared").expect("write shared file");
+        let shared_arg = shared.display().to_string();
+
+        let mut allowed = spawn_reader(dir.path(), &["type", &shared_arg]);
+        assert!(
+            allowed.wait().expect("wait for the allowed run").success(),
+            "the grant should make the file readable"
+        );
+
+        let policy = SandboxPolicy::new()
+            .allow_read_path(dir.path())
+            .deny_path(dir.path());
+        let mut command = Command::new("cmd");
+        command.arg("/C");
+        command.args(["type", shared_arg.as_str()]);
+        let mut denied = spawn_sandboxed(&mut command, &policy).expect("the sandbox should start");
+        assert!(
+            !denied.wait().expect("wait for the denied run").success(),
+            "a denied path must not be granted"
+        );
+    }
+
+    /// The DACL `icacls` prints for `path`, with the inherited marker dropped.
+    ///
+    /// A grant and the revoke that follows leave the path's pre-existing ACEs
+    /// marked inherited where they had been explicit, so the raw output does
+    /// not compare equal even when nothing was left behind. Dropping `(I)`
+    /// keeps the comparison sensitive to a trustee arriving or leaving, which
+    /// is what a leaked grant looks like whatever name `icacls` gives it.
+    fn dacl(path: &std::path::Path) -> String {
+        let output = Command::new("icacls")
+            .arg(path.as_os_str())
+            .output()
+            .expect("run icacls");
+        String::from_utf8_lossy(&output.stdout).replace("(I)", "")
+    }
+
+    /// An exited sandbox leaves no ACE behind (agntcy/shadi#540).
+    ///
+    /// The file inside the directory matters as much as the directory: since
+    /// agntcy/shadi#532 the grant is inheritable, so revoking it has to clear
+    /// the copies Windows propagated to the children.
+    #[test]
+    fn an_exited_sandbox_leaves_no_grant_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shared = dir.path().join("shared.txt");
+        std::fs::write(&shared, b"shared").expect("write shared file");
+        let shared_arg = shared.display().to_string();
+
+        let dir_before = dacl(dir.path());
+        let file_before = dacl(&shared);
+
+        let mut child = spawn_reader(dir.path(), &["type", &shared_arg]);
+        assert!(
+            child.wait().expect("wait").success(),
+            "the grant should make the file readable"
+        );
+
+        assert_eq!(
+            dacl(dir.path()),
+            dir_before,
+            "the directory kept an ACE after the sandbox exited"
+        );
+        assert_eq!(
+            dacl(&shared),
+            file_before,
+            "the file kept an inherited ACE after the sandbox exited"
+        );
+    }
+
+    /// A capability array that CreateProcessW rejects stops every sandbox that
+    /// is allowed network from starting at all (agntcy/shadi#531). `net_block`
+    /// is false by default, so this is the default policy.
+    #[test]
+    fn a_network_enabled_sandbox_spawns() {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        let mut child = spawn_sandboxed(&mut command, &SandboxPolicy::new())
+            .expect("a network-enabled sandbox should spawn");
+        assert!(child.wait().expect("wait").success());
     }
 
     #[test]

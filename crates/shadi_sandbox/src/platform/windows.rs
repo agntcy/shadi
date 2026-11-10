@@ -18,6 +18,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::{
     DeriveCapabilitySidsFromName, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, NO_INHERITANCE,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW,
@@ -28,6 +29,7 @@ use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::ACL;
+use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
     JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -93,7 +95,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
         "starting Windows AppContainer sandbox"
     );
 
-    let appcontainer = AppContainer::new(&profile_name, policy.net_blocked()).map_err(|err| {
+    let appcontainer = AppContainer::new(&profile_name, !policy.net_blocked()).map_err(|err| {
         delete_appcontainer_profile(&profile_name);
         SandboxError::ApplyFailed(err)
     })?;
@@ -209,7 +211,13 @@ fn apply_policy_acl_grants(
     let sid = appcontainer.sid();
     let sid_string = appcontainer.sid_string()?;
     let mut rollbacks = Vec::new();
+    // A denied path is dropped from the grant set, the way Landlock does it.
+    // Carving a denial out of an allowed parent needs a deny ACE ordered ahead
+    // of the allow ACEs, which is a separate step (agntcy/shadi#541).
     for path in policy.allow_read() {
+        if policy.path_is_denied(path) {
+            continue;
+        }
         match grant_path_access(sid, &sid_string, profile, path, true, false) {
             Ok(rollback) => rollbacks.push(rollback),
             Err(err) => {
@@ -220,6 +228,9 @@ fn apply_policy_acl_grants(
     }
 
     for path in policy.allow_write() {
+        if policy.path_is_denied(path) {
+            continue;
+        }
         match grant_path_access(sid, &sid_string, profile, path, true, true) {
             Ok(rollback) => rollbacks.push(rollback),
             Err(err) => {
@@ -262,25 +273,24 @@ fn is_already_exists_hresult(code: i32) -> bool {
 
 struct AppContainer {
     sid: *mut core::ffi::c_void,
-    caps: *mut SID_AND_ATTRIBUTES,
-    group_caps: *mut SID_AND_ATTRIBUTES,
-    cap_count: u32,
+    caps: Vec<SID_AND_ATTRIBUTES>,
+    /// The SIDs `caps` points at; freed with the container.
+    capability_sids: Vec<*mut core::ffi::c_void>,
 }
 
 impl AppContainer {
-    fn new(name: &str, net_blocked: bool) -> Result<Self, String> {
+    fn new(name: &str, grant_internet: bool) -> Result<Self, String> {
         let sid = create_or_derive_appcontainer_sid(name)?;
-        let (caps, group_caps, cap_count) = if net_blocked {
-            (std::ptr::null_mut(), std::ptr::null_mut(), 0)
-        } else {
+        let (caps, capability_sids) = if grant_internet {
             derive_internet_client_capabilities()?
+        } else {
+            (Vec::new(), Vec::new())
         };
 
         Ok(Self {
             sid,
             caps,
-            group_caps,
-            cap_count,
+            capability_sids,
         })
     }
 
@@ -337,7 +347,8 @@ fn create_or_derive_appcontainer_sid(name: &str) -> Result<*mut core::ffi::c_voi
     Ok(sid)
 }
 
-fn derive_internet_client_capabilities() -> Result<(*mut SID_AND_ATTRIBUTES, *mut SID_AND_ATTRIBUTES, u32), String> {
+fn derive_internet_client_capabilities(
+) -> Result<(Vec<SID_AND_ATTRIBUTES>, Vec<*mut core::ffi::c_void>), String> {
     let cap_name = to_wide("internetClient");
     let mut caps_raw: *mut *mut core::ffi::c_void = std::ptr::null_mut();
     let mut group_caps_raw: *mut *mut core::ffi::c_void = std::ptr::null_mut();
@@ -354,13 +365,44 @@ fn derive_internet_client_capabilities() -> Result<(*mut SID_AND_ATTRIBUTES, *mu
         )
     };
 
-    let caps = caps_raw as *mut SID_AND_ATTRIBUTES;
-    let group_caps = group_caps_raw as *mut SID_AND_ATTRIBUTES;
-    if ok == 0 || caps.is_null() || cap_count == 0 {
+    if ok == 0 || caps_raw.is_null() || cap_count == 0 {
         return Err(last_win32_error_message("DeriveCapabilitySidsFromName"));
     }
 
-    Ok((caps, group_caps, cap_count))
+    // Group capability SIDs have no place in SECURITY_CAPABILITIES.
+    unsafe { free_sid_array(group_caps_raw, group_cap_count) };
+
+    // The call returns arrays of PSID, but SECURITY_CAPABILITIES.Capabilities
+    // is an array of SID_AND_ATTRIBUTES. Reinterpreting one as the other left
+    // Attributes holding whatever followed the SID pointer, and CreateProcessW
+    // rejected the attribute list with ERROR_INVALID_PARAMETER (agntcy/shadi#531).
+    let sids = unsafe { std::slice::from_raw_parts(caps_raw, cap_count as usize).to_vec() };
+    unsafe { LocalFree(caps_raw as *mut _) };
+
+    let caps = sids
+        .iter()
+        .map(|sid| SID_AND_ATTRIBUTES {
+            Sid: *sid,
+            Attributes: SE_GROUP_ENABLED as u32,
+        })
+        .collect();
+
+    Ok((caps, sids))
+}
+
+/// Free each SID in an array handed back by `DeriveCapabilitySidsFromName`,
+/// then the array itself.
+unsafe fn free_sid_array(array: *mut *mut core::ffi::c_void, count: u32) {
+    if array.is_null() {
+        return;
+    }
+    for index in 0..count as usize {
+        let sid = *array.add(index);
+        if !sid.is_null() {
+            LocalFree(sid);
+        }
+    }
+    LocalFree(array as *mut _);
 }
 
 impl Drop for AppContainer {
@@ -369,11 +411,10 @@ impl Drop for AppContainer {
             if !self.sid.is_null() {
                 LocalFree(self.sid);
             }
-            if !self.caps.is_null() {
-                LocalFree(self.caps as *mut _);
-            }
-            if !self.group_caps.is_null() {
-                LocalFree(self.group_caps as *mut _);
+            for sid in &self.capability_sids {
+                if !sid.is_null() {
+                    LocalFree(*sid);
+                }
             }
         }
     }
@@ -393,8 +434,12 @@ fn spawn_appcontainer_process(
 
     let mut security_caps = SECURITY_CAPABILITIES {
         AppContainerSid: appcontainer.sid(),
-        Capabilities: appcontainer.caps,
-        CapabilityCount: appcontainer.cap_count,
+        Capabilities: if appcontainer.caps.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            appcontainer.caps.as_ptr() as *mut SID_AND_ATTRIBUTES
+        },
+        CapabilityCount: appcontainer.caps.len() as u32,
         Reserved: 0,
     };
 
@@ -691,6 +736,14 @@ fn grant_path_access(
         return Err("no access requested".to_string());
     }
 
+    // An ACE on a directory covers the directory object alone unless it is
+    // marked inheritable, which left granted files unreadable (agntcy/shadi#532).
+    let inheritance = if path.is_dir() {
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT
+    } else {
+        NO_INHERITANCE
+    };
+
     let path_w = to_wide(&strip_extended_path_prefix(path));
     let mut rollback = WindowsAclRollback {
         path: path_w.clone(),
@@ -702,7 +755,7 @@ fn grant_path_access(
     // Journaled before the change, so a crash in between leaves something to
     // revoke rather than a grant nobody knows about.
     persist_windows_acl_rollback(&mut rollback)?;
-    edit_dacl(&path_w, sid, GRANT_ACCESS, access_mask)?;
+    edit_dacl(&path_w, sid, GRANT_ACCESS, access_mask, inheritance)?;
     Ok(rollback)
 }
 
@@ -714,7 +767,7 @@ pub(crate) fn revoke_sid_access(path_w: &[u16], sid: &str) -> Result<(), String>
     if unsafe { ConvertStringSidToSidW(sid_w.as_ptr(), &mut sid_ptr) } == 0 {
         return Err(last_win32_error_message("ConvertStringSidToSidW"));
     }
-    let result = edit_dacl(path_w, sid_ptr, REVOKE_ACCESS, 0);
+    let result = edit_dacl(path_w, sid_ptr, REVOKE_ACCESS, 0, NO_INHERITANCE);
     unsafe { LocalFree(sid_ptr) };
     result
 }
@@ -727,6 +780,7 @@ fn edit_dacl(
     sid: *mut core::ffi::c_void,
     mode: ACCESS_MODE,
     access_mask: u32,
+    inheritance: u32,
 ) -> Result<(), String> {
     static ACL_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serial = ACL_EDIT
@@ -754,7 +808,7 @@ fn edit_dacl(
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask,
         grfAccessMode: mode,
-        grfInheritance: NO_INHERITANCE,
+        grfInheritance: inheritance,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: std::ptr::null_mut(),
             MultipleTrusteeOperation: 0,
