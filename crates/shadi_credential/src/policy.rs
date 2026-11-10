@@ -26,7 +26,8 @@ pub struct IssuerPolicy {
     /// Pinned keys; paired with `iss` so an issuer cannot exist without them.
     pub jwks: PathBuf,
     pub vct: String,
-    /// Claim name to required value; an array-valued claim matches by containment.
+    /// Claim name to required value, matched against the claim's canonical
+    /// string form; an array-valued claim matches by containment.
     #[serde(default)]
     pub require_claims: BTreeMap<String, String>,
     /// Deny a credential with no `exp`. An expired one is `verify`'s to refuse.
@@ -174,7 +175,9 @@ impl AdmissionPolicy {
 fn matches(have: &Value, want: &str) -> bool {
     match have {
         Value::String(s) => s == want,
-        Value::Array(items) => items.iter().any(|v| v.as_str() == Some(want)),
+        Value::Bool(b) => b.to_string() == want,
+        Value::Number(n) => n.to_string() == want,
+        Value::Array(items) => items.iter().any(|v| matches(v, want)),
         _ => false,
     }
 }
@@ -437,6 +440,22 @@ mod tests {
         let lacks = [("groups", json!(["interns", "other"]))];
         let why = denied(fx.present(&p, ISS, VCT, None, &lacks));
         assert!(why.contains("`groups` does not match"), "{why}");
+    }
+
+    #[test]
+    fn bool_and_number_claims_match_by_canonical_string_form() {
+        let fx = Fx::new();
+        let verified = json!({"require_claims": {"verified": "true", "age": "42"}});
+        let p = fx.load(vec![fx.entry(ISS, verified)]);
+        let has = [("verified", json!(true)), ("age", json!(42))];
+        assert_eq!(fx.present(&p, ISS, VCT, None, &has), Decision::Admit);
+
+        let wrong_bool = [("verified", json!(false)), ("age", json!(42))];
+        let why = denied(fx.present(&p, ISS, VCT, None, &wrong_bool));
+        assert!(why.contains("`verified` does not match"), "{why}");
+
+        let in_array = [("verified", json!([true, false])), ("age", json!(42))];
+        assert_eq!(fx.present(&p, ISS, VCT, None, &in_array), Decision::Admit);
     }
 
     #[test]
