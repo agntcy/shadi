@@ -55,13 +55,6 @@ impl<'a> SecureAgentChannel<'a> {
 
     pub fn send(&self, ctx: &SessionContext, message: &[u8]) -> SecretResult<()> {
         let outgoing = if let Some(identity) = self.signer {
-            // A consistency check only — this is our own fresh envelope, not
-            // something to run through the replay cache meant for the peer's.
-            if let Some(expected) = ctx.did.as_deref() {
-                if expected != identity.did() {
-                    return Err(SecretError::NotAuthorized);
-                }
-            }
             self.verifier
                 .verify(&ctx.clone().with_proven_did(&identity.did()))?;
             seal_and_sign(identity, ctx.did.as_deref(), message, None)
@@ -196,7 +189,7 @@ mod tests {
     }
 
     fn replay_cache() -> ReplayCache {
-        ReplayCache::new(16, 16, true)
+        ReplayCache::new(16, 16)
     }
 
     #[test]
@@ -287,22 +280,25 @@ mod tests {
     }
 
     #[test]
-    fn send_wraps_payload_in_a_sealed_did_proof() {
+    fn send_wraps_payload_in_a_sealed_did_proof_addressed_to_the_session_peer() {
         let session = TestSession::new();
         let store = MemoryStore;
         let allow = AllowVerifier;
         let identity = shadi_identity::AgentIdentity::generate().unwrap();
+        let dest = shadi_identity::AgentIdentity::generate().unwrap();
         let replay = replay_cache();
         let channel =
             SecureAgentChannel::new(&session, &allow, &store, &replay).with_signer(&identity);
-        let ctx = SessionContext::new("agent", "session").with_did(identity.did());
+        // ctx.did is the session's peer, per SessionContext's own doc — the
+        // destination this envelope gets sealed for, not the local signer.
+        let ctx = SessionContext::new("agent", "session").with_did(dest.did());
 
         channel.send(&ctx, b"hello").unwrap();
         let sent = session.sent.lock().unwrap().clone();
         assert!(shadi_identity::looks_like_did_proof(&sent));
         let opened = replay_cache();
         let (did, body, _hint) =
-            shadi_identity::verify_and_open(&sent, Some(identity.did().as_str()), &opened).unwrap();
+            shadi_identity::verify_and_open(&sent, Some(dest.did().as_str()), &opened).unwrap();
         assert_eq!(did, identity.did());
         assert_eq!(body, b"hello");
     }
