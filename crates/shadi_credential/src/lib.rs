@@ -11,11 +11,17 @@
 //! storage.
 
 pub mod dcql;
+pub mod jwks;
+pub mod nonce;
 pub mod oid4vci;
+pub mod policy;
 pub mod presentation;
 pub mod sd_jwt;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod vault;
+pub mod verify;
 
 use thiserror::Error;
 
@@ -27,17 +33,25 @@ pub enum CredentialError {
     Malformed(String),
     #[error("vault storage error: {0}")]
     Storage(String),
-    /// A response parsed fine but failed a check.
-    #[error("issuance refused: {0}")]
+    /// Well-formed input that failed a check — an issuance response, a
+    /// challenge, or a key lookup.
+    #[error("refused: {0}")]
     Refused(String),
 }
 
 pub use dcql::{select, ClaimQuery, CredentialQuery, DcqlQuery, ReleasePolicy, Selection};
+pub use jwks::JwksStore;
+pub use nonce::{Challenge, NonceStore};
 pub use oid4vci::{check_id_token, proof_jwt, IdTokenClaims, IdpOrigin};
+pub use policy::{AdmissionPolicy, Decision, IssuerPolicy};
 pub use presentation::answer_challenge;
-pub use sd_jwt::{import, parse_sd_jwt, Disclosure, ParsedCredential, SD_JWT_FORMAT};
+pub use sd_jwt::{
+    import, parse_presentation, parse_sd_jwt, Disclosure, Jwt, ParsedCredential,
+    ParsedPresentation, SD_JWT_FORMAT,
+};
 pub use store::{CredentialRecord, SqlCipherVault};
 pub use vault::{
     default_backend, default_vault, pin_issuer, CredentialVault, KeychainVault, VaultBackend,
     CREDENTIAL_KEY_PREFIX,
 };
+pub use verify::{verify, VerifiedPresentation};

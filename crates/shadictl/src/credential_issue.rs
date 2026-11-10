@@ -290,6 +290,24 @@ fn extract_credential(body: &Value) -> Result<String, String> {
     .ok_or_else(|| "the credential response held no credential".to_string())
 }
 
+/// The IdP's `openid-configuration` and its `issuer`, which must be the IdP.
+fn oidc_config(http: &dyn Http, idp: &str) -> Result<(Value, String), String> {
+    let config = http.get(&well_known(idp, "openid-configuration")?, None)?;
+    let issuer = str_field(&config, "issuer")?.to_string();
+    if !same_id(&issuer, idp) {
+        return Err("issuer does not match the IdP".to_string());
+    }
+    Ok((config, issuer))
+}
+
+/// `(issuer, jwks document)`; both URLs are pinned to the IdP's origin.
+pub(crate) fn fetch_jwks(http: &dyn Http, idp: &str) -> Result<(String, Value), String> {
+    let origin = IdpOrigin::new(idp).map_err(|err| err.to_string())?;
+    let (config, issuer) = oidc_config(http, idp)?;
+    let jwks_url = endpoint(&origin, &config, "jwks_uri")?;
+    Ok((issuer, http.get(&jwks_url, None)?))
+}
+
 /// What the shared login leg yields; each agent's issuance runs from it.
 struct Session {
     origin: IdpOrigin,
@@ -333,11 +351,7 @@ fn login(
         }
     }
 
-    let config = http.get(&well_known(args.idp, "openid-configuration")?, None)?;
-    let oidc_issuer = str_field(&config, "issuer")?;
-    if !same_id(oidc_issuer, args.idp) {
-        return Err("issuer does not match the IdP".to_string());
-    }
+    let (config, oidc_issuer) = oidc_config(http, args.idp)?;
     let token_url = endpoint(&origin, &config, "token_endpoint")?;
     let device_url = endpoint(&origin, &config, "device_authorization_endpoint")?;
 
@@ -367,7 +381,7 @@ fn login(
     let claims = shadi_credential::check_id_token(
         &origin,
         &token.id_token,
-        oidc_issuer,
+        &oidc_issuer,
         args.client_id,
         args.email,
         now,
@@ -375,7 +389,7 @@ fn login(
     .map_err(|err| err.to_string())?;
 
     let pinned = vault
-        .pin_subject(oidc_issuer, &claims.email, &claims.subject)
+        .pin_subject(&oidc_issuer, &claims.email, &claims.subject)
         .map_err(|err| err.to_string())?;
     if pinned != claims.subject {
         return Err("this email is already pinned to a different account at this IdP".to_string());
@@ -449,6 +463,9 @@ pub(crate) fn issue(
     issue_for(http, vault, identity, &session, args)
 }
 
+/// One outcome per agent, in the order asked for.
+pub(crate) type IssuedPerAgent = Vec<(String, Result<CredentialRecord, String>)>;
+
 /// `Err` means the shared login failed and no agent was tried.
 pub(crate) fn issue_all(
     http: &dyn Http,
@@ -456,7 +473,7 @@ pub(crate) fn issue_all(
     identities: &[(String, AgentIdentity)],
     args: &IssueArgs<'_>,
     now: i64,
-) -> Result<Vec<(String, Result<CredentialRecord, String>)>, String> {
+) -> Result<IssuedPerAgent, String> {
     let names: Vec<&str> = identities.iter().map(|(name, _)| name.as_str()).collect();
     let session = login(http, vault, args, &names, now)?;
     Ok(identities
@@ -1226,5 +1243,133 @@ mod tests {
         assert!(extract_credential(&json!({ "credentials": [] })).is_err());
         let err = extract_credential(&json!({ "credentials": [raw.clone(), raw] })).unwrap_err();
         assert!(err.contains("2 credentials"), "{err}");
+    }
+
+    const CONFIG: &str = "/realms/eng/.well-known/openid-configuration";
+    const JWKS: &str = "/realms/eng/certs";
+
+    fn jwks_doc(keys: Value) -> Value {
+        json!({ "keys": keys })
+    }
+
+    fn ed_key(kid: &str) -> Value {
+        json!({ "kty": "OKP", "crv": "Ed25519", "kid": kid, "alg": "EdDSA",
+                "x": b64(&AgentIdentity::generate().expect("identity").verifying_key_bytes()) })
+    }
+
+    fn jwks_fake(config: Value, jwks: Value) -> Fake {
+        let fake = fake();
+        fake.set(CONFIG, vec![config]);
+        fake.set(JWKS, vec![jwks]);
+        fake
+    }
+
+    fn config(issuer: &str, uri: &str) -> Value {
+        json!({ "issuer": issuer, "jwks_uri": uri })
+    }
+
+    const CERTS: &str = "https://idp.example/realms/eng/certs";
+
+    /// Runs the command core and asserts the refusal left nothing on disk.
+    fn refused(fake: &Fake) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        crate::credential_command::fetch_jwks_file(fake, IDP, &out).expect_err("refused");
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn fetch_jwks_writes_a_file_the_store_then_loads() {
+        let fake = jwks_fake(
+            config(IDP, CERTS),
+            jwks_doc(json!([
+                ed_key("a"),
+                json!({ "kty": "RSA", "kid": "r", "n": "AQAB", "e": "AQAB" })
+            ])),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        let report = crate::credential_command::fetch_jwks_file(&fake, IDP, &out).expect("fetch");
+        assert_eq!(
+            report,
+            format!("issuer: {IDP}\nusable keys: 1\nwrote: {}", out.display())
+        );
+        let mut store = shadi_credential::JwksStore::new();
+        store.add_file(IDP, &out).expect("load");
+        assert!(store.key(IDP, Some("a")).is_ok());
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_mismatched_issuer_and_writes_nothing() {
+        refused(&jwks_fake(
+            config("https://idp.example/realms/rogue", CERTS),
+            jwks_doc(json!([ed_key("a")])),
+        ));
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_jwks_uri_on_another_origin() {
+        let fake = jwks_fake(
+            config(IDP, "https://evil.example/certs"),
+            jwks_doc(json!([ed_key("a")])),
+        );
+        refused(&fake);
+        assert!(fake.requests_to("/certs").is_empty());
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_document_with_no_usable_key() {
+        for keys in [
+            json!([]),
+            json!([{ "kty": "RSA", "kid": "r", "n": "AQAB", "e": "AQAB" }]),
+        ] {
+            refused(&jwks_fake(config(IDP, CERTS), jwks_doc(keys)));
+        }
+    }
+
+    #[test]
+    fn fetch_jwks_refresh_replaces_the_file_atomically_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        std::fs::write(&out, "stale-content").expect("seed");
+
+        let fake = jwks_fake(config(IDP, CERTS), jwks_doc(json!([ed_key("a")])));
+        crate::credential_command::fetch_jwks_file(&fake, IDP, &out).expect("fetch");
+
+        let mut store = shadi_credential::JwksStore::new();
+        store.add_file(IDP, &out).expect("load");
+        assert!(store.key(IDP, Some("a")).is_ok());
+
+        // Nothing but the final file is left beside it.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("jwks.json")]);
+    }
+
+    #[test]
+    fn fetch_jwks_refresh_keeps_the_old_file_when_the_new_one_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("jwks.json");
+        std::fs::write(&out, "previously-pinned-jwks").expect("seed");
+
+        let fake = jwks_fake(
+            config("https://idp.example/realms/rogue", CERTS),
+            jwks_doc(json!([ed_key("a")])),
+        );
+        crate::credential_command::fetch_jwks_file(&fake, IDP, &out).expect_err("refused");
+
+        assert_eq!(
+            std::fs::read_to_string(&out).expect("read"),
+            "previously-pinned-jwks"
+        );
+    }
+
+    #[test]
+    fn fetch_jwks_refuses_a_malformed_document() {
+        for body in [json!("not json"), json!({ "keys": "nope" })] {
+            refused(&jwks_fake(config(IDP, CERTS), body));
+        }
     }
 }

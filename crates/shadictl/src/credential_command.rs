@@ -3,6 +3,9 @@ use super::*;
 use shadi_credential::{CredentialRecord, CredentialVault, Disclosure, VaultBackend};
 
 pub(crate) fn run_credential_command(cli: CredentialCli) -> ExitCode {
+    if let CredentialCommand::FetchJwks { idp, out } = &cli.command {
+        return run_fetch_jwks(idp, out);
+    }
     let vault = match open_vault(&cli) {
         Ok(vault) => vault,
         Err(err) => {
@@ -143,7 +146,64 @@ pub(crate) fn handle_credential_command(
             .to_string())
         }
         CredentialCommand::Issue { .. } => Err("issue is handled by run_issue".to_string()),
+        CredentialCommand::FetchJwks { .. } => {
+            Err("fetch-jwks is handled by run_fetch_jwks".to_string())
+        }
     }
+}
+
+fn run_fetch_jwks(idp: &str, out: &std::path::Path) -> ExitCode {
+    match crate::credential_issue::client().and_then(|http| fetch_jwks_file(&http, idp, out)) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Checks the document before `out` exists, so a rejected one leaves no file.
+/// The issuer line is the exact string the policy's `iss` must carry.
+///
+/// Written to a temp file in `out`'s own directory and renamed into place,
+/// rather than truncated in place: a refresh interrupted mid-write (crash,
+/// disk full) must leave the previously-pinned JWKS intact, not a corrupt
+/// file that takes a live `AdmissionPolicy` down with it.
+pub(crate) fn fetch_jwks_file(
+    http: &dyn crate::credential_issue::Http,
+    idp: &str,
+    out: &std::path::Path,
+) -> Result<String, String> {
+    let (issuer, doc) = crate::credential_issue::fetch_jwks(http, idp)?;
+    let text = doc.to_string();
+    let mut store = shadi_credential::JwksStore::new();
+    store
+        .add_json(&issuer, &text)
+        .map_err(|err| err.to_string())?;
+    let usable = doc["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|jwk| jwk["kid"].as_str())
+        .filter(|kid| store.key(&issuer, Some(kid)).is_ok())
+        .count();
+
+    let dir = out.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = dir.unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|err| format!("failed to create a temp file in {}: {}", dir.display(), err))?;
+    std::io::Write::write_all(&mut tmp, text.as_bytes())
+        .map_err(|err| format!("failed to write {}: {}", out.display(), err))?;
+    tmp.persist(out)
+        .map_err(|err| format!("failed to write {}: {}", out.display(), err.error))?;
+
+    Ok(format!(
+        "issuer: {issuer}\nusable keys: {usable}\nwrote: {}",
+        out.display()
+    ))
 }
 
 /// Always a JSON array, one entry per agent; any failure is a nonzero exit.
@@ -653,18 +713,13 @@ mod tests {
     }
 
     #[test]
-    fn disclose_shows_every_claim_sharing_a_name() {
-        let disclosed = disclosed_json(&[
+    fn a_credential_repeating_a_claim_name_cannot_be_imported() {
+        let vault = vault();
+        let raw = fixture_with(&[
             json!(["c2FsdA", "groups", "admins"]),
             json!(["c2FsdA", "groups", "auditors"]),
         ]);
-        assert_eq!(
-            disclosed,
-            json!([
-                { "name": "groups", "value": "admins" },
-                { "name": "groups", "value": "auditors" },
-            ])
-        );
+        assert!(shadi_credential::import(&vault, &raw, 1_000).is_err());
     }
 
     #[test]
