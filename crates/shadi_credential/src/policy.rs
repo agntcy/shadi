@@ -129,6 +129,7 @@ impl AdmissionPolicy {
             "format": crate::sd_jwt::SD_JWT_FORMAT,
             "meta": { "vct_values": [&issuer.vct] },
             "claims": claims,
+            "trusted_authorities": [{ "type": "issuer", "values": [&issuer.iss] }],
         }]});
         // Through the real parser, so the holder's caps are checked here too.
         let text = query.to_string();
@@ -309,6 +310,8 @@ mod tests {
         assert_eq!(c.vct_values, vec![VCT]);
         assert_eq!(c.claims.len(), 1);
         assert_eq!(c.claims[0].path, vec!["groups"]);
+        assert_eq!(c.trusted_authorities.len(), 1);
+        assert_eq!(c.trusted_authorities[0].values, vec![ISS]);
         assert_eq!(
             fx.present(&p, ISS, VCT, Some(NOW + 60), &groups()),
             Decision::Admit
