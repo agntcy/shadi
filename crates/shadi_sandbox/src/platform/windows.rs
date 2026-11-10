@@ -951,7 +951,7 @@ fn holds_inheritable_ace(dacl: *const ACL, sid: *mut core::ffi::c_void) -> bool 
     let count = u32::from(unsafe { (*dacl).AceCount });
     (0..count).any(|index| {
         let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
             return true;
         }
         let header = unsafe { &*(ace as *const ACE_HEADER) };
