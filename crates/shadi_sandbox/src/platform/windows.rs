@@ -1004,10 +1004,14 @@ fn holds_inheritable_ace(dacl: *const ACL, sid: *mut core::ffi::c_void) -> bool 
     }
     let count = u32::from(unsafe { (*dacl).AceCount });
     (0..count).any(|index| {
-        let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+        let mut out = std::mem::MaybeUninit::<*mut core::ffi::c_void>::uninit();
+        if unsafe { GetAce(dacl, index, out.as_mut_ptr()) } == 0 {
             return true;
         }
+        let Some(ace) = std::ptr::NonNull::new(unsafe { out.assume_init() }) else {
+            return true;
+        };
+        let ace = ace.as_ptr();
         let header = unsafe { &*(ace as *const ACE_HEADER) };
         let simple = matches!(
             u32::from(header.AceType),
