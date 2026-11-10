@@ -1716,9 +1716,16 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Whether `pid` is a live process. A zombie isn't: it may wait a long
+    /// time to be reaped where init doesn't reap orphans (containers).
     fn is_running(pid: i32) -> bool {
-        // SAFETY: signal 0 only checks that the process exists.
-        unsafe { libc::kill(pid, 0) == 0 }
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let state = String::from_utf8_lossy(&output.stdout);
+        let state = state.trim();
+        !state.is_empty() && !state.starts_with('Z')
     }
 
     #[cfg(unix)]
@@ -1872,7 +1879,7 @@ mod tests {
             start.elapsed() >= grace,
             "killed before the grace period ended"
         );
-        // Reaped by init after the kill, which can take a moment.
+        // SIGKILL can take a moment to land.
         let gone = (0..50).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(20));
             !is_running(descendant)
