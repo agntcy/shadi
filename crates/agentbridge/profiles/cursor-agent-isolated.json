@@ -13,6 +13,7 @@
     "--workspace",
     "{workdir}",
     "--trust",
+    "--force",
     "--sandbox",
     "disabled"
   ],

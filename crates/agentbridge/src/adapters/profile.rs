@@ -987,6 +987,21 @@ mod tests {
     }
 
     #[test]
+    fn sandboxed_copilot_and_cursor_run_without_their_own_approvals() {
+        // Only under the SHADI sandbox, which already confines paths and
+        // commands, and a fresh HOME has no saved approvals to fall back on.
+        for (id, flag) in [
+            ("copilot-isolated", "--allow-all-paths"),
+            ("cursor-agent-isolated", "--force"),
+        ] {
+            let p = load_bundled(id);
+            assert!(p.require_sandbox, "{id}");
+            let argv = render_argv(&p, "/ws", "hi", None, None, true);
+            assert!(argv.iter().any(|a| a == flag), "{id}: {argv:?}");
+        }
+    }
+
+    #[test]
     fn claude_argv_matches_native_order() {
         let p = load_bundled("claude-code");    
         let argv = render_argv(
