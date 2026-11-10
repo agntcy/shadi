@@ -438,9 +438,11 @@ mirrors the Windows Job-object pattern (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
 When `shadictl` itself receives `SIGTERM`, `SIGINT`, `SIGHUP`, or `SIGQUIT`, it
 first sends `SIGTERM` to the child's process group and waits up to 10 seconds,
 so the agent can clean up (for example, `agentbridge register --record` removes
-its config root). If the child is still running after that, or a second signal
-arrives, it gets `SIGKILL`. The child is in its own session, so a Ctrl-C in the
-terminal reaches it only this way. On Windows the child is killed at once.
+its config root). If the child, or any process it left in its process group, is
+still running after that, or a second signal arrives, the group gets `SIGKILL`.
+`shadictl` exits with the child's own status. The child is in its own session,
+so a Ctrl-C in the terminal reaches it only this way. On Windows the child is
+killed at once.
 
 ### Mach IPC hardening (macOS)
 

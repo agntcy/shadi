@@ -244,6 +244,21 @@ impl SandboxedChild {
         }
     }
 
+    /// Whether a process is left in the child's process group, which can
+    /// outlive the child itself (macOS/Linux). [`kill`](Self::kill) still
+    /// reaches it after the child was reaped: the group ID is not reused
+    /// while the group has members. Always `false` on Windows, where the job
+    /// object ends with the child.
+    pub fn group_alive(&self) -> bool {
+        #[cfg(unix)]
+        {
+            // SAFETY: signal 0 only checks that the group exists.
+            unsafe { libc::killpg(self.id() as i32, 0) == 0 }
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     pub fn id(&self) -> u32 {
         match &self.inner {
             SandboxedChildInner::Std(child) => child.id(),
