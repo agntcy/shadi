@@ -279,12 +279,15 @@ fn apply_policy_acl_grants(
 
     // A process the child starts opens the working directory again under the
     // AppContainer token, and fails without an ACE there (agntcy/shadi#538).
-    // Traverse lists and reads nothing in it. Without it the child still
-    // runs, so a directory whose DACL can't be changed only warns.
+    // CreateProcessW reads its attributes and opens it for traverse; neither
+    // lists or reads anything in it. Without it the child still runs, so a
+    // directory whose DACL can't be changed only warns.
     if let Some(dir) = working_dir {
         if !policy.path_is_denied(dir) && !working_dir_is_granted(policy, dir) {
-            let access = windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE
-                | windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_READ_ATTRIBUTES, FILE_TRAVERSE, SYNCHRONIZE,
+            };
+            let access = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
             match grant_access(sid, &sid_string, profile, dir, access, NO_INHERITANCE) {
                 Ok(rollback) => rollbacks.push(rollback),
                 Err(err) => warn!(
