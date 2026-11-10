@@ -211,7 +211,13 @@ fn apply_policy_acl_grants(
     let sid = appcontainer.sid();
     let sid_string = appcontainer.sid_string()?;
     let mut rollbacks = Vec::new();
+    // A denied path is dropped from the grant set, the way Landlock does it.
+    // Carving a denial out of an allowed parent needs a deny ACE ordered ahead
+    // of the allow ACEs, which is a separate step (agntcy/shadi#541).
     for path in policy.allow_read() {
+        if policy.path_is_denied(path) {
+            continue;
+        }
         match grant_path_access(sid, &sid_string, profile, path, true, false) {
             Ok(rollback) => rollbacks.push(rollback),
             Err(err) => {
@@ -222,6 +228,9 @@ fn apply_policy_acl_grants(
     }
 
     for path in policy.allow_write() {
+        if policy.path_is_denied(path) {
+            continue;
+        }
         match grant_path_access(sid, &sid_string, profile, path, true, true) {
             Ok(rollback) => rollbacks.push(rollback),
             Err(err) => {

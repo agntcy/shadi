@@ -88,6 +88,36 @@ mod windows_integration {
         );
     }
 
+    /// A path that is both allowed and denied is not granted (agntcy/shadi#541).
+    ///
+    /// The allowed run is the control: without it a temp directory the
+    /// AppContainer could already read would pass the denied run for free.
+    #[test]
+    fn a_denied_path_is_not_granted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shared = dir.path().join("shared.txt");
+        std::fs::write(&shared, b"shared").expect("write shared file");
+        let shared_arg = shared.display().to_string();
+
+        let mut allowed = spawn_reader(dir.path(), &["type", &shared_arg]);
+        assert!(
+            allowed.wait().expect("wait for the allowed run").success(),
+            "the grant should make the file readable"
+        );
+
+        let policy = SandboxPolicy::new()
+            .allow_read_path(dir.path())
+            .deny_path(dir.path());
+        let mut command = Command::new("cmd");
+        command.arg("/C");
+        command.args(["type", shared_arg.as_str()]);
+        let mut denied = spawn_sandboxed(&mut command, &policy).expect("the sandbox should start");
+        assert!(
+            !denied.wait().expect("wait for the denied run").success(),
+            "a denied path must not be granted"
+        );
+    }
+
     /// A capability array that CreateProcessW rejects stops every sandbox that
     /// is allowed network from starting at all (agntcy/shadi#531). `net_block`
     /// is false by default, so this is the default policy.
