@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
@@ -17,7 +17,11 @@ use windows_sys::Win32::Foundation::{
     SetHandleInformation,
 };
 use windows_sys::Win32::Security::{
-    DeriveCapabilitySidsFromName, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, NO_INHERITANCE,
+    DeriveCapabilitySidsFromName, EqualSid, GetAce, GetSecurityDescriptorControl,
+    InitializeSecurityDescriptor, SetFileSecurityW, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE, ACE_HEADER, CONTAINER_INHERIT_ACE,
+    NO_INHERITANCE, OBJECT_INHERIT_ACE, SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR,
+    SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED, SID_AND_ATTRIBUTES,
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::Security::Authorization::{
@@ -29,7 +33,10 @@ use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::ACL;
-use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
+    SE_GROUP_ENABLED,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
     JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -100,11 +107,13 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
         SandboxError::ApplyFailed(err)
     })?;
 
+    let working_dir = effective_working_dir(command);
     let mut rollbacks =
-        apply_policy_acl_grants(&appcontainer, &profile_name, policy).map_err(|err| {
-            delete_appcontainer_profile(&profile_name);
-            SandboxError::ApplyFailed(err)
-        })?;
+        apply_policy_acl_grants(&appcontainer, &profile_name, policy, working_dir.as_deref())
+            .map_err(|err| {
+                delete_appcontainer_profile(&profile_name);
+                SandboxError::ApplyFailed(err)
+            })?;
 
     let process_info = match spawn_appcontainer_process(
         &program,
@@ -203,10 +212,38 @@ pub(crate) fn owner_is_alive(pid: u32) -> bool {
     }
 }
 
+/// The directory the child starts in: the command's, or this process's.
+fn effective_working_dir(command: &Command) -> Option<PathBuf> {
+    let own = std::env::current_dir().ok();
+    match command.get_current_dir() {
+        Some(dir) if dir.is_absolute() => Some(dir.to_path_buf()),
+        Some(dir) => own.map(|base| base.join(dir)),
+        None => own,
+    }
+}
+
+/// Whether the policy already grants `dir`, itself or as part of a granted
+/// directory, whose ACE it inherits.
+fn working_dir_is_granted(policy: &SandboxPolicy, dir: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = canonical(dir);
+    policy
+        .allow_read()
+        .iter()
+        .chain(policy.allow_write())
+        .filter(|path| !policy.path_is_denied(path))
+        .any(|path| {
+            let granted = canonical(path);
+            dir == granted || (granted.is_dir() && dir.starts_with(&granted))
+        })
+}
+
 fn apply_policy_acl_grants(
     appcontainer: &AppContainer,
     profile: &str,
     policy: &SandboxPolicy,
+    working_dir: Option<&Path>,
 ) -> Result<Vec<WindowsAclRollback>, String> {
     let sid = appcontainer.sid();
     let sid_string = appcontainer.sid_string()?;
@@ -236,6 +273,26 @@ fn apply_policy_acl_grants(
             Err(err) => {
                 rollback_acl_changes(&mut rollbacks);
                 return Err(err);
+            }
+        }
+    }
+
+    // A process the child starts opens the working directory again under the
+    // AppContainer token, and fails without an ACE there (agntcy/shadi#538).
+    // Traverse lists and reads nothing in it. Without it the child still
+    // runs, so a directory whose DACL can't be changed only warns.
+    if let Some(dir) = working_dir {
+        if !policy.path_is_denied(dir) && !working_dir_is_granted(policy, dir) {
+            let access = windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE
+                | windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+            match grant_access(sid, &sid_string, profile, dir, access, NO_INHERITANCE) {
+                Ok(rollback) => rollbacks.push(rollback),
+                Err(err) => warn!(
+                    target: "shadi.sandbox.windows",
+                    working_dir = %dir.display(),
+                    error = %err,
+                    "the sandbox cannot open its working directory, so it cannot start other programs"
+                ),
             }
         }
     }
@@ -721,8 +778,6 @@ fn grant_path_access(
     read: bool,
     write: bool,
 ) -> Result<WindowsAclRollback, String> {
-    reject_reparse_points(path)?;
-
     let mut access_mask: u32 = 0;
     if read {
         access_mask |= windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
@@ -743,6 +798,18 @@ fn grant_path_access(
     } else {
         NO_INHERITANCE
     };
+    grant_access(sid, sid_string, profile, path, access_mask, inheritance)
+}
+
+fn grant_access(
+    sid: *mut core::ffi::c_void,
+    sid_string: &str,
+    profile: &str,
+    path: &Path,
+    access_mask: u32,
+    inheritance: u32,
+) -> Result<WindowsAclRollback, String> {
+    reject_reparse_points(path)?;
 
     let path_w = to_wide(&strip_extended_path_prefix(path));
     let mut rollback = WindowsAclRollback {
@@ -805,6 +872,26 @@ fn edit_dacl(
         return Err(win32_error_message("GetNamedSecurityInfoW", result));
     }
 
+    // An inheritable ACE reaches existing children only through
+    // SetNamedSecurityInfoW, which walks the whole tree and re-marks ACEs
+    // copied from the parent as inherited (agntcy/shadi#545). Any other edit
+    // is written to this object alone.
+    let propagate = if mode == REVOKE_ACCESS {
+        holds_inheritable_ace(dacl, sid)
+    } else {
+        inheritance != NO_INHERITANCE
+    };
+    let mut control: u16 = 0;
+    let mut revision: u32 = 0;
+    if !propagate
+        && unsafe { GetSecurityDescriptorControl(security_descriptor, &mut control, &mut revision) }
+            == 0
+    {
+        let error = last_win32_error_message("GetSecurityDescriptorControl");
+        unsafe { LocalFree(security_descriptor) };
+        return Err(error);
+    }
+
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask,
         grfAccessMode: mode,
@@ -821,6 +908,8 @@ fn edit_dacl(
     let result = unsafe { SetEntriesInAclW(1, &entry, dacl, &mut updated) };
     let result = if result != 0 {
         Err(win32_error_message("SetEntriesInAclW", result))
+    } else if !propagate {
+        set_object_dacl(path_w, updated, control)
     } else {
         let rc = unsafe {
             SetNamedSecurityInfoW(
@@ -848,6 +937,57 @@ fn edit_dacl(
         }
     }
     result
+}
+
+/// Whether `dacl` has an ACE for `sid` that children inherit. An ACE that
+/// can't be read counts as one, so a revoke still reaches the children.
+fn holds_inheritable_ace(dacl: *const ACL, sid: *mut core::ffi::c_void) -> bool {
+    if dacl.is_null() {
+        return false;
+    }
+    let count = u32::from(unsafe { (*dacl).AceCount });
+    (0..count).any(|index| {
+        let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+            return true;
+        }
+        let header = unsafe { &*(ace as *const ACE_HEADER) };
+        let simple = matches!(
+            u32::from(header.AceType),
+            ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
+        );
+        let inheritable =
+            u32::from(header.AceFlags) & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) != 0;
+        simple && inheritable && {
+            let ace_sid =
+                unsafe { std::ptr::addr_of!((*(ace as *const ACCESS_ALLOWED_ACE)).SidStart) };
+            let equal = unsafe { EqualSid(ace_sid as *mut core::ffi::c_void, sid) };
+            equal != 0
+        }
+    })
+}
+
+/// Write `dacl` to `path_w` alone, keeping the protection and
+/// auto-inheritance bits `control` had.
+fn set_object_dacl(path_w: &[u16], dacl: *const ACL, control: u16) -> Result<(), String> {
+    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let descriptor_ptr = &mut descriptor as *mut SECURITY_DESCRIPTOR as *mut core::ffi::c_void;
+    let bits = SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED;
+    let written = unsafe {
+        InitializeSecurityDescriptor(descriptor_ptr, SECURITY_DESCRIPTOR_REVISION) != 0
+            && SetSecurityDescriptorDacl(descriptor_ptr, 1, dacl, 0) != 0
+            && SetSecurityDescriptorControl(descriptor_ptr, bits, control & bits) != 0
+            && SetFileSecurityW(
+                path_w.as_ptr(),
+                windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
+                descriptor_ptr,
+            ) != 0
+    };
+    if written {
+        Ok(())
+    } else {
+        Err(last_win32_error_message("SetFileSecurityW"))
+    }
 }
 
 fn is_reparse_point_attributes(attributes: u32) -> bool {
@@ -1007,5 +1147,34 @@ mod tests {
         assert!(is_reparse_point_attributes(FILE_ATTRIBUTE_REPARSE_POINT));
         assert!(is_reparse_point_attributes(FILE_ATTRIBUTE_REPARSE_POINT | 0x20));
         assert!(!is_reparse_point_attributes(0));
+    }
+
+    #[test]
+    fn a_working_dir_in_a_granted_directory_needs_no_grant_of_its_own() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let inside = root.path().join("sub");
+        std::fs::create_dir(&inside).expect("create sub");
+        let other = tempfile::tempdir().expect("tempdir");
+        let policy = SandboxPolicy::new().allow_read_path(root.path());
+
+        assert!(working_dir_is_granted(&policy, root.path()));
+        assert!(working_dir_is_granted(&policy, &inside));
+        assert!(!working_dir_is_granted(&policy, other.path()));
+        assert!(!working_dir_is_granted(
+            &policy.deny_path(root.path()),
+            &inside
+        ));
+    }
+
+    #[test]
+    fn a_relative_working_dir_is_relative_to_this_process() {
+        let own = std::env::current_dir().ok();
+        let mut command = Command::new("cmd");
+        assert_eq!(effective_working_dir(&command), own);
+        command.current_dir("sub");
+        assert_eq!(
+            effective_working_dir(&command),
+            own.map(|dir| dir.join("sub"))
+        );
     }
 }

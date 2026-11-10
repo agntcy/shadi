@@ -514,6 +514,12 @@ allowed.
     other entry stays as it is at that moment. Sandboxes that share a path can
     therefore start and exit in any order.
 
+    A program the sandboxed process starts has to open its working directory
+    under the sandbox's SID. When no allowlisted path covers that directory,
+    the sandbox gets traverse on it alone, which lists and reads nothing in
+    it, written to that directory only. If that grant can't be applied, the
+    process still runs but can't start other programs.
+
     SHADI journals each grant to disk before applying it. On the next Windows
     sandbox startup, it revokes grants whose owning process is no longer
     running, which covers a process that crashed before cleanup. Grants of
