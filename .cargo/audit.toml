@@ -18,4 +18,19 @@ ignore = [
 	# public key bytes, so no secret operand ever reaches crypto-bigint and a
 	# timing sidechannel needs one. Drop this entry once cx448 takes 0.7.6.
 	"RUSTSEC-2026-0387",
+	# SQLite before 3.54.0 can return uninitialized page-cache memory when a
+	# database is opened next to a `-wal` file with a mismatched page size —
+	# an information leak a local, unprivileged attacker triggers by planting
+	# that sibling file. Reaches us through rusqlite's bundled-sqlcipher
+	# feature (shadi_credential's vault, shadi_memory's store). The generic
+	# fix, libsqlite3-sys >=0.39.0, does not cover this: that feature vendors
+	# SQLite through the separate sqlcipher-src crate, and 0.39.0/0.39.1 (the
+	# latest release) hard-pin sqlcipher-src =419.0.6, which still bundles
+	# SQLite 3.53.4. sqlcipher-src 420.0.0 (bundling 3.54.1) exists, but no
+	# libsqlite3-sys release depends on it yet. Both stores chmod their
+	# database file 0600, which SQLite also applies to its journal/WAL
+	# siblings, narrowing the attacker to one who already has local access to
+	# the store's directory. Drop this entry once libsqlite3-sys depends on
+	# sqlcipher-src >=420.0.0.
+	"RUSTSEC-2026-0459",
 ]
