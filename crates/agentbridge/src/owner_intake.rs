@@ -37,20 +37,28 @@ pub fn render_request(channel: &str, invitee_name: &str, invitee_did: &str) -> S
 ///
 /// `self_did` is the owner's own DID, so a request sealed for a different
 /// owner (or replayed) is refused the same way a forged one is.
+///
+/// The returned [`shadi_identity::Opened`] has not yet spent its replay
+/// slot — call [`shadi_identity::Opened::confirm`] once the owner's policy
+/// has actually acted on the request. A `did:key` is free to mint and this
+/// endpoint is deliberately open to strangers, so charging the shared,
+/// bounded replay cache for every syntactically valid envelope (whatever
+/// the owner's policy would do with it) would let a flood of fresh
+/// identities lock out a genuine first-time requester.
 pub fn admit(
     signed: &[u8],
     now: u64,
     self_did: Option<&str>,
     replay: &ReplayCache,
-) -> Result<InviteRequest, String> {
+) -> Result<(InviteRequest, shadi_identity::Opened), String> {
     if !shadi_identity::looks_like_did_proof(signed) {
         return Err("a channel request must carry the requester's DID proof".to_string());
     }
-    let (requester_did, sealed_payload, _hint) =
-        shadi_identity::verify_and_open(signed, self_did, replay)?;
-    let (requester_human_did, payload) = if shadi_identity::looks_like_binding(&sealed_payload) {
+    let (requester_did, opened) =
+        shadi_identity::verify_and_open_deferred(signed, self_did, replay)?;
+    let (requester_human_did, payload) = if shadi_identity::looks_like_binding(opened.body()) {
         let (certificate, rest) =
-            shadi_identity::split_binding(&sealed_payload).map_err(|e| e.to_string())?;
+            shadi_identity::split_binding(opened.body()).map_err(|e| e.to_string())?;
         let binding = shadi_identity::verify_binding(certificate, now)
             .map_err(|e| format!("agent binding rejected: {e}"))?;
         if binding.agent_did != requester_did {
@@ -61,7 +69,7 @@ pub fn admit(
         }
         (Some(binding.human_did), rest.to_vec())
     } else {
-        (None, sealed_payload)
+        (None, opened.body().to_vec())
     };
     // Only the framing matters here; presentations are checked by the
     // credential-gated listener, not by owner intake.
@@ -70,14 +78,17 @@ pub fn admit(
     // A request sent as a task has the task header before its body.
     let body = text.split_once("\nbody:\n").map_or(text, |(_, body)| body);
     let (channel, invitee_name, invitee_did) = parse_request(body)?;
-    Ok(InviteRequest {
-        channel,
-        invitee_name,
-        invitee_did: Some(invitee_did),
-        action: GrantAction::Add,
-        requester: requester_did,
-        requester_human_did,
-    })
+    Ok((
+        InviteRequest {
+            channel,
+            invitee_name,
+            invitee_did: Some(invitee_did),
+            action: GrantAction::Add,
+            requester: requester_did,
+            requester_human_did,
+        },
+        opened,
+    ))
 }
 
 fn parse_request(body: &str) -> Result<(String, String, String), String> {
@@ -139,8 +150,8 @@ impl OwnerExecutor {
             Ok(owner) => owner.owner_did(),
             Err(_) => return (TaskState::Rejected, "refused: owner state is poisoned".to_string()),
         };
-        let request = match admit(signed, now, Some(self_did.as_str()), &self.replay) {
-            Ok(request) => request,
+        let (request, opened) = match admit(signed, now, Some(self_did.as_str()), &self.replay) {
+            Ok(result) => result,
             Err(reason) => {
                 tracing::warn!(%reason, "refused a channel request before the owner's policy");
                 return (TaskState::Rejected, format!("refused: {reason}"));
@@ -155,24 +166,38 @@ impl OwnerExecutor {
                     .request(request.clone(), now)
                     .map_err(|e| e.to_string())
             });
+        // The replay slot is spent only once the policy actually acted on
+        // the request (granted it or parked it for the owner) — a request
+        // for a channel this owner doesn't hold, or one its policy blocks,
+        // never costs a slot, so it can't be used to exhaust the cache.
         match outcome {
-            Ok(Outcome::Granted(grant)) => match self.inviter.invite(&grant, &request) {
-                Ok(()) => (
-                    TaskState::Completed,
-                    format!(
-                        "granted: {} invited to {}",
-                        request.invitee_name, request.channel
+            Ok(Outcome::Granted(grant)) => {
+                if let Err(reason) = opened.confirm(&self.replay) {
+                    return (TaskState::Rejected, format!("refused: {reason}"));
+                }
+                match self.inviter.invite(&grant, &request) {
+                    Ok(()) => (
+                        TaskState::Completed,
+                        format!(
+                            "granted: {} invited to {}",
+                            request.invitee_name, request.channel
+                        ),
                     ),
-                ),
-                Err(err) => (
-                    TaskState::Failed,
-                    format!("granted, but the invite failed: {err}"),
-                ),
-            },
-            Ok(Outcome::Pending { ask_id, expires_at }) => (
-                TaskState::Completed,
-                format!("pending: the owner decides ask {ask_id} by {expires_at}"),
-            ),
+                    Err(err) => (
+                        TaskState::Failed,
+                        format!("granted, but the invite failed: {err}"),
+                    ),
+                }
+            }
+            Ok(Outcome::Pending { ask_id, expires_at }) => {
+                if let Err(reason) = opened.confirm(&self.replay) {
+                    return (TaskState::Rejected, format!("refused: {reason}"));
+                }
+                (
+                    TaskState::Completed,
+                    format!("pending: the owner decides ask {ask_id} by {expires_at}"),
+                )
+            }
             Ok(Outcome::Refused(reason)) => (TaskState::Rejected, format!("refused: {reason}")),
             Err(err) => (TaskState::Failed, format!("error: {err}")),
         }
@@ -361,14 +386,14 @@ mod tests {
         .unwrap();
         let carried = seal_and_sign(&setup.agent, Some(&setup.owner_did), &framed, None).unwrap();
 
-        let plain = admit(
+        let (plain, _) = admit(
             &as_task(&setup, false),
             NOW,
             Some(&setup.owner_did),
             &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY),
         )
         .unwrap();
-        let with_vp = admit(
+        let (with_vp, _) = admit(
             &carried,
             NOW,
             Some(&setup.owner_did),
@@ -410,6 +435,53 @@ mod tests {
         let (state, reply) = failing.executor.handle(&as_task(&failing, false), NOW);
         assert_eq!(state, TaskState::Failed);
         assert!(reply.contains("node unreachable"), "{reply}");
+    }
+
+    #[test]
+    fn a_blocked_requests_envelope_is_never_treated_as_a_replay() {
+        // The replay slot is only spent on Granted/Pending, so a request the
+        // policy refuses can be resent — by a retry, or by a flood of fresh
+        // DIDs doing the same — without exhausting the shared cache.
+        let blocked = setup(r#"{"default": "block"}"#);
+        let task = as_task(&blocked, false);
+        for _ in 0..3 {
+            let (state, reply) = blocked.executor.handle(&task, NOW);
+            assert_eq!(
+                (state, reply.as_str()),
+                (
+                    TaskState::Rejected,
+                    "refused: refused by the owner's policy"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_granted_requests_envelope_is_rejected_as_a_replay_on_resend() {
+        let setup = setup("{}");
+        let policy = format!(
+            r#"{{"rules": [{{"channel": "*", "requested_by_human": "{}", "decision": "allow"}}]}}"#,
+            setup.human.did()
+        );
+        setup
+            .executor
+            .owner
+            .lock()
+            .unwrap()
+            .set_policy(OwnerPolicy::from_json(&policy).unwrap());
+        let task = as_task(&setup, true);
+
+        let (state, _) = setup.executor.handle(&task, NOW);
+        assert_eq!(state, TaskState::Completed);
+        assert_eq!(setup.invites.0.lock().unwrap().len(), 1);
+
+        // Deferring the commit to Granted doesn't weaken replay protection
+        // for the case it exists for: the same envelope resent is still a
+        // replay, not a second grant.
+        let (state, reply) = setup.executor.handle(&task, NOW);
+        assert_eq!(state, TaskState::Rejected);
+        assert!(reply.contains("replay"), "{reply}");
+        assert_eq!(setup.invites.0.lock().unwrap().len(), 1, "no second invite");
     }
 
     #[test]
