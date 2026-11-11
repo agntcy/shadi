@@ -95,6 +95,41 @@ impl Sealed {
         sender_did: &str,
         replay: &ReplayCache,
     ) -> Result<(Vec<u8>, Option<String>), String> {
+        let (sealed, now) = Self::validate(payload, self_did)?;
+        if !replay.commit(sender_did, &sealed.jti, now) {
+            return Err("sealed payload already delivered (replay)".to_string());
+        }
+        Ok((sealed.body, sealed.principal_hint))
+    }
+
+    /// Like [`Self::open`], but does not spend the replay slot: a caller
+    /// that can cheaply refuse most deliveries before they are worth
+    /// remembering (e.g. one naming a resource it doesn't hold) calls
+    /// [`Opened::confirm`] only once it has decided this one is. A true
+    /// replay — a `jti` already committed by an earlier confirm — is still
+    /// rejected here, before any of that caller's own work runs.
+    pub fn open_deferred(
+        payload: &[u8],
+        self_did: Option<&str>,
+        sender_did: &str,
+        replay: &ReplayCache,
+    ) -> Result<Opened, String> {
+        let (sealed, now) = Self::validate(payload, self_did)?;
+        if replay.contains(sender_did, &sealed.jti) {
+            return Err("sealed payload already delivered (replay)".to_string());
+        }
+        Ok(Opened {
+            sender_did: sender_did.to_string(),
+            jti: sealed.jti,
+            now,
+            body: sealed.body,
+            principal_hint: sealed.principal_hint,
+        })
+    }
+
+    /// Parse, check freshness, and check the audience — everything [`open`]
+    /// and [`open_deferred`] share, short of touching the replay cache.
+    fn validate(payload: &[u8], self_did: Option<&str>) -> Result<(Sealed, u64), String> {
         let sealed: Sealed = serde_json::from_slice(payload)
             .map_err(|e| format!("not a sealed payload: {e}"))?;
         let now = now_unix()?;
@@ -109,10 +144,40 @@ impl Sealed {
                 ));
             }
         }
-        if !replay.admit(sender_did, &sealed.jti, now) {
+        Ok((sealed, now))
+    }
+}
+
+/// A sealed payload that passed freshness and audience checks, with its
+/// replay slot not yet spent. A caller that decided a delivery is worth
+/// acting on calls [`Self::confirm`] to spend that slot; one that refuses
+/// the delivery for its own reasons can just drop this, at no cost to the
+/// shared [`ReplayCache`].
+pub struct Opened {
+    sender_did: String,
+    jti: String,
+    now: u64,
+    body: Vec<u8>,
+    principal_hint: Option<String>,
+}
+
+impl Opened {
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    pub fn principal_hint(&self) -> Option<&str> {
+        self.principal_hint.as_deref()
+    }
+
+    /// Spend this delivery's replay slot. `Err` if it was already spent —
+    /// a concurrent delivery of the same envelope won this race, or the
+    /// cache has no room left to remember it.
+    pub fn confirm(self, replay: &ReplayCache) -> Result<(Vec<u8>, Option<String>), String> {
+        if !replay.commit(&self.sender_did, &self.jti, self.now) {
             return Err("sealed payload already delivered (replay)".to_string());
         }
-        Ok((sealed.body, sealed.principal_hint))
+        Ok((self.body, self.principal_hint))
     }
 }
 
@@ -201,11 +266,23 @@ impl ReplayCache {
         }
     }
 
+    /// True iff `jti` from `sender_did` was already committed. Read-only — it
+    /// does not touch the sender/eviction bookkeeping, so a caller can check
+    /// before doing expensive work without that check itself costing
+    /// anything against the bounded sender table.
+    fn contains(&self, sender_did: &str, jti: &str) -> bool {
+        let table = self.senders.lock().unwrap_or_else(|e| e.into_inner());
+        table
+            .by_did
+            .get(sender_did)
+            .is_some_and(|(_, entries)| entries.contains_key(jti))
+    }
+
     /// True iff `jti` from `sender_did` had not been seen before and there was
     /// room to remember it. `now` is the caller's already-validated clock
     /// reading, so a clock fault is one error at [`Sealed::open`]'s boundary
     /// rather than a second, silent one here.
-    fn admit(&self, sender_did: &str, jti: &str, now: u64) -> bool {
+    fn commit(&self, sender_did: &str, jti: &str, now: u64) -> bool {
         let cutoff = now.saturating_sub(REPLAY_RETENTION_SECS);
         let mut table = self.senders.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -272,6 +349,21 @@ pub fn verify_and_open(
     let verified = unwrap_signed_message(envelope).map_err(|e| e.to_string())?;
     let (body, hint) = Sealed::open(&verified.payload, self_did, &verified.did, replay)?;
     Ok((verified.did, body, hint))
+}
+
+/// Like [`verify_and_open`], but leaves the replay slot unspent — see
+/// [`Sealed::open_deferred`]. Returns the signer's DID alongside the
+/// [`Opened`] ticket, since a deferring caller typically still needs it (to
+/// check a binding inside the body, for example) before deciding whether to
+/// confirm.
+pub fn verify_and_open_deferred(
+    envelope: &[u8],
+    self_did: Option<&str>,
+    replay: &ReplayCache,
+) -> Result<(String, Opened), String> {
+    let verified = unwrap_signed_message(envelope).map_err(|e| e.to_string())?;
+    let opened = Sealed::open_deferred(&verified.payload, self_did, &verified.did, replay)?;
+    Ok((verified.did, opened))
 }
 
 #[cfg(test)]
@@ -345,14 +437,14 @@ mod tests {
     fn a_sender_flooding_its_own_capacity_does_not_block_another_sender() {
         let replay = ReplayCache::new(16, 2);
         let now = now_unix().unwrap();
-        assert!(replay.admit("alice", "a1", now));
-        assert!(replay.admit("alice", "a2", now));
+        assert!(replay.commit("alice", "a1", now));
+        assert!(replay.commit("alice", "a2", now));
         assert!(
-            !replay.admit("alice", "a3", now),
+            !replay.commit("alice", "a3", now),
             "alice's table is already full of live entries"
         );
         assert!(
-            replay.admit("bob", "b1", now),
+            replay.commit("bob", "b1", now),
             "bob has his own, untouched capacity"
         );
     }
@@ -361,23 +453,23 @@ mod tests {
     fn bounded_senders_fail_closed_under_load() {
         let replay = ReplayCache::new(2, 4);
         let now = now_unix().unwrap();
-        assert!(replay.admit("alice", "a1", now));
-        assert!(replay.admit("bob", "b1", now));
+        assert!(replay.commit("alice", "a1", now));
+        assert!(replay.commit("bob", "b1", now));
         // Both tracked senders are still live: no room for a third.
-        assert!(!replay.admit("carol", "c1", now));
+        assert!(!replay.commit("carol", "c1", now));
         // And a spent nonce from an existing sender is still a replay, not a
         // second admission that bumps capacity.
-        assert!(!replay.admit("alice", "a1", now));
+        assert!(!replay.commit("alice", "a1", now));
     }
 
     #[test]
     fn an_idle_sender_is_evicted_to_make_room_for_a_new_one() {
         let replay = ReplayCache::new(1, 4);
         let start = now_unix().unwrap();
-        assert!(replay.admit("alice", "a1", start));
+        assert!(replay.commit("alice", "a1", start));
         // Carol arrives once alice's entries are old enough to be fully
         // expired: alice is idle, not merely full, so she makes room.
         let later = start + REPLAY_RETENTION_SECS + 1;
-        assert!(replay.admit("carol", "c1", later));
+        assert!(replay.commit("carol", "c1", later));
     }
 }

@@ -42,7 +42,9 @@ pub use did_proof::{
     looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
-pub use freshness::{seal_and_sign, verify_and_open, ReplayCache, Sealed};
+pub use freshness::{
+    seal_and_sign, verify_and_open, verify_and_open_deferred, Opened, ReplayCache, Sealed,
+};
 pub use grant::{issue_grant, verify_grant, ChannelGrant, GrantAction, GrantRole};
 pub use trust_anchor::{DeclaredKeysAnchor, KeyListFetcher, PublishedKeysAnchor, TrustAnchor};
 pub use vp_layer::{looks_like_vp, split_vp, wrap_vp, VP_MAX_BYTES};
