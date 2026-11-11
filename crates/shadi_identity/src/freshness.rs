@@ -9,7 +9,7 @@
 //! audience before it is signed, and [`ReplayCache`] remembers which nonces a
 //! sender has already spent.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -61,6 +61,15 @@ pub struct Sealed {
 impl Sealed {
     /// Seal `body` for one delivery: a fresh `jti`, the current time, and
     /// `aud` when the destination DID is known.
+    ///
+    /// `aud: None` does not bind the destination at all — [`Sealed::open`]
+    /// waives the audience check entirely for it, same as for a receiver that
+    /// does not know its own DID. Several callers (`coordinate`, `handoff`,
+    /// `request_invite`) seal with `None` today because they address a peer
+    /// by name or locator and never resolve its `did:key`, not because the
+    /// destination is meant to be unauthenticated — resolving one (e.g. a
+    /// directory lookup, as `shadi_desktop` already does) is follow-up work,
+    /// not a property of this type.
     pub fn seal(
         aud: Option<&str>,
         body: &[u8],
@@ -117,7 +126,70 @@ impl Sealed {
 pub struct ReplayCache {
     max_senders: usize,
     per_sender_capacity: usize,
-    senders: Mutex<HashMap<String, HashMap<String, u64>>>,
+    senders: Mutex<SenderTable>,
+}
+
+/// Senders, indexed two ways: by DID for lookup, and by last-seen time so the
+/// longest-idle (and therefore only evictable) sender is found in `O(log n)`
+/// instead of sweeping every tracked sender's entries to check.
+#[derive(Default)]
+struct SenderTable {
+    by_did: HashMap<String, (u64, HashMap<String, u64>)>,
+    by_last_seen: BTreeMap<u64, HashSet<String>>,
+}
+
+impl SenderTable {
+    fn insert_new(&mut self, sender_did: String, now: u64) {
+        self.by_last_seen
+            .entry(now)
+            .or_default()
+            .insert(sender_did.clone());
+        self.by_did.insert(sender_did, (now, HashMap::new()));
+    }
+
+    /// Records that `sender_did` was just seen at `now`, moving it in the
+    /// last-seen index so it is not mistaken for idle.
+    fn touch(&mut self, sender_did: &str, now: u64) {
+        let old_last_seen = match self.by_did.get(sender_did) {
+            Some((ts, _)) => *ts,
+            None => return,
+        };
+        if now <= old_last_seen {
+            return;
+        }
+        self.unindex_last_seen(sender_did, old_last_seen);
+        self.by_last_seen
+            .entry(now)
+            .or_default()
+            .insert(sender_did.to_string());
+        if let Some(entry) = self.by_did.get_mut(sender_did) {
+            entry.0 = now;
+        }
+    }
+
+    fn remove(&mut self, sender_did: &str) {
+        if let Some((last_seen, _)) = self.by_did.remove(sender_did) {
+            self.unindex_last_seen(sender_did, last_seen);
+        }
+    }
+
+    fn unindex_last_seen(&mut self, sender_did: &str, last_seen: u64) {
+        if let Some(bucket) = self.by_last_seen.get_mut(&last_seen) {
+            bucket.remove(sender_did);
+            if bucket.is_empty() {
+                self.by_last_seen.remove(&last_seen);
+            }
+        }
+    }
+
+    /// A sender last seen before `cutoff`: every entry it ever recorded is
+    /// expired, since none can postdate its own last-seen time.
+    fn idle_before(&self, cutoff: u64) -> Option<String> {
+        self.by_last_seen
+            .range(..cutoff)
+            .next()
+            .and_then(|(_, bucket)| bucket.iter().next().cloned())
+    }
 }
 
 impl ReplayCache {
@@ -125,7 +197,7 @@ impl ReplayCache {
         Self {
             max_senders,
             per_sender_capacity,
-            senders: Mutex::new(HashMap::new()),
+            senders: Mutex::new(SenderTable::default()),
         }
     }
 
@@ -135,24 +207,24 @@ impl ReplayCache {
     /// rather than a second, silent one here.
     fn admit(&self, sender_did: &str, jti: &str, now: u64) -> bool {
         let cutoff = now.saturating_sub(REPLAY_RETENTION_SECS);
-        let mut senders = self.senders.lock().unwrap_or_else(|e| e.into_inner());
+        let mut table = self.senders.lock().unwrap_or_else(|e| e.into_inner());
 
-        if !senders.contains_key(sender_did) {
-            if senders.len() >= self.max_senders {
+        if table.by_did.contains_key(sender_did) {
+            table.touch(sender_did, now);
+        } else {
+            if table.by_did.len() >= self.max_senders {
                 // Only a sender whose entries have all expired is evictable —
-                // one that is still live never makes room for another.
-                senders.retain(|_, entries| {
-                    entries.retain(|_, seen_at| *seen_at >= cutoff);
-                    !entries.is_empty()
-                });
-                if senders.len() >= self.max_senders {
-                    return false;
+                // one that is still live never makes room for another. Found
+                // via the last-seen index, not by scanning every sender.
+                match table.idle_before(cutoff) {
+                    Some(idle) => table.remove(&idle),
+                    None => return false,
                 }
             }
-            senders.insert(sender_did.to_string(), HashMap::new());
+            table.insert_new(sender_did.to_string(), now);
         }
 
-        let entries = senders.get_mut(sender_did).expect("just inserted or present");
+        let (_, entries) = table.by_did.get_mut(sender_did).expect("just inserted or present");
         entries.retain(|_, seen_at| *seen_at >= cutoff);
         if entries.contains_key(jti) {
             return false;
@@ -296,5 +368,16 @@ mod tests {
         // And a spent nonce from an existing sender is still a replay, not a
         // second admission that bumps capacity.
         assert!(!replay.admit("alice", "a1", now));
+    }
+
+    #[test]
+    fn an_idle_sender_is_evicted_to_make_room_for_a_new_one() {
+        let replay = ReplayCache::new(1, 4);
+        let start = now_unix().unwrap();
+        assert!(replay.admit("alice", "a1", start));
+        // Carol arrives once alice's entries are old enough to be fully
+        // expired: alice is idle, not merely full, so she makes room.
+        let later = start + REPLAY_RETENTION_SECS + 1;
+        assert!(replay.admit("carol", "c1", later));
     }
 }
