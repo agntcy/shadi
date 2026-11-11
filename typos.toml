@@ -20,3 +20,5 @@ shadictl = "shadictl"
 [default.extend-words]
 # Same SID in comments and string literals.
 BA = "BA"
+# A misspelled policy field, which a test checks is refused.
+requre = "requre"

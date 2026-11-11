@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_backend_names_the_variable() {
+    fn unparsable_backend_names_the_variable() {
         let err = choose_backend(Some("bogus"), false, || VaultBackend::Keychain)
             .expect_err("not a backend");
         assert!(err.contains("SHADI_CREDENTIAL_BACKEND"), "{err}");
