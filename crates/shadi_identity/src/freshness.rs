@@ -64,12 +64,12 @@ impl Sealed {
     ///
     /// `aud: None` does not bind the destination at all — [`Sealed::open`]
     /// waives the audience check entirely for it, same as for a receiver that
-    /// does not know its own DID. Several callers (`coordinate`, `handoff`,
-    /// `request_invite`) seal with `None` today because they address a peer
-    /// by name or locator and never resolve its `did:key`, not because the
-    /// destination is meant to be unauthenticated — resolving one (e.g. a
-    /// directory lookup, as `shadi_desktop` already does) is follow-up work,
-    /// not a property of this type.
+    /// does not know its own DID. `coordinate` and `handoff` resolve a peer's
+    /// `did:key` when it is a locally registered agent, and `request_invite`
+    /// takes the owner's DID as an explicit flag — but none of them can
+    /// require one: a remote or unregistered peer, or a caller who simply
+    /// doesn't pass `--owner-did`, still has to go through unaddressed rather
+    /// than fail outright.
     pub fn seal(
         aud: Option<&str>,
         body: &[u8],
