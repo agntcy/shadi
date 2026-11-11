@@ -5,6 +5,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Rebuild binaries for an existing CLI release tag (agntcy-shadi-cli-v* or agntcy-agentbridge-cli-v*) instead of running release-plz
+        required: false
+        default: ""
 
 # Least privilege by default; jobs widen it where they need to.
 permissions:
@@ -13,6 +18,7 @@ permissions:
 jobs:
   release-crates:
     name: Release crates
+    if: ${{ !inputs.release_tag }}
     runs-on: ubuntu-latest
     outputs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
@@ -64,7 +70,8 @@ jobs:
   resolve-shadictl-release:
     name: Resolve shadictl release
     needs: release-crates
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
+    # A backfill skips release-crates, so only cancellation may stop this job.
+    if: ${{ !cancelled() && (startsWith(inputs.release_tag, 'agntcy-shadi-cli-v') || (needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"'))) }}
     runs-on: ubuntu-latest
     permissions: {}
     outputs:
@@ -75,7 +82,11 @@ jobs:
         shell: bash
         env:
           RELEASES: ${{ needs.release-crates.outputs.releases }}
+          BACKFILL_TAG: ${{ inputs.release_tag }}
         run: |
+          if [ -n "$BACKFILL_TAG" ]; then
+            echo "release_tag=$BACKFILL_TAG" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           release_tag=$(python - <<'PY'
           import json
           import os
@@ -93,10 +104,8 @@ jobs:
 
   release-shadictl-binaries:
     name: Release shadictl binaries (${{ matrix.name }})
-    needs:
-      - release-crates
-      - resolve-shadictl-release
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
+    needs: resolve-shadictl-release
+    if: ${{ !cancelled() && needs.resolve-shadictl-release.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
@@ -129,6 +138,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
@@ -232,10 +243,9 @@ jobs:
   release-shadictl-winget:
     name: Publish shadictl WinGet manifests
     needs:
-      - release-crates
       - resolve-shadictl-release
       - release-shadictl-binaries
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
+    if: ${{ !cancelled() && needs.resolve-shadictl-release.result == 'success' && needs.release-shadictl-binaries.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -255,10 +265,9 @@ jobs:
   release-shadictl-homebrew:
     name: Publish shadictl Homebrew formula
     needs:
-      - release-crates
       - resolve-shadictl-release
       - release-shadictl-binaries
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-shadi-cli"') }}
+    if: ${{ !cancelled() && needs.resolve-shadictl-release.result == 'success' && needs.release-shadictl-binaries.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -277,7 +286,8 @@ jobs:
   resolve-agentbridge-release:
     name: Resolve agentbridge release
     needs: release-crates
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    # A backfill skips release-crates, so only cancellation may stop this job.
+    if: ${{ !cancelled() && (startsWith(inputs.release_tag, 'agntcy-agentbridge-cli-v') || (needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"'))) }}
     runs-on: ubuntu-latest
     permissions: {}
     outputs:
@@ -288,7 +298,11 @@ jobs:
         shell: bash
         env:
           RELEASES: ${{ needs.release-crates.outputs.releases }}
+          BACKFILL_TAG: ${{ inputs.release_tag }}
         run: |
+          if [ -n "$BACKFILL_TAG" ]; then
+            echo "release_tag=$BACKFILL_TAG" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           release_tag=$(python - <<'PY'
           import json
           import os
@@ -306,10 +320,8 @@ jobs:
 
   release-agentbridge-binaries:
     name: Release agentbridge binaries (${{ matrix.name }})
-    needs:
-      - release-crates
-      - resolve-agentbridge-release
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    needs: resolve-agentbridge-release
+    if: ${{ !cancelled() && needs.resolve-agentbridge-release.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
@@ -342,6 +354,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
@@ -445,10 +459,9 @@ jobs:
   release-agentbridge-winget:
     name: Publish agentbridge WinGet manifests
     needs:
-      - release-crates
       - resolve-agentbridge-release
       - release-agentbridge-binaries
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    if: ${{ !cancelled() && needs.resolve-agentbridge-release.result == 'success' && needs.release-agentbridge-binaries.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -469,10 +482,9 @@ jobs:
   release-agentbridge-homebrew:
     name: Publish agentbridge Homebrew formula
     needs:
-      - release-crates
       - resolve-agentbridge-release
       - release-agentbridge-binaries
-    if: ${{ needs.release-crates.outputs.releases_created == 'true' && contains(needs.release-crates.outputs.releases, '"package_name":"agntcy-agentbridge-cli"') }}
+    if: ${{ !cancelled() && needs.resolve-agentbridge-release.result == 'success' && needs.release-agentbridge-binaries.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -491,6 +503,7 @@ jobs:
 
   release-crates-pr:
     name: Release crates - PR
+    if: ${{ !inputs.release_tag }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
