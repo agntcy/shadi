@@ -298,6 +298,12 @@ enum Cmd {
         /// SLIM node endpoint.
         #[arg(long, env = "SLIM_ENDPOINT", default_value = "127.0.0.1:47357")]
         endpoint: String,
+
+        /// The owner's DID, sealed into the signed request so it cannot be
+        /// redirected to a different agent. No discovery for this exists yet;
+        /// the caller must already know it.
+        #[arg(long)]
+        owner_did: Option<String>,
     },
 
     /// Run autonomous multi-round coordination toward a programming goal.
@@ -642,6 +648,7 @@ fn main() {
             invitee_did,
             agent_id,
             endpoint,
+            owner_did,
         } => commands::request_invite::run(
             &owner,
             &channel,
@@ -649,6 +656,7 @@ fn main() {
             &invitee_did,
             &agent_id,
             &endpoint,
+            owner_did.as_deref(),
         ),
         Cmd::Coordinate {
             goal,
@@ -998,16 +1006,42 @@ mod tests {
                 channel,
                 invitee_name,
                 invitee_did,
+                owner_did,
                 ..
-            } => assert_eq!(
-                [owner, channel, invitee_name, invitee_did],
-                [
-                    "agntcy/shadi/avatar",
-                    "agntcy/shadi/review-room",
-                    "agntcy/shadi/copilot",
-                    "did:key:zPeer"
-                ]
-            ),
+            } => {
+                assert_eq!(
+                    [owner, channel, invitee_name, invitee_did],
+                    [
+                        "agntcy/shadi/avatar",
+                        "agntcy/shadi/review-room",
+                        "agntcy/shadi/copilot",
+                        "did:key:zPeer"
+                    ]
+                );
+                assert_eq!(owner_did, None);
+            }
+            _ => panic!("expected request-invite subcommand"),
+        }
+
+        let request_with_owner_did = Cli::try_parse_from([
+            "agentbridge",
+            "request-invite",
+            "--owner",
+            "agntcy/shadi/avatar",
+            "--channel",
+            "agntcy/shadi/review-room",
+            "--invitee-name",
+            "agntcy/shadi/copilot",
+            "--invitee-did",
+            "did:key:zPeer",
+            "--owner-did",
+            "did:key:zOwner",
+        ])
+        .expect("parse request-invite with owner-did");
+        match request_with_owner_did.command {
+            Cmd::RequestInvite { owner_did, .. } => {
+                assert_eq!(owner_did.as_deref(), Some("did:key:zOwner"));
+            }
             _ => panic!("expected request-invite subcommand"),
         }
     }
