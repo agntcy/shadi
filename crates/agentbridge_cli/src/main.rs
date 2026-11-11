@@ -311,7 +311,8 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         agents: Vec<String>,
 
-        /// Minimum endorsements to select a winning artifact.
+        /// Endorsements the winning artifact needs. A round without them is
+        /// repeated, and the last round takes the most endorsed artifact.
         #[arg(long, default_value = "2")]
         quorum: usize,
 

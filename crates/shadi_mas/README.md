@@ -95,8 +95,11 @@ let mut runtime = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
 
 runtime.apply(dev_event("claude", b"fn parse(input: &str) -> Ast { ... }"));
 runtime.apply(dev_event("copilot", b"fn parse(s: &str) -> Result<Ast> { ... }"));
-runtime.apply(vote_event("codex", "copilot"));
 runtime.apply(dev_event("codex", b"fn parse(s: &str) -> Option<Ast> { ... }"));
+runtime.apply(vote_event("claude", "copilot"));
+runtime.apply(vote_event("copilot", "copilot"));
+runtime.apply(vote_event("codex", "claude"));
+// The last ballot closes the round, and copilot has quorum (2)
 // → EventOutcome::Finalized(summary)
 
 let winner = runtime.engine().selected_artifact(Epoch(0)).unwrap();

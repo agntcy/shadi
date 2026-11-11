@@ -111,8 +111,10 @@ as `AUTH_REQUIRED` (re-prove / ask / deny); a forged DID is rejected.
 
 `coordinate --pattern development` (default) is CONVERGE for a **code**
 class: every agent proposes a code artifact, then every agent votes on
-the best one. Finalization fires as soon as endorsements reach the
-quorum — triggered by applying the last proposal of the epoch.
+the best one. Once every agent has voted, the most endorsed artifact wins
+if it has `--quorum` endorsements. Otherwise the round is repeated, and
+the last round (`--max-rounds`) takes the most endorsed artifact. A vote
+that fails or names no proposal counts as an abstention.
 
 The same two group phases cover any class. `--assembly` asks the team to
 model the problem first. `--pattern preference|cascade|resource` runs
@@ -141,9 +143,9 @@ sequenceDiagram
     A-->>CO: endorses copilot
     CO->>B: vote prompt  (goal + both proposals)
     B-->>CO: endorses copilot
-    CO->>MAS: apply ToolResult{copilot, accepted:true}
-    CO->>MAS: apply ExternalBytes(codex_vote_artifact)
-    note over MAS: quorum met on last apply
+    CO->>MAS: apply ToolResult{copilot, accepted:true}  (copilot's ballot)
+    CO->>MAS: apply ToolResult{copilot, accepted:true}  (codex's ballot)
+    note over MAS: every agent has voted, quorum met
     MAS-->>CO: Finalized — winner: copilot  (2/2 votes)
   end
 
@@ -265,7 +267,9 @@ agentbridge coordinate \
 2. Each agent invokes its CLI tool via `ToolAdapter::call()` → code proposal.
 3. Proposals are published to a SLIM group session.
 4. Agents vote via `SemanticPayload::ToolResult { accepted: true }`.
-5. When `accepted_votes ≥ quorum` → `EventOutcome::Finalized` → loop exits.
+5. Once every agent has voted, the most endorsed artifact with at least
+   `--quorum` endorsements → `EventOutcome::Finalized` → loop exits.
+   Without one the round is repeated; the last takes the most endorsed.
 6. The winning artifact is written to disk. Human approval is optional.
 
 ## Asking a channel's owner
