@@ -119,6 +119,15 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 settings, for `--record`). They only run under `shadictl --net-block`, where
 `opencode-isolated` can't run yet (shadi#496).
 
+Three of them turn off the harness's own approvals, which a fresh `HOME` has
+none saved for and a headless run can't ask: `codex-isolated` skips codex's
+sandbox, `copilot-isolated` passes `--allow-all-tools --allow-all-paths`, and
+`cursor-agent-isolated` passes `--force`. Within the paths `shadictl` grants, a
+task, or a skill from the `--record` it runs, can then do anything the harness
+can, with nothing asking first. What it may touch is only what you grant, so
+give `--read` where it should only read: a reviewer needs `--read <repo>`,
+while `--allow <repo>` lets it change the repo.
+
 ### `list` — discover registered adapters
 
 ```bash
