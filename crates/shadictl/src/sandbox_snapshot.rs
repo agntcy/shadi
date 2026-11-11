@@ -1887,6 +1887,53 @@ mod tests {
         assert!(gone, "the descendant outlived shadictl");
     }
 
+    /// When `shadictl` is PID 1 (a container without init), a group member the
+    /// child leaves behind becomes `shadictl`'s own child, and its zombie still
+    /// counts as a group member on Linux until `shadictl` reaps it. Here the
+    /// test process stands in for `shadictl`: the member is its direct child.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_group_member_left_as_our_zombie_does_not_hold_up_the_stop() {
+        use std::os::unix::process::CommandExt;
+
+        let leader = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap 'exit 0' TERM; while :; do sleep 0.05; done")
+            .process_group(0)
+            .spawn()
+            .expect("spawn leader");
+        let pgid = leader.id() as i32;
+        let mut member = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap 'exit 0' TERM; while :; do sleep 0.05; done")
+            .process_group(pgid)
+            .spawn()
+            .expect("spawn member");
+        let mut child = SandboxedChild::from_std(leader);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let interrupted = Arc::new(AtomicUsize::new(0));
+        interrupt_after(&interrupted, &[50]);
+        let start = std::time::Instant::now();
+        let outcome = wait_for_child_or_interrupt(
+            &mut child,
+            Some(&interrupted),
+            None,
+            None,
+            std::time::Duration::from_secs(5),
+        )
+        .expect("wait");
+        let elapsed = start.elapsed();
+        let _ = member.kill();
+        let _ = member.wait();
+
+        assert!(matches!(outcome, ChildWaitOutcome::Terminated(_)));
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "waited {elapsed:?} on a group of zombies"
+        );
+    }
+
     #[test]
     fn prepare_sandbox_launch_returns_policy_with_base_net_allow() {
         let cli = build_cli();

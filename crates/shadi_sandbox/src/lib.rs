@@ -249,11 +249,26 @@ impl SandboxedChild {
     /// reaches it after the child was reaped: the group ID is not reused
     /// while the group has members. Always `false` on Windows, where the job
     /// object ends with the child.
+    ///
+    /// Call it only once the child itself was reaped: it first reaps group
+    /// members that are this process's own children and have exited. On
+    /// Linux a zombie still counts as a member, and when `shadictl` runs as
+    /// PID 1 (a container without init), the members the child leaves behind
+    /// become its children, so nothing else would reap them.
     pub fn group_alive(&self) -> bool {
         #[cfg(unix)]
         {
+            let pgid = self.id() as i32;
+            loop {
+                let mut status = 0;
+                // SAFETY: WNOHANG only reaps exited children of this process
+                // in the group; it returns 0 or -1 (ECHILD) once none is left.
+                if unsafe { libc::waitpid(-pgid, &mut status, libc::WNOHANG) } <= 0 {
+                    break;
+                }
+            }
             // SAFETY: signal 0 only checks that the group exists.
-            unsafe { libc::killpg(self.id() as i32, 0) == 0 }
+            unsafe { libc::killpg(pgid, 0) == 0 }
         }
         #[cfg(not(unix))]
         false
@@ -333,6 +348,36 @@ mod tests {
         wrapped.kill().expect("killpg kill");
         let status = wrapped.wait().expect("wait");
         assert!(!status.success(), "killed process must not succeed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_of_our_own_zombies_is_not_alive() {
+        use std::os::unix::process::CommandExt;
+        let leader = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn leader");
+        let pgid = leader.id() as i32;
+        // A group member that is our own child, as a member the child leaves
+        // behind is for shadictl running as PID 1.
+        let mut member = Command::new("sleep")
+            .arg("30")
+            .process_group(pgid)
+            .spawn()
+            .expect("spawn member");
+        let mut wrapped = SandboxedChild::from_std(leader);
+        assert!(wrapped.group_alive());
+
+        wrapped.kill().expect("killpg kill");
+        wrapped.wait().expect("wait leader");
+        // The member is now a zombie nobody else will reap.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let alive = wrapped.group_alive();
+        let _ = member.kill();
+        let _ = member.wait();
+        assert!(!alive, "a group of zombies counted as alive");
     }
 
     #[test]
