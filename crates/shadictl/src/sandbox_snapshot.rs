@@ -8,11 +8,15 @@ use shadi_sandbox::SandboxedChild;
 #[cfg(all(not(test), unix))]
 fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
     use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+    count_signals(&[SIGINT, SIGTERM, SIGHUP, SIGQUIT])
+}
 
-    // A count, not a flag: two signals that land between two polls still
-    // read as two, so the second kills at once.
+/// Count every delivery of `signals`. A count, not a flag: two signals that
+/// land between two polls still read as two, so the second kills at once.
+#[cfg(unix)]
+fn count_signals(signals: &[i32]) -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
     let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    for signal in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
+    for &signal in signals {
         let handler_count = std::sync::Arc::clone(&count);
         // SAFETY: the handler only does an atomic add, which is
         // async-signal-safe.
@@ -1424,6 +1428,25 @@ mod tests {
     #[cfg(unix)]
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn every_delivered_signal_is_counted() {
+        use signal_hook::consts::signal::SIGUSR1;
+        // SIGUSR1, not a stop signal: the handler stays installed for the
+        // rest of the test binary, and nothing else here uses it.
+        let count = count_signals(&[SIGUSR1]).expect("handler installs");
+        signal_hook::low_level::raise(SIGUSR1).expect("raise");
+        signal_hook::low_level::raise(SIGUSR1).expect("raise");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_that_cannot_be_handled_installs_no_counter() {
+        // Not a signal number on any platform, so `sigaction` rejects it.
+        assert!(count_signals(&[9999]).is_none());
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
