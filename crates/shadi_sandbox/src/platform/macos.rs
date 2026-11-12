@@ -425,10 +425,15 @@ fn with_program_readable(
     let Some(program) = program else {
         return profile;
     };
-    // The policy keeps each --deny as given and canonical, so checking every
-    // spelling of the program covers the `/private` aliases on both sides.
+    // Match each deny as `build_profile` enforces it: through
+    // `seatbelt_spellings`, which also makes a relative deny absolute.
     let spellings = seatbelt_spellings(program);
-    if spellings.iter().any(|p| policy.path_is_denied(p)) {
+    let denied = policy
+        .deny()
+        .iter()
+        .flat_map(|deny| seatbelt_spellings(deny))
+        .any(|deny| spellings.iter().any(|p| p.starts_with(&deny)));
+    if denied {
         return profile;
     }
     for spelling in spellings {
@@ -980,6 +985,16 @@ mod tests {
         let policy = SandboxPolicy::default().deny_path("/private/tmp/build");
         let program = std::path::Path::new("/tmp/build/agentbridge");
         let profile = with_program_readable(String::new(), Some(program), &policy);
+        assert!(profile.is_empty(), "{profile}");
+    }
+
+    #[test]
+    fn a_program_under_a_relative_deny_stays_unreadable() {
+        // build_profile resolves a relative deny against the working
+        // directory; the grant must see the same path.
+        let policy = SandboxPolicy::default().deny_path("bin");
+        let program = std::env::current_dir().unwrap().join("bin/agentbridge");
+        let profile = with_program_readable(String::new(), Some(&program), &policy);
         assert!(profile.is_empty(), "{profile}");
     }
 
