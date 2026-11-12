@@ -126,7 +126,11 @@ sandbox, `copilot-isolated` passes `--allow-all-tools --allow-all-paths`, and
 task, or a skill from the `--record` it runs, can then do anything the harness
 can, with nothing asking first. What it may touch is only what you grant, so
 give `--read` where it should only read: a reviewer needs `--read <repo>`,
-while `--allow <repo>` lets it change the repo.
+while `--allow <repo>` lets it change the repo. Every `shadictl` profile also
+grants read and write on the directory it starts in, and `--read` doesn't take
+that back, so start `shadictl` in a directory neither in the repo nor above
+it (e.g. `$SHADI_TMP_DIR`) and pass the repo as `--command`, as in the example
+above.
 
 ### `list` — discover registered adapters
 
