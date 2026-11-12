@@ -573,7 +573,7 @@ fn main() {
                 agent_name = Some(commands::register::agent_name(
                     name.as_deref(),
                     source.as_ref().map(|source| source.name.as_str()),
-                    &tool,
+                    &commands::register::profile_id(&tool)?,
                 )?);
                 if let Some(source) = source {
                     card_opts.add_record(&source);

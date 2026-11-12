@@ -214,7 +214,7 @@ pub fn validate_agent_name(name: &str) -> anyhow::Result<()> {
 pub fn agent_name(
     name: Option<&str>,
     record_name: Option<&str>,
-    tool: &str,
+    profile_id: &str,
 ) -> anyhow::Result<AgentName> {
     if let Some(name) = name {
         validate_agent_name(name)?;
@@ -224,32 +224,45 @@ pub fn agent_name(
         });
     }
     let profile = AgentName {
-        id: tool.to_string(),
+        id: profile_id.to_string(),
         source: NameSource::Profile,
     };
     let Some(record_name) = record_name else {
         return Ok(profile);
     };
-    // `org/skill` → `org-skill`: one `-` for each run of characters SLIM
-    // can't hold, none at either end.
+    // `org/skill` → `org-skill`: the characters SLIM can hold stay as they
+    // are, so distinct valid names stay distinct; each run of others becomes
+    // one `-`. No `-` at either end.
     let mut prefix = String::new();
+    let mut replacing = false;
     for c in record_name.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
             prefix.push(c);
-        } else if !prefix.is_empty() && !prefix.ends_with('-') {
+            replacing = false;
+        } else if !replacing {
             prefix.push('-');
+            replacing = true;
         }
     }
-    let room = MAX_AGENT_NAME.saturating_sub(tool.len() + 1);
+    let room = MAX_AGENT_NAME.saturating_sub(profile_id.len() + 1);
     prefix.truncate(room);
-    let prefix = prefix.trim_end_matches('-');
+    let prefix = prefix.trim_matches('-');
     if prefix.is_empty() {
         return Ok(profile);
     }
     Ok(AgentName {
-        id: format!("{prefix}-{tool}"),
+        id: format!("{prefix}-{profile_id}"),
         source: NameSource::Record,
     })
+}
+
+/// The id `--tool`'s profile names itself by (its `id`, which a profile in
+/// `AGENTBRIDGE_PROFILES_DIR` may set apart from its file name); `--tool`
+/// itself for `generic-stdio` or a tool without a profile.
+pub fn profile_id(tool: &str) -> anyhow::Result<String> {
+    Ok(load_profile(tool)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .map_or_else(|| tool.to_string(), |profile| profile.id))
 }
 
 /// The harness's working directory: `--command`, or the current directory.
@@ -1969,6 +1982,33 @@ mod tests {
         let name = agent_name(None, Some(&record), "claude-code-isolated").unwrap();
         assert_eq!(name.id.len(), 64);
         assert!(name.id.ends_with("-claude-code-isolated"), "{}", name.id);
+    }
+
+    #[test]
+    fn record_name_keeps_the_characters_slim_can_hold() {
+        let name = agent_name(None, Some("code--review_v2"), "codex-isolated").unwrap();
+        assert_eq!(name.id, "code--review_v2-codex-isolated");
+        let name = agent_name(None, Some("-/lead"), "codex-isolated").unwrap();
+        assert_eq!(name.id, "lead-codex-isolated");
+    }
+
+    #[test]
+    fn agent_is_named_after_the_loaded_profiles_id_not_its_file_name() {
+        let _guard = crate::commands::test_env_lock();
+        let profiles = tempfile::tempdir().unwrap();
+        std::fs::write(
+            profiles.path().join("alias.json"),
+            r#"{"id":"reviewer","bin":"/bin/echo","execute":{"args":["{prompt}"]}}"#,
+        )
+        .unwrap();
+        std::env::set_var("AGENTBRIDGE_PROFILES_DIR", profiles.path());
+        let alias = profile_id("alias");
+        let bundled = profile_id("claude-code");
+        let stdio = profile_id("generic-stdio");
+        std::env::remove_var("AGENTBRIDGE_PROFILES_DIR");
+        assert_eq!(alias.unwrap(), "reviewer");
+        assert_eq!(bundled.unwrap(), "claude-code");
+        assert_eq!(stdio.unwrap(), "generic-stdio");
     }
 
     #[test]
