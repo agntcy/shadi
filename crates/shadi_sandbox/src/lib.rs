@@ -213,6 +213,67 @@ impl SandboxedChild {
         }
     }
 
+    /// Ask the child to stop: `SIGTERM` to its process group on macOS/Linux,
+    /// so it can clean up first. Follow with [`kill`](Self::kill) if it is
+    /// still running after a grace period. Windows has no such signal, so
+    /// this kills there.
+    pub fn terminate(&mut self) -> io::Result<()> {
+        let span = info_span!("shadi.sandbox.terminate", pid = self.id());
+        let _guard = span.enter();
+
+        match &mut self.inner {
+            SandboxedChildInner::Std(child) => {
+                #[cfg(unix)]
+                {
+                    let pid = child.id() as i32;
+                    // SAFETY: killpg and kill only send a signal.
+                    if unsafe { libc::killpg(pid, libc::SIGTERM) } == 0 {
+                        return Ok(());
+                    }
+                    // Not a process group leader (test/coverage mode).
+                    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+                        return Ok(());
+                    }
+                    Err(io::Error::last_os_error())
+                }
+                #[cfg(not(unix))]
+                child.kill()
+            }
+            #[cfg(target_os = "windows")]
+            SandboxedChildInner::Windows(child) => child.kill(),
+        }
+    }
+
+    /// Whether a process is left in the child's process group, which can
+    /// outlive the child itself (macOS/Linux). [`kill`](Self::kill) still
+    /// reaches it after the child was reaped: the group ID is not reused
+    /// while the group has members. Always `false` on Windows, where the job
+    /// object ends with the child.
+    ///
+    /// Call it only once the child itself was reaped: it first reaps group
+    /// members that are this process's own children and have exited. On
+    /// Linux a zombie still counts as a member, and when `shadictl` runs as
+    /// PID 1 (a container without init), the members the child leaves behind
+    /// become its children, so nothing else would reap them.
+    pub fn group_alive(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let pgid = self.id() as i32;
+            loop {
+                let mut status = 0;
+                // SAFETY: WNOHANG only reaps exited children of this process
+                // in the group; it returns 0 or -1 (ECHILD) once none is left.
+                if unsafe { libc::waitpid(-pgid, &mut status, libc::WNOHANG) } <= 0 {
+                    break;
+                }
+            }
+            // SAFETY: signal 0 only checks that the group exists.
+            unsafe { libc::killpg(pgid, 0) == 0 }
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     pub fn id(&self) -> u32 {
         match &self.inner {
             SandboxedChildInner::Std(child) => child.id(),
@@ -287,6 +348,36 @@ mod tests {
         wrapped.kill().expect("killpg kill");
         let status = wrapped.wait().expect("wait");
         assert!(!status.success(), "killed process must not succeed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_of_our_own_zombies_is_not_alive() {
+        use std::os::unix::process::CommandExt;
+        let leader = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn leader");
+        let pgid = leader.id() as i32;
+        // A group member that is our own child, as a member the child leaves
+        // behind is for shadictl running as PID 1.
+        let mut member = Command::new("sleep")
+            .arg("30")
+            .process_group(pgid)
+            .spawn()
+            .expect("spawn member");
+        let mut wrapped = SandboxedChild::from_std(leader);
+        assert!(wrapped.group_alive());
+
+        wrapped.kill().expect("killpg kill");
+        wrapped.wait().expect("wait leader");
+        // The member is now a zombie nobody else will reap.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let alive = wrapped.group_alive();
+        let _ = member.kill();
+        let _ = member.wait();
+        assert!(!alive, "a group of zombies counted as alive");
     }
 
     #[test]
