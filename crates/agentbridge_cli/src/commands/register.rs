@@ -239,7 +239,7 @@ pub fn agent_name(
     };
     // `org/skill` → `org-skill`: the characters SLIM can hold stay as they
     // are, so distinct valid names stay distinct; each run of others becomes
-    // one `-`. No `-` at either end.
+    // one `-`. Only a leading `-` goes, which a name may not start with.
     let mut prefix = String::new();
     let mut replacing = false;
     for c in record_name.chars() {
@@ -253,7 +253,7 @@ pub fn agent_name(
     }
     let room = MAX_AGENT_NAME.saturating_sub(profile_id.len() + 1);
     prefix.truncate(room);
-    let prefix = prefix.trim_matches('-');
+    let prefix = prefix.trim_start_matches('-');
     if prefix.is_empty() {
         return Ok(profile);
     }
@@ -2153,6 +2153,8 @@ mod tests {
         assert_eq!(name.id, "code--review_v2-codex-isolated");
         let name = agent_name(None, Some("-/lead"), "codex-isolated").unwrap();
         assert_eq!(name.id, "lead-codex-isolated");
+        let name = agent_name(None, Some("code-review-"), "codex-isolated").unwrap();
+        assert_eq!(name.id, "code-review--codex-isolated");
     }
 
     #[test]
