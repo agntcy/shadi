@@ -251,16 +251,24 @@ pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
         anyhow::bail!("ASSEMBLY inferred an unmapped class; CONVERGE will not start");
     }
 
-    let effective_quorum = quorum.min(agents.len());
-    let config = DevelopmentEngineConfig::new(
-        agents.iter().map(|a| a.id.clone()),
-        effective_quorum,
-        max_rounds,
-    );
+    let (runtime, epoch) = run_development(goal, &agents, quorum.min(agents.len()), max_rounds)?;
+    finish(&runtime, epoch, output, require_human)
+}
+
+/// Rounds of proposals and ballots until one selects an artifact. Returns
+/// the runtime and the epoch to read the artifact from.
+fn run_development(
+    goal: &str,
+    agents: &[AgentEntry],
+    quorum: usize,
+    max_rounds: u64,
+) -> anyhow::Result<(MasRuntime<DevelopmentEngine>, u64)> {
+    let config =
+        DevelopmentEngineConfig::new(agents.iter().map(|a| a.id.clone()), quorum, max_rounds);
     let mut runtime = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
 
     println!(
-        "Starting autonomous coordination: {} agents, quorum={effective_quorum}, max_rounds={max_rounds}",
+        "Starting autonomous coordination: {} agents, quorum={quorum}, max_rounds={max_rounds}",
         agents.len()
     );
     println!("Goal: {goal}\n");
@@ -270,7 +278,7 @@ pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
 
         // Collect all proposals for this epoch (sequential — each agent calls its LLM).
         let mut proposals: Vec<(AgentId, String)> = Vec::new();
-        for agent in &agents {
+        for agent in agents {
             let prompt = proposal_prompt(goal, epoch, &proposals);
             match invoke_tool(&agent.tool, &prompt, &agent.id.0, "prop", epoch) {
                 Ok(code) => {
@@ -284,27 +292,19 @@ pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
         if proposals.is_empty() {
             anyhow::bail!("all agents failed to propose at epoch {epoch}");
         }
-
-        // Staggered voting: apply proposals 1..N-1 to the engine (won't finalize
-        // when quorum=N), then run a single vote round where ALL agents evaluate
-        // all proposals, then apply the Nth proposal to trigger finalization with
-        // votes already counted.
-        println!("\n─── Epoch {epoch}: endorsement phase ───");
-
-        let last_idx = proposals.len().saturating_sub(1);
-        let proposal_list = build_proposal_list(&proposals);
-
-        // Apply proposals 1..N-1 (these do not trigger finalization with quorum=N).
-        for (proposer_id, code) in &proposals[..last_idx] {
-            let ev = proposal_event(proposer_id, epoch, code.as_bytes());
-            runtime.apply(ev);
+        for (proposer_id, code) in &proposals {
+            runtime.apply(proposal_event(proposer_id, epoch, code.as_bytes()));
         }
 
-        // Vote round: ALL agents evaluate all proposals and endorse one.
-        // This runs before the last proposal so votes are counted at finalization.
+        // Every agent casts a ballot, an abstention when its vote fails, so
+        // the round closes on the last one.
+        println!("\n─── Epoch {epoch}: endorsement phase ───");
+        let proposal_list = build_proposal_list(&proposals);
         let vote_prompt_str = vote_prompt(goal, &proposal_list, epoch);
-        for voter in &agents {
-            match invoke_tool(&voter.tool, &vote_prompt_str, &voter.id.0, "vote", epoch) {
+        let mut finalized = None;
+        for voter in agents {
+            let reply = invoke_tool(&voter.tool, &vote_prompt_str, &voter.id.0, "vote", epoch);
+            let ballot = match reply {
                 Ok(endorsee_raw) => {
                     let endorsee = endorsee_raw.trim().to_string();
                     let valid = proposals.iter().any(|(id, _)| id.0 == endorsee);
@@ -315,47 +315,44 @@ pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
                         if valid {
                             ""
                         } else {
-                            " (unrecognised — skipped)"
+                            " (unrecognised — counted as an abstention)"
                         }
                     );
-                    let ev = vote_event(&voter.id, &endorsee, epoch, valid);
-                    runtime.apply(ev);
+                    vote_event(&voter.id, &endorsee, epoch, valid)
                 }
-                Err(e) => println!("  [{}] vote failed: {e}", voter.id.0),
+                Err(e) => {
+                    println!("  [{}] vote failed: {e}", voter.id.0);
+                    vote_event(&voter.id, "", epoch, false)
+                }
+            };
+            if let EventOutcome::Finalized(summary) = runtime.apply(ballot) {
+                finalized = Some(summary);
             }
         }
 
-        // Apply the last proposal — triggers finalization with votes counted.
-        let (last_proposer, last_code) = &proposals[last_idx];
-        let ev = proposal_event(last_proposer, epoch, last_code.as_bytes());
-        let outcome = runtime.apply(ev);
-        if let EventOutcome::Finalized(ref s) = outcome {
-            println!(
-                "\n  🏆 Finalized at epoch {} ({} participants)",
-                s.epoch.0, s.participants
-            );
-        } else {
-            println!("\n  (quorum not met — will retry next round)");
-        }
-
-        // Check outcome of the last proposal.
-        let engine_finalized = runtime.engine().selected_artifact(Epoch(epoch)).is_some();
-        if engine_finalized {
-            return finish(&runtime, epoch, output, require_human);
-        }
-
-        println!();
-        if epoch + 1 >= max_rounds {
-            println!("Max rounds reached — force-finalizing best artifact.");
+        match finalized {
+            Some(s) if s.selected_value as usize >= quorum => {
+                println!(
+                    "\n  🏆 Finalized at epoch {} ({} endorsements of {})",
+                    s.epoch.0,
+                    s.selected_value,
+                    agents.len()
+                );
+                return Ok((runtime, epoch));
+            }
+            Some(s) => {
+                println!(
+                    "\n  Max rounds reached — selected the most endorsed artifact \
+                     ({} endorsements, quorum {quorum})",
+                    s.selected_value
+                );
+                return Ok((runtime, epoch));
+            }
+            None => println!("\n  (quorum not met — will retry next round)\n"),
         }
     }
 
-    finish(
-        &runtime,
-        max_rounds.saturating_sub(1),
-        output,
-        require_human,
-    )
+    Ok((runtime, max_rounds.saturating_sub(1)))
 }
 
 fn run_assembly(
@@ -1151,6 +1148,55 @@ mod tests {
                 tool: Arc::new(ReplyTool(reply)),
             })
             .collect()
+    }
+
+    /// Agents named after `replies`' keys, each answering every prompt with
+    /// its value: the artifact it proposes and the agent it endorses.
+    fn named_agents(replies: &[(&'static str, &'static str)]) -> Vec<AgentEntry> {
+        replies
+            .iter()
+            .map(|(id, reply)| AgentEntry {
+                id: AgentId::from(*id),
+                tool: Arc::new(ReplyTool(reply)),
+            })
+            .collect()
+    }
+
+    /// agntcy/shadi#319: with `--quorum` below the agent count, every vote
+    /// arrived after the round had closed on proposals.
+    #[test]
+    fn a_quorum_below_the_agent_count_counts_the_votes() {
+        let agents = named_agents(&[
+            ("alpha", "charlie"),
+            ("bravo", "charlie"),
+            ("charlie", "charlie"),
+        ]);
+        let (runtime, epoch) = run_development("goal", &agents, 2, 5).expect("run");
+
+        assert_eq!(epoch, 0);
+        assert_eq!(
+            runtime.engine().selected_artifact(Epoch(0)),
+            Some(b"charlie".as_slice())
+        );
+        let counters = runtime.engine().counters();
+        assert_eq!((counters.applied, counters.rejected), (6, 0));
+    }
+
+    #[test]
+    fn a_round_without_quorum_is_retried_and_the_last_takes_the_most_endorsed() {
+        let agents = named_agents(&[
+            ("alpha", "alpha"),
+            ("bravo", "bravo"),
+            ("charlie", "charlie"),
+        ]);
+        let (runtime, epoch) = run_development("goal", &agents, 2, 2).expect("run");
+
+        assert_eq!(epoch, 1);
+        assert_eq!(runtime.engine().selected_artifact(Epoch(0)), None);
+        assert_eq!(
+            runtime.engine().selected_artifact(Epoch(1)),
+            Some(b"alpha".as_slice())
+        );
     }
 
     #[test]

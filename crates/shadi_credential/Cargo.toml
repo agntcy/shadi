@@ -10,14 +10,20 @@ repository.workspace = true
 [lib]
 name = "shadi_credential"
 
+[features]
+testkit = []
+
 [dependencies]
 agent_secrets = { package = "agntcy-shadi-agent-secrets", version = "0.4.2", path = "../agent_secrets" }
 shadi_identity = { package = "agntcy-shadi-identity", version = "0.4.0", path = "../shadi_identity" }
 base64 = "0.23"
 ed25519-dalek = "2.2"
+getrandom = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11"
 thiserror = "1.0"
+url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 
 # Mirrors shadi_memory's crypto provider choice; see the comment there.

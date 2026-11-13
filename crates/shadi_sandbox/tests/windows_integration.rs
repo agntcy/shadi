@@ -42,8 +42,7 @@ mod windows_integration {
 
     /// Wait for the parent to drop `go.txt` beside the script, then read the
     /// shared file: 0 if the grant still works, 1 if it was lost, 2 if the
-    /// parent never signalled. Nothing here leaves cmd's own builtins, because
-    /// a sandboxed process cannot start another image (agntcy/shadi#538).
+    /// parent never signalled.
     const READER_SCRIPT: &str = concat!(
         "@echo off\r\n",
         "for /l %%i in (1,1,1000000) do if exist \"%~dp0go.txt\" goto signalled\r\n",
@@ -166,6 +165,82 @@ mod windows_integration {
         );
     }
 
+    /// `path`'s DACL in SDDL, as `icacls /save` writes it: unlike [`dacl`]
+    /// it shows which ACEs are inherited (`ID`).
+    fn sddl(path: &std::path::Path) -> String {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let saved = scratch.path().join("acl.txt");
+        let output = Command::new("icacls")
+            .arg(path)
+            .arg("/save")
+            .arg(&saved)
+            .output()
+            .expect("run icacls");
+        assert!(
+            output.status.success(),
+            "icacls /save failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        // UTF-16LE: the file's name on one line, its SDDL on the next.
+        let bytes = std::fs::read(&saved).expect("read the saved ACL");
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        text.lines()
+            .nth(1)
+            .unwrap_or_else(|| panic!("no SDDL saved for {}: {text:?}", path.display()))
+            .trim()
+            .to_string()
+    }
+
+    /// A sandboxed process starts another image although no policy path
+    /// covers its working directory, here the test's own (agntcy/shadi#538).
+    #[test]
+    fn a_sandboxed_process_starts_another_image() {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "cmd.exe", "/C", "exit", "7"]);
+        let mut child =
+            spawn_sandboxed(&mut command, &SandboxPolicy::new()).expect("the sandbox should start");
+        assert_eq!(child.wait().expect("wait").code(), Some(7));
+    }
+
+    /// The working directory gets traverse and its own attributes alone:
+    /// nothing in it is readable,
+    /// and its DACL is as it was once the sandbox exits, inherited ACEs
+    /// included (agntcy/shadi#538, #545).
+    #[test]
+    fn an_ungranted_working_dir_is_opened_but_not_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("secret.txt"), b"secret").expect("write secret");
+        let before = sddl(dir.path());
+
+        let mut starts = Command::new("cmd");
+        starts.current_dir(dir.path());
+        starts.args(["/C", "cmd.exe", "/C", "exit", "7"]);
+        let mut child =
+            spawn_sandboxed(&mut starts, &SandboxPolicy::new()).expect("the sandbox should start");
+        assert_eq!(child.wait().expect("wait").code(), Some(7));
+
+        let mut reads = Command::new("cmd");
+        reads.current_dir(dir.path());
+        reads.args(["/C", "type", "secret.txt"]);
+        let mut child =
+            spawn_sandboxed(&mut reads, &SandboxPolicy::new()).expect("the sandbox should start");
+        assert!(
+            !child.wait().expect("wait").success(),
+            "a file in the working directory must stay unreadable"
+        );
+
+        assert_eq!(
+            sddl(dir.path()),
+            before,
+            "the working directory's DACL changed"
+        );
+    }
+
     /// A capability array that CreateProcessW rejects stops every sandbox that
     /// is allowed network from starting at all (agntcy/shadi#531). `net_block`
     /// is false by default, so this is the default policy.
@@ -176,6 +251,22 @@ mod windows_integration {
         let mut child = spawn_sandboxed(&mut command, &SandboxPolicy::new())
             .expect("a network-enabled sandbox should spawn");
         assert!(child.wait().expect("wait").success());
+    }
+
+    /// Proxy mode cannot be enforced inside an AppContainer, so it must fail
+    /// rather than run with proxy env vars nothing honours (agntcy/shadi#530).
+    #[test]
+    fn proxy_mode_is_refused() {
+        let policy = SandboxPolicy::new().with_net_proxy_port(9050);
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        match spawn_sandboxed(&mut command, &policy) {
+            Err(SandboxError::ApplyFailed(message)) => {
+                assert!(message.contains("loopback exemption"), "{message}");
+            }
+            Err(error) => panic!("proxy mode should be refused, got {error:?}"),
+            Ok(_) => panic!("proxy mode should be refused, but the sandbox started"),
+        }
     }
 
     #[test]

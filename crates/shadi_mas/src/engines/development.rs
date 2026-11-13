@@ -8,17 +8,24 @@ use crate::types::{
 
 /// Configuration for the `DevelopmentEngine`.
 ///
-/// Agents submit code artifacts (as `ExternalBytes`) each round. When enough
-/// participants have submitted, the engine finalizes and selects the artifact
-/// that received the most acceptance votes (`ToolResult { accepted: true }`).
-/// If no votes are cast, the most-recently submitted artifact is selected.
+/// Each round, agents submit code artifacts (as `ExternalBytes`) and every
+/// participant casts a ballot: `ToolResult { accepted: true }` endorses the
+/// agent named in `tool_name`, `accepted: false` abstains. Once every
+/// participant has cast one, the most endorsed artifact wins if it has at
+/// least `quorum` endorsements. Otherwise the round closes without a winner
+/// and the next one starts, until the last of `max_rounds` selects the most
+/// endorsed artifact whatever its count. Ties go to the alphabetically first
+/// agent.
+///
+/// With no `participants`, nobody can tell when everyone has voted, so a
+/// round closes only when an artifact reaches `quorum`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DevelopmentEngineConfig {
     pub participants: BTreeSet<AgentId>,
-    /// Minimum number of submissions needed before finalization is possible.
+    /// Endorsements the winning artifact needs.
     pub quorum: usize,
-    /// Maximum number of rounds before the engine force-finalizes with the
-    /// best artifact seen so far, preventing infinite loops.
+    /// Rounds before the last one selects the most endorsed artifact without
+    /// `quorum`.
     pub max_rounds: u64,
 }
 
@@ -35,29 +42,19 @@ impl DevelopmentEngineConfig {
     }
 }
 
-/// Per-participant artifact submission tracked within an epoch.
-#[derive(Clone, Debug)]
-struct ArtifactEntry {
-    artifact: Vec<u8>,
-    votes_for: usize,
-}
-
-/// Coordinates multiple agents toward a shared software artifact.
-///
-/// Each agent submits a code proposal via `SemanticPayload::ExternalBytes`.
-/// Agents endorse a proposal via `SemanticPayload::ToolResult { accepted: true }`.
-/// Finalization selects the artifact with the most votes; ties break toward
-/// the first submission. Finalized artifacts are retrievable via
-/// [`selected_artifact`].
+/// Coordinates multiple agents toward a shared software artifact, as
+/// [`DevelopmentEngineConfig`] describes. A finalization's
+/// `selected_value` is the winner's endorsement count. Finalized artifacts
+/// are retrievable via [`selected_artifact`](Self::selected_artifact).
 #[derive(Clone, Debug)]
 pub struct DevelopmentEngine {
     active_epoch: Epoch,
     config: DevelopmentEngineConfig,
     seen_events: BTreeSet<EventId>,
     /// Proposals indexed by submitting participant.
-    proposals: BTreeMap<AgentId, ArtifactEntry>,
-    /// Acceptance votes: voter → participant they endorse.
-    votes: BTreeMap<AgentId, AgentId>,
+    proposals: BTreeMap<AgentId, Vec<u8>>,
+    /// Ballots: voter → the participant they endorse, `None` to abstain.
+    ballots: BTreeMap<AgentId, Option<AgentId>>,
     /// Finalized artifacts keyed by epoch.
     selected: BTreeMap<Epoch, Vec<u8>>,
     counters: RuntimeCounters,
@@ -70,7 +67,7 @@ impl DevelopmentEngine {
             config,
             seen_events: BTreeSet::new(),
             proposals: BTreeMap::new(),
-            votes: BTreeMap::new(),
+            ballots: BTreeMap::new(),
             selected: BTreeMap::new(),
             counters: RuntimeCounters::default(),
         }
@@ -85,79 +82,95 @@ impl DevelopmentEngine {
         self.selected.get(&epoch).map(|v| v.as_slice())
     }
 
-    fn try_finalize(&mut self) -> Option<FinalizationSummary> {
-        if self.proposals.len() < self.config.quorum {
-            return None;
-        }
+    fn knows(&self, agent: &AgentId) -> bool {
+        self.config.participants.is_empty() || self.config.participants.contains(agent)
+    }
 
-        // Tally acceptance votes.
-        for endorsee in self.votes.values() {
-            if let Some(entry) = self.proposals.get_mut(endorsee) {
-                entry.votes_for += 1;
+    /// The most endorsed proposal and its endorsements; the first in agent
+    /// order on a tie.
+    fn leader(&self) -> Option<(AgentId, usize)> {
+        let mut leader: Option<(&AgentId, usize)> = None;
+        for agent in self.proposals.keys() {
+            let endorsements = self
+                .ballots
+                .values()
+                .filter(|endorsee| endorsee.as_ref() == Some(agent))
+                .count();
+            if leader.is_none_or(|(_, most)| endorsements > most) {
+                leader = Some((agent, endorsements));
             }
         }
+        leader.map(|(agent, endorsements)| (agent.clone(), endorsements))
+    }
 
-        // Select the proposal with the most votes; tie-break by insertion order
-        // (BTreeMap is sorted by key, so the alphabetically first AgentId wins ties).
-        let winner = self
-            .proposals
+    /// Close the round once its outcome is known: every participant has
+    /// voted or, with an open participant set, an artifact reached quorum.
+    fn try_close(&mut self) -> EventOutcome {
+        let leader = self.leader();
+        let reached = leader
+            .as_ref()
+            .is_some_and(|(_, endorsements)| *endorsements >= self.config.quorum);
+        if self.config.participants.is_empty() {
+            return match leader {
+                Some(winner) if reached => self.finalize(winner),
+                _ => EventOutcome::Applied,
+            };
+        }
+        if !self
+            .config
+            .participants
             .iter()
-            .max_by_key(|(_, e)| e.votes_for)
-            .map(|(_, e)| e.artifact.clone())
-            .unwrap_or_default();
+            .all(|participant| self.ballots.contains_key(participant))
+        {
+            return EventOutcome::Applied;
+        }
+        let last_round = self.active_epoch.0 + 1 >= self.config.max_rounds;
+        match leader {
+            Some(winner) if reached || last_round => self.finalize(winner),
+            _ => {
+                self.next_round();
+                EventOutcome::Applied
+            }
+        }
+    }
 
+    fn finalize(&mut self, (winner, endorsements): (AgentId, usize)) -> EventOutcome {
         let summary = FinalizationSummary {
             epoch: self.active_epoch,
             participants: self.proposals.len(),
-            selected_value: self.proposals.len() as i64,
+            selected_value: endorsements as i64,
         };
-        self.selected.insert(self.active_epoch, winner);
-        self.proposals.clear();
-        self.votes.clear();
-        self.active_epoch = Epoch(self.active_epoch.0 + 1);
+        let artifact = self.proposals.remove(&winner).unwrap_or_default();
+        self.selected.insert(self.active_epoch, artifact);
         self.counters.finalized += 1;
-        Some(summary)
+        self.next_round();
+        EventOutcome::Finalized(summary)
     }
 
-    fn max_rounds_exceeded(&self) -> bool {
-        self.active_epoch.0 >= self.config.max_rounds
+    fn next_round(&mut self) {
+        self.proposals.clear();
+        self.ballots.clear();
+        self.active_epoch = Epoch(self.active_epoch.0 + 1);
     }
 
     fn accept_proposal(&mut self, participant: AgentId, artifact: Vec<u8>) -> EventOutcome {
-        if !self.config.participants.is_empty()
-            && !self.config.participants.contains(&participant)
-        {
+        if !self.knows(&participant) {
             self.counters.rejected += 1;
             return EventOutcome::Rejected(RejectReason::UnknownParticipant);
         }
-
-        self.proposals.insert(
-            participant,
-            ArtifactEntry {
-                artifact,
-                votes_for: 0,
-            },
-        );
-        self.counters.applied += 1;
-
-        if self.max_rounds_exceeded() {
-            // Force finalize even without quorum.
-            return match self.try_finalize() {
-                Some(summary) => EventOutcome::Finalized(summary),
-                None => EventOutcome::Applied,
-            };
-        }
-
-        match self.try_finalize() {
-            Some(summary) => EventOutcome::Finalized(summary),
-            None => EventOutcome::Applied,
-        }
-    }
-
-    fn accept_vote(&mut self, voter: AgentId, endorsee: AgentId) -> EventOutcome {
-        self.votes.insert(voter, endorsee);
+        self.proposals.insert(participant, artifact);
         self.counters.applied += 1;
         EventOutcome::Applied
+    }
+
+    fn accept_ballot(&mut self, voter: AgentId, endorsee: Option<AgentId>) -> EventOutcome {
+        if !self.knows(&voter) {
+            self.counters.rejected += 1;
+            return EventOutcome::Rejected(RejectReason::UnknownParticipant);
+        }
+        self.ballots.insert(voter, endorsee);
+        self.counters.applied += 1;
+        self.try_close()
     }
 }
 
@@ -218,20 +231,16 @@ impl CoordinationEngine for DevelopmentEngine {
                 };
                 self.accept_proposal(participant, bytes)
             }
-            // Vote: ToolResult.accepted=true means "I endorse tool_name (= AgentId)".
+            // Ballot: accepted=true endorses tool_name (an AgentId), false abstains.
             SemanticPayload::ToolResult {
                 tool_name,
-                accepted: true,
+                accepted,
             } => {
                 let voter = match &event.metadata.source {
                     crate::types::EventSource::Peer(id) => id.clone(),
                     _ => AgentId("local".to_string()),
                 };
-                self.accept_vote(voter, AgentId(tool_name))
-            }
-            SemanticPayload::ToolResult { accepted: false, .. } => {
-                self.counters.applied += 1;
-                EventOutcome::Applied
+                self.accept_ballot(voter, accepted.then_some(AgentId(tool_name)))
             }
             _ => {
                 self.counters.applied += 1;
@@ -252,16 +261,37 @@ mod tests {
     use crate::types::{EventMetadata, EventSource};
 
     fn engine() -> MasRuntime<DevelopmentEngine> {
+        engine_with(3, 10)
+    }
+
+    fn engine_with(quorum: usize, max_rounds: u64) -> MasRuntime<DevelopmentEngine> {
         let config = DevelopmentEngineConfig::new(
             [
                 AgentId::from("claude"),
                 AgentId::from("copilot"),
                 AgentId::from("codex"),
             ],
-            3,
-            10,
+            quorum,
+            max_rounds,
         );
         MasRuntime::new(DevelopmentEngine::new(Epoch(0), config))
+    }
+
+    fn propose_all(rt: &mut MasRuntime<DevelopmentEngine>, epoch: u64) {
+        for agent in ["claude", "copilot", "codex"] {
+            let id = format!("p-{agent}-{epoch}");
+            let outcome = rt.apply(proposal(&id, epoch, agent, agent.as_bytes()));
+            assert_eq!(outcome, EventOutcome::Applied);
+        }
+    }
+
+    fn abstain(id: &str, epoch: u64, voter: &str) -> SemanticEvent {
+        let mut event = vote(id, epoch, voter, "");
+        event.payload = SemanticPayload::ToolResult {
+            tool_name: String::new(),
+            accepted: false,
+        };
+        event
     }
 
     fn proposal(id: &str, epoch: u64, agent: &str, code: &[u8]) -> SemanticEvent {
@@ -294,40 +324,113 @@ mod tests {
     }
 
     #[test]
-    fn finalizes_when_quorum_proposals_received() {
+    fn finalizes_once_every_participant_has_voted() {
         let mut rt = engine();
+        propose_all(&mut rt, 0);
+        assert_eq!(
+            rt.apply(vote("v1", 0, "claude", "codex")),
+            EventOutcome::Applied
+        );
+        assert_eq!(
+            rt.apply(vote("v2", 0, "copilot", "codex")),
+            EventOutcome::Applied
+        );
 
-        assert_eq!(rt.apply(proposal("p1", 0, "claude", b"fn foo() {}")), EventOutcome::Applied);
-        assert_eq!(rt.apply(proposal("p2", 0, "copilot", b"fn foo() -> i32 { 0 }")), EventOutcome::Applied);
-
-        let outcome = rt.apply(proposal("p3", 0, "codex", b"fn foo() -> i32 { 42 }"));
-        assert!(matches!(outcome, EventOutcome::Finalized(_)));
+        let outcome = rt.apply(vote("v3", 0, "codex", "codex"));
+        assert!(matches!(outcome, EventOutcome::Finalized(ref s) if s.selected_value == 3));
         assert_eq!(rt.engine().active_epoch(), Epoch(1));
+        assert_eq!(
+            rt.engine().selected_artifact(Epoch(0)),
+            Some(b"codex".as_slice())
+        );
+    }
+
+    /// agntcy/shadi#319: a quorum below the participant count used to close
+    /// the round on proposals, so every vote landed after it and was refused.
+    #[test]
+    fn a_quorum_below_the_participant_count_counts_every_vote() {
+        let mut rt = engine_with(2, 10);
+        propose_all(&mut rt, 0);
+        rt.apply(vote("v1", 0, "claude", "codex"));
+        rt.apply(vote("v2", 0, "copilot", "codex"));
+        let outcome = rt.apply(vote("v3", 0, "codex", "codex"));
+
+        assert!(matches!(outcome, EventOutcome::Finalized(ref s) if s.selected_value == 3));
+        assert_eq!(
+            rt.engine().selected_artifact(Epoch(0)),
+            Some(b"codex".as_slice())
+        );
+        let counters = rt.engine().counters();
+        assert_eq!((counters.applied, counters.rejected), (6, 0));
     }
 
     #[test]
-    fn selected_artifact_accessible_after_finalization() {
-        let mut rt = engine();
-        rt.apply(proposal("p1", 0, "claude", b"fn a() {}"));
-        rt.apply(proposal("p2", 0, "copilot", b"fn b() {}"));
-        rt.apply(proposal("p3", 0, "codex", b"fn c() {}"));
+    fn the_most_endorsed_artifact_wins() {
+        let mut rt = engine_with(2, 10);
+        propose_all(&mut rt, 0);
+        rt.apply(vote("v1", 0, "claude", "claude"));
+        rt.apply(vote("v2", 0, "copilot", "claude"));
+        rt.apply(vote("v3", 0, "codex", "copilot"));
 
-        // With no votes, any artifact is valid — just assert one is stored.
-        assert!(rt.engine().selected_artifact(Epoch(0)).is_some());
+        assert_eq!(
+            rt.engine().selected_artifact(Epoch(0)),
+            Some(b"claude".as_slice())
+        );
     }
 
     #[test]
-    fn votes_influence_artifact_selection() {
-        let mut rt = engine();
-        rt.apply(proposal("p1", 0, "claude", b"fn winner() {}"));
-        rt.apply(proposal("p2", 0, "copilot", b"fn loser() {}"));
-        // Votes before third proposal
-        rt.apply(vote("v1", 0, "codex", "claude"));
-        // Third proposal triggers finalization
-        rt.apply(proposal("p3", 0, "codex", b"fn also() {}"));
+    fn ties_go_to_the_alphabetically_first_agent() {
+        let mut rt = engine_with(1, 10);
+        propose_all(&mut rt, 0);
+        rt.apply(vote("v1", 0, "claude", "copilot"));
+        rt.apply(vote("v2", 0, "copilot", "codex"));
+        rt.apply(abstain("v3", 0, "codex"));
 
-        let artifact = rt.engine().selected_artifact(Epoch(0)).unwrap();
-        assert_eq!(artifact, b"fn winner() {}");
+        assert_eq!(
+            rt.engine().selected_artifact(Epoch(0)),
+            Some(b"codex".as_slice())
+        );
+    }
+
+    #[test]
+    fn a_round_without_quorum_closes_and_the_next_one_starts() {
+        let mut rt = engine_with(2, 10);
+        propose_all(&mut rt, 0);
+        rt.apply(vote("v1", 0, "claude", "claude"));
+        rt.apply(vote("v2", 0, "copilot", "copilot"));
+        assert_eq!(rt.apply(abstain("v3", 0, "codex")), EventOutcome::Applied);
+
+        assert_eq!(rt.engine().active_epoch(), Epoch(1));
+        assert_eq!(rt.engine().selected_artifact(Epoch(0)), None);
+        propose_all(&mut rt, 1);
+        assert_eq!(
+            rt.apply(proposal("p-late", 0, "claude", b"late")),
+            EventOutcome::Rejected(RejectReason::StaleEpoch { current: Epoch(1) })
+        );
+    }
+
+    #[test]
+    fn the_last_round_selects_the_most_endorsed_artifact_without_quorum() {
+        let mut rt = engine_with(3, 1);
+        propose_all(&mut rt, 0);
+        rt.apply(vote("v1", 0, "claude", "copilot"));
+        rt.apply(vote("v2", 0, "copilot", "copilot"));
+        let outcome = rt.apply(abstain("v3", 0, "codex"));
+
+        assert!(matches!(outcome, EventOutcome::Finalized(ref s) if s.selected_value == 2));
+        assert_eq!(
+            rt.engine().selected_artifact(Epoch(0)),
+            Some(b"copilot".as_slice())
+        );
+    }
+
+    #[test]
+    fn an_unknown_voter_is_rejected() {
+        let mut rt = engine();
+        assert_eq!(
+            rt.apply(vote("v-mallory", 0, "mallory", "claude")),
+            EventOutcome::Rejected(RejectReason::UnknownParticipant)
+        );
     }
 
     #[test]
@@ -403,8 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn local_source_submits_proposal_and_finalizes() {
-        // Open participant set (empty), quorum=1 → one Local proposal finalizes.
+    fn an_open_participant_set_finalizes_at_quorum() {
         let config = DevelopmentEngineConfig::new([], 1, 10);
         let mut rt = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
         let ev = SemanticEvent {
@@ -417,7 +519,21 @@ mod tests {
             },
             payload: SemanticPayload::ExternalBytes(b"local code".to_vec()),
         };
-        assert!(matches!(rt.apply(ev), EventOutcome::Finalized(_)));
+        assert_eq!(rt.apply(ev), EventOutcome::Applied);
+        let endorse = SemanticEvent {
+            pattern: PatternKind::Development,
+            metadata: EventMetadata {
+                event_id: EventId::from("v-local"),
+                correlation_id: None,
+                epoch: Epoch(0),
+                source: EventSource::Local,
+            },
+            payload: SemanticPayload::ToolResult {
+                tool_name: "local".to_string(),
+                accepted: true,
+            },
+        };
+        assert!(matches!(rt.apply(endorse), EventOutcome::Finalized(_)));
         assert_eq!(rt.engine().selected_artifact(Epoch(0)), Some(b"local code".as_slice()));
     }
 
@@ -440,10 +556,11 @@ mod tests {
 
     #[test]
     fn finalized_epoch_rejected_after_quorum() {
-        let mut rt = engine();
-        rt.apply(proposal("p1", 0, "claude", b"fn a() {}"));
-        rt.apply(proposal("p2", 0, "copilot", b"fn b() {}"));
-        rt.apply(proposal("p3", 0, "codex", b"fn c() {}"));
+        let mut rt = engine_with(1, 10);
+        propose_all(&mut rt, 0);
+        rt.apply(vote("v1", 0, "claude", "claude"));
+        rt.apply(vote("v2", 0, "copilot", "claude"));
+        rt.apply(vote("v3", 0, "codex", "claude"));
         // Epoch 0 is finalized; late event must be rejected.
         let late = proposal("p-late", 0, "claude", b"fn late() {}");
         assert_eq!(
@@ -453,23 +570,13 @@ mod tests {
     }
 
     #[test]
-    fn force_finalize_when_max_rounds_exceeded() {
-        // max_rounds=0: epoch 0 >= 0, so force-finalize fires immediately.
-        // quorum=1 → one proposal is enough.
+    fn a_proposal_alone_never_finalizes() {
         let config = DevelopmentEngineConfig::new([AgentId::from("claude")], 1, 0);
-        let mut rt = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
-        let outcome = rt.apply(proposal("p1", 0, "claude", b"fn forced() {}"));
-        assert!(matches!(outcome, EventOutcome::Finalized(_)));
-        assert_eq!(rt.engine().selected_artifact(Epoch(0)), Some(b"fn forced() {}".as_slice()));
-    }
-
-    #[test]
-    fn force_finalize_applied_when_quorum_not_met() {
-        // max_rounds=0 triggers force-finalize, but quorum=10 → try_finalize returns None.
-        let config = DevelopmentEngineConfig::new([], 10, 0);
         let mut rt = MasRuntime::new(DevelopmentEngine::new(Epoch(0), config));
         let outcome = rt.apply(proposal("p1", 0, "claude", b"fn code() {}"));
         assert_eq!(outcome, EventOutcome::Applied);
+        let outcome = rt.apply(abstain("v1", 0, "claude"));
+        assert!(matches!(outcome, EventOutcome::Finalized(ref s) if s.selected_value == 0));
     }
 
     #[test]

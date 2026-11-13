@@ -12,10 +12,24 @@ use std::time::Duration;
 
 use a2a::{SendMessageResponse, TaskState};
 
+/// Outermost bound on a challenge. The query inside it has its own, smaller
+/// cap where it is parsed; this one keeps an oversized envelope from ever
+/// being held.
+pub const MAX_CHALLENGE_BYTES: usize = 32 * 1024;
 /// How many times the client will re-prove or escalate before denying.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 2;
 /// Wall-clock budget for an escalate prompt. Expired escalate is a deny.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What a parked task hands the next send attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AuthChallenge {
+    /// The parked task, so the retry lands on it instead of minting a new one.
+    pub task_id: String,
+    /// Opaque challenge the listener attached, if it attached one.
+    pub challenge: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthRequiredPolicy {
@@ -126,7 +140,8 @@ pub fn is_auth_required(response: &SendMessageResponse) -> bool {
 
 /// Drive send attempts until the task leaves `AUTH_REQUIRED` or is denied.
 ///
-/// `send` is called for every attempt (including the first). `escalate` runs
+/// `send` is called for every attempt (including the first, which gets `None`;
+/// later ones get what the previous parked response carried). `escalate` runs
 /// only when policy is `Ask` and the first re-prove was not enough.
 pub fn run_auth_required_loop<S, E>(
     mut send: S,
@@ -134,15 +149,17 @@ pub fn run_auth_required_loop<S, E>(
     mut escalate: E,
 ) -> Result<SendMessageResponse, String>
 where
-    S: FnMut() -> Result<SendMessageResponse, String>,
+    S: FnMut(Option<&AuthChallenge>) -> Result<SendMessageResponse, String>,
     E: FnMut() -> Result<String, String>,
 {
     let mut attempt = 0u32;
+    let mut parked: Option<AuthChallenge> = None;
     loop {
-        let response = send()?;
+        let response = send(parked.as_ref())?;
         if !is_auth_required(&response) {
             return Ok(response);
         }
+        parked = parked_challenge(&response)?;
         attempt += 1;
         let action = decide_auth_required(attempt, config);
         audit_auth_required(attempt, &action);
@@ -164,6 +181,26 @@ where
             AuthRequiredAction::Deny { reason } => return Err(reason),
         }
     }
+}
+
+fn parked_challenge(response: &SendMessageResponse) -> Result<Option<AuthChallenge>, String> {
+    let SendMessageResponse::Task(task) = response else {
+        return Ok(None);
+    };
+    let challenge = task
+        .status
+        .message
+        .as_ref()
+        .and_then(shadi_a2a::challenge_from_message);
+    if challenge.is_some_and(|c| c.len() > MAX_CHALLENGE_BYTES) {
+        return Err(format!(
+            "AUTH_REQUIRED denied: challenge exceeds {MAX_CHALLENGE_BYTES} bytes"
+        ));
+    }
+    Ok(Some(AuthChallenge {
+        task_id: task.id.clone(),
+        challenge: challenge.map(str::to_string),
+    }))
 }
 
 /// Record the decision without secrets or raw tokens.
@@ -279,6 +316,17 @@ mod tests {
         })
     }
 
+    fn parked_task_with_challenge(challenge: &str) -> SendMessageResponse {
+        let SendMessageResponse::Task(mut task) = parked_task() else {
+            unreachable!()
+        };
+        task.status.message = Some(shadi_a2a::insert_challenge(
+            Message::new(Role::Agent, vec![Part::text("prove".to_string())]),
+            challenge,
+        ));
+        SendMessageResponse::Task(task)
+    }
+
     fn completed_message() -> SendMessageResponse {
         SendMessageResponse::Message(Message::new(
             Role::Agent,
@@ -295,7 +343,7 @@ mod tests {
         };
         let mut n = 0;
         let response = run_auth_required_loop(
-            || {
+            |_| {
                 n += 1;
                 if n == 1 {
                     Ok(parked_task())
@@ -318,7 +366,7 @@ mod tests {
             max_attempts: 1,
             timeout: Duration::from_millis(10),
         };
-        let err = run_auth_required_loop(|| Ok(parked_task()), &cfg, || Ok(String::new()))
+        let err = run_auth_required_loop(|_| Ok(parked_task()), &cfg, || Ok(String::new()))
             .expect_err("must deny after max attempts");
         assert!(err.contains("AUTH_REQUIRED denied"));
         assert!(err.contains("exceeded"));
@@ -368,7 +416,7 @@ mod tests {
     #[test]
     fn send_error_propagates_without_retry() {
         let cfg = AuthRequiredConfig::default();
-        let err = run_auth_required_loop(|| Err("transport down".into()), &cfg, || Ok(String::new()))
+        let err = run_auth_required_loop(|_| Err("transport down".into()), &cfg, || Ok(String::new()))
             .expect_err("send failure must surface");
         assert_eq!(err, "transport down");
     }
@@ -383,7 +431,7 @@ mod tests {
         let mut n = 0;
         let mut escalated = 0;
         let response = run_auth_required_loop(
-            || {
+            |_| {
                 n += 1;
                 if n < 3 {
                     Ok(parked_task())
@@ -412,7 +460,7 @@ mod tests {
         };
         let mut n = 0;
         let err = run_auth_required_loop(
-            || {
+            |_| {
                 n += 1;
                 Ok(parked_task())
             },
@@ -432,7 +480,7 @@ mod tests {
             timeout: Duration::from_millis(5),
         };
         let err = run_auth_required_loop(
-            || Ok(parked_task()),
+            |_| Ok(parked_task()),
             &cfg,
             || {
                 std::thread::sleep(Duration::from_millis(20));
@@ -441,5 +489,42 @@ mod tests {
         )
         .expect_err("slow escalate must time out");
         assert!(err.contains("timed out"));
+    }
+
+    #[test]
+    fn parked_challenge_and_task_id_reach_the_next_attempt() {
+        let cfg = AuthRequiredConfig::default();
+        let mut seen = Vec::new();
+        run_auth_required_loop(
+            |previous| {
+                seen.push(previous.cloned());
+                if seen.len() == 1 {
+                    Ok(parked_task_with_challenge("{\"nonce\":\"n1\"}"))
+                } else {
+                    Ok(completed_message())
+                }
+            },
+            &cfg,
+            || Ok(String::new()),
+        )
+        .expect("second attempt completes");
+        assert_eq!(seen[0], None);
+        let second = seen[1].as_ref().expect("challenge reaches attempt two");
+        assert_eq!(second.task_id, "parked");
+        assert_eq!(second.challenge.as_deref(), Some("{\"nonce\":\"n1\"}"));
+    }
+
+    #[test]
+    fn oversized_challenge_denies_with_the_limit() {
+        let cfg = AuthRequiredConfig::default();
+        let big = "x".repeat(MAX_CHALLENGE_BYTES + 1);
+        let err = run_auth_required_loop(
+            |_| Ok(parked_task_with_challenge(&big)),
+            &cfg,
+            || Ok(String::new()),
+        )
+        .expect_err("oversized challenge must deny");
+        assert!(err.contains("AUTH_REQUIRED denied"));
+        assert!(err.contains(&MAX_CHALLENGE_BYTES.to_string()));
     }
 }

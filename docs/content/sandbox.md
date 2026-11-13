@@ -471,6 +471,22 @@ AppContainer's network capability entirely and `net_allow` is not applied.
 `net_blocked` disables all TCP/IP; Unix-domain sockets can still be selectively
 allowed.
 
+!!! warning "Proxy mode is refused on Windows"
+
+    `--watch-policy` cannot be enforced inside an AppContainer, and a launch
+    that asks for it fails rather than running unenforced.
+
+    An AppContainer cannot connect to `127.0.0.1` unless its container SID holds
+    a loopback exemption (`CheckNetIsolation LoopbackExempt`), which needs
+    administrator rights, and each sandbox here gets a fresh SID. The capability
+    that would let the child reach the network, `internetClient`, lets it reach
+    every host directly and skip the proxy, so no setting confines it to the
+    proxy. Measured on Windows: with `internetClient` a public host is reachable
+    and loopback is not; with no capabilities neither is.
+
+    Use `--net-block`, or `--net-allow` on macOS or Linux, where the kernel
+    enforces the port.
+
 ## Notes
 
 - This is an MVP and uses a conservative Seatbelt profile. System paths required
@@ -497,6 +513,19 @@ allowed.
     When the process exits, only that SID's entries are removed, and every
     other entry stays as it is at that moment. Sandboxes that share a path can
     therefore start and exit in any order.
+
+    A program the sandboxed process starts has to open its working directory
+    under the sandbox's SID. When no allowlisted path covers that directory,
+    the sandbox may traverse it and read its attributes, written to that
+    directory only; that lists and reads nothing in it. If that grant can't
+    be applied, the process still runs but can't start other programs.
+
+    A directory grant has to reach what is already inside the directory, so
+    it goes through `SetNamedSecurityInfoW`, which also applies Windows
+    auto-inheritance. Some folders, often under `%TEMP%`, hold unmarked
+    copies of their parent's ACEs. Those come out marked inherited after a
+    sandbox runs. Trustees and rights are unchanged, but those ACEs then
+    follow later changes to the parent. A protected DACL stays protected.
 
     SHADI journals each grant to disk before applying it. On the next Windows
     sandbox startup, it revokes grants whose owning process is no longer
