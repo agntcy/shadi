@@ -986,6 +986,45 @@ mod tests {
         }
     }
 
+    /// Copilot's and Cursor's flags that turn off their own path and command
+    /// approvals.
+    const APPROVAL_BYPASS_FLAGS: &[&str] =
+        &["--allow-all-paths", "--allow-all", "--force", "--yolo"];
+
+    #[test]
+    fn only_profiles_that_require_the_sandbox_skip_harness_approvals() {
+        for id in bundled_profile_ids() {
+            let p = load_bundled(id);
+            for workdir_flags in [true, false] {
+                let argv = render_argv(&p, "/ws", "hi", None, None, workdir_flags);
+                let bypass: Vec<_> = argv
+                    .iter()
+                    .filter(|a| APPROVAL_BYPASS_FLAGS.contains(&a.as_str()))
+                    .collect();
+                assert!(
+                    bypass.is_empty() || p.require_sandbox,
+                    "{id} passes {bypass:?} without require_sandbox"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sandboxed_copilot_and_cursor_run_without_their_own_approvals() {
+        // A fresh HOME has no saved approvals to fall back on.
+        for (id, flag) in [
+            ("copilot-isolated", "--allow-all-paths"),
+            ("cursor-agent-isolated", "--force"),
+        ] {
+            let p = load_bundled(id);
+            // Whatever the profile does with its working-directory flags.
+            for workdir_flags in [true, false] {
+                let argv = render_argv(&p, "/ws", "hi", None, None, workdir_flags);
+                assert!(argv.iter().any(|a| a == flag), "{id}: {argv:?}");
+            }
+        }
+    }
+
     #[test]
     fn claude_argv_matches_native_order() {
         let p = load_bundled("claude-code");    

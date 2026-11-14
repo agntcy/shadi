@@ -36,6 +36,7 @@
   "execute": {
     "args": [
       "--print",
+      "--force",
       "--output-format",
       "text",
       "{workdir_flags}",
