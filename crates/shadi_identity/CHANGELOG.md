@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.4.0...agntcy-shadi-identity-v0.5.0) - 2026-11-14
+
+### Added
+
+- *(agentbridge)* wire the OID4VP holder and verifier ([#524](https://github.com/agntcy/shadi/pull/524))
+- *(credential)* [**breaking**] add the OID4VP holder path ([#520](https://github.com/agntcy/shadi/pull/520))
+
 ## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.3.0...agntcy-shadi-identity-v0.4.0) - 2026-10-16
 
 ### Added
