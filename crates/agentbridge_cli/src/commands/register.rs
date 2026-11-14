@@ -348,6 +348,7 @@ struct AgentBridgeExecutor {
     verbose: bool,
     egress: Arc<dyn AgentVerifier>,
     gate: Option<Arc<CredentialGate>>,
+    replay: Arc<shadi_identity::ReplayCache>,
 }
 
 /// What a credential-gated listener needs, built once at startup.
@@ -663,18 +664,15 @@ impl AgentExecutor for AgentBridgeExecutor {
             )
         };
         let refuse = |state, reason: String| refuse_with(state, reason, None);
-        if let Some(message) = ctx.message.as_ref() {
-            if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
-                span.record("a2a.outcome", "rejected");
-                tracing::warn!(%reason, "refused a task addressed to another agent");
-                return refuse(TaskState::Rejected, reason);
-            }
-        }
-        let (raw, sender_did) = match ctx
-            .message
-            .as_ref()
-            .map(|m| admit_message(m, self.gate.as_deref(), &task_id))
-        {
+        let (raw, sender_did) = match ctx.message.as_ref().map(|message| {
+            admit_message(
+                message,
+                self.agent_did.as_deref(),
+                &self.replay,
+                self.gate.as_deref(),
+                &task_id,
+            )
+        }) {
             Some(MessageAdmission::Proven {
                 did,
                 human_did,
@@ -700,6 +698,13 @@ impl AgentExecutor for AgentBridgeExecutor {
             Some(MessageAdmission::Forged { reason }) => {
                 span.record("a2a.outcome", "rejected");
                 tracing::warn!(%reason, "refused a task that failed admission");
+                return refuse(TaskState::Rejected, reason);
+            }
+            Some(MessageAdmission::Refused { reason }) => {
+                // Signature checks out, but the sealed envelope is misaddressed,
+                // stale, or already spent.
+                span.record("a2a.outcome", "rejected");
+                tracing::warn!(%reason, "refused a sealed message that failed its freshness, audience, or replay check");
                 return refuse(TaskState::Rejected, reason);
             }
             None => ("(no prompt)".to_string(), None),
@@ -903,6 +908,7 @@ impl AgentBridgeRequestHandler {
         verbose: bool,
         egress: Arc<dyn AgentVerifier>,
         gate: Option<Arc<CredentialGate>>,
+        replay: Arc<shadi_identity::ReplayCache>,
     ) -> Self {
         Self {
             inner: DefaultRequestHandler::new(
@@ -915,6 +921,7 @@ impl AgentBridgeRequestHandler {
                     verbose,
                     egress,
                     gate,
+                    replay,
                 },
                 InMemoryTaskStore::new(),
             ),
@@ -1263,6 +1270,7 @@ fn run_slim_listener(
         verbose,
         egress::policy(),
         gate,
+        default_replay_cache(),
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
@@ -1370,7 +1378,8 @@ fn terminal_task(
     }))
 }
 
-/// Admission decided from the message alone, so the executor can reach it.
+/// Admission decided from the message, the listener's own DID, and the
+/// replay cache, so the executor can reach it.
 enum MessageAdmission {
     Proven {
         did: String,
@@ -1385,6 +1394,11 @@ enum MessageAdmission {
         challenge: Option<String>,
     },
     Forged {
+        reason: String,
+    },
+    /// Signature checks out, but the sealed envelope is misaddressed, stale,
+    /// or a replay.
+    Refused {
         reason: String,
     },
 }
@@ -1412,12 +1426,16 @@ fn conversation_key(sender_did: Option<&str>, context_id: &str) -> String {
     format!("{} {context_id}", sender_did.unwrap_or("-"))
 }
 
-/// Application-layer gate: the payload must be signed by the claimed agent DID.
+/// Application-layer gate: the payload must be signed by the claimed agent DID,
+/// and the sealed body inside it must be fresh, addressed to us (when we know
+/// our own DID), and not a replay this sender has already spent.
 ///
 /// A mesh member that presents another agent's DID fails here — the public key
 /// comes from the claimed `did:key`, not from the caller.
 fn admit_message(
     message: &Message,
+    self_did: Option<&str>,
+    replay: &shadi_identity::ReplayCache,
     gate: Option<&CredentialGate>,
     task_id: &str,
 ) -> MessageAdmission {
@@ -1440,9 +1458,18 @@ fn admit_message(
             };
         }
     };
+    let (payload, _hint) = match shadi_identity::Sealed::open(
+        &verified.payload,
+        self_did,
+        &verified.did,
+        replay,
+    ) {
+        Ok(opened) => opened,
+        Err(reason) => return MessageAdmission::Refused { reason },
+    };
     match admit_binding(
         verified.did,
-        &verified.payload,
+        &payload,
         &allowed_human_dids(),
         now_unix(),
     ) {
@@ -1600,19 +1627,9 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// The URL is not the name. If the caller addressed a DID, only that agent
-/// may execute — even when several agents are reachable at the same locator.
-fn wrong_destination_reason(listener_did: Option<&str>, message: &Message) -> Option<String> {
-    let dest = shadi_a2a::dest_did_from_message(message)?;
-    match listener_did {
-        Some(mine) if mine == dest => None,
-        Some(mine) => Some(format!(
-            "destination DID {dest} is not this agent ({mine}); URL is only a locator"
-        )),
-        None => Some(format!(
-            "destination DID {dest} set but this listener has no agent DID"
-        )),
-    }
+/// A fresh replay cache for one listener's lifetime.
+fn default_replay_cache() -> Arc<shadi_identity::ReplayCache> {
+    Arc::new(shadi_identity::ReplayCache::new(1024, 256))
 }
 
 fn extract_text(message: &Message) -> String {
@@ -1789,6 +1806,7 @@ fn run_unicast_listener(
         verbose,
         egress::policy(),
         gate,
+        default_replay_cache(),
     ));
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -2153,21 +2171,46 @@ test push ... FAILED
         }
     }
 
+    /// The destination used to travel as unsigned `Message.metadata`
+    /// (`wrong_destination_reason`), strippable or rewritable by anyone who
+    /// observed the envelope. It's now `aud` inside the sealed, signed body.
     #[test]
-    fn wrong_destination_did_is_rejected_even_on_the_same_url() {
-        let message = shadi_a2a::insert_dest_did(
-            Message::new(Role::User, vec![Part::text("task".to_string())]),
-            "did:key:zOther",
-        );
-        let reason = wrong_destination_reason(Some("did:key:zMine"), &message).expect("mismatch");
-        assert!(reason.contains("did:key:zOther"), "{reason}");
-        assert!(reason.contains("locator"), "{reason}");
-        assert!(wrong_destination_reason(Some("did:key:zOther"), &message).is_none());
-        let unlabeled = Message::new(Role::User, vec![Part::text("task".to_string())]);
-        assert!(wrong_destination_reason(Some("did:key:zMine"), &unlabeled).is_none());
-        let unlabeled_reason =
-            wrong_destination_reason(None, &message).expect("dest DID with no listener DID");
-        assert!(unlabeled_reason.contains("no agent DID"), "{unlabeled_reason}");
+    fn a_sealed_message_for_a_different_agent_is_refused() {
+        let sender = shadi_identity::AgentIdentity::generate().unwrap();
+        let replay = default_replay_cache();
+        let envelope =
+            shadi_identity::seal_and_sign(&sender, Some("did:key:zOther"), b"task", None).unwrap();
+        let text = String::from_utf8(envelope).unwrap();
+
+        match admit_message(
+            &sample_request(text.clone()).message,
+            Some("did:key:zMine"),
+            &replay,
+            None,
+            "t",
+        ) {
+            MessageAdmission::Refused { reason } => {
+                assert!(reason.contains("did:key:zOther"), "{reason}");
+            }
+            MessageAdmission::Proven { did, .. } => {
+                panic!("misaddressed message must not prove as {did}")
+            }
+            MessageAdmission::AuthRequired { reason, .. } | MessageAdmission::Forged { reason } => {
+                panic!("misaddressed message must be refused, not {reason}")
+            }
+        }
+
+        // The genuine recipient still admits the same envelope.
+        match admit_message(
+            &sample_request(text).message,
+            Some("did:key:zOther"),
+            &replay,
+            None,
+            "t",
+        ) {
+            MessageAdmission::Proven { did, .. } => assert_eq!(did, sender.did()),
+            _ => panic!("the real recipient must still admit it"),
+        }
     }
 
     fn scratch_registry() -> (PathBuf, LocalAdapterRegistry) {
@@ -2394,12 +2437,14 @@ test push ... FAILED
 
     #[test]
     fn admit_unsigned_message_parks_auth_required() {
-        match admit_message(&sample_request("plain task").message, None, "t") {
+        let replay = default_replay_cache();
+        match admit_message(&sample_request("plain task").message, None, &replay, None, "t") {
             MessageAdmission::AuthRequired { reason, .. } => {
                 assert!(reason.contains("DID proof required"), "{reason}");
             }
             MessageAdmission::Proven { did, .. } => panic!("unsigned text proved as {did}"),
             MessageAdmission::Forged { reason } => panic!("expected parked, got forged: {reason}"),
+            MessageAdmission::Refused { reason } => panic!("expected parked, got refused: {reason}"),
         }
     }
 
@@ -2422,10 +2467,14 @@ test push ... FAILED
     }
 
     fn silent_handler() -> AgentBridgeRequestHandler {
+        silent_handler_with_did(None)
+    }
+
+    fn silent_handler_with_did(agent_did: Option<&str>) -> AgentBridgeRequestHandler {
         AgentBridgeRequestHandler::new(
             Arc::new(SilentAdapter(shadi_mas::AgentId("claude-code".to_string()))),
             "claude-code",
-            None,
+            agent_did,
             None,
             Some("127.0.0.1:4311"),
             A2ABinding::Jsonrpc,
@@ -2433,6 +2482,7 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            default_replay_cache(),
         )
     }
 
@@ -2474,7 +2524,7 @@ test push ... FAILED
     async fn a_forged_did_is_rejected_as_a_stored_task() {
         let honest = shadi_identity::AgentIdentity::generate().unwrap();
         let impostor = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&honest, None, b"task", None).unwrap();
         let sig_line = {
             let text = String::from_utf8(envelope).unwrap();
             text.lines().nth(2).unwrap().to_string()
@@ -2584,13 +2634,14 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            default_replay_cache(),
         );
         let (alice, mallory) = (
             shadi_identity::AgentIdentity::generate().unwrap(),
             shadi_identity::AgentIdentity::generate().unwrap(),
         );
         for sender in [&alice, &mallory, &alice] {
-            let envelope = shadi_identity::wrap_signed_message(sender, b"task").unwrap();
+            let envelope = shadi_identity::seal_and_sign(sender, None, b"task", None).unwrap();
             let mut request = sample_request(String::from_utf8(envelope).unwrap());
             request.message.context_id = Some("shared-context".to_string());
             handler
@@ -2644,7 +2695,7 @@ test push ... FAILED
     /// Run one signed task through a listener whose replies pass `policy`.
     async fn reply_through(policy: Arc<dyn AgentVerifier>) -> (Task, String) {
         let sender = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&sender, b"hello").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&sender, None, b"hello", None).unwrap();
         let handler = AgentBridgeRequestHandler::new(
             Arc::new(ReplyAdapter(shadi_mas::AgentId("claude-code".to_string()))),
             "claude-code",
@@ -2656,6 +2707,7 @@ test push ... FAILED
             false,
             policy,
             None,
+            default_replay_cache(),
         );
         let request = sample_request(String::from_utf8(envelope).unwrap());
         let response = handler
@@ -2896,7 +2948,7 @@ test push ... FAILED
     async fn refused_and_parked_tasks_record_why_on_the_receive_span() {
         let trace = Trace::default();
         let _installed = trace.install();
-        let handler = silent_handler();
+        let handler = silent_handler_with_did(Some("did:key:zMine"));
         let params = A2AServiceParams::default();
 
         let unsigned = sample_request("plain task");
@@ -2908,18 +2960,25 @@ test push ... FAILED
 
         let honest = shadi_identity::AgentIdentity::generate().unwrap();
         let impostor = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&honest, None, b"task", None).unwrap();
         let envelope = String::from_utf8(envelope).unwrap();
         let signature = envelope.lines().nth(2).unwrap();
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{signature}\ntask", impostor.did());
         let _ = handler.send_message(&params, sample_request(forged)).await;
         trace.assert_has(&["shadi.a2a.receive: refused a task that failed admission"]);
 
-        let mut addressed = sample_request("task");
-        addressed.message = shadi_a2a::insert_dest_did(addressed.message, "did:key:zSomeoneElse");
-        let _ = handler.send_message(&params, addressed).await;
+        let sender = shadi_identity::AgentIdentity::generate().unwrap();
+        let misaddressed =
+            shadi_identity::seal_and_sign(&sender, Some("did:key:zSomeoneElse"), b"task", None)
+                .unwrap();
+        let _ = handler
+            .send_message(
+                &params,
+                sample_request(String::from_utf8(misaddressed).unwrap()),
+            )
+            .await;
         trace.assert_has(&[
-            "shadi.a2a.receive: refused a task addressed to another agent",
+            "shadi.a2a.receive: refused a sealed message that failed its freshness, audience, or replay check",
             "shadi.a2a.receive a2a.outcome=rejected",
         ]);
     }
@@ -2930,18 +2989,20 @@ test push ... FAILED
     async fn each_refusal_quotes_its_own_local_evaluation_id() {
         let trace = Trace::default();
         let _installed = trace.install();
-        let handler = silent_handler();
+        let handler = silent_handler_with_did(Some("did:key:zMine"));
         let params = A2AServiceParams::default();
 
         let honest = shadi_identity::AgentIdentity::generate().unwrap();
         let impostor = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&honest, None, b"task", None).unwrap();
         let envelope = String::from_utf8(envelope).unwrap();
         let signature = envelope.lines().nth(2).unwrap();
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{signature}\ntask", impostor.did());
-        let mut misaddressed = sample_request("task");
-        misaddressed.message =
-            shadi_a2a::insert_dest_did(misaddressed.message, "did:key:zSomeoneElse");
+        let sender = shadi_identity::AgentIdentity::generate().unwrap();
+        let misaddressed_envelope =
+            shadi_identity::seal_and_sign(&sender, Some("did:key:zSomeoneElse"), b"task", None)
+                .unwrap();
+        let misaddressed = sample_request(String::from_utf8(misaddressed_envelope).unwrap());
 
         let mut seen = Vec::new();
         for mut request in [
@@ -3084,14 +3145,15 @@ test push ... FAILED
     fn admit_forged_did_is_rejected() {
         let honest = shadi_identity::AgentIdentity::generate().unwrap();
         let impostor = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&honest, None, b"task", None).unwrap();
         // Claim the impostor's DID while keeping the honest signature.
         let sig_line = {
             let text = String::from_utf8(envelope.clone()).unwrap();
             text.lines().nth(2).unwrap().to_string()
         };
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
-        match admit_message(&sample_request(forged).message, None, "t") {
+        let replay = default_replay_cache();
+        match admit_message(&sample_request(forged).message, None, &replay, None, "t") {
             MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("forged DID"), "{reason}");
             }
@@ -3101,15 +3163,19 @@ test push ... FAILED
             MessageAdmission::Proven { did, .. } => {
                 panic!("forged DID must not prove as {did}");
             }
+            MessageAdmission::Refused { reason } => {
+                panic!("forged DID must be Forged, not Refused: {reason}");
+            }
         }
     }
 
     #[test]
     fn admit_honest_proof_unwraps_payload() {
         let id = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&id, None, b"real prompt", None).unwrap();
         let text = String::from_utf8(envelope).unwrap();
-        match admit_message(&sample_request(text).message, None, "t") {
+        let replay = default_replay_cache();
+        match admit_message(&sample_request(text).message, None, &replay, None, "t") {
             MessageAdmission::Proven { did, payload, .. } => {
                 assert_eq!(did, id.did());
                 assert_eq!(payload, "real prompt");
@@ -3140,7 +3206,7 @@ test push ... FAILED
 
     fn signed(payload: &[u8]) -> (String, String) {
         let id = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&id, payload).unwrap();
+        let envelope = shadi_identity::seal_and_sign(&id, None, payload, None).unwrap();
         (id.did().to_string(), String::from_utf8(envelope).unwrap())
     }
 
@@ -3148,7 +3214,8 @@ test push ... FAILED
     fn without_a_gate_the_vp_layer_is_stripped_not_prompted() {
         let layered = shadi_identity::wrap_vp("tok~en", b"real prompt").unwrap();
         let (did, text) = signed(&layered);
-        match admit_message(&sample_request(text).message, None, "t") {
+        let replay = default_replay_cache();
+        match admit_message(&sample_request(text).message, None, &replay, None, "t") {
             MessageAdmission::Proven {
                 did: proven,
                 payload,
@@ -3165,7 +3232,8 @@ test push ... FAILED
     #[test]
     fn without_a_gate_a_plain_payload_is_unchanged() {
         let (_, text) = signed(b"real prompt");
-        match admit_message(&sample_request(text).message, None, "t") {
+        let replay = default_replay_cache();
+        match admit_message(&sample_request(text).message, None, &replay, None, "t") {
             MessageAdmission::Proven { payload, .. } => assert_eq!(payload, "real prompt"),
             _ => panic!("honest proof must be admitted"),
         }
@@ -3175,7 +3243,8 @@ test push ... FAILED
     fn a_gate_with_no_presentation_issues_a_challenge() {
         let (_dir, gate) = gate_fixture();
         let (_, text) = signed(b"real prompt");
-        match admit_message(&sample_request(text).message, Some(&gate), "task-7") {
+        let replay = default_replay_cache();
+        match admit_message(&sample_request(text).message, None, &replay, Some(&gate), "task-7") {
             MessageAdmission::AuthRequired {
                 reason,
                 challenge: Some(json),
@@ -3240,12 +3309,12 @@ test push ... FAILED
             shadi_credential::SqlCipherVault::open(&dir.path().join("vault.db"), "k").unwrap();
         shadi_credential::import(&vault, &cred, now).unwrap();
 
-        let task = shadi_identity::wrap_signed_message(&agent, b"real prompt").unwrap();
+        let task = shadi_identity::seal_and_sign(&agent, None, b"real prompt", None).unwrap();
         let msg = sample_request(String::from_utf8(task).unwrap()).message;
         let MessageAdmission::AuthRequired {
             challenge: Some(json),
             ..
-        } = admit_message(&msg, Some(&gate), "task-1")
+        } = admit_message(&msg, None, &default_replay_cache(), Some(&gate), "task-1")
         else {
             panic!("an unpresented message must be challenged");
         };
@@ -3266,7 +3335,7 @@ test push ... FAILED
         .unwrap();
 
         let framed = shadi_identity::wrap_vp(&edit(token), b"real prompt").unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&agent, &framed).unwrap();
+        let envelope = shadi_identity::seal_and_sign(&agent, None, &framed, None).unwrap();
         (
             dir,
             gate,
@@ -3278,7 +3347,13 @@ test push ... FAILED
     #[test]
     fn a_presentation_the_sender_builds_is_admitted_by_the_listener() {
         let (_dir, gate, did, text) = answered_challenge();
-        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            &default_replay_cache(),
+            Some(&gate),
+            "task-1",
+        ) {
             MessageAdmission::Proven {
                 did: proven,
                 payload,
@@ -3290,6 +3365,7 @@ test push ... FAILED
             }
             MessageAdmission::Forged { reason } => panic!("forged: {reason}"),
             MessageAdmission::AuthRequired { reason, .. } => panic!("auth required: {reason}"),
+            MessageAdmission::Refused { reason } => panic!("refused: {reason}"),
         }
     }
 
@@ -3308,11 +3384,19 @@ test push ... FAILED
     fn a_replayed_presentation_is_rechallenged_because_the_nonce_is_single_use() {
         let (_dir, gate, _, text) = answered_challenge();
         let msg = sample_request(text).message;
+        // The presentation's single-use nonce is what's under test here, not
+        // the envelope's own replay cache — each admission gets a fresh one.
         assert!(matches!(
-            admit_message(&msg, Some(&gate), "task-1"),
+            admit_message(&msg, None, &default_replay_cache(), Some(&gate), "task-1"),
             MessageAdmission::Proven { .. }
         ));
-        let fresh = challenge_of(admit_message(&msg, Some(&gate), "task-1"));
+        let fresh = challenge_of(admit_message(
+            &msg,
+            None,
+            &default_replay_cache(),
+            Some(&gate),
+            "task-1",
+        ));
         assert_eq!(fresh.task_id, "task-1");
     }
 
@@ -3322,6 +3406,8 @@ test push ... FAILED
         let (_other_dir, other_gate) = gate_fixture();
         let fresh = challenge_of(admit_message(
             &sample_request(text).message,
+            None,
+            &default_replay_cache(),
             Some(&other_gate),
             "task-1",
         ));
@@ -3340,7 +3426,13 @@ test push ... FAILED
             };
             format!("{}{swap}{}", &token[..at], &token[at + 1..])
         });
-        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            &default_replay_cache(),
+            Some(&gate),
+            "task-1",
+        ) {
             MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("signature"), "{reason}")
             }
@@ -3353,7 +3445,13 @@ test push ... FAILED
         let (_dir, gate) = gate_fixture();
         let (_, text) = signed(b"SHADI-VP/1\nnot-a-field\n\nprompt");
         for gate in [None, Some(&gate)] {
-            match admit_message(&sample_request(text.clone()).message, gate, "t") {
+            match admit_message(
+                &sample_request(text.clone()).message,
+                None,
+                &default_replay_cache(),
+                gate,
+                "t",
+            ) {
                 MessageAdmission::Forged { reason } => assert!(!reason.is_empty()),
                 _ => panic!("a malformed layer must be rejected"),
             }

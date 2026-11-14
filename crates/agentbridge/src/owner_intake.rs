@@ -15,7 +15,7 @@ use a2a::event::StreamResponse;
 use a2a::*;
 use a2a_server::{AgentExecutor, ExecutorContext};
 use futures::stream::BoxStream;
-use shadi_identity::GrantAction;
+use shadi_identity::{GrantAction, ReplayCache};
 
 use crate::owner::{InviteRequest, Outcome, Owner};
 
@@ -34,25 +34,42 @@ pub fn render_request(channel: &str, invitee_name: &str, invitee_did: &str) -> S
 
 /// Admit a request from the text a task carried: the DID proof names the
 /// requester, and a binding inside it names the requester's human.
-pub fn admit(signed: &[u8], now: u64) -> Result<InviteRequest, String> {
+///
+/// `self_did` is the owner's own DID, so a request sealed for a different
+/// owner (or replayed) is refused the same way a forged one is.
+///
+/// The returned [`shadi_identity::Opened`] has not yet spent its replay
+/// slot — call [`shadi_identity::Opened::confirm`] once the owner's policy
+/// has actually acted on the request. A `did:key` is free to mint and this
+/// endpoint is deliberately open to strangers, so charging the shared,
+/// bounded replay cache for every syntactically valid envelope (whatever
+/// the owner's policy would do with it) would let a flood of fresh
+/// identities lock out a genuine first-time requester.
+pub fn admit(
+    signed: &[u8],
+    now: u64,
+    self_did: Option<&str>,
+    replay: &ReplayCache,
+) -> Result<(InviteRequest, shadi_identity::Opened), String> {
     if !shadi_identity::looks_like_did_proof(signed) {
         return Err("a channel request must carry the requester's DID proof".to_string());
     }
-    let verified = shadi_identity::unwrap_signed_message(signed).map_err(|e| e.to_string())?;
-    let (requester_human_did, payload) = if shadi_identity::looks_like_binding(&verified.payload) {
+    let (requester_did, opened) =
+        shadi_identity::verify_and_open_deferred(signed, self_did, replay)?;
+    let (requester_human_did, payload) = if shadi_identity::looks_like_binding(opened.body()) {
         let (certificate, rest) =
-            shadi_identity::split_binding(&verified.payload).map_err(|e| e.to_string())?;
+            shadi_identity::split_binding(opened.body()).map_err(|e| e.to_string())?;
         let binding = shadi_identity::verify_binding(certificate, now)
             .map_err(|e| format!("agent binding rejected: {e}"))?;
-        if binding.agent_did != verified.did {
+        if binding.agent_did != requester_did {
             return Err(format!(
                 "agent binding is for {}, but the request was signed by {}",
-                binding.agent_did, verified.did
+                binding.agent_did, requester_did
             ));
         }
         (Some(binding.human_did), rest.to_vec())
     } else {
-        (None, verified.payload.clone())
+        (None, opened.body().to_vec())
     };
     // Only the framing matters here; presentations are checked by the
     // credential-gated listener, not by owner intake.
@@ -61,14 +78,17 @@ pub fn admit(signed: &[u8], now: u64) -> Result<InviteRequest, String> {
     // A request sent as a task has the task header before its body.
     let body = text.split_once("\nbody:\n").map_or(text, |(_, body)| body);
     let (channel, invitee_name, invitee_did) = parse_request(body)?;
-    Ok(InviteRequest {
-        channel,
-        invitee_name,
-        invitee_did: Some(invitee_did),
-        action: GrantAction::Add,
-        requester: verified.did,
-        requester_human_did,
-    })
+    Ok((
+        InviteRequest {
+            channel,
+            invitee_name,
+            invitee_did: Some(invitee_did),
+            action: GrantAction::Add,
+            requester: requester_did,
+            requester_human_did,
+        },
+        opened,
+    ))
 }
 
 fn parse_request(body: &str) -> Result<(String, String, String), String> {
@@ -96,23 +116,42 @@ pub trait Inviter: Send + Sync {
     fn invite(&self, grant: &[u8], request: &InviteRequest) -> Result<(), String>;
 }
 
+/// Live senders this process tracks replay nonces for, and how many live
+/// nonces each may hold at once.
+const REPLAY_MAX_SENDERS: usize = 1024;
+const REPLAY_PER_SENDER_CAPACITY: usize = 256;
+
 /// Serves channel requests for one owner.
 #[derive(Clone)]
 pub struct OwnerExecutor {
     owner: Arc<Mutex<Owner>>,
     inviter: Arc<dyn Inviter>,
+    replay: Arc<ReplayCache>,
 }
 
 impl OwnerExecutor {
     pub fn new(owner: Arc<Mutex<Owner>>, inviter: Arc<dyn Inviter>) -> Self {
-        Self { owner, inviter }
+        Self {
+            owner,
+            inviter,
+            replay: Arc::new(ReplayCache::new(
+                REPLAY_MAX_SENDERS,
+                REPLAY_PER_SENDER_CAPACITY,
+            )),
+        }
     }
 
     /// Decide one signed request, inviting when it is granted. Returns the
     /// state the requester's task ends in and the line it is told.
     pub fn handle(&self, signed: &[u8], now: u64) -> (TaskState, String) {
-        let request = match admit(signed, now) {
-            Ok(request) => request,
+        // A poisoned lock must not silently drop the audience check: `admit`
+        // treats `None` as "we don't know our own DID", not "refuse".
+        let self_did = match self.owner.lock() {
+            Ok(owner) => owner.owner_did(),
+            Err(_) => return (TaskState::Rejected, "refused: owner state is poisoned".to_string()),
+        };
+        let (request, opened) = match admit(signed, now, Some(self_did.as_str()), &self.replay) {
+            Ok(result) => result,
             Err(reason) => {
                 tracing::warn!(%reason, "refused a channel request before the owner's policy");
                 return (TaskState::Rejected, format!("refused: {reason}"));
@@ -127,24 +166,38 @@ impl OwnerExecutor {
                     .request(request.clone(), now)
                     .map_err(|e| e.to_string())
             });
+        // The replay slot is spent only once the policy actually acted on
+        // the request (granted it or parked it for the owner) — a request
+        // for a channel this owner doesn't hold, or one its policy blocks,
+        // never costs a slot, so it can't be used to exhaust the cache.
         match outcome {
-            Ok(Outcome::Granted(grant)) => match self.inviter.invite(&grant, &request) {
-                Ok(()) => (
-                    TaskState::Completed,
-                    format!(
-                        "granted: {} invited to {}",
-                        request.invitee_name, request.channel
+            Ok(Outcome::Granted(grant)) => {
+                if let Err(reason) = opened.confirm(&self.replay) {
+                    return (TaskState::Rejected, format!("refused: {reason}"));
+                }
+                match self.inviter.invite(&grant, &request) {
+                    Ok(()) => (
+                        TaskState::Completed,
+                        format!(
+                            "granted: {} invited to {}",
+                            request.invitee_name, request.channel
+                        ),
                     ),
-                ),
-                Err(err) => (
-                    TaskState::Failed,
-                    format!("granted, but the invite failed: {err}"),
-                ),
-            },
-            Ok(Outcome::Pending { ask_id, expires_at }) => (
-                TaskState::Completed,
-                format!("pending: the owner decides ask {ask_id} by {expires_at}"),
-            ),
+                    Err(err) => (
+                        TaskState::Failed,
+                        format!("granted, but the invite failed: {err}"),
+                    ),
+                }
+            }
+            Ok(Outcome::Pending { ask_id, expires_at }) => {
+                if let Err(reason) = opened.confirm(&self.replay) {
+                    return (TaskState::Rejected, format!("refused: {reason}"));
+                }
+                (
+                    TaskState::Completed,
+                    format!("pending: the owner decides ask {ask_id} by {expires_at}"),
+                )
+            }
             Ok(Outcome::Refused(reason)) => (TaskState::Rejected, format!("refused: {reason}")),
             Err(err) => (TaskState::Failed, format!("error: {err}")),
         }
@@ -219,7 +272,7 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
     use crate::owner::OwnerPolicy;
-    use shadi_identity::{issue_binding, verify_grant, wrap_signed_message, AgentIdentity};
+    use shadi_identity::{issue_binding, seal_and_sign, verify_grant, AgentIdentity};
 
     const NOW: u64 = 1_700_000_000;
     const ROOM: &str = "agntcy/shadi/review-room";
@@ -279,7 +332,7 @@ mod tests {
             payload.push(b'\n');
         }
         payload.extend_from_slice(body.as_bytes());
-        wrap_signed_message(&setup.agent, &payload).unwrap()
+        seal_and_sign(&setup.agent, Some(&setup.owner_did), &payload, None).unwrap()
     }
 
     fn as_task(setup: &Setup, bound: bool) -> Vec<u8> {
@@ -331,10 +384,22 @@ mod tests {
             task.as_bytes(),
         )
         .unwrap();
-        let carried = wrap_signed_message(&setup.agent, &framed).unwrap();
+        let carried = seal_and_sign(&setup.agent, Some(&setup.owner_did), &framed, None).unwrap();
 
-        let plain = admit(&as_task(&setup, false), NOW).unwrap();
-        let with_vp = admit(&carried, NOW).unwrap();
+        let (plain, _) = admit(
+            &as_task(&setup, false),
+            NOW,
+            Some(&setup.owner_did),
+            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY),
+        )
+        .unwrap();
+        let (with_vp, _) = admit(
+            &carried,
+            NOW,
+            Some(&setup.owner_did),
+            &ReplayCache::new(REPLAY_MAX_SENDERS, REPLAY_PER_SENDER_CAPACITY),
+        )
+        .unwrap();
         assert_eq!(with_vp.channel, plain.channel);
         assert_eq!(with_vp.invitee_did, plain.invitee_did);
         assert_eq!(with_vp.requester, plain.requester);
@@ -373,6 +438,53 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_requests_envelope_is_never_treated_as_a_replay() {
+        // The replay slot is only spent on Granted/Pending, so a request the
+        // policy refuses can be resent — by a retry, or by a flood of fresh
+        // DIDs doing the same — without exhausting the shared cache.
+        let blocked = setup(r#"{"default": "block"}"#);
+        let task = as_task(&blocked, false);
+        for _ in 0..3 {
+            let (state, reply) = blocked.executor.handle(&task, NOW);
+            assert_eq!(
+                (state, reply.as_str()),
+                (
+                    TaskState::Rejected,
+                    "refused: refused by the owner's policy"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_granted_requests_envelope_is_rejected_as_a_replay_on_resend() {
+        let setup = setup("{}");
+        let policy = format!(
+            r#"{{"rules": [{{"channel": "*", "requested_by_human": "{}", "decision": "allow"}}]}}"#,
+            setup.human.did()
+        );
+        setup
+            .executor
+            .owner
+            .lock()
+            .unwrap()
+            .set_policy(OwnerPolicy::from_json(&policy).unwrap());
+        let task = as_task(&setup, true);
+
+        let (state, _) = setup.executor.handle(&task, NOW);
+        assert_eq!(state, TaskState::Completed);
+        assert_eq!(setup.invites.0.lock().unwrap().len(), 1);
+
+        // Deferring the commit to Granted doesn't weaken replay protection
+        // for the case it exists for: the same envelope resent is still a
+        // replay, not a second grant.
+        let (state, reply) = setup.executor.handle(&task, NOW);
+        assert_eq!(state, TaskState::Rejected);
+        assert!(reply.contains("replay"), "{reply}");
+        assert_eq!(setup.invites.0.lock().unwrap().len(), 1, "no second invite");
+    }
+
+    #[test]
     fn requests_that_prove_nothing_never_reach_the_policy() {
         let setup = setup(r#"{"default": "allow"}"#);
         let body = render_request(ROOM, PEER, &setup.peer_did);
@@ -387,11 +499,11 @@ mod tests {
         let mut stolen = issue_binding(&setup.human, &other_agent.did(), "x", NOW + 60).unwrap();
         stolen.push(b'\n');
         stolen.extend_from_slice(body.as_bytes());
-        let stolen = wrap_signed_message(&setup.agent, &stolen).unwrap();
+        let stolen = seal_and_sign(&setup.agent, Some(&setup.owner_did), &stolen, None).unwrap();
         let mut lapsed = issue_binding(&setup.human, &setup.agent.did(), "x", NOW - 1).unwrap();
         lapsed.push(b'\n');
         lapsed.extend_from_slice(body.as_bytes());
-        let lapsed = wrap_signed_message(&setup.agent, &lapsed).unwrap();
+        let lapsed = seal_and_sign(&setup.agent, Some(&setup.owner_did), &lapsed, None).unwrap();
 
         for (bad, why) in [
             (body.as_bytes().to_vec(), "DID proof"),

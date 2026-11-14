@@ -1,6 +1,7 @@
 use agentbridge::{
     adapter::CliToolAdapter,
     adapters::generic_stdio::GenericStdioAdapter,
+    local_registry::LocalAdapterRegistry,
     mas::{
         derive, infer_pattern, parse_announce, parse_converge_vote, AgentId, AssemblySession,
         CascadeEngine, CascadeEngineConfig, ConvergeBallot, ConvergeController, ConvergeHalt,
@@ -868,6 +869,16 @@ fn truncate(s: &str, max: usize) -> String {
 
 // ─── Agent spec parser ────────────────────────────────────────────────────────
 
+/// Seal the destination DID when it is locally known; remote/unregistered
+/// peers fall back to None rather than failing here.
+fn resolve_peer_did(agent_id: &str) -> Option<String> {
+    LocalAdapterRegistry::from_env()
+        .resolve_live(agent_id)
+        .ok()
+        .map(|r| r.did)
+        .filter(|did| !did.is_empty())
+}
+
 fn build_agents(
     specs: &[String],
     slim_endpoint: &str,
@@ -909,7 +920,7 @@ fn build_agents(
                 destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
                 a2a_url: None,
                 a2a_binding: None,
-                peer_did: None,
+                peer_did: resolve_peer_did(&agent_id),
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
                 agent_id: agent_id.clone(),
@@ -1114,6 +1125,33 @@ mod tests {
         assert_eq!(executed["mean_reference_gap"], 2.0);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_peer_did_finds_a_locally_registered_agent() {
+        let _guard = super::super::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("SHADI_TMP_DIR");
+        std::env::set_var("SHADI_TMP_DIR", tmp.path());
+
+        let _lease = LocalAdapterRegistry::from_env()
+            .publish(&agentbridge::local_registry::LocalAdapterRecord {
+                name: "peer".to_string(),
+                did: "did:key:zPeer".to_string(),
+                slim_endpoint: "127.0.0.1:47357".to_string(),
+                a2a_url: String::new(),
+                a2a_binding: shadi_a2a::A2ABinding::Grpc,
+                pid: std::process::id(),
+            })
+            .unwrap();
+
+        assert_eq!(resolve_peer_did("peer"), Some("did:key:zPeer".to_string()));
+        assert_eq!(resolve_peer_did("unregistered-agent"), None);
+
+        match prev {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
     }
 
     #[test]

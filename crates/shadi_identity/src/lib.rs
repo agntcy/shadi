@@ -23,6 +23,7 @@ pub mod channel_request;
 pub mod config;
 pub mod did_document;
 pub mod did_proof;
+pub mod freshness;
 pub mod grant;
 #[cfg(feature = "openpgp")]
 pub mod openpgp;
@@ -40,6 +41,9 @@ pub use binding::{
 pub use did_proof::{
     looks_like_did_proof, sign_message_from_env, unwrap_signed_message, wrap_signed_message,
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
+};
+pub use freshness::{
+    seal_and_sign, verify_and_open, verify_and_open_deferred, Opened, ReplayCache, Sealed,
 };
 pub use grant::{issue_grant, verify_grant, ChannelGrant, GrantAction, GrantRole};
 pub use trust_anchor::{DeclaredKeysAnchor, KeyListFetcher, PublishedKeysAnchor, TrustAnchor};
