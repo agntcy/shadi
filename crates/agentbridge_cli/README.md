@@ -91,6 +91,12 @@ shadictl --net-block --net-allow 127.0.0.1:50051 --net-allow localhost:8888 \
     --a2a-listen 127.0.0.1:50051 --a2a-binding http+json
 ```
 
+The agent is named `<record name>-<profile>`, here `code-review-claude-code-isolated`:
+its card and workload name, its SLIM name, the name `delegate --to` takes, and,
+with `SLIM_HUMAN_SEED`, the source of its DID. `--name <NAME>` sets it instead
+(ASCII letters, digits, `-` and `_`, at most 64); without `--record` the agent
+is named after `--tool`.
+
 What the agent card advertises:
 
 - `--skill <OASF skill>` (repeatable) and `--domain <OASF domain>` (repeatable,
