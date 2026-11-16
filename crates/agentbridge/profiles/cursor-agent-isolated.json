@@ -11,10 +11,7 @@
   },
   "workdir_flags": [
     "--workspace",
-    "{workdir}",
-    "--trust",
-    "--sandbox",
-    "disabled"
+    "{workdir}"
   ],
   "workdir_flags_on_execute": true,
   "workdir_flags_on_snapshot": true,
@@ -37,6 +34,9 @@
     "args": [
       "--print",
       "--force",
+      "--trust",
+      "--sandbox",
+      "disabled",
       "--output-format",
       "text",
       "{workdir_flags}",

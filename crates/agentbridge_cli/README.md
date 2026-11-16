@@ -119,18 +119,31 @@ Supported `--tool` values: `generic-stdio`, `claude-code`, `copilot`, `codex`,
 settings, for `--record`). They only run under `shadictl --net-block`, where
 `opencode-isolated` can't run yet (shadi#496).
 
-Three of them turn off the harness's own approvals, which a fresh `HOME` has
-none saved for and a headless run can't ask: `codex-isolated` skips codex's
-sandbox, `copilot-isolated` passes `--allow-all-tools --allow-all-paths`, and
-`cursor-agent-isolated` passes `--force`. Within the paths `shadictl` grants, a
-task, or a skill from the `--record` it runs, can then do anything the harness
-can, with nothing asking first. What it may touch is only what you grant, so
-give `--read` where it should only read: a reviewer needs `--read <repo>`,
-while `--allow <repo>` lets it change the repo. Every `shadictl` profile also
-grants read and write on the directory it starts in, and `--read` doesn't take
-that back, so start `shadictl` in a directory neither in the repo nor above
-it (e.g. `$SHADI_TMP_DIR`) and pass the repo as `--command`, as in the example
-above.
+Four of them turn off the harness's own approvals, which a fresh `HOME` has
+none saved for and a headless run can't ask: `codex-isolated` passes
+`--dangerously-bypass-approvals-and-sandbox`, `copilot-isolated` passes
+`--allow-all-tools --allow-all-paths`, `cursor-agent-isolated` passes `--force
+--trust --sandbox disabled`, and `opencode-isolated` passes `--auto`. Codex's
+and Cursor's flags also turn off the harness's own sandbox, so `shadictl` is
+the only one left. Within the paths `shadictl` grants, a task, or a skill from
+the `--record` it runs, can then do anything the harness can, with nothing
+asking first.
+
+What it may touch is only what you grant, so give `--read` where it should
+only read: a reviewer needs `--read <repo>`, while `--allow <repo>` lets it
+change the repo. A read grant only adds access. It doesn't take back a write
+from a wider grant, such as the read and write every `shadictl` profile gives
+the directory it starts in, and `shadictl` warns when a `--read` path stays
+writable. So start `shadictl` outside the repo and not above it, and pass the
+repo as `--command`:
+
+```bash
+# <repo> is outside $SHADI_TMP_DIR, so neither the start-directory grant nor
+# --allow "$SHADI_TMP_DIR" covers it. `...` is the tool's --net-allow and
+# --read paths and --record, as in the claude-code-isolated example above.
+cd "$SHADI_TMP_DIR" && shadictl --net-block --read <repo> --allow "$SHADI_TMP_DIR" ... -- \
+  agentbridge register --tool copilot-isolated --command <repo> ...
+```
 
 ### `list` — discover registered adapters
 
