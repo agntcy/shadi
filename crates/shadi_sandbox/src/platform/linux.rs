@@ -149,11 +149,7 @@ impl LandlockConfig {
                 read_paths.push(p.clone());
             }
         }
-        for p in policy.allow_write() {
-            if !policy.path_is_denied(p) {
-                write_paths.push(p.clone());
-            }
-        }
+        write_paths.extend(granted_write_paths(policy));
 
         let net_ports = if policy.net_blocked() || policy.net_proxy_port().is_some() {
             policy
@@ -242,6 +238,30 @@ fn compatibility_read_paths() -> Vec<std::path::PathBuf> {
         paths.push(format!("{}/.cache", home).into());
     }
     paths
+}
+
+/// The caller's write grants Landlock gets: `--deny` drops a grant it
+/// covers, but can't take a write back for part of a granted tree.
+pub(super) fn granted_write_paths(policy: &SandboxPolicy) -> Vec<std::path::PathBuf> {
+    policy
+        .allow_write()
+        .iter()
+        .filter(|p| !policy.path_is_denied(p))
+        .cloned()
+        .collect()
+}
+
+/// Directories the ruleset lets a program write beyond the caller's grants:
+/// the compatibility profile's temp, config and cache dirs, which `--deny`
+/// doesn't filter.
+pub(super) fn implicit_write_paths(policy: &SandboxPolicy) -> Vec<std::path::PathBuf> {
+    if policy.platform_profile() != PlatformSandboxProfile::Compatibility {
+        return Vec::new();
+    }
+    compatibility_write_paths()
+        .into_iter()
+        .filter(|p| Path::new(p).exists())
+        .collect()
 }
 
 /// Extra write paths for the compatibility profile.

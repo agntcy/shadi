@@ -188,10 +188,14 @@ from caller allows.
 Because paths only add, `--read PATH` leaves `PATH` writable when a write
 grant covers it: the `allow: ["."]` every profile gives the directory
 `shadictl` starts in, or an `--allow` / `--write` on a directory above it.
-`shadictl` warns when that happens (`warning: --read PATH stays writable`).
-Landlock has no rule that takes a write back for part of a granted tree, so
-to keep a directory read-only, start `shadictl` outside it and don't grant
-write above it. `--deny` doesn't help here, because it removes read as well.
+On macOS the per-user temp directory (`$TMPDIR`, under `/var/folders`) is
+always writable as well, so a directory there stays writable wherever
+`shadictl` starts. `shadictl` warns when any of this happens
+(`warning: --read PATH stays writable`). Landlock has no rule that takes a
+write back for part of a granted tree, so to keep a directory read-only,
+start `shadictl` outside it, keep it out of the temp directory, and don't
+grant write above it. `--deny` doesn't help here: on macOS it removes read
+as well, and on Linux it drops only a whole grant it covers.
 
 ### Compiled read floor
 
