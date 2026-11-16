@@ -77,7 +77,7 @@ flowchart LR
     tool -- "stdin / stdout" --> ca --> srv
   end
 
-  slim{{"SLIM node\nagntcy/shadi/&lt;tool&gt;-a2a\nmTLS · DID auth"}}
+  slim{{"SLIM node\nagntcy/shadi/&lt;name&gt;-a2a\nmTLS · DID auth"}}
 
   subgraph coord["agentbridge coordinate"]
     direction TB
@@ -339,11 +339,25 @@ clients use reqwest and can speak HTTPS.
 Each adapter registers under the hierarchical name:
 
 ```text
-agntcy/shadi/<tool>-a2a
+agntcy/shadi/<name>-a2a
 ```
 
-For example, `--tool copilot` listens as `agntcy/shadi/copilot-a2a`. The
-`coordinate` command reaches it with `--agents slim:copilot`.
+`<name>` is the agent's name, which is also its card and workload name, its
+local lease, the name `delegate --to` takes and, with `SLIM_HUMAN_SEED`, the
+source of its DID. It is:
+
+- `--name <NAME>` when given (ASCII letters, digits, `-` and `_`, at most 64);
+- else, with `--record`, `<record name>-<profile id>`, the record name with each
+  run of other characters turned into `-`, so `--tool claude-code-isolated
+  --record code-review` is `code-review-claude-code-isolated`. A record name too
+  long to fit keeps its start and gains a short digest of the whole name, so two
+  long names stay apart;
+- else the profile id, so `--tool copilot` listens as `agntcy/shadi/copilot-a2a`.
+
+A name SLIM can't hold is refused at start, whichever of these it came from.
+The `coordinate` command reaches an agent with `--agents slim:<name>`, for
+example `--agents slim:copilot`, and a `SLIM_MEMBER_DIDS` allowlist names the
+DID derived from that same name.
 
 ### Request handler stack
 
@@ -422,10 +436,10 @@ register --slim-endpoint 127.0.0.1:47357
   ├─ service.connect()               connect to SLIM node (TLS 1.3)
   ├─ shadi_identity::require_did_auth_from_env()
   │    + shadi_identity::create_app() authenticate with this agent's DID
-  ├─ app.subscribe()                 subscribe to agntcy/shadi/<tool>-a2a
+  ├─ app.subscribe()                 subscribe to agntcy/shadi/<name>-a2a
   ├─ srv.serve()                     start the A2A/SLIMRPC event loop
   │
-  │  [agentbridge] ready — listening on agntcy/shadi/<tool>-a2a
+  │  [agentbridge] ready — listening on agntcy/shadi/<name>-a2a
   │
   ├─ … handles tasks until Ctrl-C …
   │
@@ -466,7 +480,7 @@ so it can act non-interactively.
 
 !!! warning "Any peer able to reach the listener can drive local code execution"
 
-    Any peer able to reach `agntcy/shadi/<tool>-a2a` on the SLIM node can drive
+    Any peer able to reach `agntcy/shadi/<name>-a2a` on the SLIM node can drive
     local code execution through the wrapped CLI tool.
 
 Controls:
