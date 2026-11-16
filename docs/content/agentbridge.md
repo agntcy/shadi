@@ -351,7 +351,8 @@ source of its DID. It is:
   run of other characters turned into `-`, so `--tool claude-code-isolated
   --record code-review` is `code-review-claude-code-isolated`. A record name too
   long to fit keeps its start and gains a short digest of the whole name, so two
-  long names stay apart;
+  long names stay apart; with a profile id too long for even that, only the
+  digest is kept;
 - else the profile id, so `--tool copilot` listens as `agntcy/shadi/copilot-a2a`.
 
 A name SLIM can't hold is refused at start, whichever of these it came from.

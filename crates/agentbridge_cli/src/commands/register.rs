@@ -216,9 +216,9 @@ pub fn validate_agent_name(name: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Characters of the record name an agent id keeps when the whole name
-/// doesn't fit: the rest is a digest of the full record name, so two long
-/// names that share a prefix still get different ids.
+/// Hex characters of the digest of the full record name that replace the
+/// part of it that doesn't fit, so two long names that share a prefix still
+/// get different ids. A profile id that leaves less room keeps fewer.
 const DIGEST_LEN: usize = 8;
 
 /// Name the agent: `--name`, else `<record name>-<profile id>` with `--record`
@@ -265,13 +265,18 @@ fn derived_name(record_name: Option<&str>, profile_id: &str) -> AgentName {
         return profile;
     }
     let room = MAX_AGENT_NAME.saturating_sub(profile_id.len() + 1);
+    let digest = || {
+        let digest = Sha256::digest(record_name.as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
     let prefix = if full.len() <= room {
         full.to_string()
     } else if room > DIGEST_LEN + 1 {
         // `full` is ASCII, so any byte index is a character boundary.
-        let digest = Sha256::digest(record_name.as_bytes());
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        format!("{}-{}", &full[..room - DIGEST_LEN - 1], &hex[..DIGEST_LEN])
+        format!("{}-{}", &full[..room - DIGEST_LEN - 1], &digest()[..DIGEST_LEN])
+    } else if room > 0 {
+        // A long profile id leaves room for no more than the digest.
+        digest()[..room.min(DIGEST_LEN)].to_string()
     } else {
         // The profile id leaves no room; the length check reports it.
         full.to_string()
@@ -2177,6 +2182,21 @@ mod tests {
         // A name that fits is left as it is.
         let name = agent_name(None, Some("code-review"), "claude-code-isolated").unwrap();
         assert_eq!(name.id, "code-review-claude-code-isolated");
+    }
+
+    #[test]
+    fn a_long_profile_id_keeps_a_digest_of_the_record_name() {
+        for id_len in 54..=62 {
+            let profile = "p".repeat(id_len);
+            let one = agent_name(None, Some("code-review"), &profile).unwrap().id;
+            let two = agent_name(None, Some("code-triage"), &profile).unwrap().id;
+            assert!(one.len() <= 64, "{one}");
+            assert!(one.ends_with(&format!("-{profile}")), "{one}");
+            assert_ne!(one, two);
+        }
+        // An id that leaves no room at all is still refused.
+        let err = agent_name(None, Some("code-review"), &"p".repeat(63)).unwrap_err();
+        assert!(err.to_string().contains("longer than 64"), "{err}");
     }
 
     #[test]
