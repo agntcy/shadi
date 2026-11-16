@@ -42,6 +42,21 @@ pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<Reso
     shadi_sandbox::resolve_policy(&overrides, &file_values)
 }
 
+/// One warning per `--read` path the policy still lets the program write.
+pub(crate) fn writable_read_warnings(policy: &SandboxPolicy, reads: &[PathBuf]) -> Vec<String> {
+    shadi_sandbox::writable_read_paths(policy, reads)
+        .into_iter()
+        .map(|(read, grant)| {
+            format!(
+                "warning: --read {} stays writable: {} is granted write \
+                 (start shadictl outside it, or drop that grant)",
+                read.display(),
+                grant.display()
+            )
+        })
+        .collect()
+}
+
 pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
     // The sandbox axes live in shadi_sandbox so the desktop panel gets the same
     // profiles without restating them; everything below them is empty in every

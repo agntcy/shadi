@@ -421,12 +421,8 @@ fn run_cli(mut cli: Cli) -> ExitCode {
         }
     };
 
-    for (read, grant) in shadi_sandbox::writable_read_paths(&resolved.policy, &cli.read) {
-        eprintln!(
-            "warning: --read {} stays writable: {} is granted write (start shadictl outside it, or drop that grant)",
-            read.display(),
-            grant.display()
-        );
+    for warning in writable_read_warnings(&resolved.policy, &cli.read) {
+        eprintln!("{warning}");
     }
 
     let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
