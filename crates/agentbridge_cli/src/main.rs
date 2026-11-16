@@ -535,7 +535,6 @@ fn main() {
                 server: dir_server.as_str(),
                 gh_token: gh_token.as_deref(),
             });
-            let mut agent_name = None;
             let result = if needs_listener {
                 Err(anyhow::anyhow!(
                     "{listener_flag} needs an A2A listener: pass --slim-endpoint or --a2a-listen"
@@ -578,33 +577,39 @@ fn main() {
                 )
             })
             .and_then(|source| {
-                agent_name = Some(commands::register::agent_name(
+                let agent_name = commands::register::agent_name(
                     name.as_deref(),
                     source.as_ref().map(|source| source.name.as_str()),
                     &commands::register::profile_id(&tool)?,
-                )?);
+                )?;
                 if let Some(source) = source {
                     card_opts.add_record(&source);
                     if !no_source_record && announce_opts.source_record.is_none() {
                         announce_opts.source_record = Some(source.cid);
                     }
                 }
-                commands::announce::configure(announce_opts)
+                commands::announce::configure(announce_opts)?;
+                Ok(agent_name)
             })
-            .and_then(|()| publishable(dir_publish, &card_opts.skills))
-            .and_then(|()| commands::card::configure(&card_opts))
-            .and_then(|()| {
+            .and_then(|agent_name| {
+                publishable(dir_publish, &card_opts.skills)?;
+                commands::card::configure(&card_opts)?;
+                Ok(agent_name)
+            })
+            .and_then(|agent_name| {
                 commands::register::run(
                     &tool,
-                    agent_name.as_ref().expect("named once the record is prepared"),
+                    &agent_name,
                     command.as_deref(),
                     &args,
-                    slim_endpoint.as_deref(),
-                    a2a_listen.as_deref(),
-                    a2a_binding,
+                    commands::register::ListenerOptions {
+                        slim_endpoint: slim_endpoint.as_deref(),
+                        a2a_listen: a2a_listen.as_deref(),
+                        a2a_binding,
+                        admission_policy: admission_policy.as_deref(),
+                        verbose,
+                    },
                     publish_opts,
-                    admission_policy.as_deref(),
-                    verbose,
                 )
             });
             // Also when configuring the card failed after provisioning.

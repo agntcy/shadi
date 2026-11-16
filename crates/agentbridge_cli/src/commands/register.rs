@@ -29,6 +29,8 @@ use futures::StreamExt;
 use shadi_a2a::{A2ABinding, SlimRpcHandler};
 
 use super::egress;
+use super::names;
+use sha2::{Digest, Sha256};
 use shadi_mas::{
     experiments::LiveA2ATaskAdapterConfig, Epoch, PatternKind, TaskAdapter, TaskEnvelope,
 };
@@ -46,27 +48,38 @@ pub struct DirPublishOptions<'a> {
     pub gh_token: Option<&'a str>,
 }
 
+/// Where the adapter listens and who it admits.
+#[derive(Clone, Copy)]
+pub struct ListenerOptions<'a> {
+    pub slim_endpoint: Option<&'a str>,
+    pub a2a_listen: Option<&'a str>,
+    pub a2a_binding: A2ABinding,
+    pub admission_policy: Option<&'a Path>,
+    pub verbose: bool,
+}
+
 /// Start a registered adapter server for a named tool.
 ///
 /// When `slim_endpoint` is provided the adapter is also exposed as an A2A
-/// service over SLIMRPC, reachable at `agntcy/shadi/<tool>-a2a`. When
+/// service over SLIMRPC, reachable at `agntcy/shadi/<name>-a2a`. When
 /// `a2a_listen` is provided it is exposed on an official A2A unicast binding
 /// (`grpc`, `jsonrpc`, or `http+json`) at that `host:port`. When `dir_publish`
 /// is provided, the adapter's real `AgentCard` is published to the Agent
 /// Directory before the adapter starts serving.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     tool: &str,
     name: &AgentName,
     command: Option<&str>,
     args: &[String],
-    slim_endpoint: Option<&str>,
-    a2a_listen: Option<&str>,
-    a2a_binding: A2ABinding,
+    listeners: ListenerOptions,
     dir_publish: Option<DirPublishOptions>,
-    admission_policy: Option<&Path>,
-    verbose: bool,
 ) -> anyhow::Result<()> {
+    let ListenerOptions {
+        slim_endpoint,
+        a2a_listen,
+        admission_policy,
+        ..
+    } = listeners;
     // The gate is built per listener, so with none it would be silently ignored.
     if admission_policy.is_some() && slim_endpoint.is_none() && a2a_listen.is_none() {
         anyhow::bail!("--admission-policy needs --slim-endpoint or --a2a-listen");
@@ -96,16 +109,7 @@ pub fn run(
                 name.source.describe(),
                 work_dir.display()
             );
-            return serve_registered(
-                &name.id,
-                adapter,
-                slim_endpoint,
-                a2a_listen,
-                a2a_binding,
-                dir_publish,
-                admission_policy,
-                verbose,
-            );
+            return serve_registered(&name.id, adapter, listeners, dir_publish);
         }
     }
 
@@ -115,33 +119,23 @@ pub fn run(
                 anyhow::anyhow!("--command is required for tool type 'generic-stdio'")
             })?;
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let tool = name.id.as_str();
-            let adapter = Arc::new(GenericStdioAdapter::spawn(tool, command, &args_ref)?);
+            let agent_id = name.id.as_str();
+            let adapter = Arc::new(GenericStdioAdapter::spawn(agent_id, command, &args_ref)?);
             println!(
-                "Registered adapter '{}' (agent id: {}, {})",
-                tool,
+                "Registered {tool} adapter (agent id: {}, {})",
                 adapter.agent_id().0,
                 name.source.describe()
             );
             if slim_endpoint.is_some() || a2a_listen.is_some() {
-                start_listeners(
-                    tool,
-                    adapter,
-                    slim_endpoint,
-                    a2a_listen,
-                    a2a_binding,
-                    dir_publish,
-                    admission_policy,
-                    verbose,
-                )?;
+                start_listeners(agent_id, adapter, listeners, dir_publish)?;
             } else {
                 if let Some(opts) = dir_publish.as_ref() {
                     publish_card_to_dir(
-                        tool,
+                        agent_id,
                         None,
                         None,
                         A2ABinding::Grpc,
-                        best_effort_did(tool).as_deref(),
+                        best_effort_did(agent_id).as_deref(),
                         opts,
                     )?;
                 }
@@ -194,30 +188,43 @@ pub struct AgentName {
     pub source: NameSource,
 }
 
-/// Check a `--name`: it becomes a SLIM name component and a file name, so it
-/// holds only ASCII letters, digits, `-` and `_`.
-pub fn validate_agent_name(name: &str) -> anyhow::Result<()> {
-    let why = if name.is_empty() {
-        "it is empty".to_string()
-    } else if name.len() > MAX_AGENT_NAME {
-        format!("it is longer than {MAX_AGENT_NAME} characters")
-    } else if name.starts_with('-') {
-        "it may not start with '-'".to_string()
-    } else if let Some(c) = name
-        .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
-    {
-        format!(
+/// What makes `name` unusable as an agent id, if anything. It becomes a SLIM
+/// name component and a file name, so it holds only ASCII letters, digits,
+/// `-` and `_`. The characters are checked first: they're what a user has to
+/// change, and once they're ASCII the byte length is the character count.
+fn name_problem(name: &str) -> Option<String> {
+    if name.is_empty() {
+        Some("it is empty".to_string())
+    } else if let Some(c) = name.chars().find(|c| !names::slim_char(*c)) {
+        Some(format!(
             "it contains {c:?}; a SLIM name component holds only ASCII letters, digits, '-' and '_'"
-        )
+        ))
+    } else if name.starts_with('-') {
+        Some("it may not start with '-'".to_string())
+    } else if name.len() > MAX_AGENT_NAME {
+        Some(format!("it is longer than {MAX_AGENT_NAME} characters"))
     } else {
-        return Ok(());
-    };
-    anyhow::bail!("invalid --name '{name}': {why}")
+        None
+    }
 }
+
+/// Check a `--name`.
+pub fn validate_agent_name(name: &str) -> anyhow::Result<()> {
+    match name_problem(name) {
+        Some(why) => anyhow::bail!("invalid --name '{name}': {why}"),
+        None => Ok(()),
+    }
+}
+
+/// Characters of the record name an agent id keeps when the whole name
+/// doesn't fit: the rest is a digest of the full record name, so two long
+/// names that share a prefix still get different ids.
+const DIGEST_LEN: usize = 8;
 
 /// Name the agent: `--name`, else `<record name>-<profile id>` with `--record`
 /// (the profile keeps one record on two harnesses apart), else the profile id.
+/// Every name is checked, whatever it came from, so one `delegate --to` can't
+/// reach is refused here, not after the listener starts.
 pub fn agent_name(
     name: Option<&str>,
     record_name: Option<&str>,
@@ -230,37 +237,49 @@ pub fn agent_name(
             source: NameSource::Flag,
         });
     }
+    let named = derived_name(record_name, profile_id);
+    if let Some(why) = name_problem(&named.id) {
+        anyhow::bail!(
+            "agent name '{}' ({}) can't be used: {why}; pass --name <NAME>",
+            named.id,
+            named.source.describe()
+        );
+    }
+    Ok(named)
+}
+
+fn derived_name(record_name: Option<&str>, profile_id: &str) -> AgentName {
     let profile = AgentName {
         id: profile_id.to_string(),
         source: NameSource::Profile,
     };
     let Some(record_name) = record_name else {
-        return Ok(profile);
+        return profile;
     };
     // `org/skill` → `org-skill`: the characters SLIM can hold stay as they
     // are, so distinct valid names stay distinct; each run of others becomes
     // one `-`. Only a leading `-` goes, which a name may not start with.
-    let mut prefix = String::new();
-    let mut replacing = false;
-    for c in record_name.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-            prefix.push(c);
-            replacing = false;
-        } else if !replacing {
-            prefix.push('-');
-            replacing = true;
-        }
+    let full = names::replace_runs(record_name, names::slim_char);
+    let full = full.trim_start_matches('-');
+    if full.is_empty() {
+        return profile;
     }
     let room = MAX_AGENT_NAME.saturating_sub(profile_id.len() + 1);
-    prefix.truncate(room);
-    let prefix = prefix.trim_start_matches('-');
-    if prefix.is_empty() {
-        return Ok(profile);
-    }
-    Ok(AgentName {
+    let prefix = if full.len() <= room {
+        full.to_string()
+    } else if room > DIGEST_LEN + 1 {
+        // `full` is ASCII, so any byte index is a character boundary.
+        let digest = Sha256::digest(record_name.as_bytes());
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{}-{}", &full[..room - DIGEST_LEN - 1], &hex[..DIGEST_LEN])
+    } else {
+        // The profile id leaves no room; the length check reports it.
+        full.to_string()
+    };
+    AgentName {
         id: format!("{prefix}-{profile_id}"),
         source: NameSource::Record,
-    })
+    }
 }
 
 /// The id `--tool`'s profile names itself by (its `id`, which a profile in
@@ -282,13 +301,15 @@ pub fn work_dir(command: Option<&str>) -> PathBuf {
 fn serve_registered(
     tool: &str,
     adapter: Arc<dyn CliAdapter>,
-    slim_endpoint: Option<&str>,
-    a2a_listen: Option<&str>,
-    a2a_binding: A2ABinding,
+    listeners: ListenerOptions,
     dir_publish: Option<DirPublishOptions>,
-    admission_policy: Option<&Path>,
-    verbose: bool,
 ) -> anyhow::Result<()> {
+    let ListenerOptions {
+        slim_endpoint,
+        a2a_listen,
+        a2a_binding,
+        ..
+    } = listeners;
     if slim_endpoint.is_none() && a2a_listen.is_none() {
         if let Some(opts) = dir_publish.as_ref() {
             publish_card_to_dir(
@@ -303,28 +324,22 @@ fn serve_registered(
         println!("Adapter ready. Use 'agentbridge handoff' or 'agentbridge coordinate'.");
         return Ok(());
     }
-    start_listeners(
-        tool,
-        adapter,
-        slim_endpoint,
-        a2a_listen,
-        a2a_binding,
-        dir_publish,
-        admission_policy,
-        verbose,
-    )
+    start_listeners(tool, adapter, listeners, dir_publish)
 }
 
 fn start_listeners(
     tool: &str,
     adapter: Arc<dyn CliAdapter>,
-    slim_endpoint: Option<&str>,
-    a2a_listen: Option<&str>,
-    a2a_binding: A2ABinding,
+    listeners: ListenerOptions,
     dir_publish: Option<DirPublishOptions>,
-    admission_policy: Option<&Path>,
-    verbose: bool,
 ) -> anyhow::Result<()> {
+    let ListenerOptions {
+        slim_endpoint,
+        a2a_listen,
+        a2a_binding,
+        admission_policy,
+        verbose,
+    } = listeners;
     // Don't announce an instance that can't start: the A2A address must be
     // free. Unannounced, SLIM still serves when a second listener fails.
     if let Some(listen) = a2a_listen.filter(|_| super::announce::enabled()) {
@@ -2148,6 +2163,49 @@ mod tests {
     }
 
     #[test]
+    fn long_record_names_that_share_a_prefix_stay_apart() {
+        let prefix = "directory.agntcy.org/cisco/".to_string() + &"x".repeat(40);
+        let one = agent_name(
+            None,
+            Some(&(prefix.clone() + "-review")),
+            "claude-code-isolated",
+        );
+        let two = agent_name(None, Some(&(prefix + "-triage")), "claude-code-isolated");
+        let (one, two) = (one.unwrap().id, two.unwrap().id);
+        assert_ne!(one, two);
+        assert!(one.len() <= 64 && two.len() <= 64, "{one} {two}");
+        // A name that fits is left as it is.
+        let name = agent_name(None, Some("code-review"), "claude-code-isolated").unwrap();
+        assert_eq!(name.id, "code-review-claude-code-isolated");
+    }
+
+    #[test]
+    fn a_derived_name_slim_cannot_hold_is_refused_with_its_source() {
+        for record in [None, Some("code-review")] {
+            let err = agent_name(None, record, "gpt-4.1").unwrap_err().to_string();
+            assert!(err.contains("'.'"), "{err}");
+            assert!(err.contains("--name"), "{err}");
+            let source = if record.is_some() {
+                "--record"
+            } else {
+                "from the profile"
+            };
+            assert!(err.contains(source), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_name_with_bad_characters_is_told_about_them_before_its_length() {
+        let name = "é".repeat(40); // 40 characters, 80 bytes
+        let err = validate_agent_name(&name).unwrap_err().to_string();
+        assert!(err.contains("'é'"), "{err}");
+        let err = validate_agent_name(&format!("{}/", "r".repeat(70)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'/'"), "{err}");
+    }
+
+    #[test]
     fn record_name_keeps_the_characters_slim_can_hold() {
         let name = agent_name(None, Some("code--review_v2"), "codex-isolated").unwrap();
         assert_eq!(name.id, "code--review_v2-codex-isolated");
@@ -2215,12 +2273,14 @@ mod tests {
             &agent_name(None, None, "gemini").unwrap(),
             None,
             &[],
+            ListenerOptions {
+                slim_endpoint: None,
+                a2a_listen: None,
+                a2a_binding: A2ABinding::Grpc,
+                admission_policy: None,
+                verbose: false,
+            },
             None,
-            None,
-            A2ABinding::Grpc,
-            None,
-            None,
-            false,
         )
         .expect_err("no gemini profile");
         let msg = err.to_string();
