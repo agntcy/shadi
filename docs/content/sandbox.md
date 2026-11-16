@@ -160,7 +160,7 @@ allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 | `--policy FILE` | Load policy settings from a JSON file. |
 | `--profile PROFILE` | Built-in launcher profile (`strict`, `balanced`, `connected`). |
 | `--allow PATH` | Allow read+write under the path. |
-| `--read PATH` | Allow read-only access under the path. |
+| `--read PATH` | Allow read access under the path. It doesn't remove a write that a wider grant gives (see below). |
 | `--write PATH` | Allow write access under the path. |
 | `--deny PATH` | Subtract the path from compiled platform defaults and from allows. |
 | `--net-block` | Block network access. |
@@ -184,6 +184,14 @@ compiles a small read floor so a process can start (dynamic linker, TLS
 trust store, resolver files). That floor is not listed in `--print-policy`.
 `--deny PATH` and a policy-file `deny` array subtract from the floor and
 from caller allows.
+
+Because paths only add, `--read PATH` leaves `PATH` writable when a write
+grant covers it: the `allow: ["."]` every profile gives the directory
+`shadictl` starts in, or an `--allow` / `--write` on a directory above it.
+`shadictl` warns when that happens (`warning: --read PATH stays writable`).
+Landlock has no rule that takes a write back for part of a granted tree, so
+to keep a directory read-only, start `shadictl` outside it and don't grant
+write above it. `--deny` doesn't help here, because it removes read as well.
 
 ### Compiled read floor
 

@@ -104,6 +104,27 @@ pub fn canonicalize_path(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
+/// Each `--read` path that `policy` still lets the program write, with the
+/// write grant that covers it (the path itself or a directory above it).
+///
+/// A read grant only adds access. It can't take away a write that a wider
+/// grant gives, such as the `allow: ["."]` every profile has for the
+/// directory `shadictl` starts in, and Landlock has no rule that would.
+/// Callers warn, so "read-only" isn't assumed where it doesn't hold.
+pub fn writable_read_paths(policy: &SandboxPolicy, reads: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    reads
+        .iter()
+        .filter_map(|read| {
+            let read = canonicalize_path(read).ok()?;
+            let grant = policy
+                .allow_write()
+                .iter()
+                .find(|write| read.starts_with(write))?;
+            Some((read, grant.clone()))
+        })
+        .collect()
+}
+
 /// Layer profile defaults, then file values, then overrides, into one policy.
 pub fn resolve_policy(
     overrides: &PolicyOverrides,
@@ -415,6 +436,35 @@ mod tests {
         let err = resolve_policy(&overrides, &PolicyFileValues::default())
             .expect_err("a missing override path is rejected");
         assert!(err.contains("invalid read path"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_read_path_inside_a_write_grant_is_reported_as_writable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(&repo).expect("mkdir");
+        let overrides = PolicyOverrides {
+            profile: Some(SandboxProfile::Strict),
+            allow: vec![dir.path().to_path_buf()],
+            read: vec![repo.clone(), elsewhere.path().to_path_buf()],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+
+        let found = writable_read_paths(&resolved.policy, &overrides.read);
+
+        let canonical_dir = canonicalize_path(dir.path()).expect("canonical");
+        let canonical_repo = canonicalize_path(&repo).expect("canonical");
+        assert!(
+            found.contains(&(canonical_repo, canonical_dir)),
+            "the repo under the allowed dir is writable: {found:?}"
+        );
+        let canonical_elsewhere = canonicalize_path(elsewhere.path()).expect("canonical");
+        assert!(
+            found.iter().all(|(read, _)| *read != canonical_elsewhere),
+            "a read path outside every write grant stays read-only: {found:?}"
+        );
     }
 
     #[test]
