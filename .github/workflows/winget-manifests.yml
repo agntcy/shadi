@@ -236,7 +236,10 @@ jobs:
           git commit -m "release: add WinGet manifest for $CLI v$PACKAGE_VERSION"
           git push --force --set-upstream origin "$branch"
 
-          pr_number=$(GH_TOKEN="$WINGET_PKGS_TOKEN" gh pr list --repo microsoft/winget-pkgs --head "$fork_owner:$branch" --base master --state open --json number --jq 'first(.[].number) // ""' 2>/dev/null || true)
+          # `gh pr list --head owner:branch` does not match a cross-repo head; the REST query does.
+          pr_number=$(GH_TOKEN="$WINGET_PKGS_TOKEN" gh api \
+            "repos/microsoft/winget-pkgs/pulls?state=open&base=master&head=$fork_owner:$branch" \
+            --jq 'first(.[].number) // ""' 2>/dev/null || true)
 
           {
             echo "### WinGet manifests for $PACKAGE_IDENTIFIER $PACKAGE_VERSION"
@@ -257,3 +260,8 @@ jobs:
             echo
             echo "Upstream release: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$pr_number" ]; then
+            echo "::error::$PACKAGE_IDENTIFIER $PACKAGE_VERSION is pushed to $fork_owner:$branch but unpublished: no open winget-pkgs PR. Open it at https://github.com/microsoft/winget-pkgs/compare/master...$fork_owner:$branch?expand=1"
+            exit 1
+          fi
