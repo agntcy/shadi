@@ -449,8 +449,12 @@ mod tests {
     fn a_read_path_inside_a_write_grant_is_reported_as_writable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
-        // Outside every write root, the per-user temp dirs included.
-        let elsewhere = PathBuf::from("/usr");
+        // Outside every write root on every platform: the parent of the crate
+        // dir, which is the test's start directory, and not a temp dir.
+        let elsewhere = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
         std::fs::create_dir(&repo).expect("mkdir");
         let overrides = PolicyOverrides {
             profile: Some(SandboxProfile::Strict),
@@ -510,7 +514,8 @@ mod tests {
 
         let found = writable_reads_with(dir.path(), &repo, &repo);
 
-        // Seatbelt checks the deny first; Landlock keeps the wider grant.
+        // Seatbelt checks the deny first; Landlock and Windows ACLs keep the
+        // wider grant.
         assert_eq!(found.is_empty(), cfg!(target_os = "macos"), "{found:?}");
     }
 

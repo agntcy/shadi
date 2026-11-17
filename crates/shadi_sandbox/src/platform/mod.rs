@@ -12,13 +12,26 @@ pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 
+/// The caller's write grants Landlock and the Windows ACL backend apply:
+/// `--deny` drops a grant it covers, but can't take a write back for part of
+/// a granted tree (see `windows::apply_policy_acl_grants`).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn granted_write_paths(policy: &SandboxPolicy) -> Vec<std::path::PathBuf> {
+    policy
+        .allow_write()
+        .iter()
+        .filter(|p| !policy.path_is_denied(p))
+        .cloned()
+        .collect()
+}
+
 /// Every directory the backend lets a sandboxed program write: the caller's
 /// grants it keeps, and the ones it adds itself, such as macOS's per-user
 /// temp dirs.
 pub(crate) fn write_roots(policy: &SandboxPolicy) -> Vec<std::path::PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        let mut roots = linux::granted_write_paths(policy);
+        let mut roots = granted_write_paths(policy);
         roots.extend(linux::implicit_write_paths(policy));
         roots
     }
@@ -32,13 +45,13 @@ pub(crate) fn write_roots(policy: &SandboxPolicy) -> Vec<std::path::PathBuf> {
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        policy.allow_write().to_vec()
+        granted_write_paths(policy)
     }
 }
 
 /// Whether `--deny` takes write away from `path` even inside a write root.
-/// Seatbelt checks the deny first; Landlock can only drop whole grants, which
-/// `write_roots` already does.
+/// Seatbelt checks the deny first; Landlock and the Windows backend can only
+/// drop whole grants, which `write_roots` already does.
 pub(crate) fn write_denied(policy: &SandboxPolicy, path: &std::path::Path) -> bool {
     #[cfg(target_os = "macos")]
     {
