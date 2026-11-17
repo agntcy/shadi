@@ -281,10 +281,10 @@ fn derived_name(record_name: Option<&str>, profile_id: &str) -> AgentName {
     } else if room >= DIGEST_LEN {
         digest()
     } else {
-        // The profile id leaves no room for the whole digest; the length
-        // check refuses the name rather than keep a shorter one that
-        // another record could share.
-        full.to_string()
+        // The profile id leaves no room for the whole digest. The name keeps
+        // it anyway, so it is always too long and the length check refuses
+        // it, rather than pass a short replaced name another record shares.
+        format!("{full}-{}", digest())
     };
     AgentName {
         id: format!("{prefix}-{profile_id}"),
@@ -2206,6 +2206,13 @@ mod tests {
             let err = agent_name(None, Some("code-review"), &"p".repeat(id_len)).unwrap_err();
             assert!(err.to_string().contains("longer than 64"), "{id_len}: {err}");
         }
+        // A replaced name short enough to fit without its digest is refused
+        // too, or `org/a` and `org-a` would share one id.
+        let profile = "p".repeat(58);
+        let err = agent_name(None, Some("org/a"), &profile).unwrap_err();
+        assert!(err.to_string().contains("longer than 64"), "{err}");
+        let plain = agent_name(None, Some("org-a"), &profile).unwrap().id;
+        assert_eq!(plain, format!("org-a-{profile}"));
     }
 
     #[test]
