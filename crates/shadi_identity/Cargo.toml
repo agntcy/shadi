@@ -32,6 +32,8 @@ sequoia-openpgp = { version = "2.2", default-features = false, features = ["cryp
 
 [features]
 openpgp = ["dep:sequoia-openpgp"]
+# Needs slim_bindings/insecure-self-certified-did (not in a release yet); forward it once published.
+open-admission = []
 
 [dev-dependencies]
 slim_config = { package = "agntcy-slim-config", version = "0.17.7" }

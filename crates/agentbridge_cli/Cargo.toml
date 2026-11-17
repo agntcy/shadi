@@ -60,6 +60,9 @@ tempfile = "3.27"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[features]
+open-admission = ["shadi_identity/open-admission"]
+
 [dev-dependencies]
 shadi_credential = { package = "agntcy-shadi-credential", version = "0.1.0", path = "../shadi_credential", features = ["testkit"] }
 opentelemetry = "0.33"

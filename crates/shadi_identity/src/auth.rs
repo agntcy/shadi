@@ -21,11 +21,12 @@ pub enum SlimAuth {
     /// Symmetric mesh secret (legacy; a homogeneous mesh shares one secret).
     SharedSecret(String),
     /// DID-JWT admission: prove `did` by signing with `signing_pem`; admit peers
-    /// whose DID is in `member_jwks` (the cryptographic allow-list).
+    /// whose DID is in `member_jwks`, or any did:key when it is `None`.
     Did {
         signing_pem: String,
         did: String,
-        member_jwks: String,
+        member_jwks: Option<String>,
+        self_certified: bool,
     },
 }
 
@@ -38,7 +39,22 @@ impl SlimAuth {
         Ok(SlimAuth::Did {
             signing_pem: agent.to_pkcs8_pem()?,
             did: agent.did(),
-            member_jwks: jwks_from_dids(member_dids)?,
+            member_jwks: Some(jwks_from_dids(member_dids)?),
+            self_certified: false,
+        })
+    }
+
+    /// Open-admission auth for `agent`: any did:key is admitted unless `member_dids` is non-empty.
+    pub fn open<'a, I>(agent: &AgentIdentity, member_dids: I) -> Result<Self, IdentityError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let dids: Vec<&str> = member_dids.into_iter().collect();
+        Ok(SlimAuth::Did {
+            signing_pem: agent.to_pkcs8_pem()?,
+            did: agent.did(),
+            member_jwks: (!dids.is_empty()).then(|| jwks_from_dids(dids)).transpose()?,
+            self_certified: true,
         })
     }
 
@@ -59,11 +75,63 @@ impl SlimAuth {
                 signing_pem,
                 did,
                 member_jwks,
-            } => (
-                config::did_provider_config(signing_pem, did, None),
-                config::did_verifier_config(member_jwks, None),
-            ),
+                self_certified,
+            } => match (member_jwks.as_deref(), *self_certified) {
+                (Some(jwks), false) => (
+                    config::did_provider_config(signing_pem, did, None),
+                    config::did_verifier_config(jwks, None),
+                ),
+                (jwks, true) => self_certified_configs(signing_pem, did, jwks),
+                (None, false) => (IdentityProviderConfig::None, IdentityVerifierConfig::None),
+            },
         }
+    }
+}
+
+#[cfg(feature = "open-admission")]
+fn self_certified_configs(
+    signing_pem: &str,
+    did: &str,
+    member_jwks: Option<&str>,
+) -> (IdentityProviderConfig, IdentityVerifierConfig) {
+    let provider = match config::did_provider_config(signing_pem, did, None) {
+        IdentityProviderConfig::Jwt { config } => {
+            IdentityProviderConfig::InsecureSelfCertifiedDid { config }
+        }
+        other => other,
+    };
+    let verifier = match member_jwks {
+        Some(jwks) => config::did_verifier_config(jwks, None),
+        None => IdentityVerifierConfig::InsecureSelfCertifiedDid {
+            config: slim_bindings::SelfCertifiedDidVerifierAuth { audience: None },
+        },
+    };
+    (provider, verifier)
+}
+
+// Without the feature there is no self-certified provider; create_app then errors.
+#[cfg(not(feature = "open-admission"))]
+fn self_certified_configs(
+    _: &str,
+    _: &str,
+    _: Option<&str>,
+) -> (IdentityProviderConfig, IdentityVerifierConfig) {
+    (IdentityProviderConfig::None, IdentityVerifierConfig::None)
+}
+
+/// `SHADI_SLIM_ADMISSION`: unset or empty is off, `open` is open, anything else is an error.
+pub fn open_admission_from_env() -> Result<bool, IdentityError> {
+    let value = std::env::var("SHADI_SLIM_ADMISSION").unwrap_or_default();
+    match value.trim() {
+        "" => Ok(false),
+        v if v.eq_ignore_ascii_case("open") && cfg!(feature = "open-admission") => Ok(true),
+        v if v.eq_ignore_ascii_case("open") => Err(IdentityError::Config(
+            "SHADI_SLIM_ADMISSION=open requires a build with the open-admission feature"
+                .to_string(),
+        )),
+        _ => Err(IdentityError::Config(
+            "SHADI_SLIM_ADMISSION must be unset or `open`".to_string(),
+        )),
     }
 }
 
@@ -155,6 +223,38 @@ pub fn agent_identity_from_env(agent_id: &str) -> Result<AgentIdentity, Identity
         IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED".to_string())
     })?;
     AgentIdentity::derive(human_seed.as_bytes(), agent_id)
+}
+
+/// [`require_did_auth_from_env`] for a caller that dials `peer_did`: under open
+/// admission the verifier is pinned to that peer and the caller's own DID.
+pub fn require_did_auth_for_peer(
+    agent_id: &str,
+    peer_did: Option<&str>,
+) -> Result<SlimAuth, IdentityError> {
+    if !open_admission_from_env()? {
+        return require_did_auth_from_env(agent_id);
+    }
+    let peer = peer_did.ok_or_else(|| {
+        IdentityError::Config("open admission needs the dialled peer's DID".to_string())
+    })?;
+    let agent = agent_identity_from_env(agent_id)?;
+    // MLS also verifies our own credential, so the pinned list must hold our DID.
+    let own = agent.did();
+    SlimAuth::open(&agent, [peer, own.as_str()])
+}
+
+/// [`require_did_auth_from_env`] for a listener: under open admission any did:key
+/// is admitted unless `SLIM_MEMBER_DIDS` lists some.
+pub fn listener_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
+    if !open_admission_from_env()? {
+        return require_did_auth_from_env(agent_id);
+    }
+    let agent = agent_identity_from_env(agent_id)?;
+    let members = std::env::var("SLIM_MEMBER_DIDS").unwrap_or_default();
+    SlimAuth::open(
+        &agent,
+        members.split(',').map(str::trim).filter(|s| !s.is_empty()),
+    )
 }
 
 fn resolve_did_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
@@ -276,5 +376,140 @@ mod tests {
 
         env::remove_var("SHADI_SLIM_AUTH");
         env::remove_var("SLIM_HUMAN_SEED");
+    }
+
+    #[cfg(feature = "open-admission")]
+    #[test]
+    fn open_auth_is_self_certified_and_pins_only_listed_peers() {
+        let agent = AgentIdentity::generate().unwrap();
+        let peer = AgentIdentity::generate().unwrap();
+        let name = Name::from_string("org/ns/app".to_string()).unwrap();
+
+        let (p, v) = SlimAuth::open(&agent, []).unwrap().configs(&name);
+        assert!(matches!(p, IdentityProviderConfig::InsecureSelfCertifiedDid { .. }));
+        assert!(matches!(v, IdentityVerifierConfig::InsecureSelfCertifiedDid { .. }));
+
+        let (p, v) = SlimAuth::open(&agent, [peer.did().as_str()]).unwrap().configs(&name);
+        assert!(matches!(p, IdentityProviderConfig::InsecureSelfCertifiedDid { .. }));
+        assert!(matches!(v, IdentityVerifierConfig::Jwt { .. }));
+    }
+
+    #[test]
+    fn configs_that_cannot_be_served_are_none() {
+        let agent = AgentIdentity::generate().unwrap();
+        let name = Name::from_string("org/ns/app".to_string()).unwrap();
+        let neither = SlimAuth::Did {
+            signing_pem: agent.to_pkcs8_pem().unwrap(),
+            did: agent.did(),
+            member_jwks: None,
+            self_certified: false,
+        };
+        let (p, v) = neither.configs(&name);
+        assert!(matches!(p, IdentityProviderConfig::None));
+        assert!(matches!(v, IdentityVerifierConfig::None));
+        #[cfg(not(feature = "open-admission"))]
+        {
+            let (p, v) = SlimAuth::open(&agent, []).unwrap().configs(&name);
+            assert!(matches!(p, IdentityProviderConfig::None));
+            assert!(matches!(v, IdentityVerifierConfig::None));
+        }
+    }
+
+    #[test]
+    fn admission_env_is_parsed_strictly() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        env::remove_var("SHADI_SLIM_ADMISSION");
+        assert!(!open_admission_from_env().unwrap());
+        env::set_var("SHADI_SLIM_ADMISSION", "  ");
+        assert!(!open_admission_from_env().unwrap());
+        env::set_var("SHADI_SLIM_ADMISSION", "allow");
+        let err = open_admission_from_env().unwrap_err().to_string();
+        assert!(err.contains("SHADI_SLIM_ADMISSION"), "{err}");
+        env::set_var("SHADI_SLIM_ADMISSION", " OPEN ");
+        let open = open_admission_from_env();
+        #[cfg(feature = "open-admission")]
+        assert!(open.unwrap());
+        #[cfg(not(feature = "open-admission"))]
+        assert!(open.unwrap_err().to_string().contains("open-admission"));
+        env::remove_var("SHADI_SLIM_ADMISSION");
+    }
+
+    #[cfg(feature = "open-admission")]
+    #[test]
+    fn open_admission_pins_callers_and_leaves_other_paths_alone() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        env::set_var("SHADI_SLIM_ADMISSION", "open");
+        env::set_var("SLIM_MEMBER_DIDS", AgentIdentity::generate().unwrap().did());
+
+        assert!(matches!(
+            require_did_auth_for_peer("avatar", None),
+            Err(IdentityError::Config(_))
+        ));
+        let peer = AgentIdentity::generate().unwrap().did();
+        let own = AgentIdentity::derive(b"human", "avatar").unwrap().did();
+        match require_did_auth_for_peer("avatar", Some(&peer)).unwrap() {
+            SlimAuth::Did { member_jwks, self_certified, .. } => {
+                assert!(self_certified);
+                assert_eq!(
+                    member_jwks,
+                    Some(jwks_from_dids([peer.as_str(), own.as_str()]).unwrap())
+                );
+            }
+            SlimAuth::SharedSecret(_) => panic!("expected DID auth"),
+        }
+
+        // The shared env path ignores the admission switch.
+        match did_auth_from_env("avatar").unwrap().unwrap() {
+            SlimAuth::Did { self_certified, member_jwks, .. } => {
+                assert!(!self_certified);
+                assert!(member_jwks.is_some());
+            }
+            SlimAuth::SharedSecret(_) => panic!("expected DID auth"),
+        }
+        env::remove_var("SLIM_MEMBER_DIDS");
+        assert!(matches!(
+            did_auth_from_env("avatar"),
+            Some(Err(IdentityError::Config(_)))
+        ));
+
+        match listener_did_auth_from_env("avatar").unwrap() {
+            SlimAuth::Did { member_jwks, self_certified, .. } => {
+                assert!(self_certified);
+                assert!(member_jwks.is_none());
+            }
+            SlimAuth::SharedSecret(_) => panic!("expected DID auth"),
+        }
+
+        env::remove_var("SHADI_SLIM_ADMISSION");
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_HUMAN_SEED");
+    }
+
+    #[cfg(not(feature = "open-admission"))]
+    #[test]
+    fn open_admission_without_the_feature_is_an_error() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        env::set_var("SLIM_MEMBER_DIDS", AgentIdentity::generate().unwrap().did());
+        env::set_var("SHADI_SLIM_ADMISSION", "open");
+
+        let is_feature_err = |r: Result<SlimAuth, IdentityError>| {
+            matches!(r, Err(IdentityError::Config(m)) if m.contains("open-admission"))
+        };
+        assert!(is_feature_err(require_did_auth_for_peer("avatar", Some("did:key:zPeer"))));
+        assert!(is_feature_err(listener_did_auth_from_env("avatar")));
+        // The shared env path ignores the switch.
+        assert!(matches!(did_auth_from_env("avatar"), Some(Ok(_))));
+
+        env::remove_var("SHADI_SLIM_ADMISSION");
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_HUMAN_SEED");
+        env::remove_var("SLIM_MEMBER_DIDS");
     }
 }

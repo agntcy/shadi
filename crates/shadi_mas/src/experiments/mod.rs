@@ -357,8 +357,11 @@ impl LiveA2ATaskAdapter {
                 let local_name_ref = Arc::new(parse_slim_name(&local_name)?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
 
-                let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
-                    .map_err(|e| e.to_string())?;
+                let auth = shadi_identity::require_did_auth_for_peer(
+                    &self.config.agent_id,
+                    self.config.peer_did.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
                 let proven_did = match &auth {
                     shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
                     shadi_identity::SlimAuth::SharedSecret(_) => {
