@@ -347,12 +347,14 @@ local lease, the name `delegate --to` takes and, with `SLIM_HUMAN_SEED`, the
 source of its DID. It is:
 
 - `--name <NAME>` when given (ASCII letters, digits, `-` and `_`, at most 64);
-- else, with `--record`, `<record name>-<profile id>`, the record name with each
-  run of other characters turned into `-`, so `--tool claude-code-isolated
-  --record code-review` is `code-review-claude-code-isolated`. A record name too
-  long to fit keeps its start and gains a short digest of the whole name, so two
-  long names stay apart; with a profile id too long for even that, only the
-  digest is kept;
+- else, with `--record`, `<record name>-<profile id>`, so `--tool
+  claude-code-isolated --record code-review` is
+  `code-review-claude-code-isolated`. A record name with characters SLIM can't
+  hold has each run of them turned into `-` and gains an 8-character digest of
+  the original name, so `org/skill` and `org-skill` stay apart. A record name
+  too long to fit keeps its start and gains the same digest; with a profile id
+  too long for that, only the digest is kept, and an id too long for the
+  digest is refused;
 - else the profile id, so `--tool copilot` listens as `agntcy/shadi/copilot-a2a`.
 
 A name SLIM can't hold is refused at start, whichever of these it came from.

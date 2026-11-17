@@ -218,7 +218,7 @@ pub fn validate_agent_name(name: &str) -> anyhow::Result<()> {
 
 /// Hex characters of the digest of the full record name that replace the
 /// part of it that doesn't fit, so two long names that share a prefix still
-/// get different ids. A profile id that leaves less room keeps fewer.
+/// get different ids. A name that had characters replaced gains one too.
 const DIGEST_LEN: usize = 8;
 
 /// Name the agent: `--name`, else `<record name>-<profile id>` with `--record`
@@ -256,9 +256,10 @@ fn derived_name(record_name: Option<&str>, profile_id: &str) -> AgentName {
     let Some(record_name) = record_name else {
         return profile;
     };
-    // `org/skill` → `org-skill`: the characters SLIM can hold stay as they
-    // are, so distinct valid names stay distinct; each run of others becomes
-    // one `-`. Only a leading `-` goes, which a name may not start with.
+    // `org/skill` → `org-skill-<digest>`: the characters SLIM can hold stay
+    // as they are, each run of others becomes one `-`, and only a leading
+    // `-` goes, which a name may not start with. A name that changed gains a
+    // digest of the original, so `org/skill` and `org-skill` stay apart.
     let full = names::replace_runs(record_name, names::slim_char);
     let full = full.trim_start_matches('-');
     if full.is_empty() {
@@ -267,18 +268,22 @@ fn derived_name(record_name: Option<&str>, profile_id: &str) -> AgentName {
     let room = MAX_AGENT_NAME.saturating_sub(profile_id.len() + 1);
     let digest = || {
         let digest = Sha256::digest(record_name.as_bytes());
-        digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        hex[..DIGEST_LEN].to_string()
     };
-    let prefix = if full.len() <= room {
+    let changed = full != record_name;
+    let prefix = if !changed && full.len() <= room {
         full.to_string()
     } else if room > DIGEST_LEN + 1 {
         // `full` is ASCII, so any byte index is a character boundary.
-        format!("{}-{}", &full[..room - DIGEST_LEN - 1], &digest()[..DIGEST_LEN])
-    } else if room > 0 {
-        // A long profile id leaves room for no more than the digest.
-        digest()[..room.min(DIGEST_LEN)].to_string()
+        let keep = full.len().min(room - DIGEST_LEN - 1);
+        format!("{}-{}", &full[..keep], digest())
+    } else if room >= DIGEST_LEN {
+        digest()
     } else {
-        // The profile id leaves no room; the length check reports it.
+        // The profile id leaves no room for the whole digest; the length
+        // check refuses the name rather than keep a shorter one that
+        // another record could share.
         full.to_string()
     };
     AgentName {
@@ -2156,7 +2161,11 @@ mod tests {
     #[test]
     fn record_name_characters_slim_cannot_hold_are_replaced() {
         let name = agent_name(None, Some("agntcy/k8s.troubleshoot"), "codex-isolated").unwrap();
-        assert_eq!(name.id, "agntcy-k8s-troubleshoot-codex-isolated");
+        let (prefix, rest) = name.id.split_at("agntcy-k8s-troubleshoot-".len());
+        assert_eq!(prefix, "agntcy-k8s-troubleshoot-");
+        // A name that had characters replaced gains a digest of the original.
+        assert_eq!(rest.len(), DIGEST_LEN + "-codex-isolated".len(), "{}", name.id);
+        assert!(rest.ends_with("-codex-isolated"), "{}", name.id);
     }
 
     #[test]
@@ -2185,18 +2194,28 @@ mod tests {
     }
 
     #[test]
-    fn a_long_profile_id_keeps_a_digest_of_the_record_name() {
-        for id_len in 54..=62 {
-            let profile = "p".repeat(id_len);
-            let one = agent_name(None, Some("code-review"), &profile).unwrap().id;
-            let two = agent_name(None, Some("code-triage"), &profile).unwrap().id;
+    fn a_profile_id_without_room_for_the_whole_digest_is_refused() {
+        // 64 - 55 - 1 = 8 characters: the digest alone still fits.
+        for id_len in [54, 55] {
+            let one = agent_name(None, Some("code-review"), &"p".repeat(id_len)).unwrap().id;
+            let two = agent_name(None, Some("code-triage"), &"p".repeat(id_len)).unwrap().id;
             assert!(one.len() <= 64, "{one}");
-            assert!(one.ends_with(&format!("-{profile}")), "{one}");
             assert_ne!(one, two);
         }
-        // An id that leaves no room at all is still refused.
-        let err = agent_name(None, Some("code-review"), &"p".repeat(63)).unwrap_err();
-        assert!(err.to_string().contains("longer than 64"), "{err}");
+        for id_len in 56..=63 {
+            let err = agent_name(None, Some("code-review"), &"p".repeat(id_len)).unwrap_err();
+            assert!(err.to_string().contains("longer than 64"), "{id_len}: {err}");
+        }
+    }
+
+    #[test]
+    fn record_names_that_only_differ_in_replaced_characters_stay_apart() {
+        let slash = agent_name(None, Some("org/skill"), "claude-code-isolated").unwrap().id;
+        let hyphen = agent_name(None, Some("org-skill"), "claude-code-isolated").unwrap().id;
+        assert_eq!(hyphen, "org-skill-claude-code-isolated");
+        assert_ne!(slash, hyphen);
+        assert!(slash.starts_with("org-skill-"), "{slash}");
+        assert!(slash.ends_with("-claude-code-isolated"), "{slash}");
     }
 
     #[test]
@@ -2230,7 +2249,8 @@ mod tests {
         let name = agent_name(None, Some("code--review_v2"), "codex-isolated").unwrap();
         assert_eq!(name.id, "code--review_v2-codex-isolated");
         let name = agent_name(None, Some("-/lead"), "codex-isolated").unwrap();
-        assert_eq!(name.id, "lead-codex-isolated");
+        assert!(name.id.starts_with("lead-"), "{}", name.id);
+        assert_eq!(name.id.len(), "lead--codex-isolated".len() + DIGEST_LEN);
         let name = agent_name(None, Some("code-review-"), "codex-isolated").unwrap();
         assert_eq!(name.id, "code-review--codex-isolated");
     }
