@@ -220,21 +220,24 @@ fn start_listeners(
     // or a listener failing to start): the guard lives until this function ends.
     let serves_card = a2a_listen.is_some()
         && matches!(a2a_binding, A2ABinding::Jsonrpc | A2ABinding::HttpJson);
+    let did = best_effort_did(tool);
     let locators = super::announce::listener_locators(
         tool,
+        did.as_deref(),
         slim_endpoint,
         a2a_listen,
         a2a_binding,
         card_interface_url,
     );
-    let (card_tool, card_slim, card_listen) = (
+    let (card_tool, card_did, card_slim, card_listen) = (
         tool.to_string(),
+        did.clone(),
         slim_endpoint.map(str::to_string),
         a2a_listen.map(str::to_string),
     );
     let announcement = super::announce::start(
         tool,
-        best_effort_did(tool).as_deref(),
+        did.as_deref(),
         slim_endpoint,
         a2a_listen.map(|_| a2a_binding),
         locators,
@@ -242,6 +245,7 @@ fn start_listeners(
         move || {
             build_agent_card(
                 &card_tool,
+                card_did.as_deref(),
                 card_slim.as_deref(),
                 card_listen.as_deref(),
                 a2a_binding,
@@ -316,7 +320,7 @@ fn start_listeners(
     if let Some(endpoint) = slim_endpoint {
         println!(
             "Starting SLIM A2A listener on {endpoint} as {} ...",
-            listener_slim_name(tool)
+            agentbridge::member_source::peer_slim_name(tool, did.as_deref())
         );
         run_slim_listener(
             tool,
@@ -529,6 +533,8 @@ fn next_peer_to_forward(self_id: &str, prompt: &str, reply: &str) -> Option<Stri
 struct HandoffTarget {
     peer_agent_id: String,
     peer_did: Option<String>,
+    /// Where to send over SLIM: the name the lease gives, else the DID's.
+    slim_name: String,
     a2a_url: Option<String>,
     a2a_binding: Option<A2ABinding>,
     slim_endpoint: Option<String>,
@@ -543,6 +549,7 @@ fn resolve_handoff_target(
 ) -> Result<HandoffTarget, String> {
     match registry.resolve_live(to) {
         Ok(record) => {
+            let slim_name = agentbridge::member_source::slim_destination(&record.to_candidate());
             let a2a_url = if record.a2a_url.is_empty() {
                 None
             } else {
@@ -560,6 +567,7 @@ fn resolve_handoff_target(
                 ));
             }
             Ok(HandoffTarget {
+                slim_name,
                 peer_agent_id: record.name,
                 peer_did: if record.did.is_empty() {
                     None
@@ -574,6 +582,10 @@ fn resolve_handoff_target(
         Err(err) if agentbridge::local_registry::is_ambiguous(&err) => Err(err),
         Err(_) => match slim_fallback {
             Some(endpoint) => Ok(HandoffTarget {
+                slim_name: agentbridge::member_source::peer_slim_name(
+                    to,
+                    agentbridge::member_source::parse_peer_did(to).as_deref(),
+                ),
                 peer_agent_id: to.to_string(),
                 peer_did: None,
                 a2a_url: None,
@@ -609,10 +621,7 @@ fn dispatch_peer_handoff(
         agent_id: from.to_string(),
         local_name: None,
         peer_agent_id: target.peer_agent_id.clone(),
-        destination: Some(agentbridge::member_source::local_slim_name(
-            &target.peer_agent_id,
-            &registry,
-        )),
+        destination: Some(target.slim_name),
         a2a_url: target.a2a_url,
         a2a_binding: target.a2a_binding,
         peer_did: target.peer_did,
@@ -892,6 +901,7 @@ struct AgentBridgeRequestHandler {
     inner: DefaultRequestHandler,
     ready: Arc<Notify>,
     agent_id: String,
+    agent_did: Option<String>,
     slim_endpoint: Option<String>,
     a2a_listen: Option<String>,
     a2a_binding: A2ABinding,
@@ -910,13 +920,12 @@ impl AgentBridgeRequestHandler {
         egress: Arc<dyn AgentVerifier>,
         gate: Option<Arc<CredentialGate>>,
     ) -> Self {
+        let agent_did = agent_did.filter(|did| !did.is_empty()).map(str::to_string);
         Self {
             inner: DefaultRequestHandler::new(
                 AgentBridgeExecutor {
                     adapter,
-                    agent_did: agent_did
-                        .filter(|did| !did.is_empty())
-                        .map(str::to_string),
+                    agent_did: agent_did.clone(),
                     slim_endpoint: slim_endpoint.map(str::to_string),
                     verbose,
                     egress,
@@ -926,6 +935,7 @@ impl AgentBridgeRequestHandler {
             ),
             ready,
             agent_id: agent_id.to_string(),
+            agent_did,
             slim_endpoint: slim_endpoint.map(str::to_string),
             a2a_listen: a2a_listen.map(str::to_string),
             a2a_binding,
@@ -1029,6 +1039,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
     ) -> Result<AgentCard, A2AError> {
         Ok(build_agent_card(
             &self.agent_id,
+            self.agent_did.as_deref(),
             self.slim_endpoint.as_deref(),
             self.a2a_listen.as_deref(),
             self.a2a_binding,
@@ -1043,6 +1054,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
 /// this adapter's card looks like.
 fn build_agent_card(
     agent_id: &str,
+    did: Option<&str>,
     slim_endpoint: Option<&str>,
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
@@ -1050,6 +1062,7 @@ fn build_agent_card(
     agent_card_with(
         &super::card::config(),
         agent_id,
+        did,
         slim_endpoint,
         a2a_listen,
         a2a_binding,
@@ -1059,6 +1072,7 @@ fn build_agent_card(
 fn agent_card_with(
     card: &super::card::CardConfig,
     agent_id: &str,
+    did: Option<&str>,
     slim_endpoint: Option<&str>,
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
@@ -1069,7 +1083,7 @@ fn agent_card_with(
             format!(
                 "slim://{}/{}",
                 super::announce::slim_node(endpoint),
-                listener_slim_name(agent_id)
+                agentbridge::member_source::peer_slim_name(agent_id, did)
             ),
             TRANSPORT_PROTOCOL_SLIMRPC,
         ));
@@ -1176,18 +1190,7 @@ fn run_slim_listener(
     admission_policy: Option<&Path>,
     verbose: bool,
 ) -> Result<(), String> {
-    let agent_name = listener_slim_name(agent_id);
-
     require_sandbox_enforced(agent_id, endpoint)?;
-
-    // Security posture: incoming A2A tasks are executed by the local CLI tool,
-    // constrained by whatever SHADI sandbox policy wraps this process (required
-    // above). Sandboxing bounds what a task CAN do; SLIM_MEMBER_DIDS still
-    // decides WHO may send one — only expose this listener to trusted SLIM peers.
-    eprintln!(
-        "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
-         CLI tool. Only expose this listener to trusted SLIM peers."
-    );
 
     let access = ClientAccess::from_env(Some(agent_id))?;
 
@@ -1200,19 +1203,22 @@ fn run_slim_listener(
         .connect(access.client_config(endpoint))
         .map_err(|e| format!("SLIM connect failed: {e:?}"))?;
 
-    let name_ref = Arc::new(parse_name(&agent_name)?);
-    let auth = shadi_identity::require_did_auth_from_env(agent_id)
-        .map_err(|e| format!("SLIM auth error: {e}"))?;
-    let app = shadi_identity::create_app(&service, name_ref.clone(), &auth)
-        .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
-    app.subscribe(name_ref.clone(), Some(connection_id))
-        .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
-    let tool_name_ref = subscribe_tool_name(&app, agent_id, &agent_name, connection_id)?;
+    let ListenerApp {
+        app,
+        did,
+        name: agent_name,
+        name_ref,
+        tool_name_ref,
+    } = open_listener_app(&service, agent_id, connection_id)?;
 
-    let did = match &auth {
-        shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
-        shadi_identity::SlimAuth::SharedSecret(_) => String::new(),
-    };
+    // Security posture: incoming A2A tasks are executed by the local CLI tool,
+    // constrained by whatever SHADI sandbox policy wraps this process (required
+    // above). Sandboxing bounds what a task CAN do; SLIM_MEMBER_DIDS still
+    // decides WHO may send one — only expose this listener to trusted SLIM peers.
+    eprintln!(
+        "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
+         CLI tool. Only expose this listener to trusted SLIM peers."
+    );
     // An announced listener is found through its dir-runtime descriptor
     // instead (one record per listener).
     let _local_lease = if did.is_empty() || super::announce::enabled() {
@@ -1240,10 +1246,7 @@ fn run_slim_listener(
     };
 
     if let Some(opts) = dir_publish {
-        let did = match &auth {
-            shadi_identity::SlimAuth::Did { did, .. } => Some(did.as_str()),
-            shadi_identity::SlimAuth::SharedSecret(_) => None,
-        };
+        let did = (!did.is_empty()).then_some(did.as_str());
         if let Err(e) = publish_card_to_dir(agent_id, Some(endpoint), a2a_listen, a2a_binding, did, opts) {
             eprintln!("[agentbridge] DIR publish failed: {e}");
         }
@@ -1343,13 +1346,41 @@ fn run_slim_listener(
 
 // ─── SLIM helper fns (mirrors shadi_mas::experiments internals) ───────────────
 
-/// The SLIM name `agent_id`'s listener holds: its DID's (agntcy/shadi#563), or
-/// its tool's when no agent identity is configured.
-pub(crate) fn listener_slim_name(agent_id: &str) -> String {
-    let did = shadi_identity::agent_identity_from_env(agent_id)
-        .ok()
-        .map(|identity| identity.did());
-    agentbridge::member_source::peer_slim_name(agent_id, did.as_deref())
+/// A listener's SLIM app, subscribed under its DID's name (agntcy/shadi#563)
+/// and, for one release, its tool's.
+struct ListenerApp {
+    app: Arc<slim_bindings::App>,
+    did: String,
+    name: String,
+    name_ref: Arc<Name>,
+    tool_name_ref: Option<Arc<Name>>,
+}
+
+fn open_listener_app(
+    service: &Service,
+    agent_id: &str,
+    connection_id: u64,
+) -> Result<ListenerApp, String> {
+    let auth = shadi_identity::require_did_auth_from_env(agent_id)
+        .map_err(|e| format!("SLIM auth error: {e}"))?;
+    let did = match &auth {
+        shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
+        shadi_identity::SlimAuth::SharedSecret(_) => String::new(),
+    };
+    let name = agentbridge::member_source::peer_slim_name(agent_id, Some(&did));
+    let name_ref = Arc::new(parse_name(&name)?);
+    let app = shadi_identity::create_app(service, name_ref.clone(), &auth)
+        .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
+    app.subscribe(name_ref.clone(), Some(connection_id))
+        .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
+    let tool_name_ref = subscribe_tool_name(&app, agent_id, &name, connection_id)?;
+    Ok(ListenerApp {
+        app,
+        did,
+        name,
+        name_ref,
+        tool_name_ref,
+    })
 }
 
 /// Also answer on the tool's name, which callers from before agntcy/shadi#563
@@ -1878,7 +1909,14 @@ fn run_unicast_listener(
                     A2ABinding::HttpJson => a2a_server::rest::rest_router(handler),
                     A2ABinding::Grpc | A2ABinding::Slim => unreachable!(),
                 };
-                let router = with_agent_card(router, agent_id, slim_endpoint, listen, a2a_binding);
+                let router = with_agent_card(
+                    router,
+                    agent_id,
+                    Some(did.as_str()),
+                    slim_endpoint,
+                    listen,
+                    a2a_binding,
+                );
                 http_server(addr, listener, router).await?
             }
         };
@@ -1909,11 +1947,12 @@ fn run_unicast_listener(
 fn with_agent_card(
     router: axum::Router,
     agent_id: &str,
+    did: Option<&str>,
     slim_endpoint: Option<&str>,
     listen: &str,
     a2a_binding: A2ABinding,
 ) -> axum::Router {
-    let card = build_agent_card(agent_id, slim_endpoint, Some(listen), a2a_binding);
+    let card = build_agent_card(agent_id, did, slim_endpoint, Some(listen), a2a_binding);
     router.merge(a2a_server::agent_card::agent_card_router(
         std::sync::Arc::new(a2a_server::StaticAgentCard::new(card)),
     ))
@@ -2025,7 +2064,7 @@ fn publish_card_to_dir(
     did: Option<&str>,
     opts: &DirPublishOptions,
 ) -> anyhow::Result<()> {
-    let card = build_agent_card(agent_id, slim_endpoint, a2a_listen, a2a_binding);
+    let card = build_agent_card(agent_id, did, slim_endpoint, a2a_listen, a2a_binding);
     let card_json = serde_json::to_value(&card)?;
     let record = agentbridge::dir_registry::wrap_agent_card(&card_json, did);
 
@@ -2266,6 +2305,17 @@ test push ... FAILED
         );
         let by_did = resolve_handoff_target("did:key:zCopilot", None, &registry).expect("did");
         assert_eq!(by_did.a2a_url, target.a2a_url);
+        // A lease from before agntcy/shadi#563 names no SLIM name.
+        assert_eq!(target.slim_name, "agntcy/shadi/copilot-a2a");
+
+        // With no lease, a NEXT to a DID goes to that DID's name.
+        let did = shadi_identity::AgentIdentity::generate().unwrap().did();
+        let unleased =
+            resolve_handoff_target(&did, Some("127.0.0.1:9"), &registry).expect("fallback");
+        assert_eq!(
+            Some(unleased.slim_name),
+            agentbridge::member_source::did_slim_name(&did)
+        );
         drop(_lease);
         let _ = fs::remove_dir_all(dir);
     }
@@ -3063,6 +3113,7 @@ test push ... FAILED
         let router = with_agent_card(
             axum::Router::new(),
             "claude-code",
+            None,
             Some("127.0.0.1:47357"),
             "127.0.0.1:4310",
             A2ABinding::HttpJson,
@@ -3093,11 +3144,18 @@ test push ... FAILED
 
         let listen = "127.0.0.1:4310";
         let binding = A2ABinding::Jsonrpc;
-        let card = build_agent_card("claude-code", None, Some(listen), binding);
+        let card = build_agent_card("claude-code", None, None, Some(listen), binding);
 
         // Through with_agent_card, which is what the listener calls, so this
         // fails if the mount is dropped rather than only if the library breaks.
-        let router = with_agent_card(axum::Router::new(), "claude-code", None, listen, binding);
+        let router = with_agent_card(
+            axum::Router::new(),
+            "claude-code",
+            None,
+            None,
+            listen,
+            binding,
+        );
 
         let response = router
             .oneshot(
@@ -3491,7 +3549,13 @@ test push ... FAILED
 
     #[test]
     fn build_agent_card_sets_slim_interface_when_endpoint_given() {
-        let card = build_agent_card("copilot", Some("127.0.0.1:47357"), None, A2ABinding::Grpc);
+        let card = build_agent_card(
+            "copilot",
+            None,
+            Some("127.0.0.1:47357"),
+            None,
+            A2ABinding::Grpc,
+        );
         assert_eq!(card.name, "copilot");
         assert_eq!(card.supported_interfaces.len(), 1);
         let iface = &card.supported_interfaces[0];
@@ -3502,7 +3566,7 @@ test push ... FAILED
     #[test]
     fn the_card_names_the_slim_node_without_its_scheme() {
         for endpoint in ["node:47357", "http://node:47357", "https://node:47357/"] {
-            let card = build_agent_card("copilot", Some(endpoint), None, A2ABinding::Grpc);
+            let card = build_agent_card("copilot", None, Some(endpoint), None, A2ABinding::Grpc);
             assert_eq!(
                 card.supported_interfaces[0].url,
                 "slim://node:47357/agntcy/shadi/copilot-a2a",
@@ -3512,14 +3576,29 @@ test push ... FAILED
     }
 
     #[test]
+    fn the_card_names_the_listener_after_its_did() {
+        let card = build_agent_card(
+            "copilot",
+            Some("did:key:zKey"),
+            Some("node:47357"),
+            None,
+            A2ABinding::Grpc,
+        );
+        assert_eq!(
+            card.supported_interfaces[0].url,
+            "slim://node:47357/agntcy/shadi/zKey-a2a"
+        );
+    }
+
+    #[test]
     fn build_agent_card_has_no_interfaces_without_endpoint() {
-        let card = build_agent_card("copilot", None, None, A2ABinding::Grpc);
+        let card = build_agent_card("copilot", None, None, None, A2ABinding::Grpc);
         assert!(card.supported_interfaces.is_empty());
     }
 
     #[test]
     fn build_agent_card_has_no_hardcoded_skills() {
-        let card = build_agent_card("codex", None, None, A2ABinding::Grpc);
+        let card = build_agent_card("codex", None, None, None, A2ABinding::Grpc);
         assert!(card.skills.is_empty());
         let extensions = card.capabilities.extensions.unwrap_or_default();
         assert!(extensions.is_empty(), "no skill given, no discovery extension");
@@ -3529,6 +3608,7 @@ test push ... FAILED
     fn build_agent_card_sets_grpc_interface_when_listen_given() {
         let card = build_agent_card(
             "copilot",
+            None,
             None,
             Some("127.0.0.1:50051"),
             A2ABinding::Grpc,
@@ -3545,6 +3625,7 @@ test push ... FAILED
         let card = build_agent_card(
             "copilot",
             None,
+            None,
             Some("127.0.0.1:8080"),
             A2ABinding::Jsonrpc,
         );
@@ -3557,6 +3638,7 @@ test push ... FAILED
     fn build_agent_card_advertises_https_for_a_non_loopback_listener() {
         let card = build_agent_card(
             "copilot",
+            None,
             None,
             Some("0.0.0.0:8443"),
             A2ABinding::HttpJson,
@@ -3573,6 +3655,7 @@ test push ... FAILED
         let card = agent_card_with(
             &config,
             "copilot",
+            None,
             Some("127.0.0.1:47357"),
             Some("0.0.0.0:8443"),
             A2ABinding::HttpJson,
@@ -3744,15 +3827,8 @@ test push ... FAILED
         let service = Service::new(format!("echo-listener-{agent_id}"));
         let access = ClientAccess::from_env(Some(agent_id)).unwrap();
         let connection_id = service.connect(access.client_config(endpoint)).unwrap();
-        let agent_name = listener_slim_name(agent_id);
-        let name = Arc::new(parse_name(&agent_name).unwrap());
-        let auth = shadi_identity::require_did_auth_from_env(agent_id).unwrap();
-        let app = shadi_identity::create_app(&service, name.clone(), &auth).unwrap();
-        app.subscribe(name, Some(connection_id)).unwrap();
-        subscribe_tool_name(&app, agent_id, &agent_name, connection_id).unwrap();
-        let did = shadi_identity::agent_identity_from_env(agent_id)
-            .unwrap()
-            .did();
+        let ListenerApp { app, did, .. } =
+            open_listener_app(&service, agent_id, connection_id).unwrap();
         let server = Arc::new(Server::new_with_shared_rx_and_connection(
             app.inner(),
             app.name().as_slim_name(),

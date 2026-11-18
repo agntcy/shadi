@@ -344,13 +344,18 @@ agntcy/shadi/<key>-a2a
 ```
 
 `<key>` is the agent's `did:key` without `did:key:`, so two people's `copilot`
-don't share a name, and whoever holds the DID can address the listener with no
-lookup: `delegate --to did:key:…` sends there on the configured endpoint even
-when no lease or Agent Directory record knows the DID. A name such as
-`--agents slim:copilot` finds the DID in the local lease.
+get different names, and whoever holds the DID can address the listener:
+`delegate --to did:key:…` sends there on the configured endpoint when the
+Agent Directory answers that it has no record of the DID (a failed lookup is
+still reported). A caller sends to the name a peer advertises in its card,
+dir-runtime entry or local lease, so `--agents slim:copilot` uses the name in
+`copilot`'s lease. For an agent on another host, use its DID:
+`--agents slim:did:key:…@<node>`.
 
 For one release a listener also answers on its tool's name,
-`agntcy/shadi/<tool>-a2a`, which callers from before this change use.
+`agntcy/shadi/<tool>-a2a`, which callers from before this change use. Until it
+goes, two people's `copilot` still share that name, and `slim:<tool>@<node>`
+reaches a remote listener only through it.
 
 A task an agent sends (`delegate`, `handoff`, a `NEXT` hop) goes out under
 `agntcy/shadi/<tool>-a2a-client-<suffix>`, a name of its own for each send, and

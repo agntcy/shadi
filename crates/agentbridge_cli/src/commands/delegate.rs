@@ -358,7 +358,9 @@ fn apply_locator_override(
                     "{err}. --a2a-url is a locator, not a name. Pass --to did:key:… \
                      (the DID stays valid when the URL changes)"
                 ))
-            } else if let Some(did) = parse_peer_did(to).filter(|_| not_in_directory(&err)) {
+            } else if let Some(did) = parse_peer_did(to).filter(|did| {
+                agentbridge::member_source::did_slim_name(did).is_some() && not_in_directory(&err)
+            }) {
                 // Nothing knows the DID, but its listener's SLIM name comes
                 // from the DID (agntcy/shadi#563): try the configured node.
                 eprintln!(
@@ -617,6 +619,24 @@ mod tests {
             agentbridge::member_source::slim_destination(&peer),
             "agntcy/shadi/zUnlisted-a2a"
         );
+
+        // Only a did:key has a SLIM name to try.
+        let err = resolve_peer_with(
+            "did:web:example.com",
+            Err("no live adapter".to_string()),
+            || Ok(None),
+            || {
+                Err(
+                    "DID did:web:example.com was not found locally or in the Agent Directory"
+                        .to_string(),
+                )
+            },
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap_err();
+        assert!(err.contains("not found"), "{err}");
     }
 
     #[test]
