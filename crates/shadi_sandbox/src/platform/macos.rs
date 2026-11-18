@@ -62,9 +62,14 @@ const ESSENTIAL_MACH_SERVICES: &[&str] = &[
     "com.apple.SystemConfiguration.SCNetworkReachability",
 ];
 
+/// Directories every profile lets a program stat (besides `/`), so a path
+/// under them resolves.
+const METADATA_READABLE_DIRS: [&str; 5] = ["/Users", "/opt", "/private", "/var", "/usr"];
+
 #[cfg(not(any(test, feature = "coverage")))]
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
+    let profile = with_program_readable(profile, resolve_program(command).as_deref(), policy);
     let profile_cstr = CString::new(profile).map_err(|_| SandboxError::InvalidConfig)?;
 
     unsafe {
@@ -87,6 +92,7 @@ pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<
 #[cfg(any(test, feature = "coverage"))]
 pub fn spawn_sandboxed(command: &mut Command, policy: &SandboxPolicy) -> Result<SandboxedChild, SandboxError> {
     let profile = build_profile(policy)?;
+    let profile = with_program_readable(profile, resolve_program(command).as_deref(), policy);
     let profile_cstr = CString::new(profile).map_err(|_| SandboxError::InvalidConfig)?;
     apply_profile(profile_cstr.as_c_str())?;
     let child = command.spawn().map_err(|err| SandboxError::SpawnFailed(err.to_string()))?;
@@ -121,7 +127,7 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
     rules.push("(allow file-read-data file-read-metadata (literal \"/\"))".to_string());
     // Node realpathSync lstats these parents before reading HOME or
     // /opt/homebrew. Metadata only — no directory listing or file contents.
-    for ancestor in ["/Users", "/opt", "/private", "/var", "/usr"] {
+    for ancestor in METADATA_READABLE_DIRS {
         rules.push(format!(
             "(allow file-read-metadata (literal \"{ancestor}\"))"
         ));
@@ -402,6 +408,116 @@ fn swap_prefix(path: &std::path::Path, from: &str, to: &str) -> Option<std::path
     raw.strip_prefix(from)
         .filter(|rest| rest.is_empty() || rest.starts_with('/'))
         .map(|rest| std::path::PathBuf::from(format!("{to}{rest}")))
+}
+
+/// Let the sandboxed program read its own executable. macOS's Security
+/// framework reads it when building a TLS policy: without this,
+/// `SecPolicyCreateSSL` returns NULL for a program outside the granted paths
+/// and HTTPS fails (security-framework panics on the NULL). Only that one
+/// file is granted, and not when the policy denies it. The grant is best
+/// effort: a path the profile can't express (not UTF-8) gets none, and the
+/// program still launches.
+fn with_program_readable(
+    mut profile: String,
+    program: Option<&std::path::Path>,
+    policy: &SandboxPolicy,
+) -> String {
+    let Some(program) = program else {
+        return profile;
+    };
+    // Match each deny as `build_profile` enforces it: through
+    // `seatbelt_spellings`, which also makes a relative deny absolute.
+    let spellings = seatbelt_spellings(program);
+    let denied = policy
+        .deny()
+        .iter()
+        .flat_map(|deny| seatbelt_spellings(deny))
+        .any(|deny| spellings.iter().any(|p| p.starts_with(&deny)));
+    if denied {
+        return profile;
+    }
+    for spelling in spellings {
+        let Some(s) = spelling.to_str().and_then(|s| escape_profile_string(s).ok()) else {
+            continue;
+        };
+        profile.push_str(&format!("\n(allow file-read* (literal \"{s}\"))"));
+        // The framework resolves the path, so it stats each parent too:
+        // metadata only, as for --read. `build_profile` already covers `/`
+        // and the directories in METADATA_READABLE_DIRS.
+        let mut ancestor = spelling.parent();
+        while let Some(dir) = ancestor {
+            let Some(d) = dir.to_str() else { break };
+            if d == "/" || METADATA_READABLE_DIRS.contains(&d) {
+                break;
+            }
+            let Ok(d) = escape_profile_string(d) else { break };
+            profile.push_str(&format!("\n(allow file-read-metadata (literal \"{d}\"))"));
+            ancestor = dir.parent();
+        }
+    }
+    profile
+}
+
+/// macOS's `_PATH_DEFPATH`: what `execvp` searches when `PATH` is unset.
+const DEFAULT_EXEC_PATH: &str = "/usr/bin:/bin";
+
+/// The executable `command` will run: a path as given (relative to its
+/// working directory), or the first match on its `PATH`, with symlinks
+/// resolved. `None` when it can't be found; the spawn then reports that.
+fn resolve_program(command: &Command) -> Option<std::path::PathBuf> {
+    resolve_program_inheriting(command, std::env::var_os("PATH"))
+}
+
+/// [`resolve_program`], with `inherited` as the parent's `PATH`, so tests
+/// don't have to change the process's own.
+///
+/// A command with no `PATH` entry is taken to inherit the parent's. That is
+/// wrong after `env_clear()`, which `get_envs()` doesn't show (exec then
+/// searches the system default); no caller of `spawn_sandboxed` clears the
+/// environment, and one that does should pass that in.
+fn resolve_program_inheriting(
+    command: &Command,
+    inherited: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    // A relative path is joined to the command's working directory when it
+    // sets one; otherwise it is left relative, and the OS resolves it against
+    // the working directory the child inherits, as exec does.
+    let in_command_dir = |path: std::path::PathBuf| match command.get_current_dir() {
+        Some(cwd) if path.is_relative() => cwd.join(path),
+        _ => path,
+    };
+    let program = std::path::Path::new(command.get_program());
+    let candidate = if program.components().count() > 1 || program.is_absolute() {
+        in_command_dir(program.to_path_buf())
+    } else {
+        // The command's PATH if it sets one; the system default when it
+        // removes it (what execvp searches without a PATH); else the parent's.
+        let path = match command.get_envs().find(|(key, _)| *key == "PATH") {
+            Some((_, Some(value))) => value.to_os_string(),
+            Some((_, None)) => std::ffi::OsString::from(DEFAULT_EXEC_PATH),
+            None => inherited?,
+        };
+        // As exec looks it up: only files the process may execute.
+        std::env::split_paths(&path)
+            .map(|dir| in_command_dir(dir).join(program))
+            .find(|p| is_executable_file(p))?
+    };
+    std::fs::canonicalize(candidate).ok()
+}
+
+/// A regular file the process may execute, as exec decides it: by the
+/// effective user and the file's ACL, not just its mode bits (a `0601` file of
+/// one's own isn't executable by its owner).
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated string for the call's duration.
+    unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 /// Lexical path plus the `/private` symlink alias, so `/tmp` and
@@ -801,6 +917,179 @@ mod tests {
         } else {
             std::env::remove_var("TMPDIR");
         }
+    }
+
+    #[test]
+    fn the_program_can_read_its_own_executable() {
+        let policy = SandboxPolicy::default();
+        let program = std::path::Path::new("/Users/someone/bin/agentbridge");
+        let profile = with_program_readable(String::new(), Some(program), &policy);
+        assert!(
+            profile.contains("(allow file-read* (literal \"/Users/someone/bin/agentbridge\"))"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains("(allow file-read-metadata (literal \"/Users/someone/bin\"))"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains("(allow file-read-metadata (literal \"/Users/someone\"))"),
+            "{profile}"
+        );
+        // build_profile already lets every program stat /Users.
+        assert!(!profile.contains("(literal \"/Users\")"), "{profile}");
+        assert!(!profile.contains("subpath"), "only the file: {profile}");
+    }
+
+    #[test]
+    fn a_program_under_a_private_alias_is_readable_by_both_spellings() {
+        let policy = SandboxPolicy::default();
+        let program = std::path::Path::new("/tmp/build/agentbridge");
+        let profile = with_program_readable(String::new(), Some(program), &policy);
+        for literal in [
+            "(allow file-read* (literal \"/tmp/build/agentbridge\"))",
+            "(allow file-read* (literal \"/private/tmp/build/agentbridge\"))",
+            "(allow file-read-metadata (literal \"/tmp/build\"))",
+            "(allow file-read-metadata (literal \"/private/tmp/build\"))",
+            "(allow file-read-metadata (literal \"/private/tmp\"))",
+        ] {
+            assert!(profile.contains(literal), "missing {literal}: {profile}");
+        }
+        assert!(!profile.contains("(literal \"/private\")"), "{profile}");
+    }
+
+    #[test]
+    fn an_unresolved_program_adds_no_rules() {
+        let profile = with_program_readable("(version 1)".to_string(), None, &SandboxPolicy::default());
+        assert_eq!(profile, "(version 1)");
+    }
+
+    #[test]
+    fn a_non_utf8_program_launches_without_the_grant() {
+        use std::os::unix::ffi::OsStrExt;
+        let program = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/Users/someone/bin/\xff"));
+        let profile = with_program_readable(String::new(), Some(program), &SandboxPolicy::default());
+        assert!(profile.is_empty(), "{profile}");
+    }
+
+    #[test]
+    fn a_denied_program_stays_unreadable() {
+        let policy = SandboxPolicy::default().deny_path("/Users/someone/bin");
+        let program = std::path::Path::new("/Users/someone/bin/agentbridge");
+        let profile = with_program_readable(String::new(), Some(program), &policy);
+        assert!(profile.is_empty(), "{profile}");
+    }
+
+    #[test]
+    fn a_program_denied_by_its_private_alias_stays_unreadable() {
+        let policy = SandboxPolicy::default().deny_path("/private/tmp/build");
+        let program = std::path::Path::new("/tmp/build/agentbridge");
+        let profile = with_program_readable(String::new(), Some(program), &policy);
+        assert!(profile.is_empty(), "{profile}");
+    }
+
+    #[test]
+    fn a_program_under_a_relative_deny_stays_unreadable() {
+        // build_profile resolves a relative deny against the working
+        // directory; the grant must see the same path.
+        let policy = SandboxPolicy::default().deny_path("bin");
+        let program = std::env::current_dir().unwrap().join("bin/agentbridge");
+        let profile = with_program_readable(String::new(), Some(&program), &policy);
+        assert!(profile.is_empty(), "{profile}");
+    }
+
+    /// A temporary directory holding an executable `my-tool`, removed on drop.
+    fn tool_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = write_tool(dir.path(), 0o755);
+        (dir, std::fs::canonicalize(exe).unwrap())
+    }
+
+    fn write_tool(dir: &std::path::Path, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = dir.join("my-tool");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(mode)).unwrap();
+        exe
+    }
+
+    #[test]
+    fn the_program_is_found_on_the_commands_path() {
+        let (dir, exe) = tool_dir();
+        let mut cmd = Command::new("my-tool");
+        cmd.env("PATH", dir.path());
+        assert_eq!(resolve_program(&cmd), Some(exe));
+    }
+
+    #[test]
+    fn a_non_executable_match_earlier_on_path_is_skipped() {
+        let (dir, exe) = tool_dir();
+        let earlier = tempfile::tempdir().unwrap();
+        std::fs::write(earlier.path().join("my-tool"), "not executable").unwrap();
+        let mut cmd = Command::new("my-tool");
+        cmd.env("PATH", std::env::join_paths([earlier.path(), dir.path()]).unwrap());
+        assert_eq!(resolve_program(&cmd), Some(exe));
+    }
+
+    #[test]
+    fn an_owner_only_match_without_the_owners_execute_bit_is_skipped() {
+        // Others may execute a 0601 file, but not its owner, so exec skips it.
+        let (dir, exe) = tool_dir();
+        let owner_only = tempfile::tempdir().unwrap();
+        write_tool(owner_only.path(), 0o601);
+        let mut cmd = Command::new("my-tool");
+        cmd.env("PATH", std::env::join_paths([owner_only.path(), dir.path()]).unwrap());
+        assert_eq!(resolve_program(&cmd), Some(exe));
+    }
+
+    #[test]
+    fn a_relative_program_is_taken_from_the_commands_working_directory() {
+        let (dir, exe) = tool_dir();
+        let mut cmd = Command::new("./my-tool");
+        cmd.current_dir(dir.path());
+        assert_eq!(resolve_program(&cmd), Some(exe));
+    }
+
+    #[test]
+    fn a_relative_path_entry_is_taken_from_the_commands_working_directory() {
+        let (dir, exe) = tool_dir();
+        let mut cmd = Command::new("my-tool");
+        cmd.current_dir(dir.path().parent().unwrap())
+            .env("PATH", dir.path().file_name().unwrap());
+        assert_eq!(resolve_program(&cmd), Some(exe));
+    }
+
+    #[test]
+    fn an_absolute_program_does_not_need_a_working_directory() {
+        let (_dir, exe) = tool_dir();
+        assert_eq!(resolve_program(&Command::new(&exe)), Some(exe));
+    }
+
+    #[test]
+    fn a_missing_program_resolves_to_nothing() {
+        assert_eq!(resolve_program(&Command::new("no-such-tool-xyz")), None);
+    }
+
+    #[test]
+    fn a_removed_path_searches_the_system_default() {
+        // The parent's PATH is passed in rather than set: other tests spawn
+        // programs from it in parallel.
+        let (dir, exe) = tool_dir();
+        let inherited = Some(std::env::join_paths([dir.path()]).unwrap());
+        let mut cmd = Command::new("my-tool");
+        assert_eq!(resolve_program_inheriting(&cmd, inherited.clone()), Some(exe));
+        cmd.env_remove("PATH");
+        assert_eq!(
+            resolve_program_inheriting(&cmd, inherited.clone()),
+            None,
+            "my-tool is only on the inherited PATH"
+        );
+        let mut sh = Command::new("sh");
+        sh.env_remove("PATH");
+        assert_eq!(
+            resolve_program_inheriting(&sh, inherited),
+            Some(std::fs::canonicalize("/bin/sh").unwrap())
+        );
     }
 
     // ── mach-lookup gating tests ───────────────────────────────────────────
