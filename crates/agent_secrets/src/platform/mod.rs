@@ -1,9 +1,11 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod noop;
 #[cfg(feature = "onepassword")]
 pub mod onepassword;
@@ -42,7 +44,12 @@ fn platform_store() -> Box<dyn SecretStore> {
     Box::new(macos::MacosKeychainStore::new("agent_secrets"))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn platform_store() -> Box<dyn SecretStore> {
+    Box::new(linux::KeyringFileStore::from_env())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn platform_store() -> Box<dyn SecretStore> {
     Box::new(noop::NoopSecretStore::new())
 }

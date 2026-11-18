@@ -66,7 +66,8 @@ pub trait SecretStore: Send + Sync {
     /// Callers choosing between this store and some other place to keep a
     /// secret need the answer *without* touching it: probing with a real
     /// operation prompts the keychain, and a cancelled or locked keychain then
-    /// looks the same as having no keychain. Only the no-op store says false.
+    /// looks the same as having no keychain. Only stores that are not set up (the no-op store, or the Linux
+    /// keyring without a readable password file) say false.
     fn is_available(&self) -> bool {
         true
     }
