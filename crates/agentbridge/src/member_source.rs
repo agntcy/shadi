@@ -174,6 +174,7 @@ impl MemberSource for RunningAgentSource {
         }
         cmd.args(["--server-addr", &self.runtime.server_addr]);
         without_dir_auth(&mut cmd);
+        crate::subprocess::withhold_shadi_secrets(&mut cmd);
 
         let output = match run_bounded(cmd, RUNTIME_LIST_TIMEOUT, RUNTIME_LIST_MAX_BYTES) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -780,6 +781,7 @@ fn without_dir_auth(cmd: &mut Command) {
 }
 
 fn apply_dir_auth(cmd: &mut Command, dir: &DirLookupOptions) {
+    crate::subprocess::withhold_for_dirctl(cmd);
     if let Some(token) = &dir.gh_token {
         cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "github")
             .env("DIRECTORY_CLIENT_GITHUB_TOKEN", token);
@@ -1331,6 +1333,44 @@ mod tests {
         assert!(result.expect("no workloads").is_empty());
         let env = std::fs::read_to_string(&log).expect("dirctl was called");
         assert_eq!(env.trim(), "DIRECTORY_CLIENT_AUTH_MODE=insecure");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dirctl_does_not_inherit_shadi_secrets() {
+        let _guard = crate::dir_registry::dirctl_env_lock().lock().expect("lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("env.log");
+        let path = dir.path().join("fake_dirctl.sh");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nenv | grep -E '^(SHADI_AGENT_KEY|SLIM_HUMAN_SEED|DIRECTORY_CLIENT_GITHUB_TOKEN)=' >> '{}'\necho '[]'\n",
+                log.display()
+            ),
+        )
+        .expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_executable(&path);
+        std::env::set_var("SHADI_DIRCTL_BINARY", &path);
+        std::env::set_var("SHADI_AGENT_KEY", "agent-key");
+        std::env::set_var("SLIM_HUMAN_SEED", "seed");
+
+        let searched = search_cids(&["--skill", "s"], &test_dir());
+        let listed = RunningAgentSource {
+            skills: Vec::new(),
+            runtime: test_dir(),
+        }
+        .resolve();
+        let pulled = pull_record_json("cid", &test_dir());
+
+        for name in ["SHADI_DIRCTL_BINARY", "SHADI_AGENT_KEY", "SLIM_HUMAN_SEED"] {
+            std::env::remove_var(name);
+        }
+        assert!(searched.is_ok() && listed.is_ok() && pulled.is_ok());
+        let env = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(env, "");
     }
 
     /// The bug this guards: the limit was applied to the raw list, so one

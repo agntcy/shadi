@@ -158,7 +158,10 @@ pub fn agent_identity_from_env(agent_id: &str) -> Result<AgentIdentity, Identity
         ));
     }
     let seed = std::env::var("SLIM_HUMAN_SEED");
-    if let Ok(key) = std::env::var("SHADI_AGENT_KEY") {
+    if let Some(key) = std::env::var("SHADI_AGENT_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+    {
         if seed.is_ok() {
             return Err(IdentityError::Config(
                 "set only one of SLIM_HUMAN_SEED and SHADI_AGENT_KEY".to_string(),
@@ -333,6 +336,26 @@ mod tests {
             assert!(matches!(err, IdentityError::Config(_)));
             assert!(!err.to_string().contains(bad), "{err}");
         }
+
+        env::remove_var("SHADI_AGENT_KEY");
+        env::remove_var("SHADI_SLIM_AUTH");
+    }
+
+    #[test]
+    fn blank_agent_key_env_is_unset() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        let expected = AgentIdentity::derive(b"human", "avatar").unwrap().did();
+        for blank in ["", "  \n"] {
+            env::set_var("SHADI_AGENT_KEY", blank);
+            assert_eq!(agent_identity_from_env("avatar").unwrap().did(), expected);
+        }
+
+        env::set_var("SHADI_AGENT_KEY", "");
+        env::remove_var("SLIM_HUMAN_SEED");
+        assert!(agent_identity_from_env("avatar").is_err());
 
         env::remove_var("SHADI_AGENT_KEY");
         env::remove_var("SHADI_SLIM_AUTH");

@@ -33,6 +33,9 @@ const SAVE_ATTEMPTS: usize = 5;
 /// when the file changed since it was loaded.
 static KEYRING_LOCK: Mutex<()> = Mutex::new(());
 
+/// Misconfigurations already reported, so each is printed once per process.
+static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 pub struct KeyringFileStore {
     /// (keyring file, password file); `None` when not configured, `Err` when
     /// misconfigured.
@@ -50,7 +53,11 @@ impl KeyringFileStore {
         let abs = |name: &str| {
             match var(name).filter(|v| !v.is_empty()).map(PathBuf::from) {
                 Some(p) if !p.is_absolute() => {
-                    eprintln!("{name} must be an absolute path");
+                    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+                    if !warned.iter().any(|w| w == name) {
+                        eprintln!("{name} must be an absolute path");
+                        warned.push(name.to_owned());
+                    }
                     Err(())
                 }
                 p => Ok(p),
@@ -96,6 +103,7 @@ impl KeyringFileStore {
             .write(true)
             .truncate(false)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(name)
             .map_err(fail)?;
         file.lock().map_err(fail)?;
@@ -125,39 +133,47 @@ impl KeyringFileStore {
         let (path, password_file) = match &self.config {
             Ok(Some((path, password_file))) => (path, password_file),
             Ok(None) => return Err(SecretError::NotSupported),
-            Err(()) => return Err(SecretError::InvalidInput),
+            Err(()) => return Err(SecretError::StorageFailure),
         };
         let secret = Self::password(password_file)?;
         let _guard = KEYRING_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if !path.exists() && !(write && self.create) {
+        let gone = || !path.exists() && !(write && self.create);
+        if gone() {
             eprintln!("keyring not found: {}", path.display());
             return Err(SecretError::StoreNotFound);
         }
         let _file_lock = if write { Some(self.lock_file(path)?) } else { None };
         std::thread::scope(|s| {
             s.spawn(move || {
+                let to_secret = |err: oo7::file::Error| match err {
+                    oo7::file::Error::IncorrectSecret => SecretError::NotAuthorized,
+                    err => {
+                        eprintln!("keyring failed: {err}");
+                        SecretError::StorageFailure
+                    }
+                };
                 tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|_| SecretError::StorageFailure)?
                     .block_on(async {
                         let mut attempt = 1;
                         loop {
-                            let keyring = UnlockedKeyring::load(path, Some(secret.clone())).await?;
+                            // Deleted while we waited for the lock or retried.
+                            if gone() {
+                                eprintln!("keyring not found: {}", path.display());
+                                return Err(SecretError::StoreNotFound);
+                            }
+                            let keyring = UnlockedKeyring::load(path, Some(secret.clone()))
+                                .await
+                                .map_err(to_secret)?;
                             match f(keyring).await {
                                 Err(oo7::file::Error::TargetFileChanged(_))
                                     if attempt < SAVE_ATTEMPTS =>
                                 {
                                     attempt += 1;
                                 }
-                                result => break result,
+                                result => break result.map_err(to_secret),
                             }
-                        }
-                    })
-                    .map_err(|err| match err {
-                        oo7::file::Error::IncorrectSecret => SecretError::NotAuthorized,
-                        err => {
-                            eprintln!("keyring failed: {err}");
-                            SecretError::StorageFailure
                         }
                     })
             })
@@ -416,10 +432,10 @@ mod tests {
                 true,
             );
             assert!(!s.is_available());
-            assert!(matches!(s.get("k"), Err(SecretError::InvalidInput)));
-            assert!(matches!(s.put("k", b"v"), Err(SecretError::InvalidInput)));
-            assert!(matches!(s.delete("k"), Err(SecretError::InvalidInput)));
-            assert!(matches!(s.list_keys(), Err(SecretError::InvalidInput)));
+            assert!(matches!(s.get("k"), Err(SecretError::StorageFailure)));
+            assert!(matches!(s.put("k", b"v"), Err(SecretError::StorageFailure)));
+            assert!(matches!(s.delete("k"), Err(SecretError::StorageFailure)));
+            assert!(matches!(s.list_keys(), Err(SecretError::StorageFailure)));
         }
     }
 
@@ -474,5 +490,104 @@ mod tests {
         assert!(!lock.exists());
 
         std::fs::set_permissions(&keyring_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn lock_path(dir: &Path) -> PathBuf {
+        dir.join("data/shadi/x.keyring.lock")
+    }
+
+    fn hold_lock(dir: &Path) -> std::fs::File {
+        let f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path(dir))
+            .unwrap();
+        f.lock().unwrap();
+        f
+    }
+
+    #[test]
+    fn writers_wait_for_the_file_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path(), b"pw");
+        s.put("seed", b"v").unwrap();
+        // Held outside the store, so only the file lock can block the put.
+        let held = hold_lock(dir.path());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| tx.send(s.put("k", b"v")).unwrap());
+            assert!(rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err());
+            drop(held);
+            rx.recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap()
+                .unwrap();
+        });
+        assert_eq!(value(&s, "k"), b"v");
+    }
+
+    #[test]
+    fn non_creating_writer_does_not_recreate_a_keyring_deleted_while_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let creating = store(dir.path(), b"pw");
+        creating.put("k", b"v").unwrap();
+        let s = readonly(&creating);
+        let held = hold_lock(dir.path());
+        let keyring = dir.path().join("data/shadi/x.keyring");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| tx.send(s.put("n", b"v")).unwrap());
+            assert!(rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err());
+            std::fs::remove_file(&keyring).unwrap();
+            drop(held);
+            let res = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+            assert!(matches!(res, Err(SecretError::StoreNotFound)));
+        });
+        assert!(!keyring.exists());
+    }
+
+    #[test]
+    fn lock_file_is_not_followed_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path(), b"pw");
+        s.put("k", b"v").unwrap();
+        let target = dir.path().join("victim");
+        let lock = lock_path(dir.path());
+        std::fs::remove_file(&lock).unwrap();
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(matches!(s.put("k2", b"v"), Err(SecretError::StorageFailure)));
+        assert!(matches!(s.delete("k"), Err(SecretError::StorageFailure)));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn save_retries_when_the_file_changed_after_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path(), b"pw");
+        s.put("seed", b"v").unwrap();
+        let (path, pw) = s.config.clone().unwrap().unwrap();
+        let first = std::sync::atomic::AtomicBool::new(true);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        s.with_keyring(true, async |k| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                // A concurrent writer in another process.
+                let secret = KeyringFileStore::password(&pw).unwrap();
+                let other = UnlockedKeyring::load(&path, Some(secret)).await?;
+                other
+                    .create_item("a", &attrs("a"), Secret::blob(b"1"), true)
+                    .await?;
+            }
+            k.create_item("b", &attrs("b"), Secret::blob(b"2"), true)
+                .await
+                .map(drop)
+        })
+        .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(s.list_keys().unwrap(), ["a", "b", "seed"]);
     }
 }

@@ -57,6 +57,17 @@ pub fn withhold_shadi_secrets(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// [`withhold_shadi_secrets`] for `dirctl`, which keeps the DIR token that is
+/// its own.
+pub fn withhold_for_dirctl(cmd: &mut Command) -> &mut Command {
+    for name in WITHHELD_FROM_HARNESS {
+        if *name != "DIRECTORY_CLIENT_GITHUB_TOKEN" {
+            cmd.env_remove(name);
+        }
+    }
+    cmd
+}
+
 /// Tracks the PIDs of subprocesses for as long as they are running, so they
 /// can be killed on demand from anywhere holding a reference to this struct.
 ///

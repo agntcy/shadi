@@ -135,21 +135,34 @@ file format, unlocked with the password in the file named by
 headless and in containers. Without that variable the store is unavailable.
 
 - The keyring defaults to `~/.shadi/keyring/agent_secrets.keyring`
-  (`SHADI_KEYRING_PATH` overrides it). That is outside every path a sandbox
-  profile grants by default, so a sandboxed child can't read it.
+  (`SHADI_KEYRING_PATH` overrides it), outside the home directories the
+  Compatibility profile grants (`~/.config`, `~/.local`, `~/.cache`).
 - Relative paths are rejected, so the keyring can't land in a granted working
   directory by accident.
-- Only `shadictl derive-agent-identity` creates a keyring; everything else
-  fails with `StoreNotFound` until it exists.
+- Only key provisioning (`shadictl derive-agent-identity` and
+  `derive-agent-did`) creates a keyring; everything else fails with
+  `StoreNotFound` until it exists.
 - Writers lock `<keyring>.lock`, so concurrent processes don't lose updates.
 - `SHADI_KEYRING_PATH` and `SHADI_KEYRING_PASSWORD_FILE` are withheld from the
   harness agentbridge launches.
 
 Unlike the macOS keychain, there is no per-application access control: a
 process that can read both the keyring and its password file can decrypt every
-item. The protection is not granting either file. Avoid broad grants such as
-`--allow $HOME` or `--allow ~/.shadi`, and keep a custom keyring or password
-file outside granted directories.
+item, and one that can write the keyring can delete or roll back items. The only
+protection is that the sandbox doesn't grant either file, and Landlock can't
+carve a file out of a granted directory. Keep both files out of every grant:
+
+- **The working directory.** Every profile and preset grants `.`, so launching
+  `shadictl` from `$HOME` or `~/.shadi` exposes the default keyring.
+- **Explicit grants** that contain them, read or write: `--allow $HOME`,
+  `--read $HOME`, `--allow ~/.shadi`.
+- **Paths every Linux sandbox can read:** `/etc`, `/usr` and `/lib*`; under
+  the Compatibility profile also `/tmp`, `/var/tmp`, `/run`, `~/.config`,
+  `~/.local` and `~/.cache`. Don't put the password file there, for example
+  under `/run/secrets` with the Compatibility profile.
+
+Create the password from random bytes and keep it private, for example
+`(umask 077; head -c 32 /dev/urandom | base64 > keyring-password)`.
 
 ## 1Password backend
 
