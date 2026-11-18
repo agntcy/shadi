@@ -84,7 +84,7 @@ The system can be read as four presentation layers:
 ### Secrets layer
 
 - **OS keystores**: Keychain (macOS/iOS), DPAPI/CNG (Windows), Keystore (Android),
-  Secret Service (Linux).
+  an encrypted keyring file (Linux).
 - **1Password backend** (optional): Cross-platform secret storage via the `op` CLI.
   Enabled with the `onepassword` Cargo feature and `SHADI_SECRET_BACKEND=onepassword`.
   Supports team/shared vaults and headless CI via `OP_SERVICE_ACCOUNT_TOKEN`.
@@ -177,6 +177,7 @@ delivery, and the prompt-injection boundary, see
     - `crates/agent_secrets/src/memory.rs`: `SecretBytes` zeroization wrapper.
     - `crates/agent_secrets/src/platform`: platform keychain backends.
     - `crates/agent_secrets/src/platform/macos.rs`: Keychain storage + key registry for listing.
+    - `crates/agent_secrets/src/platform/linux.rs`: encrypted keyring file storage (libsecret file format).
     - `crates/agent_secrets/src/platform/onepassword.rs`: 1Password backend via `op` CLI.
     - `crates/shadictl/src/identity_command.rs`: OpenPGP/GPG ingestion and DID derivation commands.
     - `crates/shadictl/src/secrets_command.rs`: secret store list/get helpers.
