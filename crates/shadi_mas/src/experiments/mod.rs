@@ -88,6 +88,9 @@ impl TaskAdapter for RecordingTaskAdapter {
 pub struct LiveA2ATaskAdapterConfig {
     pub endpoint: String,
     pub agent_id: String,
+    /// Prefix of the SLIM name a send subscribes under, `agntcy/shadi/{agent_id}-a2a-client`
+    /// by default. Each attempt adds a suffix of its own, so a send never takes the
+    /// name of the agent's listener or of another send in flight (agntcy/shadi#570).
     pub local_name: Option<String>,
     pub peer_agent_id: String,
     pub destination: Option<String>,
@@ -321,11 +324,11 @@ impl LiveA2ATaskAdapter {
         message: &Message,
     ) -> Result<SendMessageResponse, String> {
         let access = ClientAccess::from_env(Some(&self.config.agent_id))?;
-        let local_name = self
+        let local_prefix = self
             .config
             .local_name
             .clone()
-            .unwrap_or_else(|| canonical_slim_name(&self.config.agent_id));
+            .unwrap_or_else(|| outbound_name_prefix(&self.config.agent_id));
         let destination = self
             .config
             .destination
@@ -354,7 +357,7 @@ impl LiveA2ATaskAdapter {
                 let connection_id = service
                     .connect(build_client_config_for_endpoint(&self.config.endpoint, &access))
                     .map_err(format_slim_error)?;
-                let local_name_ref = Arc::new(parse_slim_name(&local_name)?);
+                let local_name_ref = Arc::new(parse_slim_name(&outbound_name(&local_prefix))?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
 
                 let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
@@ -586,6 +589,18 @@ fn parse_slim_name(raw: &str) -> Result<Name, String> {
     })
 }
 
+fn outbound_name_prefix(agent_id: &str) -> String {
+    format!("{}-a2a-client", canonical_slim_name(agent_id))
+}
+
+/// `prefix` plus a random suffix. With two SLIM apps under one name, the peer's
+/// answer to a session handshake can reach the other one, and the send retries
+/// until it gives up.
+fn outbound_name(prefix: &str) -> String {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    format!("{prefix}-{}", &nonce[..12])
+}
+
 fn canonical_slim_name(agent_id: &str) -> String {
     if agent_id.contains('/') {
         agent_id.to_string()
@@ -612,6 +627,24 @@ mod transport_tests {
             correlation_id: Some("corr-1".to_string()),
             body: b"hello world".to_vec(),
         }
+    }
+
+    #[test]
+    fn each_send_subscribes_under_a_name_of_its_own() {
+        let prefix = outbound_name_prefix("copilot");
+        assert_eq!(prefix, "agntcy/shadi/copilot-a2a-client");
+        let first = outbound_name(&prefix);
+        let second = outbound_name(&prefix);
+        assert_ne!(first, second);
+        assert!(
+            first.starts_with("agntcy/shadi/copilot-a2a-client-"),
+            "{first}"
+        );
+        assert_ne!(
+            outbound_name("agntcy/shadi/copilot-a2a"),
+            "agntcy/shadi/copilot-a2a"
+        );
+        parse_slim_name(&first).unwrap();
     }
 
     #[test]

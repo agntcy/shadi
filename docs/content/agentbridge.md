@@ -345,6 +345,11 @@ agntcy/shadi/<tool>-a2a
 For example, `--tool copilot` listens as `agntcy/shadi/copilot-a2a`. The
 `coordinate` command reaches it with `--agents slim:copilot`.
 
+A task an agent sends (`delegate`, `handoff`, a `NEXT` hop) goes out under
+`agntcy/shadi/<tool>-a2a-client-<suffix>`, a name of its own for each send, and
+is signed with the agent's DID. So an agent can call out while its listener
+runs, several calls at once, and the peer still sees the agent's own DID.
+
 ### Request handler stack
 
 ```text
