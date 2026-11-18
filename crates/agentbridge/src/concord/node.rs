@@ -11,6 +11,7 @@
 //! A node that only opens the run and takes no part in it is a node whose
 //! agent is not among the participants.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -73,6 +74,12 @@ pub struct ConcordInit {
 pub struct NodeConfig {
     /// How many times the model may answer one task before the node gives up.
     pub max_attempts: u32,
+    /// How many times a failed harness call is repeated before the node gives
+    /// up. A reply that is refused is not a failure: it counts against
+    /// `max_attempts`.
+    pub harness_retries: u32,
+    /// How long to wait before repeating a failed harness call.
+    pub harness_pause: Duration,
     /// How long to wait for a message before looking at the timers.
     pub poll: Duration,
     /// How long the node may run in all. `None` runs until the run ends.
@@ -83,6 +90,8 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             max_attempts: 3,
+            harness_retries: 2,
+            harness_pause: Duration::from_secs(2),
             poll: Duration::from_millis(200),
             deadline: None,
         }
@@ -107,7 +116,12 @@ pub enum NodeError {
     Unsupported(&'static str),
     #[error("the run did not end within {0:?}")]
     Deadline(Duration),
+    #[error("the node was stopped before the run ended")]
+    Stopped,
 }
+
+/// What a node calls for every event.
+type Observer = Box<dyn Fn(&Event) + Send>;
 
 pub struct Node<C: Channel, R: Responder> {
     agent: Agent,
@@ -121,6 +135,8 @@ pub struct Node<C: Channel, R: Responder> {
     /// The agent's own raw anchors, once its init reply is sent.
     anchors: Option<RawAnchors>,
     events: Vec<Event>,
+    observer: Option<Observer>,
+    stop: Arc<AtomicBool>,
 }
 
 impl<C: Channel, R: Responder> Node<C, R> {
@@ -134,7 +150,30 @@ impl<C: Channel, R: Responder> Node<C, R> {
             described: false,
             anchors: None,
             events: Vec::new(),
+            observer: None,
+            stop: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Change how the node paces itself.
+    pub fn set_config(&mut self, config: NodeConfig) {
+        self.config = config;
+    }
+
+    /// Call `observer` for every event as it happens, for a log.
+    pub fn observe(&mut self, observer: impl Fn(&Event) + Send + 'static) {
+        self.observer = Some(Box::new(observer));
+    }
+
+    /// A flag that, once set, ends [`Node::run`] with [`NodeError::Stopped`]
+    /// the next time the node looks at it: between messages, and before a
+    /// failed harness call is repeated.
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
     }
 
     pub fn agent(&self) -> &Agent {
@@ -166,6 +205,9 @@ impl<C: Channel, R: Responder> Node<C, R> {
     pub fn run(&mut self) -> Result<Report, NodeError> {
         let started = Instant::now();
         loop {
+            if self.stopped() {
+                return Err(NodeError::Stopped);
+            }
             self.answer_due()?;
             if let Some(report) = self.finished() {
                 return Ok(report);
@@ -209,6 +251,9 @@ impl<C: Channel, R: Responder> Node<C, R> {
         }
         for event in &step.events {
             tracing::debug!(event = %event.event, "concord");
+            if let Some(observer) = &self.observer {
+                observer(event);
+            }
         }
         self.inbox.extend(step.accepted);
         self.events.extend(step.events);
@@ -234,10 +279,7 @@ impl<C: Channel, R: Responder> Node<C, R> {
         let mut last = String::new();
         let mut repeats = 0;
         for attempt in 1..=self.config.max_attempts {
-            let reply = self
-                .responder
-                .respond(task, &prompt)
-                .map_err(NodeError::Harness)?;
+            let reply = self.ask(task, &prompt)?;
             let outcome = match extract_json(&reply) {
                 Some(answer) => {
                     let outcome = submit(&mut self.agent, task, &answer, self.anchors, repeats);
@@ -275,6 +317,27 @@ impl<C: Channel, R: Responder> Node<C, R> {
             attempts: self.config.max_attempts,
             last,
         })
+    }
+
+    /// The model's reply to `prompt`. A call that fails is repeated after a
+    /// pause, as a harness may fail once (a rate limit, a dropped connection)
+    /// and answer the next time.
+    fn ask(&mut self, task: &Task, prompt: &str) -> Result<String, NodeError> {
+        let mut failures = 0;
+        loop {
+            match self.responder.respond(task, prompt) {
+                Ok(reply) => return Ok(reply),
+                Err(_) if self.stopped() => return Err(NodeError::Stopped),
+                Err(error) if failures >= self.config.harness_retries => {
+                    return Err(NodeError::Harness(error));
+                }
+                Err(error) => {
+                    failures += 1;
+                    tracing::warn!(%error, failures, kind = task.kind(), "concord: the harness failed, trying again");
+                    std::thread::sleep(self.config.harness_pause);
+                }
+            }
+        }
     }
 
     /// What the model reads for `task`: how a run goes (once), what the others

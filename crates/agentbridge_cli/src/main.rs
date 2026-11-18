@@ -176,6 +176,32 @@ enum Cmd {
         /// (`dirctl verify --oidc-subject`).
         #[arg(long, value_name = "SUBJECT", requires = "record_oidc_issuer")]
         record_oidc_subject: Option<String>,
+
+        /// Take part in a group protocol instead of serving prompts. `concord`:
+        /// negotiate one outcome with the other members over A2A Collaborate,
+        /// with this tool as the model. Needs --slim-endpoint and
+        /// --peer-agent-ids, and a build with the `concord` feature.
+        #[arg(
+            long,
+            value_enum,
+            requires = "peer_agent_ids",
+            conflicts_with_all = [
+                "a2a_listen", "a2a_binding", "admission_policy", "dir_publish", "dir_announce",
+                "card_listen", "record", "source_record", "no_source_record", "skills",
+                "domains", "agent_version", "advertise_url", "skip_oasf_validation",
+            ]
+        )]
+        protocol: Option<commands::concord::Protocol>,
+
+        /// Agent ids of the other members of the group, the coordinator
+        /// included (with --protocol).
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "ID1,ID2,...",
+            requires = "protocol"
+        )]
+        peer_agent_ids: Vec<String>,
     },
 
     /// List available adapters (Agent Directory or this machine).
@@ -353,7 +379,96 @@ enum Cmd {
         /// Write a machine-readable run report to this path as JSON.
         #[arg(long)]
         report: Option<String>,
+
+        /// Run a group protocol instead of the coordination patterns.
+        /// `concord`: open a run that looks for one outcome every participant
+        /// rates above a threshold. The goal is the problem; needs
+        /// --participants, --reject, --ideal and --schema.
+        #[arg(
+            long,
+            value_enum,
+            conflicts_with_all = ["agents", "quorum", "max_rounds", "output", "require_human", "pattern", "assembly"]
+        )]
+        protocol: Option<commands::concord::Protocol>,
+
+        /// Agent ids that negotiate (with --protocol concord), at least two.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "ID1,ID2,...",
+            requires = "protocol"
+        )]
+        participants: Vec<String>,
+
+        /// The worst outcome, as a state and not as a proposal (with --protocol concord).
+        #[arg(long, requires = "protocol")]
+        reject: Option<String>,
+
+        /// The best outcome, as a state and not as a proposal (with --protocol concord).
+        #[arg(long, requires = "protocol")]
+        ideal: Option<String>,
+
+        /// JSON Schema of one candidate, inline or the path of a file (with --protocol concord).
+        #[arg(long, requires = "protocol")]
+        schema: Option<String>,
+
+        /// Score every participant must reach, above 0 and at most 1 (with --protocol concord; default 0.6).
+        #[arg(long, requires = "protocol")]
+        threshold: Option<String>,
+
+        /// Repair rounds before the run settles for the best outcome found (with --protocol concord; default 8).
+        #[arg(long, requires = "protocol")]
+        budget: Option<i64>,
+
+        /// Seconds a participant waits for a message it is owed before asking
+        /// again (with --protocol concord; default 300).
+        #[arg(long, requires = "protocol")]
+        timeout: Option<i64>,
+
+        /// Times a participant asks again before the run is aborted (with --protocol concord; default 3).
+        #[arg(long, requires = "protocol")]
+        retries: Option<i64>,
     },
+}
+
+/// The flags of a group protocol given without `--protocol`. clap's `requires`
+/// does not catch them next to an argument that conflicts with `--protocol`
+/// (`coordinate --agents x --budget 3`), and the command would then run the
+/// other algorithm and ignore the flag.
+fn misplaced_protocol_flags(command: &Cmd) -> Option<&'static str> {
+    match command {
+        Cmd::Register {
+            protocol: None,
+            peer_agent_ids,
+            ..
+        } if !peer_agent_ids.is_empty() => Some("--peer-agent-ids needs --protocol concord"),
+        Cmd::Coordinate {
+            protocol: None,
+            participants,
+            reject,
+            ideal,
+            schema,
+            threshold,
+            budget,
+            timeout,
+            retries,
+            ..
+        } if !participants.is_empty()
+            || reject.is_some()
+            || ideal.is_some()
+            || schema.is_some()
+            || threshold.is_some()
+            || budget.is_some()
+            || timeout.is_some()
+            || retries.is_some() =>
+        {
+            Some(
+                "--participants, --reject, --ideal, --schema, --threshold, --budget, --timeout \
+                 and --retries need --protocol concord",
+            )
+        }
+        _ => None,
+    }
 }
 
 /// The console keeps RUST_LOG, warn by default. Traces go to the collector
@@ -457,8 +572,29 @@ fn main() {
     slim_config::tls::provider::initialize_crypto_provider();
 
     let cli = Cli::parse();
+    if let Some(message) = misplaced_protocol_flags(&cli.command) {
+        eprintln!("error: {message}");
+        std::process::exit(2);
+    }
 
     let result = match cli.command {
+        Cmd::Register {
+            protocol: Some(commands::concord::Protocol::Concord),
+            tool,
+            command,
+            args,
+            slim_endpoint,
+            peer_agent_ids,
+            verbose,
+            ..
+        } => commands::concord::register(commands::concord::MemberOptions {
+            tool: &tool,
+            command: command.as_deref(),
+            args: &args,
+            slim_endpoint: slim_endpoint.as_deref(),
+            peers: &peer_agent_ids,
+            verbose,
+        }),
         Cmd::Register {
             tool,
             command,
@@ -487,6 +623,8 @@ fn main() {
             record_server,
             record_oidc_issuer,
             record_oidc_subject,
+            protocol: None,
+            peer_agent_ids: _,
         } => {
             // All three serve or announce a listener, so they need one; a
             // --record without one would be provisioned and removed at once.
@@ -652,6 +790,35 @@ fn main() {
             &endpoint,
         ),
         Cmd::Coordinate {
+            protocol: Some(commands::concord::Protocol::Concord),
+            goal,
+            slim_endpoint,
+            session,
+            report,
+            participants,
+            reject,
+            ideal,
+            schema,
+            threshold,
+            budget,
+            timeout,
+            retries,
+            ..
+        } => commands::concord::coordinate(commands::concord::CoordinateOptions {
+            goal: &goal,
+            participants: &participants,
+            reject: reject.as_deref(),
+            ideal: ideal.as_deref(),
+            schema: schema.as_deref(),
+            threshold: threshold.as_deref(),
+            budget,
+            timeout,
+            retries,
+            slim_endpoint: &slim_endpoint,
+            session: session.as_deref(),
+            report: report.as_deref(),
+        }),
+        Cmd::Coordinate {
             goal,
             agents,
             quorum,
@@ -663,6 +830,7 @@ fn main() {
             assembly,
             session,
             report,
+            ..
         } => commands::coordinate::run(commands::coordinate::Options {
             goal: &goal,
             agent_specs: &agents,
@@ -785,6 +953,237 @@ mod tests {
             }
             _ => panic!("expected coordinate subcommand"),
         }
+    }
+
+    #[test]
+    fn parses_register_concord() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "claude-code",
+            "--slim-endpoint",
+            "127.0.0.1:47357",
+            "--protocol",
+            "concord",
+            "--peer-agent-ids",
+            "copilot,codex,coordinator",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Register {
+                protocol,
+                peer_agent_ids,
+                ..
+            } => {
+                assert_eq!(protocol, Some(commands::concord::Protocol::Concord));
+                assert_eq!(peer_agent_ids, ["copilot", "codex", "coordinator"]);
+            }
+            _ => panic!("expected register subcommand"),
+        }
+    }
+
+    #[test]
+    fn register_concord_needs_its_peers_and_peers_need_concord() {
+        let base = ["agentbridge", "register", "--tool", "claude-code"];
+        assert!(
+            Cli::try_parse_from(base.iter().copied().chain(["--protocol", "concord"])).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(base.iter().copied().chain(["--peer-agent-ids", "a,b"])).is_err()
+        );
+    }
+
+    #[test]
+    fn register_concord_refuses_the_flags_it_would_ignore() {
+        for flag in [
+            ["--admission-policy", "policy.json"],
+            ["--skill", "some/skill"],
+            ["--domain", "some/domain"],
+            ["--version", "1.2.0"],
+            ["--advertise-url", "http://localhost:9000"],
+            ["--source-record", "some-cid"],
+            ["--a2a-binding", "jsonrpc"],
+        ] {
+            let parsed = Cli::try_parse_from(
+                [
+                    "agentbridge",
+                    "register",
+                    "--tool",
+                    "claude-code",
+                    "--protocol",
+                    "concord",
+                    "--peer-agent-ids",
+                    "a,b",
+                ]
+                .into_iter()
+                .chain(flag),
+            );
+            assert!(parsed.is_err(), "{} was accepted", flag[0]);
+        }
+    }
+
+    #[test]
+    fn register_concord_does_not_mix_with_a_listener_or_a_record() {
+        for flag in [
+            ["--a2a-listen", "127.0.0.1:9000"],
+            ["--record", "some-record"],
+        ] {
+            let err = Cli::try_parse_from(
+                [
+                    "agentbridge",
+                    "register",
+                    "--tool",
+                    "claude-code",
+                    "--protocol",
+                    "concord",
+                    "--peer-agent-ids",
+                    "a",
+                ]
+                .into_iter()
+                .chain(flag),
+            );
+            assert!(err.is_err(), "{flag:?} must conflict with --protocol");
+        }
+    }
+
+    #[test]
+    fn parses_coordinate_concord() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "coordinate",
+            "--protocol",
+            "concord",
+            "--goal",
+            "choose the evacuation city",
+            "--participants",
+            "a,b,c",
+            "--reject",
+            "the evacuation fails",
+            "--ideal",
+            "everyone is safe",
+            "--schema",
+            r#"{"type":"string"}"#,
+            "--threshold",
+            "0.7",
+            "--budget",
+            "4",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Coordinate {
+                protocol,
+                participants,
+                threshold,
+                budget,
+                timeout,
+                ..
+            } => {
+                assert_eq!(protocol, Some(commands::concord::Protocol::Concord));
+                assert_eq!(participants, ["a", "b", "c"]);
+                assert_eq!(threshold.as_deref(), Some("0.7"));
+                assert_eq!(budget, Some(4));
+                assert_eq!(timeout, None);
+            }
+            _ => panic!("expected coordinate subcommand"),
+        }
+    }
+
+    #[test]
+    fn coordinate_concord_does_not_mix_with_the_other_algorithms() {
+        for flag in [
+            ["--quorum", "2"],
+            ["--max-rounds", "3"],
+            ["--pattern", "preference"],
+            ["--agents", "claude-code"],
+            ["--output", "out.rs"],
+        ] {
+            let err = Cli::try_parse_from(
+                [
+                    "agentbridge",
+                    "coordinate",
+                    "--goal",
+                    "g",
+                    "--protocol",
+                    "concord",
+                ]
+                .into_iter()
+                .chain(flag),
+            );
+            assert!(err.is_err(), "{flag:?} must conflict with --protocol");
+        }
+    }
+
+    #[test]
+    fn coordinate_without_a_protocol_is_unchanged() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "coordinate",
+            "--goal",
+            "g",
+            "--agents",
+            "goose",
+        ])
+        .expect("parse");
+        assert_eq!(misplaced_protocol_flags(&cli.command), None);
+        match cli.command {
+            Cmd::Coordinate {
+                protocol,
+                quorum,
+                pattern,
+                ..
+            } => {
+                assert_eq!(protocol, None);
+                assert_eq!(quorum, 2);
+                assert_eq!(pattern, shadi_mas::PatternKind::Development);
+            }
+            _ => panic!("expected coordinate subcommand"),
+        }
+    }
+
+    #[test]
+    fn concord_flags_without_a_protocol_are_refused_even_next_to_agents() {
+        // `--agents` conflicts with `--protocol`, which makes clap skip `requires`
+        for flag in [
+            ["--reject", "x"],
+            ["--ideal", "x"],
+            ["--schema", "{}"],
+            ["--threshold", "0.5"],
+            ["--budget", "3"],
+            ["--timeout", "9"],
+            ["--retries", "1"],
+            ["--participants", "a,b"],
+        ] {
+            let cli = Cli::try_parse_from(
+                [
+                    "agentbridge",
+                    "coordinate",
+                    "--goal",
+                    "g",
+                    "--agents",
+                    "goose",
+                ]
+                .into_iter()
+                .chain(flag),
+            )
+            .expect("clap alone lets it through");
+            assert!(
+                misplaced_protocol_flags(&cli.command).is_some(),
+                "{flag:?} must be refused without --protocol"
+            );
+        }
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "register",
+            "--tool",
+            "claude-code",
+            "--a2a-listen",
+            "127.0.0.1:9000",
+            "--peer-agent-ids",
+            "a",
+        ])
+        .expect("clap alone lets it through");
+        assert!(misplaced_protocol_flags(&cli.command).is_some());
     }
 
     #[test]

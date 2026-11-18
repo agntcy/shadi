@@ -1,5 +1,10 @@
 pub mod announce;
 pub mod card;
+pub mod concord;
+#[cfg(feature = "concord")]
+pub mod concord_channel;
+#[cfg(all(test, feature = "concord"))]
+mod concord_scenarios;
 pub mod coordinate;
 pub mod delegate;
 pub mod egress;

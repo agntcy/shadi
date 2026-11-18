@@ -1139,7 +1139,7 @@ pub fn preflight(
 /// enough to constrain whatever CLI tool an adapter spawns to run a task —
 /// no sandboxing code is needed in agentbridge itself. See
 /// [`shadi_sandbox::sandbox_enforced`].
-fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String> {
+pub(super) fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String> {
     if shadi_sandbox::sandbox_enforced() {
         return Ok(());
     }

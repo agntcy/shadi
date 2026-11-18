@@ -14,6 +14,11 @@
 
 pub mod binding;
 
+/// The CONCORD library the node is built on, so that a caller uses the
+/// version this crate is pinned to.
+#[cfg(feature = "concord")]
+pub use ioc_concord;
+
 #[cfg(feature = "concord")]
 pub mod channel;
 #[cfg(feature = "concord")]
