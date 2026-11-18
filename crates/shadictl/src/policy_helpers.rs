@@ -120,7 +120,12 @@ pub(crate) fn inject_keychain_with_store(
         let (key, env) = parse_key_env(mapping)?;
         let secret = store
             .get(key)
-            .map_err(|_| format!("keychain lookup failed for {}", key))?;
+            .map_err(|err| match err {
+                agent_secrets::SecretError::StoreNotFound => {
+                    format!("keychain lookup failed for {}: {}", key, err)
+                }
+                _ => format!("keychain lookup failed for {}", key),
+            })?;
         let value = secret.expose(|bytes| bytes.to_vec());
         let value = secret_bytes_to_utf8(&value)?;
         command.env(env, value);

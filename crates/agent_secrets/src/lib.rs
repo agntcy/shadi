@@ -27,6 +27,7 @@ pub enum SecretError {
     NotAuthorized,
     InvalidInput,
     StorageFailure,
+    StoreNotFound,
 }
 
 impl fmt::Display for SecretError {
@@ -36,6 +37,7 @@ impl fmt::Display for SecretError {
             SecretError::NotAuthorized => "not authorized",
             SecretError::InvalidInput => "invalid input",
             SecretError::StorageFailure => "storage failure",
+            SecretError::StoreNotFound => "secret store not found",
         };
         f.write_str(msg)
     }
@@ -66,8 +68,9 @@ pub trait SecretStore: Send + Sync {
     /// Callers choosing between this store and some other place to keep a
     /// secret need the answer *without* touching it: probing with a real
     /// operation prompts the keychain, and a cancelled or locked keychain then
-    /// looks the same as having no keychain. Only stores that are not set up (the no-op store, or the Linux
-    /// keyring without a readable password file) say false.
+    /// looks the same as having no keychain. Only stores that are not set up
+    /// (the no-op store, or the Linux keyring without a readable password
+    /// file or without a keyring file to open) say false.
     fn is_available(&self) -> bool {
         true
     }
@@ -75,6 +78,12 @@ pub trait SecretStore: Send + Sync {
 
 pub fn default_store() -> Box<dyn SecretStore> {
     platform::default_store()
+}
+
+/// `default_store`, except that on Linux the keyring file may be created.
+/// Only key provisioning should use it.
+pub fn creating_store() -> Box<dyn SecretStore> {
+    platform::creating_store()
 }
 
 #[cfg(test)]
@@ -177,11 +186,13 @@ mod tests {
         assert_eq!(SecretError::NotAuthorized.to_string(), "not authorized");
         assert_eq!(SecretError::InvalidInput.to_string(), "invalid input");
         assert_eq!(SecretError::StorageFailure.to_string(), "storage failure");
+        assert_eq!(SecretError::StoreNotFound.to_string(), "secret store not found");
     }
 
     #[test]
     fn default_store_constructs_a_backend() {
         let _store = default_store();
+        let _store = creating_store();
     }
 
     /// `MemoryStore` does not implement `is_available`, so this is the trait
