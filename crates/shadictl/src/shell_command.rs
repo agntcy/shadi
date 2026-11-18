@@ -1724,9 +1724,8 @@ fn resolve_and_persist_group_trust(args: &SlimCreateGroupArgs) -> Result<(), Str
 
     if let Some(path) = &args.write_config {
         let agent_id = std::env::var("SHADI_AGENT_ID").unwrap_or_else(|_| "agent".to_string());
-        let moderator_did = std::env::var("SLIM_HUMAN_SEED")
+        let moderator_did = shadi_identity::agent_identity_from_env(&agent_id)
             .ok()
-            .and_then(|seed| shadi_identity::AgentIdentity::derive(seed.as_bytes(), &agent_id).ok())
             .map(|agent| agent.did());
 
         let mut groups = std::collections::BTreeMap::new();
@@ -2420,6 +2419,41 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(written.contains("did:key:agent"));
         assert!(written.contains("agntcy/shadi/room"));
+    }
+
+    #[test]
+    fn resolve_and_persist_group_trust_writes_moderator_did_from_injected_agent_key() {
+        use base64::Engine as _;
+        let _lock = crate::lock_test_env();
+        let key = [7u8; 32];
+        let _trust = ScopedEnvVar::unset("SLIM_MEMBER_DIDS");
+        let _dir_server = ScopedEnvVar::unset("SHADI_DIR_SERVER");
+        let _auth = ScopedEnvVar::set("SHADI_SLIM_AUTH", "did");
+        let _seed = ScopedEnvVar::unset("SLIM_HUMAN_SEED");
+        let _key = ScopedEnvVar::set(
+            "SHADI_AGENT_KEY",
+            base64::engine::general_purpose::STANDARD.encode(key),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "shadi-test-create-group-key-{}.toml",
+            std::process::id()
+        ));
+        let args = SlimCreateGroupArgs {
+            channel: "agntcy/shadi/room".to_string(),
+            members: vec!["explicit:copilot=did:key:agent".to_string()],
+            dir_server: "localhost:8888".to_string(),
+            runtime: "localhost:8888".to_string(),
+            gh_token: None,
+            limit: 10,
+            write_config: Some(path.clone()),
+        };
+
+        resolve_and_persist_group_trust(&args).expect("resolve");
+
+        let written = std::fs::read_to_string(&path).expect("config file written");
+        let _ = std::fs::remove_file(&path);
+        let expected = shadi_identity::AgentIdentity::from_signing_key_slice(&key).unwrap();
+        assert!(written.contains(&expected.did()), "{written}");
     }
 
     #[test]

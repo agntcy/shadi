@@ -517,7 +517,8 @@ pub(crate) fn resolve_default_shared_secret() -> Result<String, String> {
 /// Resolve how this agent authenticates to the SLIM mesh.
 ///
 /// `SHADI_SLIM_AUTH=did` selects DID-JWT admission (agent key derived from
-/// `SLIM_HUMAN_SEED`, allow-list `SLIM_MEMBER_DIDS`); anything else uses the
+/// `SLIM_HUMAN_SEED` or injected as `SHADI_AGENT_KEY`, allow-list
+/// `SLIM_MEMBER_DIDS`); anything else uses the
 /// shared-secret mesh key. The DID env contract lives in
 /// [`shadi_identity::did_auth_from_env`], shared by every SHADI create_app site.
 pub(crate) fn resolve_slim_auth(agent_id: &str) -> Result<shadi_identity::SlimAuth, String> {
@@ -529,18 +530,11 @@ pub(crate) fn resolve_slim_auth(agent_id: &str) -> Result<shadi_identity::SlimAu
     }
 }
 
-/// The DID identity to display for `agent_id` when DID auth is active: its derived
-/// `did:key` plus the human DID it belongs to (`SLIM_HUMAN_DID`, optional). Returns
+/// The DID identity to display for `agent_id` when DID auth is active: its
+/// `did:key` (derived from `SLIM_HUMAN_SEED` or from `SHADI_AGENT_KEY`) plus the human DID it belongs to (`SLIM_HUMAN_DID`, optional). Returns
 /// `None` under shared-secret auth, so callers keep their legacy output.
 fn did_identity_for_display(agent_id: &str) -> Option<(String, Option<String>)> {
-    if !std::env::var("SHADI_SLIM_AUTH")
-        .unwrap_or_default()
-        .eq_ignore_ascii_case("did")
-    {
-        return None;
-    }
-    let seed = std::env::var("SLIM_HUMAN_SEED").ok()?;
-    let agent = shadi_identity::AgentIdentity::derive(seed.as_bytes(), agent_id).ok()?;
+    let agent = shadi_identity::agent_identity_from_env(agent_id).ok()?;
     let human = std::env::var("SLIM_HUMAN_DID")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -693,6 +687,23 @@ mod tests {
         // Deterministic, and name-scoped.
         assert_eq!(did_identity_for_display("avatar").unwrap().0, did);
         assert_ne!(did_identity_for_display("secops-a").unwrap().0, did);
+    }
+
+    #[test]
+    fn did_identity_for_display_uses_injected_agent_key() {
+        use base64::Engine as _;
+        let _guard = lock_env();
+        let key = [7u8; 32];
+        let _auth = ScopedEnvVar::set("SHADI_SLIM_AUTH", "did");
+        let _seed = ScopedEnvVar::unset("SLIM_HUMAN_SEED");
+        let _key = ScopedEnvVar::set(
+            "SHADI_AGENT_KEY",
+            base64::engine::general_purpose::STANDARD.encode(key),
+        );
+
+        let (did, _) = did_identity_for_display("avatar").expect("did identity");
+        let expected = shadi_identity::AgentIdentity::from_signing_key_slice(&key).unwrap();
+        assert_eq!(did, expected.did());
     }
 
     #[test]
