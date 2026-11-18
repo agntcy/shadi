@@ -24,6 +24,11 @@ use std::sync::Mutex;
 pub const WITHHELD_FROM_HARNESS: &[&str] = &[
     // The human root secret every agent key is derived from.
     "SLIM_HUMAN_SEED",
+    // One agent's pre-derived signing key (base64).
+    "SHADI_AGENT_KEY",
+    // Where the keyring holding agent keys lives, and its password file.
+    "SHADI_KEYRING_PATH",
+    "SHADI_KEYRING_PASSWORD_FILE",
     "SLIM_SHARED_SECRET",
     "SHADI_SSH_PASSPHRASE",
     "SHADI_MEMORY_KEY",
@@ -143,15 +148,16 @@ mod tests {
         let mut cmd = Command::new("/bin/sh");
         cmd.env("SLIM_HUMAN_SEED", "root-secret")
             .env("A2A_TLS_KEY", "/keys/a2a.key")
+            .env("SHADI_AGENT_KEY", "agent-secret")
             .env("HARNESS_OK", "kept")
             .arg("-c")
-            .arg("echo ${SLIM_HUMAN_SEED-unset} ${A2A_TLS_KEY-unset} ${HARNESS_OK-unset}");
+            .arg("echo ${SLIM_HUMAN_SEED-unset} ${A2A_TLS_KEY-unset} ${SHADI_AGENT_KEY-unset} ${HARNESS_OK-unset}");
         withhold_shadi_secrets(&mut cmd);
 
         let out = cmd.output().unwrap();
         assert_eq!(
             String::from_utf8_lossy(&out.stdout).trim(),
-            "unset unset kept"
+            "unset unset unset kept"
         );
     }
 

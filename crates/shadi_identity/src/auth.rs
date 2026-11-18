@@ -112,8 +112,8 @@ fn did_auth_for(agent: &AgentIdentity, member_dids: &str) -> Result<SlimAuth, Id
 /// Resolve how `agent_id` should authenticate to the SLIM mesh, from the environment.
 ///
 /// Returns `Some(..)` iff `SHADI_SLIM_AUTH=did`, in which case the agent key is
-/// derived from `SLIM_HUMAN_SEED` and the allow-list is `SLIM_MEMBER_DIDS`
-/// (comma-separated `did:key`s). Returns `None` for any other mode, signalling the
+/// derived from `SLIM_HUMAN_SEED` (or read from `SHADI_AGENT_KEY`) and the
+/// allow-list is `SLIM_MEMBER_DIDS` (comma-separated `did:key`s). Returns `None` for any other mode, signalling the
 /// caller to fall back to its own shared secret. This is the single env contract
 /// shared by every SHADI `create_app` site.
 pub fn did_auth_from_env(agent_id: &str) -> Option<Result<SlimAuth, IdentityError>> {
@@ -135,24 +135,48 @@ pub fn require_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityErr
     did_auth_from_env(agent_id).unwrap_or_else(|| {
         Err(IdentityError::Config(
             "coding-agent adapters must authenticate via DID (set SHADI_SLIM_AUTH=did, \
-             SLIM_HUMAN_SEED, SLIM_MEMBER_DIDS); shared secrets are not permitted"
+             SLIM_HUMAN_SEED or SHADI_AGENT_KEY, SLIM_MEMBER_DIDS); shared secrets are not \
+             permitted"
                 .to_string(),
         ))
     })
 }
 
-/// The agent's own key from the environment: `SHADI_SLIM_AUTH=did` plus
-/// `SLIM_HUMAN_SEED`. Unlike [`did_auth_from_env`] it needs no peer allow-list,
+/// The agent's own key from the environment: `SHADI_SLIM_AUTH=did` plus either
+/// `SLIM_HUMAN_SEED` (the key is derived) or `SHADI_AGENT_KEY` (base64 of the
+/// 32-byte signing key, as `shadictl derive-agent-identity` stores it); setting
+/// both is an error. `agent_id` only names the derived key: it is ignored when
+/// `SHADI_AGENT_KEY` is set. Unlike [`did_auth_from_env`] it needs no peer allow-list,
 /// so callers that only sign or name themselves do not depend on one.
 pub fn agent_identity_from_env(agent_id: &str) -> Result<AgentIdentity, IdentityError> {
+    use base64::Engine as _;
     let mode = std::env::var("SHADI_SLIM_AUTH").unwrap_or_default();
     if !mode.eq_ignore_ascii_case("did") {
         return Err(IdentityError::Config(
-            "an agent identity requires SHADI_SLIM_AUTH=did and SLIM_HUMAN_SEED".to_string(),
+            "an agent identity requires SHADI_SLIM_AUTH=did and SLIM_HUMAN_SEED or SHADI_AGENT_KEY"
+                .to_string(),
         ));
     }
-    let human_seed = std::env::var("SLIM_HUMAN_SEED").map_err(|_| {
-        IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED".to_string())
+    let seed = std::env::var("SLIM_HUMAN_SEED");
+    if let Ok(key) = std::env::var("SHADI_AGENT_KEY") {
+        if seed.is_ok() {
+            return Err(IdentityError::Config(
+                "set only one of SLIM_HUMAN_SEED and SHADI_AGENT_KEY".to_string(),
+            ));
+        }
+        let key = zeroize::Zeroizing::new(key);
+        let bytes = zeroize::Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(key.trim())
+                .map_err(|_| IdentityError::Config("SHADI_AGENT_KEY is not base64".to_string()))?,
+        );
+        return AgentIdentity::from_signing_key_slice(&bytes)
+            .map_err(|_| IdentityError::Config("SHADI_AGENT_KEY is not a 32-byte key".to_string()));
+    }
+    let human_seed = seed.map_err(|_| {
+        IdentityError::Config(
+            "SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED or SHADI_AGENT_KEY".to_string(),
+        )
     })?;
     AgentIdentity::derive(human_seed.as_bytes(), agent_id)
 }
@@ -276,5 +300,41 @@ mod tests {
 
         env::remove_var("SHADI_SLIM_AUTH");
         env::remove_var("SLIM_HUMAN_SEED");
+    }
+
+    #[test]
+    fn agent_key_env_loads_the_derived_identity() {
+        use base64::Engine as _;
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        let derived = AgentIdentity::derive(b"human", "avatar").unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(derived.signing_key_bytes());
+        env::remove_var("SLIM_HUMAN_SEED");
+        env::set_var("SHADI_SLIM_AUTH", "did");
+
+        env::set_var("SHADI_AGENT_KEY", format!("{b64}\n"));
+        let id = agent_identity_from_env("other-name").expect("key loads");
+        assert_eq!(id.did(), derived.did());
+
+        env::remove_var("SHADI_SLIM_AUTH");
+        assert!(agent_identity_from_env("avatar").is_err());
+        env::set_var("SHADI_SLIM_AUTH", "did");
+
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        let err = agent_identity_from_env("avatar").err().expect("rejected");
+        assert!(matches!(err, IdentityError::Config(_)));
+        assert!(!err.to_string().contains(&b64));
+        env::remove_var("SLIM_HUMAN_SEED");
+
+        let short = base64::engine::general_purpose::STANDARD.encode([7u8; 16]);
+        for bad in ["not*base64*secret", short.as_str()] {
+            env::set_var("SHADI_AGENT_KEY", bad);
+            let err = agent_identity_from_env("avatar").err().expect("rejected");
+            assert!(matches!(err, IdentityError::Config(_)));
+            assert!(!err.to_string().contains(bad), "{err}");
+        }
+
+        env::remove_var("SHADI_AGENT_KEY");
+        env::remove_var("SHADI_SLIM_AUTH");
     }
 }
