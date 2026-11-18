@@ -19,7 +19,7 @@ pub fn run(
     let config = LiveA2ATaskAdapterConfig {
         endpoint: endpoint.to_string(),
         agent_id: agent_id.to_string(),
-        local_name: Some(format!("agntcy/shadi/{agent_id}-a2a-client")),
+        local_name: None,
         peer_agent_id: owner.to_string(),
         destination: Some(owner_service_name(owner)),
         a2a_url: None,
