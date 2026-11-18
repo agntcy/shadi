@@ -231,28 +231,39 @@ pub fn require_did_auth_for_peer(
     agent_id: &str,
     peer_did: Option<&str>,
 ) -> Result<SlimAuth, IdentityError> {
-    if !open_admission_from_env()? {
-        return require_did_auth_from_env(agent_id);
+    if open_admission_from_env()? {
+        open_auth_for_peer(&agent_identity_from_env(agent_id)?, peer_did)
+    } else {
+        require_did_auth_from_env(agent_id)
     }
+}
+
+fn open_auth_for_peer(
+    agent: &AgentIdentity,
+    peer_did: Option<&str>,
+) -> Result<SlimAuth, IdentityError> {
     let peer = peer_did.ok_or_else(|| {
         IdentityError::Config("open admission needs the dialled peer's DID".to_string())
     })?;
-    let agent = agent_identity_from_env(agent_id)?;
     // MLS also verifies our own credential, so the pinned list must hold our DID.
     let own = agent.did();
-    SlimAuth::open(&agent, [peer, own.as_str()])
+    SlimAuth::open(agent, [peer, own.as_str()])
 }
 
 /// [`require_did_auth_from_env`] for a listener: under open admission any did:key
 /// is admitted unless `SLIM_MEMBER_DIDS` lists some.
 pub fn listener_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
-    if !open_admission_from_env()? {
-        return require_did_auth_from_env(agent_id);
+    if open_admission_from_env()? {
+        let members = std::env::var("SLIM_MEMBER_DIDS").unwrap_or_default();
+        open_auth_for_members(&agent_identity_from_env(agent_id)?, &members)
+    } else {
+        require_did_auth_from_env(agent_id)
     }
-    let agent = agent_identity_from_env(agent_id)?;
-    let members = std::env::var("SLIM_MEMBER_DIDS").unwrap_or_default();
+}
+
+fn open_auth_for_members(agent: &AgentIdentity, members: &str) -> Result<SlimAuth, IdentityError> {
     SlimAuth::open(
-        &agent,
+        agent,
         members.split(',').map(str::trim).filter(|s| !s.is_empty()),
     )
 }
@@ -487,6 +498,87 @@ mod tests {
         env::remove_var("SHADI_SLIM_ADMISSION");
         env::remove_var("SHADI_SLIM_AUTH");
         env::remove_var("SLIM_HUMAN_SEED");
+    }
+
+    #[test]
+    fn admission_off_delegates_to_the_shared_did_path() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        let member = AgentIdentity::derive(b"human", "avatar").unwrap().did();
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        env::set_var("SLIM_MEMBER_DIDS", &member);
+
+        for admission in [None, Some("")] {
+            match admission {
+                Some(v) => env::set_var("SHADI_SLIM_ADMISSION", v),
+                None => env::remove_var("SHADI_SLIM_ADMISSION"),
+            }
+            let expected = jwks_from_dids([member.as_str()]).unwrap();
+            for auth in [
+                require_did_auth_for_peer("avatar", None).unwrap(),
+                listener_did_auth_from_env("avatar").unwrap(),
+            ] {
+                let SlimAuth::Did { did, member_jwks, self_certified, .. } = auth else { panic!("expected DID auth") };
+                assert_eq!(did, member);
+                assert_eq!(member_jwks, Some(expected.clone()));
+                assert!(!self_certified);
+            }
+        }
+
+        env::remove_var("SLIM_MEMBER_DIDS");
+        assert!(matches!(
+            require_did_auth_for_peer("avatar", None),
+            Err(IdentityError::Config(m)) if m.contains("SLIM_MEMBER_DIDS")
+        ));
+        assert!(matches!(
+            listener_did_auth_from_env("avatar"),
+            Err(IdentityError::Config(m)) if m.contains("SLIM_MEMBER_DIDS")
+        ));
+
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_HUMAN_SEED");
+    }
+
+    #[test]
+    fn open_auth_for_peer_pins_peer_and_own_did() {
+        let agent = AgentIdentity::generate().unwrap();
+        let peer = AgentIdentity::generate().unwrap().did();
+
+        let err = open_auth_for_peer(&agent, None).err().expect("peer required");
+        assert!(err.to_string().contains("peer"), "{err}");
+
+        let auth = open_auth_for_peer(&agent, Some(&peer)).unwrap();
+        let SlimAuth::Did { did, member_jwks, self_certified, .. } = auth else { panic!("expected DID auth") };
+        assert_eq!(did, agent.did());
+        assert!(self_certified);
+        assert_eq!(
+            member_jwks,
+            Some(jwks_from_dids([peer.as_str(), agent.did().as_str()]).unwrap())
+        );
+    }
+
+    #[test]
+    fn open_auth_for_members_trims_and_falls_back_to_open_verifier() {
+        let agent = AgentIdentity::generate().unwrap();
+        let a = AgentIdentity::generate().unwrap().did();
+        let b = AgentIdentity::generate().unwrap().did();
+
+        for members in ["", "   ", " , ,"] {
+            let auth = open_auth_for_members(&agent, members).unwrap();
+            let SlimAuth::Did { member_jwks, self_certified, .. } = auth else { panic!("expected DID auth") };
+            assert!(self_certified);
+            assert!(member_jwks.is_none());
+        }
+
+        let raw = format!(" {a} , ,{b} ");
+        let auth = open_auth_for_members(&agent, &raw).unwrap();
+        let SlimAuth::Did { member_jwks, self_certified, .. } = auth else { panic!("expected DID auth") };
+        assert!(self_certified);
+        assert_eq!(
+            member_jwks,
+            Some(jwks_from_dids([a.as_str(), b.as_str()]).unwrap())
+        );
     }
 
     #[cfg(not(feature = "open-admission"))]
