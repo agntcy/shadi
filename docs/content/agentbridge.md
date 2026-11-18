@@ -362,6 +362,11 @@ The `coordinate` command reaches an agent with `--agents slim:<name>`, for
 example `--agents slim:copilot`, and a `SLIM_MEMBER_DIDS` allowlist names the
 DID derived from that same name.
 
+A task an agent sends (`delegate`, `handoff`, a `NEXT` hop) goes out under
+`agntcy/shadi/<tool>-a2a-client-<suffix>`, a name of its own for each send, and
+is signed with the agent's DID. So an agent can call out while its listener
+runs, several calls at once, and the peer still sees the agent's own DID.
+
 ### Request handler stack
 
 ```text

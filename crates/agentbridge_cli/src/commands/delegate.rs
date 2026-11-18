@@ -67,7 +67,7 @@ pub fn run(
     let config = LiveA2ATaskAdapterConfig {
         endpoint: slim_node.clone(),
         agent_id: local_agent_id.to_string(),
-        local_name: Some(format!("agntcy/shadi/{local_agent_id}-a2a")),
+        local_name: Some(format!("agntcy/shadi/{local_agent_id}-a2a-client")),
         peer_agent_id: peer.name.clone(),
         destination: Some(format!("agntcy/shadi/{}-a2a", peer.name)),
         a2a_url: unicast.as_ref().map(|l| l.url.clone()),
