@@ -183,6 +183,9 @@ impl LiveA2ATaskAdapter {
         if let Some(did) = self.config.peer_did.as_deref() {
             span.record("peer.did", did);
         }
+        // A caller harness (Claude Code's Bash tool, `codex exec`) names its
+        // span in TRACEPARENT; a NEXT handoff inside a receive span keeps it.
+        shadi_a2a::set_parent_from_env(&span);
         let _guard = span.enter();
 
         let body = Mutex::new(render_task_message(task));
