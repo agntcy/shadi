@@ -3985,8 +3985,10 @@ test push ... FAILED
         let _ = fs::remove_dir_all(&tmp);
     }
     /// Answers a task with its prompt.
+    #[cfg(not(windows))]
     struct EchoAdapter(shadi_mas::AgentId);
 
+    #[cfg(not(windows))]
     impl CliAdapter for EchoAdapter {
         fn agent_id(&self) -> &shadi_mas::AgentId {
             &self.0
@@ -4008,6 +4010,7 @@ test push ... FAILED
     }
 
     /// A SLIM listener for `agent_id` that echoes its tasks, as `register` runs one.
+    #[cfg(not(windows))]
     fn serve_echo(
         agent_id: &str,
         endpoint: &str,
@@ -4067,9 +4070,28 @@ test push ... FAILED
     /// its name, three times at once (agntcy/shadi#570). Each send is given the
     /// listener's name, as `delegate` used to pass, to show the adapter keeps
     /// them apart anyway.
+    ///
+    /// The body runs in a child process: SLIM installs the global tracing
+    /// subscriber the span tests above rely on, and the body sets the env.
+    #[cfg(not(windows))]
     #[test]
     fn a_listening_agent_calls_out_while_its_listener_runs() {
+        const CHILD: &str = "AGENTBRIDGE_TEST_570_CHILD";
         let _guard = super::super::test_env_lock();
+        if std::env::var_os(CHILD).is_none() {
+            let (_, module) = module_path!().split_once("::").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    &format!("{module}::a_listening_agent_calls_out_while_its_listener_runs"),
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "the child run failed: {status}");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let tls = dir.path().join("shadi-slim-mtls");
         let script =
