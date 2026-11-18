@@ -3,6 +3,7 @@
 
 pub mod adapter;
 pub mod adapters;
+pub mod concord;
 pub mod context;
 pub mod dir_registry;
 pub mod local_registry;

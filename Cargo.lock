@@ -195,6 +195,7 @@ dependencies = [
  "agntcy-shadi-mas",
  "agntcy-shadi-sandbox",
  "futures",
+ "ioc-concord",
  "libc",
  "serde",
  "serde_json",
@@ -4613,6 +4614,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ioc-concord"
+version = "0.1.0"
+source = "git+https://github.com/ioc-project/cognition-protocols?rev=28236f4e989ec6324380f3ae952a7c05df8691e4#28236f4e989ec6324380f3ae952a7c05df8691e4"
+dependencies = [
+ "indexmap 2.14.2",
+ "regex",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "uuid",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7728,6 +7743,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8295,6 +8316,8 @@ version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
+ "foldhash 0.2.0",
+ "indexmap 2.14.2",
  "itoa",
  "memchr",
  "serde",

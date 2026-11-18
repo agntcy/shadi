@@ -27,6 +27,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2.0"
 tracing = "0.1"
 time = { version = "0.3", features = ["formatting"] }
+# CONCORD protocol library, pinned to a commit until it is released.
+ioc-concord = { git = "https://github.com/ioc-project/cognition-protocols", rev = "28236f4e989ec6324380f3ae952a7c05df8691e4", optional = true }
+
+[features]
+# CONCORD negotiation over A2A Collaborate (see `concord`).
+concord = ["dep:ioc-concord"]
 
 # Killing a tracked child by pid: signals on unix, TerminateProcess on windows.
 [target.'cfg(unix)'.dependencies]
