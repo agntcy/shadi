@@ -269,7 +269,11 @@ pub fn listener_locators(
     if let Some(endpoint) = slim_endpoint {
         locators.push(Locator {
             protocol: "slim".to_string(),
-            url: format!("slim://{}/agntcy/shadi/{agent_id}-a2a", slim_node(endpoint)),
+            url: format!(
+                "slim://{}/{}",
+                slim_node(endpoint),
+                super::register::listener_slim_name(agent_id)
+            ),
         });
     }
 

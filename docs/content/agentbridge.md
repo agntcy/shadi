@@ -77,7 +77,7 @@ flowchart LR
     tool -- "stdin / stdout" --> ca --> srv
   end
 
-  slim{{"SLIM node\nagntcy/shadi/&lt;tool&gt;-a2a\nmTLS · DID auth"}}
+  slim{{"SLIM node\nagntcy/shadi/&lt;key&gt;-a2a\nmTLS · DID auth"}}
 
   subgraph coord["agentbridge coordinate"]
     direction TB
@@ -226,7 +226,8 @@ A bare subprocess command still opens GenericStdio. `--save` /
 
 Bare tool names open a **local** `CliAdapter` (`snapshot_context` /
 `inject_context`). `slim:<id>` is A2A: `LiveA2ATaskAdapter` proves as
-`SHADI_AGENT_ID` and `SendMessage`s to `agntcy/shadi/<id>-a2a`. When
+`SHADI_AGENT_ID` and `SendMessage`s to `<id>`'s listener, named after the DID
+in its lease. When
 `SHADI_AGENT_ID` matches `--from slim:<id>`, the source is that agent
 acting as an A2A *client* — snapshot stays local so the process does not
 call its own listener; only the destination inject is an A2A task.
@@ -336,14 +337,20 @@ clients use reqwest and can speak HTTPS.
 
 ### SLIM address
 
-Each adapter registers under the hierarchical name:
+Each adapter registers under a name derived from its DID:
 
 ```text
-agntcy/shadi/<tool>-a2a
+agntcy/shadi/<key>-a2a
 ```
 
-For example, `--tool copilot` listens as `agntcy/shadi/copilot-a2a`. The
-`coordinate` command reaches it with `--agents slim:copilot`.
+`<key>` is the agent's `did:key` without `did:key:`, so two people's `copilot`
+don't share a name, and whoever holds the DID can address the listener with no
+lookup: `delegate --to did:key:…` sends there on the configured endpoint even
+when no lease or Agent Directory record knows the DID. A name such as
+`--agents slim:copilot` finds the DID in the local lease.
+
+For one release a listener also answers on its tool's name,
+`agntcy/shadi/<tool>-a2a`, which callers from before this change use.
 
 A task an agent sends (`delegate`, `handoff`, a `NEXT` hop) goes out under
 `agntcy/shadi/<tool>-a2a-client-<suffix>`, a name of its own for each send, and
@@ -427,10 +434,10 @@ register --slim-endpoint 127.0.0.1:47357
   ├─ service.connect()               connect to SLIM node (TLS 1.3)
   ├─ shadi_identity::require_did_auth_from_env()
   │    + shadi_identity::create_app() authenticate with this agent's DID
-  ├─ app.subscribe()                 subscribe to agntcy/shadi/<tool>-a2a
+  ├─ app.subscribe()                 subscribe to agntcy/shadi/<key>-a2a (and <tool>-a2a)
   ├─ srv.serve()                     start the A2A/SLIMRPC event loop
   │
-  │  [agentbridge] ready — listening on agntcy/shadi/<tool>-a2a
+  │  [agentbridge] ready — listening on agntcy/shadi/<key>-a2a
   │
   ├─ … handles tasks until Ctrl-C …
   │
@@ -471,7 +478,7 @@ so it can act non-interactively.
 
 !!! warning "Any peer able to reach the listener can drive local code execution"
 
-    Any peer able to reach `agntcy/shadi/<tool>-a2a` on the SLIM node can drive
+    Any peer able to reach the listener's SLIM name on the node can drive
     local code execution through the wrapped CLI tool.
 
 Controls:

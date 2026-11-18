@@ -314,7 +314,10 @@ fn start_listeners(
         }
     }
     if let Some(endpoint) = slim_endpoint {
-        println!("Starting SLIM A2A listener on {endpoint} as agntcy/shadi/{tool}-a2a ...");
+        println!(
+            "Starting SLIM A2A listener on {endpoint} as {} ...",
+            listener_slim_name(tool)
+        );
         run_slim_listener(
             tool,
             adapter,
@@ -606,7 +609,10 @@ fn dispatch_peer_handoff(
         agent_id: from.to_string(),
         local_name: None,
         peer_agent_id: target.peer_agent_id.clone(),
-        destination: Some(format!("agntcy/shadi/{}-a2a", target.peer_agent_id)),
+        destination: Some(agentbridge::member_source::local_slim_name(
+            &target.peer_agent_id,
+            &registry,
+        )),
         a2a_url: target.a2a_url,
         a2a_binding: target.a2a_binding,
         peer_did: target.peer_did,
@@ -1061,8 +1067,9 @@ fn agent_card_with(
     if let Some(endpoint) = slim_endpoint {
         supported_interfaces.push(AgentInterface::new(
             format!(
-                "slim://{}/agntcy/shadi/{agent_id}-a2a",
-                super::announce::slim_node(endpoint)
+                "slim://{}/{}",
+                super::announce::slim_node(endpoint),
+                listener_slim_name(agent_id)
             ),
             TRANSPORT_PROTOCOL_SLIMRPC,
         ));
@@ -1169,7 +1176,7 @@ fn run_slim_listener(
     admission_policy: Option<&Path>,
     verbose: bool,
 ) -> Result<(), String> {
-    let agent_name = format!("agntcy/shadi/{agent_id}-a2a");
+    let agent_name = listener_slim_name(agent_id);
 
     require_sandbox_enforced(agent_id, endpoint)?;
 
@@ -1200,6 +1207,7 @@ fn run_slim_listener(
         .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
     app.subscribe(name_ref.clone(), Some(connection_id))
         .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
+    let tool_name_ref = subscribe_tool_name(&app, agent_id, &agent_name, connection_id)?;
 
     let did = match &auth {
         shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
@@ -1220,6 +1228,7 @@ fn run_slim_listener(
                     .unwrap_or_default(),
                 a2a_binding,
                 pid: std::process::id(),
+                slim_name: agent_name.clone(),
             },
         ) {
             Ok(lease) => Some(lease),
@@ -1323,6 +1332,9 @@ fn run_slim_listener(
     });
 
     let _ = app.unsubscribe(name_ref, Some(connection_id));
+    if let Some(tool_name_ref) = tool_name_ref {
+        let _ = app.unsubscribe(tool_name_ref, Some(connection_id));
+    }
     let _ = service.disconnect(connection_id);
     let _ = service.shutdown();
 
@@ -1330,6 +1342,37 @@ fn run_slim_listener(
 }
 
 // ─── SLIM helper fns (mirrors shadi_mas::experiments internals) ───────────────
+
+/// The SLIM name `agent_id`'s listener holds: its DID's (agntcy/shadi#563), or
+/// its tool's when no agent identity is configured.
+pub(crate) fn listener_slim_name(agent_id: &str) -> String {
+    let did = shadi_identity::agent_identity_from_env(agent_id)
+        .ok()
+        .map(|identity| identity.did());
+    agentbridge::member_source::peer_slim_name(agent_id, did.as_deref())
+}
+
+/// Also answer on the tool's name, which callers from before agntcy/shadi#563
+/// address. It goes in the next release.
+fn subscribe_tool_name(
+    app: &slim_bindings::App,
+    agent_id: &str,
+    agent_name: &str,
+    connection_id: u64,
+) -> Result<Option<Arc<Name>>, String> {
+    let tool_name = agentbridge::member_source::slim_channel_name(agent_id);
+    if tool_name == agent_name {
+        return Ok(None);
+    }
+    let tool_name_ref = Arc::new(parse_name(&tool_name)?);
+    app.subscribe(tool_name_ref.clone(), Some(connection_id))
+        .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
+    eprintln!(
+        "[agentbridge] also answering on {tool_name}, the name callers from before \
+         agntcy/shadi#563 use; it is removed in the next release"
+    );
+    Ok(Some(tool_name_ref))
+}
 
 fn parse_name(name: &str) -> Result<Name, String> {
     Name::from_string(name.to_string())
@@ -1756,6 +1799,7 @@ fn run_unicast_listener(
             a2a_url: a2a_url.clone(),
             a2a_binding,
             pid: std::process::id(),
+            slim_name: String::new(),
         }) {
             Ok(lease) => Some(lease),
             Err(err) => {
@@ -2193,6 +2237,7 @@ test push ... FAILED
             a2a_url: url.to_string(),
             a2a_binding: A2ABinding::Grpc,
             pid: std::process::id(),
+            slim_name: String::new(),
         }
     }
 
@@ -3699,10 +3744,12 @@ test push ... FAILED
         let service = Service::new(format!("echo-listener-{agent_id}"));
         let access = ClientAccess::from_env(Some(agent_id)).unwrap();
         let connection_id = service.connect(access.client_config(endpoint)).unwrap();
-        let name = Arc::new(parse_name(&format!("agntcy/shadi/{agent_id}-a2a")).unwrap());
+        let agent_name = listener_slim_name(agent_id);
+        let name = Arc::new(parse_name(&agent_name).unwrap());
         let auth = shadi_identity::require_did_auth_from_env(agent_id).unwrap();
         let app = shadi_identity::create_app(&service, name.clone(), &auth).unwrap();
         app.subscribe(name, Some(connection_id)).unwrap();
+        subscribe_tool_name(&app, agent_id, &agent_name, connection_id).unwrap();
         let did = shadi_identity::agent_identity_from_env(agent_id)
             .unwrap()
             .did();
@@ -3857,17 +3904,24 @@ test push ... FAILED
         ];
         std::thread::sleep(Duration::from_millis(500));
 
-        let sends: Vec<_> = (0..3)
+        // The first three address the callee by its DID (agntcy/shadi#563); the
+        // last by its tool name, as a caller from before #563 does.
+        let sends: Vec<_> = (0..4)
             .map(|i| {
                 let endpoint = endpoint.clone();
                 let callee = did("callee");
+                let destination = if i < 3 {
+                    agentbridge::member_source::did_slim_name(&callee).unwrap()
+                } else {
+                    "agntcy/shadi/callee-a2a".to_string()
+                };
                 std::thread::spawn(move || {
                     let adapter = egress::live_adapter(LiveA2ATaskAdapterConfig {
                         endpoint,
                         agent_id: "caller".to_string(),
                         local_name: Some("agntcy/shadi/caller-a2a".to_string()),
                         peer_agent_id: "callee".to_string(),
-                        destination: Some("agntcy/shadi/callee-a2a".to_string()),
+                        destination: Some(destination),
                         a2a_url: None,
                         a2a_binding: None,
                         peer_did: Some(callee),

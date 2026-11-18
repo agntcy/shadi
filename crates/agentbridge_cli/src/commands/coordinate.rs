@@ -906,7 +906,10 @@ fn build_agents(
                 agent_id: "coordinator".to_string(),
                 local_name: Some(format!("agntcy/shadi/coordinator-{session}-a2a-client")),
                 peer_agent_id: agent_id.clone(),
-                destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+                destination: Some(agentbridge::member_source::local_slim_name(
+                    &agent_id,
+                    &agentbridge::local_registry::LocalAdapterRegistry::from_env(),
+                )),
                 a2a_url: None,
                 a2a_binding: None,
                 peer_did: None,

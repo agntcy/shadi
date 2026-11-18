@@ -34,6 +34,9 @@ pub struct CandidateMember {
     /// Official unicast binding for [`Self::a2a_url`] (`GRPC`, `JSONRPC`,
     /// `HTTP+JSON`). `None` when there is no HTTP locator.
     pub a2a_binding: Option<A2ABinding>,
+    /// The SLIM name the agent advertises. `None` when nothing advertises one;
+    /// [`slim_destination`] then derives it from the DID.
+    pub slim_name: Option<String>,
 }
 
 impl CandidateMember {
@@ -358,6 +361,7 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
         slim_endpoint: slim_endpoint.map(str::to_string),
         a2a_url: None,
         a2a_binding: None,
+        slim_name: None,
     };
     for locator in workload.get("locators").and_then(Value::as_array)? {
         let protocol = locator.get("protocol").and_then(Value::as_str);
@@ -368,6 +372,7 @@ fn candidate_from_workload(workload: &Value) -> Option<CandidateMember> {
             // slim://<endpoint>/<org>/<ns>/<name>; the annotation, when set,
             // already holds the endpoint with its scheme.
             Some("slim") => {
+                candidate.slim_name = candidate.slim_name.take().or_else(|| slim_name_in(url));
                 if candidate.slim_endpoint.is_none() {
                     let rest = url.strip_prefix("slim://").unwrap_or(url);
                     let node = rest.split('/').next().unwrap_or(rest);
@@ -617,6 +622,7 @@ pub fn parse_member_spec_at(
                 slim_endpoint: endpoint,
                 a2a_url: None,
                 a2a_binding: None,
+                slim_name: None,
             }],
         }));
     }
@@ -652,8 +658,53 @@ pub fn resolve_members_at(
 }
 
 /// SLIM channel advertised for a registered adapter (`agntcy/shadi/<id>-a2a`).
+/// A listener still answers on it for one release; it is named after its DID
+/// ([`did_slim_name`]), since two people's `copilot` share a tool name.
 pub fn slim_channel_name(agent_id: &str) -> String {
     format!("agntcy/shadi/{agent_id}-a2a")
+}
+
+/// The SLIM name a listener with `did` holds: `agntcy/shadi/<key>-a2a`, `<key>`
+/// being the `did:key` without its prefix, so whoever holds the DID can
+/// address it without a lookup. `None` for any other DID.
+pub fn did_slim_name(did: &str) -> Option<String> {
+    let key = did.trim().strip_prefix("did:key:")?;
+    (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then(|| format!("agntcy/shadi/{key}-a2a"))
+}
+
+/// Where to send to `name`: its DID's name, else its tool's.
+pub fn peer_slim_name(name: &str, did: Option<&str>) -> String {
+    did.and_then(did_slim_name)
+        .unwrap_or_else(|| slim_channel_name(name))
+}
+
+/// Where to send to `peer`: the name it advertises, so a listener from before
+/// agntcy/shadi#563, which holds its tool's name, is still reached; else its
+/// DID's.
+pub fn slim_destination(peer: &CandidateMember) -> String {
+    peer.slim_name
+        .clone()
+        .unwrap_or_else(|| peer_slim_name(&peer.name, Some(&peer.did)))
+}
+
+/// [`slim_destination`] for an agent found by its id: its lease, when this
+/// host has one.
+pub fn local_slim_name(
+    agent_id: &str,
+    registry: &crate::local_registry::LocalAdapterRegistry,
+) -> String {
+    match registry.resolve_live(agent_id) {
+        Ok(record) => slim_destination(&record.to_candidate()),
+        Err(_) => slim_channel_name(agent_id),
+    }
+}
+
+/// The `org/ns/name` of a `slim://node/org/ns/name` URL.
+fn slim_name_in(url: &str) -> Option<String> {
+    let (_, name) = url.strip_prefix("slim://")?.split_once('/')?;
+    (name.split('/').count() == 3 && name.split('/').all(|part| !part.is_empty()))
+        .then(|| name.to_string())
 }
 
 /// True when `query` is the tool name or its SLIM channel (aliases for the DID).
@@ -913,11 +964,15 @@ fn extract_candidate(record: &Value) -> Option<CandidateMember> {
         .cloned()
         .unwrap_or_default();
 
-    let slim_endpoint = supported.iter().find_map(|iface| {
+    let slim_url = supported.iter().find_map(|iface| {
         let url = iface.get("url")?.as_str()?;
-        let rest = url.strip_prefix("slim://")?;
-        Some(rest.split('/').next().unwrap_or(rest).to_string())
+        url.starts_with("slim://").then_some(url)
     });
+    let slim_endpoint = slim_url.map(|url| {
+        let rest = &url["slim://".len()..];
+        rest.split('/').next().unwrap_or(rest).to_string()
+    });
+    let slim_name = slim_url.and_then(slim_name_in);
     let (a2a_binding, a2a_url) = supported
         .iter()
         .find_map(unicast_locator_from_interface)
@@ -930,6 +985,7 @@ fn extract_candidate(record: &Value) -> Option<CandidateMember> {
         slim_endpoint,
         a2a_url,
         a2a_binding,
+        slim_name,
     })
 }
 
@@ -1104,6 +1160,7 @@ mod tests {
             slim_endpoint: Some("   ".to_string()),
             a2a_url: Some(String::new()),
             a2a_binding: None,
+            slim_name: None,
         };
         assert!(empty.slim_locator().is_none());
         assert!(empty.unicast_locator().is_none());
@@ -1114,6 +1171,7 @@ mod tests {
             slim_endpoint: None,
             a2a_url: Some("http://127.0.0.1:9".to_string()),
             a2a_binding: Some(A2ABinding::Slim),
+            slim_name: None,
         };
         assert!(slim_as_unicast.unicast_locator().is_none());
     }
@@ -1170,6 +1228,7 @@ mod tests {
             a2a_url: url.to_string(),
             a2a_binding: A2ABinding::Grpc,
             pid: std::process::id(),
+            slim_name: String::new(),
         }
     }
 
@@ -1241,6 +1300,67 @@ mod tests {
     }
 
     #[test]
+    fn a_listener_is_named_after_its_did_key() {
+        assert_eq!(
+            did_slim_name("did:key:z6MkAbc").as_deref(),
+            Some("agntcy/shadi/z6MkAbc-a2a")
+        );
+        assert_eq!(did_slim_name("did:web:example.com"), None);
+        assert_eq!(did_slim_name("did:key:"), None);
+        assert_eq!(did_slim_name("did:key:z6/../x"), None);
+        assert_eq!(
+            peer_slim_name("copilot", Some("did:key:z6MkAbc")),
+            "agntcy/shadi/z6MkAbc-a2a"
+        );
+        assert_eq!(peer_slim_name("copilot", None), "agntcy/shadi/copilot-a2a");
+        assert_eq!(
+            peer_slim_name("copilot", Some("")),
+            "agntcy/shadi/copilot-a2a"
+        );
+    }
+
+    #[test]
+    fn a_local_listener_is_addressed_by_the_name_its_lease_gives() {
+        let (_dir, registry) = temp_registry();
+        let mut record = grpc_lease("copilot", "did:key:zLeased", "");
+        record.slim_endpoint = "127.0.0.1:47357".to_string();
+        record.slim_name = "agntcy/shadi/zLeased-a2a".to_string();
+        let _lease = registry.publish(&record).unwrap();
+        assert_eq!(
+            local_slim_name("copilot", &registry),
+            "agntcy/shadi/zLeased-a2a"
+        );
+
+        // A lease from before agntcy/shadi#563 names no SLIM name: its
+        // listener holds its tool's.
+        let mut old = grpc_lease("codex", "did:key:zOld", "");
+        old.slim_endpoint = "127.0.0.1:47357".to_string();
+        let _old = registry.publish(&old).unwrap();
+        assert_eq!(
+            local_slim_name("codex", &registry),
+            "agntcy/shadi/codex-a2a"
+        );
+        assert_eq!(
+            local_slim_name("goose", &registry),
+            "agntcy/shadi/goose-a2a"
+        );
+    }
+
+    #[test]
+    fn a_card_or_workload_gives_the_slim_name_its_listener_holds() {
+        assert_eq!(
+            slim_name_in("slim://node:47357/agntcy/shadi/zKey-a2a").as_deref(),
+            Some("agntcy/shadi/zKey-a2a")
+        );
+        assert_eq!(slim_name_in("slim://node:47357"), None);
+        assert_eq!(slim_name_in("slim://node:47357/agntcy/shadi"), None);
+
+        let old = a2a_record("codex", "did:key:zCodex", "node:47357");
+        let peer = extract_candidate(&old).unwrap();
+        assert_eq!(slim_destination(&peer), "agntcy/shadi/codex-a2a");
+    }
+
+    #[test]
     fn an_ambiguous_slim_instance_is_listed_with_its_slim_locator() {
         let slim = CandidateMember {
             name: "codex".to_string(),
@@ -1248,6 +1368,7 @@ mod tests {
             slim_endpoint: Some("https://node-a:47357".to_string()),
             a2a_url: None,
             a2a_binding: None,
+            slim_name: None,
         };
         let row = instance_row(&slim);
         assert!(row.ends_with("slim://node-a:47357"), "{row}");
@@ -1516,6 +1637,7 @@ mod tests {
                 slim_endpoint: None,
                 a2a_url: None,
                 a2a_binding: None,
+                slim_name: None,
             },
             CandidateMember {
                 name: "claude-code".to_string(),
@@ -1523,6 +1645,7 @@ mod tests {
                 slim_endpoint: Some("127.0.0.1:47560".to_string()),
                 a2a_url: None,
                 a2a_binding: None,
+                slim_name: None,
             },
         ];
         let source = ExplicitListSource {
@@ -2134,6 +2257,7 @@ esac
             slim_endpoint: Some(endpoint.to_string()),
             a2a_url: None,
             a2a_binding: None,
+            slim_name: None,
         };
         let plain = slim_at("node:47357");
         for other in [
@@ -2152,6 +2276,7 @@ esac
             slim_endpoint: None,
             a2a_url: Some(url.to_string()),
             a2a_binding: Some(A2ABinding::HttpJson),
+            slim_name: None,
         };
         assert!(http_at("http://127.0.0.1:9").same_agent(&http_at("http://127.0.0.1:9/")));
         assert!(!http_at("http://127.0.0.1:9").same_agent(&http_at("http://127.0.0.1:8")));

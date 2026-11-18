@@ -210,7 +210,10 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
             agent_id: local_id.clone(),
             local_name: None,
             peer_agent_id: agent_id.clone(),
-            destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+            destination: Some(agentbridge::member_source::local_slim_name(
+                &agent_id,
+                &agentbridge::local_registry::LocalAdapterRegistry::from_env(),
+            )),
             a2a_url: None,
             a2a_binding: None,
             peer_did: None,

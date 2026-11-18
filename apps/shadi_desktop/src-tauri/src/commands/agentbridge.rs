@@ -253,7 +253,10 @@ pub async fn agentbridge_delegate(
             agent_id: agent_id.clone(),
             local_name: None,
             peer_agent_id: to.clone(),
-            destination: Some(format!("agntcy/shadi/{to}-a2a")),
+            destination: Some(agentbridge::member_source::local_slim_name(
+                &to,
+                &agentbridge::local_registry::LocalAdapterRegistry::from_env(),
+            )),
             a2a_url: None,
             a2a_binding: None,
             peer_did,
@@ -373,7 +376,10 @@ fn build_agents(specs: &[String], slim_endpoint: &str) -> Result<Vec<AgentEntry>
                 agent_id: "coordinator".to_string(),
                 local_name: Some("agntcy/shadi/coordinator-a2a".to_string()),
                 peer_agent_id: agent_id.clone(),
-                destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+                destination: Some(agentbridge::member_source::local_slim_name(
+                    &agent_id,
+                    &agentbridge::local_registry::LocalAdapterRegistry::from_env(),
+                )),
                 a2a_url: None,
                 a2a_binding: None,
                 peer_did,
@@ -655,6 +661,7 @@ mod tests {
                 slim_endpoint: None,
                 a2a_url: None,
                 a2a_binding: None,
+                slim_name: None,
             })
             .collect()
     }
