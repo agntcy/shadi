@@ -746,7 +746,7 @@ fn dispatch_peer_handoff(
     let adapter = super::egress::live_adapter(LiveA2ATaskAdapterConfig {
         endpoint: target.slim_endpoint.clone().unwrap_or_default(),
         agent_id: from.to_string(),
-        local_name: Some(format!("agntcy/shadi/{from}-a2a-client")),
+        local_name: None,
         peer_agent_id: target.peer_agent_id.clone(),
         destination: Some(format!("agntcy/shadi/{}-a2a", target.peer_agent_id)),
         a2a_url: target.a2a_url,
