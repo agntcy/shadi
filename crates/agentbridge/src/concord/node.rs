@@ -24,6 +24,7 @@ use ioc_concord::wire::InitParams;
 use serde_json::Value;
 
 use super::channel::Channel;
+use super::initiator::{self, Given, WriteError};
 use super::reply::{anchors_of, answer_format, extract_json, submit, Submitted};
 use crate::adapter::CliAdapter;
 
@@ -32,6 +33,23 @@ pub trait Responder: Send {
     /// The model's reply to `prompt`, the text of `task`. The reply is read
     /// as JSON (see [`super::reply`]).
     fn respond(&mut self, task: &Task, prompt: &str) -> Result<String, String>;
+
+    /// The model's reply to a `prompt` that is not a task: what an initiator
+    /// reads to write the frame of a run. A responder with no model for it
+    /// says so.
+    fn respond_to(&mut self, _prompt: &str) -> Result<String, String> {
+        Err("this responder has no model to write the init".to_string())
+    }
+}
+
+impl<R: Responder + ?Sized> Responder for Box<R> {
+    fn respond(&mut self, task: &Task, prompt: &str) -> Result<String, String> {
+        (**self).respond(task, prompt)
+    }
+
+    fn respond_to(&mut self, prompt: &str) -> Result<String, String> {
+        (**self).respond_to(prompt)
+    }
 }
 
 /// A harness as the model of a node. Each run gets its own conversation, so
@@ -52,7 +70,16 @@ impl Responder for HarnessResponder {
             .execute_prompt_in(task.run_id(), prompt)
             .map_err(|e| e.to_string())
     }
+
+    fn respond_to(&mut self, prompt: &str) -> Result<String, String> {
+        self.adapter
+            .execute_prompt_in(INIT_CONVERSATION, prompt)
+            .map_err(|e| e.to_string())
+    }
 }
+
+/// The conversation in which an initiator's harness writes the init.
+const INIT_CONVERSATION: &str = "concord-init";
 
 /// What opens a run: the problem, the two anchors of the scale, the shape of a
 /// candidate, who negotiates, and the parameters.
@@ -201,6 +228,29 @@ impl<C: Channel, R: Responder> Node<C, R> {
         self.apply(step)
     }
 
+    /// Have the model write whatever of the frame of a run `given` leaves
+    /// out: the anchors, the threshold and the shape of a candidate. What was
+    /// given stays as it is, and nothing is asked when nothing is missing.
+    pub fn write_init(
+        &mut self,
+        goal: &str,
+        participants: &[String],
+        given: &Given,
+    ) -> Result<Given, NodeError> {
+        let max_attempts = self.config.max_attempts;
+        initiator::write(goal, participants, given, max_attempts, |prompt| {
+            self.call("init", |responder| responder.respond_to(prompt))
+        })
+        .map_err(|error| match error {
+            WriteError::Asking(error) => error,
+            WriteError::Refused { attempts, last } => NodeError::Refused {
+                kind: "init",
+                attempts,
+                last,
+            },
+        })
+    }
+
     /// Take part until the run ends, and return its report.
     pub fn run(&mut self) -> Result<Report, NodeError> {
         let started = Instant::now();
@@ -323,9 +373,18 @@ impl<C: Channel, R: Responder> Node<C, R> {
     /// pause, as a harness may fail once (a rate limit, a dropped connection)
     /// and answer the next time.
     fn ask(&mut self, task: &Task, prompt: &str) -> Result<String, NodeError> {
+        self.call(task.kind(), |responder| responder.respond(task, prompt))
+    }
+
+    /// Repeat `call` on the responder while it fails, as `ask` does.
+    fn call(
+        &mut self,
+        what: &str,
+        mut call: impl FnMut(&mut R) -> Result<String, String>,
+    ) -> Result<String, NodeError> {
         let mut failures = 0;
         loop {
-            match self.responder.respond(task, prompt) {
+            match call(&mut self.responder) {
                 Ok(reply) => return Ok(reply),
                 Err(_) if self.stopped() => return Err(NodeError::Stopped),
                 Err(error) if failures >= self.config.harness_retries => {
@@ -333,7 +392,7 @@ impl<C: Channel, R: Responder> Node<C, R> {
                 }
                 Err(error) => {
                     failures += 1;
-                    tracing::warn!(%error, failures, kind = task.kind(), "concord: the harness failed, trying again");
+                    tracing::warn!(%error, failures, what, "concord: the harness failed, trying again");
                     std::thread::sleep(self.config.harness_pause);
                 }
             }

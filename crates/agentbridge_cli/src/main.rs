@@ -383,7 +383,8 @@ enum Cmd {
         /// Run a group protocol instead of the coordination patterns.
         /// `concord`: open a run that looks for one outcome every participant
         /// rates above a threshold. The goal is the problem; needs
-        /// --participants, --reject, --ideal and --schema.
+        /// --participants, and either --tool (a harness writes the anchors, the
+        /// threshold and the candidate schema) or --reject, --ideal and --schema.
         #[arg(
             long,
             value_enum,
@@ -399,6 +400,17 @@ enum Cmd {
             requires = "protocol"
         )]
         participants: Vec<String>,
+
+        /// Tool type of the harness that writes the parts of the run that
+        /// --reject, --ideal, --schema and --threshold leave out, and that
+        /// they then override (with --protocol concord). It runs like a member's:
+        /// under a SHADI sandbox, reading the goal.
+        #[arg(long, requires = "protocol")]
+        tool: Option<String>,
+
+        /// Working directory of the --tool harness (default: the current one).
+        #[arg(long, requires = "tool")]
+        command: Option<String>,
 
         /// The worst outcome, as a state and not as a proposal (with --protocol concord).
         #[arg(long, requires = "protocol")]
@@ -444,6 +456,8 @@ fn misplaced_protocol_flags(command: &Cmd) -> Option<&'static str> {
         } if !peer_agent_ids.is_empty() => Some("--peer-agent-ids needs --protocol concord"),
         Cmd::Coordinate {
             protocol: None,
+            tool,
+            command,
             participants,
             reject,
             ideal,
@@ -454,6 +468,8 @@ fn misplaced_protocol_flags(command: &Cmd) -> Option<&'static str> {
             retries,
             ..
         } if !participants.is_empty()
+            || tool.is_some()
+            || command.is_some()
             || reject.is_some()
             || ideal.is_some()
             || schema.is_some()
@@ -463,8 +479,8 @@ fn misplaced_protocol_flags(command: &Cmd) -> Option<&'static str> {
             || retries.is_some() =>
         {
             Some(
-                "--participants, --reject, --ideal, --schema, --threshold, --budget, --timeout \
-                 and --retries need --protocol concord",
+                "--participants, --tool, --command, --reject, --ideal, --schema, --threshold, \
+                 --budget, --timeout and --retries need --protocol concord",
             )
         }
         _ => None,
@@ -795,6 +811,8 @@ fn main() {
             slim_endpoint,
             session,
             report,
+            tool,
+            command,
             participants,
             reject,
             ideal,
@@ -806,6 +824,8 @@ fn main() {
             ..
         } => commands::concord::coordinate(commands::concord::CoordinateOptions {
             goal: &goal,
+            tool: tool.as_deref(),
+            command: command.as_deref(),
             participants: &participants,
             reject: reject.as_deref(),
             ideal: ideal.as_deref(),
@@ -992,6 +1012,54 @@ mod tests {
         assert!(
             Cli::try_parse_from(base.iter().copied().chain(["--peer-agent-ids", "a,b"])).is_err()
         );
+    }
+
+    #[test]
+    fn coordinate_concord_takes_a_harness_instead_of_the_anchors_and_the_schema() {
+        let base = [
+            "agentbridge",
+            "coordinate",
+            "--goal",
+            "decide",
+            "--protocol",
+            "concord",
+            "--participants",
+            "a,b",
+        ];
+        let cli = Cli::try_parse_from(base.iter().copied().chain(["--tool", "claude-code"]))
+            .expect("a tool needs no anchors");
+        match cli.command {
+            Cmd::Coordinate {
+                tool,
+                reject,
+                ideal,
+                schema,
+                ..
+            } => {
+                assert_eq!(tool.as_deref(), Some("claude-code"));
+                assert!(reject.is_none() && ideal.is_none() && schema.is_none());
+            }
+            _ => panic!("expected coordinate subcommand"),
+        }
+        // a working directory only means something with a tool
+        assert!(Cli::try_parse_from(base.iter().copied().chain(["--command", "."])).is_err());
+    }
+
+    #[test]
+    fn coordinate_tool_without_a_protocol_is_refused() {
+        let cli = Cli::try_parse_from([
+            "agentbridge",
+            "coordinate",
+            "--goal",
+            "decide",
+            "--agents",
+            "claude-code",
+            "--tool",
+            "claude-code",
+        ]);
+        // `--agents` conflicts with `--protocol`, which makes clap skip `requires`
+        let cli = cli.expect("clap lets it through");
+        assert!(misplaced_protocol_flags(&cli.command).is_some());
     }
 
     #[test]

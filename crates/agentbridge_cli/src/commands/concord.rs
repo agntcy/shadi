@@ -38,6 +38,8 @@ mod disabled {
 
     pub struct CoordinateOptions<'a> {
         pub goal: &'a str,
+        pub tool: Option<&'a str>,
+        pub command: Option<&'a str>,
         pub participants: &'a [String],
         pub reject: Option<&'a str>,
         pub ideal: Option<&'a str>,
@@ -89,6 +91,7 @@ mod enabled {
 
     use agent_transport_slim::client_access::ClientAccess;
     use agentbridge::adapters::generic_stdio::GenericStdioAdapter;
+    use agentbridge::concord::initiator::Given;
     use agentbridge::concord::ioc_concord::agent::{Agent, Event};
     use agentbridge::concord::ioc_concord::protocol::Outcome;
     use agentbridge::concord::ioc_concord::report::Report;
@@ -124,6 +127,10 @@ mod enabled {
     pub struct CoordinateOptions<'a> {
         /// The problem, as every participant reads it.
         pub goal: &'a str,
+        /// A harness that writes the parts of the frame the options below
+        /// leave out. Without one, they are all required.
+        pub tool: Option<&'a str>,
+        pub command: Option<&'a str>,
         pub participants: &'a [String],
         pub reject: Option<&'a str>,
         pub ideal: Option<&'a str>,
@@ -296,24 +303,86 @@ mod enabled {
     }
 
     /// `coordinate --protocol concord`: open a run among `participants`, wait
-    /// for it to end, and report how.
+    /// for it to end, and report how. With a `--tool`, a harness writes the
+    /// anchors, the threshold and the shape of a candidate that are not given.
     pub fn coordinate(opts: CoordinateOptions<'_>) -> anyhow::Result<()> {
         if opts.participants.len() < 2 {
             bail!("--protocol concord needs --participants: at least two agent ids");
         }
-        let reject = opts
-            .reject
-            .ok_or_else(|| anyhow!("--protocol concord needs --reject"))?;
-        let ideal = opts
-            .ideal
-            .ok_or_else(|| anyhow!("--protocol concord needs --ideal"))?;
-        let schema = read_schema(
-            opts.schema
-                .ok_or_else(|| anyhow!("--protocol concord needs --schema"))?,
-        )?;
+        let given = Given {
+            reject: opts.reject.map(str::to_string),
+            ideal: opts.ideal.map(str::to_string),
+            schema: opts.schema.map(read_schema).transpose()?,
+            threshold: opts.threshold.map(str::to_string),
+        };
+        if opts.tool.is_none() {
+            // nothing writes the frame: the command line has to
+            for (flag, present) in [
+                ("--reject", given.reject.is_some()),
+                ("--ideal", given.ideal.is_some()),
+                ("--schema", given.schema.is_some()),
+            ] {
+                if !present {
+                    bail!("--protocol concord needs {flag}, or --tool to have a harness write it");
+                }
+            }
+        }
+
+        // The harness reads what the goal says and the members' replies, and
+        // acts on it: the same sandbox requirement as for a member.
+        let adapter = match opts.tool {
+            Some(tool) => {
+                require_sandbox_enforced(tool, opts.slim_endpoint).map_err(|e| anyhow!("{e}"))?;
+                let (_, adapter) = open_adapter(tool, opts.command, &[])?;
+                Some(adapter)
+            }
+            None => None,
+        };
+        let responder: Box<dyn Responder> = match &adapter {
+            Some(adapter) => Box::new(HarnessResponder::new(Arc::clone(adapter))),
+            None => Box::new(NoModel),
+        };
+
+        // The members name this id among their peers to reach the coordinator.
+        let id = match opts.session {
+            Some(session) => format!("{COORDINATOR}-{session}"),
+            None => COORDINATOR.to_string(),
+        };
+        let config = collaborate_config(&id, COORDINATOR, opts.slim_endpoint, opts.participants)?;
+        let channel = CollaborateChannel::connect(config).map_err(|e| anyhow!("{e}"))?;
+        let mut node = Node::new(Agent::new(&id)?, channel, responder, NodeConfig::default());
+        node.observe(|event| log_event(event, false));
+        if let Some(adapter) = adapter {
+            stop_on_signal(node.stop_flag(), adapter);
+        }
+
+        let frame = if given.is_complete() {
+            given
+        } else {
+            println!("Asking the initiator's harness to write the frame of the run...");
+            match node.write_init(opts.goal, opts.participants, &given) {
+                Ok(frame) => frame,
+                Err(NodeError::Stopped) => {
+                    eprintln!("Stopped before the run was opened.");
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let (Some(reject), Some(ideal), Some(schema)) = (frame.reject, frame.ideal, frame.schema)
+        else {
+            bail!("the frame of the run is incomplete");
+        };
+        println!("Frame of the run:");
+        println!("  x_reject:  {reject}");
+        println!("  x_ideal:   {ideal}");
+        println!("  schema:    {schema}");
+        if let Some(threshold) = &frame.threshold {
+            println!("  threshold: {threshold}");
+        }
 
         let mut params = InitParams::default();
-        if let Some(threshold) = opts.threshold {
+        if let Some(threshold) = &frame.threshold {
             params = params.satisfaction_threshold(threshold);
         }
         if let Some(budget) = opts.budget {
@@ -328,28 +397,25 @@ mod enabled {
         let init = ConcordInit {
             participants: opts.participants.to_vec(),
             context: opts.goal.to_string(),
-            x_reject: reject.to_string(),
-            x_ideal: ideal.to_string(),
+            x_reject: reject,
+            x_ideal: ideal,
             schema,
             params,
         };
 
-        // The members name this id among their peers to reach the coordinator.
-        let id = match opts.session {
-            Some(session) => format!("{COORDINATOR}-{session}"),
-            None => COORDINATOR.to_string(),
-        };
-        let config = collaborate_config(&id, COORDINATOR, opts.slim_endpoint, opts.participants)?;
-        let channel = CollaborateChannel::connect(config).map_err(|e| anyhow!("{e}"))?;
         println!(
             "Opening a CONCORD run as {id} among {}. The members must already be running.",
             opts.participants.join(", ")
         );
-        let mut node = Node::new(Agent::new(&id)?, channel, NoModel, NodeConfig::default());
-        node.observe(|event| log_event(event, false));
         node.start(&init)?;
-        let report = node.run()?;
-        finish(&report, opts.report)
+        match node.run() {
+            Ok(report) => finish(&report, opts.report),
+            Err(NodeError::Stopped) => {
+                eprintln!("Stopped before the run ended.");
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Print the report, write it when asked, and turn an aborted run into an
@@ -373,6 +439,8 @@ mod enabled {
         fn options<'a>(participants: &'a [String]) -> CoordinateOptions<'a> {
             CoordinateOptions {
                 goal: "pick one",
+                tool: None,
+                command: None,
                 participants,
                 reject: Some("nothing is decided"),
                 ideal: Some("everyone is satisfied"),

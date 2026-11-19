@@ -1007,7 +1007,7 @@ mod tests {
                 "/var/workspace",
                 "--system-prompt",
                 "sys",
-                "--session-id",
+                "--resume",
                 "sid-1",
                 "--",
                 "hello",

@@ -46,8 +46,8 @@
   },
   "session": {
     "json_field": "session_id",
-    "flag": "--session-id",
-    "retry_stderr_contains": "already in use"
+    "flag": "--resume",
+    "retry_stderr_contains": "No conversation found"
   },
   "result": { "kind": "json_field", "field": "result" }
 }

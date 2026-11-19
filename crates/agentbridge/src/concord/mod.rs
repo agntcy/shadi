@@ -9,6 +9,8 @@
 //!
 //! - [`node`] runs the state machine for one agent, with a harness as its
 //!   model.
+//! - [`initiator`] is how a model writes the frame of a run: its anchors, its
+//!   threshold and the shape of a candidate.
 //! - [`reply`] turns what the harness writes into a call the library accepts.
 //! - [`channel`] is the broadcast channel a node talks through.
 
@@ -21,6 +23,8 @@ pub use ioc_concord;
 
 #[cfg(feature = "concord")]
 pub mod channel;
+#[cfg(feature = "concord")]
+pub mod initiator;
 #[cfg(feature = "concord")]
 pub mod node;
 #[cfg(feature = "concord")]
