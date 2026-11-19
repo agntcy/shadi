@@ -81,6 +81,13 @@
       "enabled": false
     },
     {
+      "description": "pnpm 11 rejects lockfile entries published less than a day ago (minimumReleaseAge defaults to 1440 minutes), so an earlier npm bump fails install in CI.",
+      "matchManagers": [
+        "npm"
+      ],
+      "minimumReleaseAge": "1 day"
+    },
+    {
       "matchManagers": [
         "github-actions"
       ],
