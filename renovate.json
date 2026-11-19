@@ -85,6 +85,14 @@
         "github-actions"
       ],
       "groupName": "github actions"
+    },
+    {
+      "description": "The workflow toolchain pins and rust-toolchain.toml / packageManager must move together, or CI installs one version and cargo or pnpm runs another. Last, so it overrides the groups above.",
+      "matchPackageNames": [
+        "rust",
+        "pnpm"
+      ],
+      "groupName": "toolchains"
     }
   ]
 }
