@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Runs the real `claude` and records, per agent, what it was given and what it
+printed: the flags (is --resume there?), the prompt, stdout and stderr. The log
+is .run/claude-<agent>.log."""
+import json, os, subprocess, sys, time
+
+args = sys.argv[1:]
+agent = os.path.basename(os.getcwd())
+root = os.environ.get("CONCORD_EXAMPLE", ".")
+log = os.path.join(root, ".run", f"claude-{agent}.log")
+split = args.index("--") if "--" in args else len(args)
+flags = args[:split]
+prompt = args[split + 1] if split + 1 < len(args) else ""
+start = time.time()
+p = subprocess.run(["claude", *args], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+took = time.time() - start
+try:
+    with open(log, "a") as f:
+        f.write(f"\n===== {time.strftime('%H:%M:%S')} {agent} took {took:.1f}s exit {p.returncode}\n")
+        f.write(f"flags: {json.dumps(flags)}\n--- prompt ({len(prompt)} bytes)\n{prompt}\n")
+        f.write(f"--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}\n")
+except OSError:
+    pass
+sys.stdout.write(p.stdout)
+sys.stderr.write(p.stderr)
+sys.exit(p.returncode)

@@ -1,0 +1,50 @@
+{
+  "id": "monolith",
+  "bin": "claude-logged",
+  "pin_tmpdir": true,
+  "env": {
+    "TMPDIR": "{tmpdir}",
+    "TMP": "{tmpdir}",
+    "TEMP": "{tmpdir}",
+    "CLAUDE_CODE_TMPDIR": "{tmpdir}",
+    "CLAUDE_TMPDIR": "{tmpdir}"
+  },
+  "workdir_flags": [
+    "--add-dir",
+    "{workdir}"
+  ],
+  "workdir_flags_on_execute": true,
+  "workdir_flags_on_snapshot": true,
+  "workdir_flags_on_inject": false,
+  "current_dir_workdir": true,
+  "system_flag": "--system-prompt",
+  "split_large_prompt": false,
+  "provision": {
+    "skills": {
+      "dir": "{workdir}/.claude/skills"
+    }
+  },
+  "execute": {
+    "args": [
+      "--print",
+      "--output-format",
+      "json",
+      "--disallowedTools",
+      "Task",
+      "{workdir_flags}",
+      "{system}",
+      "{session}",
+      "--",
+      "{prompt}"
+    ]
+  },
+  "session": {
+    "json_field": "session_id",
+    "flag": "--resume",
+    "retry_stderr_contains": "No conversation found"
+  },
+  "result": {
+    "kind": "json_field",
+    "field": "result"
+  }
+}

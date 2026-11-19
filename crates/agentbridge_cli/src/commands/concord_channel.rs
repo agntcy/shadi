@@ -40,6 +40,10 @@ const DEFAULT_SETTLE: Duration = Duration::from_secs(2);
 /// How long `connect` waits for the channel to come up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long dropping the channel waits for the messages still queued to be
+/// sent.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// What a member needs to join the group.
 pub struct CollaborateConfig {
     /// How this process reaches the SLIM node, with its transport security.
@@ -88,7 +92,9 @@ fn parse_name(raw: &str) -> Result<Name, String> {
 /// One member's end of a CONCORD group.
 pub struct CollaborateChannel {
     inbound: mpsc::Receiver<String>,
-    outbound: async_mpsc::UnboundedSender<Message>,
+    outbound: Option<async_mpsc::UnboundedSender<Message>>,
+    /// Told when everything queued has been sent.
+    drained: mpsc::Receiver<()>,
 }
 
 impl CollaborateChannel {
@@ -98,20 +104,49 @@ impl CollaborateChannel {
         let (inbound_tx, inbound) = mpsc::channel();
         let (outbound, outbound_rx) = async_mpsc::unbounded();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let (drained_tx, drained) = mpsc::channel();
         thread::Builder::new()
             .name(format!("concord-{}", config.agent_id))
-            .spawn(move || run(config, inbound_tx, outbound_rx, ready_tx))
+            .spawn(move || run(config, inbound_tx, outbound_rx, ready_tx, drained_tx))
             .map_err(|e| format!("failed to start the group thread: {e}"))?;
         ready_rx
             .recv_timeout(CONNECT_TIMEOUT)
             .map_err(|_| "the group channel did not come up in time".to_string())??;
-        Ok(Self { inbound, outbound })
+        Ok(Self {
+            inbound,
+            outbound: Some(outbound),
+            drained,
+        })
+    }
+}
+
+impl CollaborateChannel {
+    /// Close the channel for sending and wait for the messages still queued to
+    /// be sent. `false` when they were not all sent in time.
+    pub fn flush(&mut self) -> bool {
+        // closing the queue lets the thread send what is left and say so
+        self.outbound = None;
+        self.drained.recv_timeout(FLUSH_TIMEOUT).is_ok()
+    }
+}
+
+impl Drop for CollaborateChannel {
+    /// Send what is still queued before the member goes: a node that ends the
+    /// run right after broadcasting its last message (the result, for the
+    /// agent that reports it) would otherwise take the message down with its
+    /// process, and the others would wait for it forever.
+    fn drop(&mut self) {
+        if self.outbound.is_some() && !self.flush() {
+            tracing::warn!("concord: the last messages may not have been sent");
+        }
     }
 }
 
 impl Channel for CollaborateChannel {
     fn broadcast(&mut self, text: &str) -> Result<(), String> {
         self.outbound
+            .as_ref()
+            .ok_or_else(|| "the group channel is closed".to_string())?
             .unbounded_send(binding::message(text))
             .map_err(|_| "the group channel is closed".to_string())
     }
@@ -132,6 +167,7 @@ fn run(
     inbound: mpsc::Sender<String>,
     outbound: async_mpsc::UnboundedReceiver<Message>,
     ready: mpsc::Sender<Result<(), String>>,
+    drained: mpsc::Sender<()>,
 ) {
     let ready_in = ready.clone();
     let result = (|| -> Result<(), String> {
@@ -222,6 +258,8 @@ fn run(
                     }
                 }
             }
+            // every queued message has been sent; what follows is teardown
+            let _ = drained.send(());
             server.shutdown().await;
             let _ = serving.await;
             Ok::<(), String>(())
@@ -332,6 +370,32 @@ pub(crate) mod tests {
             None,
             "a must not hear itself"
         );
+    }
+
+    #[test]
+    #[ignore = "starts a SLIM node, which sets a global tracing subscriber"]
+    fn what_is_queued_when_a_member_closes_is_sent_first() {
+        let (_node, url) = node();
+        let ids = ["a", "b"];
+        let mut a = member(&url, "a", &ids, None);
+        let mut b = member(&url, "b", &ids, None);
+        std::thread::sleep(Duration::from_secs(2));
+        // the last messages of a node, as it ends: the process goes right after
+        for n in 1..=3 {
+            a.broadcast(&format!("<concord-result>{n}</concord-result>"))
+                .unwrap();
+        }
+        assert!(a.flush(), "the queued messages were not all sent");
+        assert!(
+            a.broadcast("late").is_err(),
+            "a closed channel takes nothing"
+        );
+        for n in 1..=3 {
+            assert_eq!(
+                recv_within(&mut b, Duration::from_secs(5)).as_deref(),
+                Some(format!("<concord-result>{n}</concord-result>").as_str())
+            );
+        }
     }
 
     #[test]
