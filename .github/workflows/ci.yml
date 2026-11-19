@@ -211,13 +211,13 @@ jobs:
       - name: Test agentbridge-cli with CONCORD
         if: needs.changes.outputs.workspace == 'true'
         run: cargo test -p agntcy-agentbridge-cli --features concord
-      # Whole negotiations between agents over a SLIM node in the test process.
-      # They are ignored in the run above because a SLIM node sets the process's
-      # tracing subscriber, which other tests of the binary rely on, so they run
-      # alone, one at a time, on a local port.
-      - name: Test CONCORD negotiations over SLIM
+      # The channel tests start a SLIM node in the test process. They are
+      # ignored in the run above because a SLIM node sets the process's tracing
+      # subscriber, which other tests of the binary rely on, so they run alone,
+      # one at a time, on a local port.
+      - name: Test the CONCORD channel over SLIM
         if: needs.changes.outputs.workspace == 'true'
-        run: cargo test -p agntcy-agentbridge-cli --features concord -- --ignored concord_ --test-threads=1
+        run: cargo test -p agntcy-agentbridge-cli --features concord -- --ignored concord_channel --test-threads=1
       - name: Clippy agentbridge with CONCORD
         if: needs.changes.outputs.workspace == 'true'
         run: cargo clippy -p agntcy-agentbridge -p agntcy-agentbridge-cli --features agntcy-agentbridge-cli/concord --all-targets
