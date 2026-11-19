@@ -23,7 +23,7 @@ use ioc_concord::wire::InitParams;
 use serde_json::Value;
 
 use super::channel::Channel;
-use super::reply::{anchors_of, answer_format, extract_json, submit, Submitted};
+use super::reply::{answer_format, extract_json, submit, Refusals, Submitted};
 use crate::adapter::CliAdapter;
 
 /// What a node needs the model for: the text that answers a task.
@@ -75,7 +75,10 @@ pub struct NodeConfig {
     pub max_attempts: u32,
     /// How long to wait for a message before looking at the timers.
     pub poll: Duration,
-    /// How long the node may run in all. `None` runs until the run ends.
+    /// How long the node may run in all. It is looked at between the calls to
+    /// the harness and not during one: a call that does not return is not
+    /// interrupted by it. `None` runs until the run ends: an agent that waits
+    /// for a run to be opened waits for as long as it takes.
     pub deadline: Option<Duration>,
 }
 
@@ -121,6 +124,8 @@ pub struct Node<C: Channel, R: Responder> {
     /// The agent's own raw anchors, once its init reply is sent.
     anchors: Option<RawAnchors>,
     events: Vec<Event>,
+    /// When `run` began, for the deadline.
+    started: Option<Instant>,
 }
 
 impl<C: Channel, R: Responder> Node<C, R> {
@@ -134,6 +139,7 @@ impl<C: Channel, R: Responder> Node<C, R> {
             described: false,
             anchors: None,
             events: Vec::new(),
+            started: None,
         }
     }
 
@@ -162,19 +168,31 @@ impl<C: Channel, R: Responder> Node<C, R> {
         self.apply(step)
     }
 
-    /// Take part until the run ends, and return its report.
+    /// Take part until the run ends, and return its report. A channel that
+    /// fails after the run has ended here (the last message of the agent that
+    /// reports the result, sent into a group that is gone) does not take the
+    /// report with it.
     pub fn run(&mut self) -> Result<Report, NodeError> {
-        let started = Instant::now();
+        match self.run_until_done() {
+            Err(NodeError::Channel(error)) => match self.finished() {
+                Some(report) => {
+                    tracing::warn!(%error, "concord: the run ended, but the channel failed after it");
+                    Ok(report)
+                }
+                None => Err(NodeError::Channel(error)),
+            },
+            other => other,
+        }
+    }
+
+    fn run_until_done(&mut self) -> Result<Report, NodeError> {
+        self.started = Some(Instant::now());
         loop {
             self.answer_due()?;
             if let Some(report) = self.finished() {
                 return Ok(report);
             }
-            if let Some(limit) = self.config.deadline {
-                if started.elapsed() >= limit {
-                    return Err(NodeError::Deadline(limit));
-                }
-            }
+            self.check_deadline()?;
             match self
                 .channel
                 .recv(self.config.poll)
@@ -190,6 +208,18 @@ impl<C: Channel, R: Responder> Node<C, R> {
                     self.apply(step)?;
                 }
             }
+        }
+    }
+
+    /// An error once the deadline has passed. It is looked at before every
+    /// call to the harness too, as one answer can take several, each of them
+    /// minutes.
+    fn check_deadline(&self) -> Result<(), NodeError> {
+        match (self.config.deadline, self.started) {
+            (Some(limit), Some(started)) if started.elapsed() >= limit => {
+                Err(NodeError::Deadline(limit))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -230,42 +260,50 @@ impl<C: Channel, R: Responder> Node<C, R> {
     /// Get an answer to `task` from the model and send it. `false` when the
     /// task turned out not to be the agent's to answer any more.
     fn answer(&mut self, task: &Task) -> Result<bool, NodeError> {
-        let mut prompt = self.prompt(task)?;
-        let mut last = String::new();
-        let mut repeats = 0;
+        let first = self.prompt(task)?;
+        let mut prompt = first.clone();
+        let mut refusals = Refusals::default();
         for attempt in 1..=self.config.max_attempts {
+            self.check_deadline()?;
             let reply = self
                 .responder
                 .respond(task, &prompt)
                 .map_err(NodeError::Harness)?;
             let outcome = match extract_json(&reply) {
-                Some(answer) => {
-                    let outcome = submit(&mut self.agent, task, &answer, self.anchors, repeats);
-                    if matches!(outcome, Submitted::Sent(_)) && matches!(task, Task::InitReply(_)) {
-                        self.anchors = anchors_of(&answer);
-                    }
-                    outcome
+                Some(answer) => submit(&mut self.agent, task, &answer, self.anchors, &refusals),
+                None => {
+                    let problem = "your answer is not a JSON object".to_string();
+                    let text =
+                        ioc_concord::guidance::refusal_text(&problem, refusals.count(&problem));
+                    Submitted::Refused { problem, text }
                 }
-                None => Submitted::Refused(ioc_concord::guidance::refusal_text(
-                    "your answer is not a JSON object",
-                    repeats,
-                )),
             };
             match outcome {
-                Submitted::Sent(step) => {
+                Submitted::Sent { step, anchors } => {
+                    if anchors.is_some() {
+                        self.anchors = anchors;
+                    }
+                    // the model has now been told how a run goes, and has read
+                    // what the others sent
+                    self.described = true;
                     self.inbox.clear();
                     self.apply(step)?;
                     return Ok(true);
                 }
                 Submitted::Unsupported(kind) => return Err(NodeError::Unsupported(kind)),
+                // `break` and not `continue` in the caller: the harness is
+                // called before an answer is submitted, so a task that stayed
+                // due would be answered, paid for, again and again
                 Submitted::Settled(why) => {
                     tracing::debug!(%why, kind = task.kind(), "concord: task no longer owed");
                     return Ok(false);
                 }
-                Submitted::Refused(text) => {
-                    repeats = if text == last { repeats + 1 } else { 1 };
-                    prompt = format!("{text}\n\n{}", answer_format(task));
-                    last = text;
+                Submitted::Refused { problem, text } => {
+                    refusals.record(&problem);
+                    // The task goes with the refusal: a harness that keeps no
+                    // conversation between calls has nothing else to answer
+                    // from. A refusal is rare, so the longer prompt is too.
+                    prompt = format!("{text}\n\nThe task, again:\n\n{first}");
                     tracing::debug!(attempt, kind = task.kind(), "concord: answer refused");
                 }
             }
@@ -273,7 +311,7 @@ impl<C: Channel, R: Responder> Node<C, R> {
         Err(NodeError::Refused {
             kind: task.kind(),
             attempts: self.config.max_attempts,
-            last,
+            last: refusals.last().to_string(),
         })
     }
 
@@ -283,7 +321,6 @@ impl<C: Channel, R: Responder> Node<C, R> {
         let mut parts = Vec::new();
         if !self.described {
             parts.push(RUN_DESCRIPTION.clone());
-            self.described = true;
         }
         let delivery = render_delivery(&self.inbox);
         if !delivery.is_empty() {

@@ -171,6 +171,47 @@ jobs:
           PYO3_PYTHON: python
         run: cargo clippy --workspace --exclude shadi_desktop --all-targets
 
+  # CONCORD is behind the `concord` feature of agentbridge, which the
+  # workspace build above does not switch on: without this job its code is
+  # never compiled or tested here.
+  concord:
+    name: CONCORD feature
+    runs-on: ubuntu-latest
+    needs: changes
+    permissions:
+      contents: read
+    env:
+      PYO3_PYTHON: python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Setup Rust
+        if: needs.changes.outputs.workspace == 'true'
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: 1.99.0
+          components: clippy
+      - name: Setup Python
+        if: needs.changes.outputs.workspace == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.15"
+      - name: Restore Rust cache
+        if: needs.changes.outputs.workspace == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Linux dependencies
+        if: needs.changes.outputs.workspace == 'true'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev libssl-dev
+      - name: Test agentbridge with CONCORD
+        if: needs.changes.outputs.workspace == 'true'
+        run: cargo test -p agntcy-agentbridge --features concord
+      - name: Clippy agentbridge with CONCORD
+        if: needs.changes.outputs.workspace == 'true'
+        run: cargo clippy -p agntcy-agentbridge --features concord --all-targets
+
   lockfiles:
     name: Lockfiles in sync
     runs-on: ubuntu-latest
