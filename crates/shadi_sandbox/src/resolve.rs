@@ -104,6 +104,34 @@ pub fn canonicalize_path(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
+/// Each `--read` path that `policy` still lets the program write, with the
+/// write root that covers it (the path itself or a directory above it).
+///
+/// A read grant only adds access. It can't take away a write that a wider
+/// grant gives, such as the `allow: ["."]` every profile has for the
+/// directory `shadictl` starts in, and Landlock has no rule that would. The
+/// roots are the ones the backend applies: on macOS they include the per-user
+/// temp dirs, and a `--deny` drops a grant (Linux) or the path (macOS) the
+/// way the backend does. Callers warn, so "read-only" isn't assumed where it
+/// doesn't hold.
+pub fn writable_read_paths(policy: &SandboxPolicy, reads: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    let roots: Vec<PathBuf> = crate::platform::write_roots(policy)
+        .into_iter()
+        .map(|root| canonicalize_path(&root).unwrap_or(root))
+        .collect();
+    reads
+        .iter()
+        .filter_map(|read| {
+            let read = canonicalize_path(read).ok()?;
+            if crate::platform::write_denied(policy, &read) {
+                return None;
+            }
+            let root = roots.iter().find(|root| read.starts_with(root))?;
+            Some((read, root.clone()))
+        })
+        .collect()
+}
+
 /// Layer profile defaults, then file values, then overrides, into one policy.
 pub fn resolve_policy(
     overrides: &PolicyOverrides,
@@ -415,6 +443,97 @@ mod tests {
         let err = resolve_policy(&overrides, &PolicyFileValues::default())
             .expect_err("a missing override path is rejected");
         assert!(err.contains("invalid read path"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_read_path_inside_a_write_grant_is_reported_as_writable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        // Outside every write root on every platform: the parent of the crate
+        // dir, which is the test's start directory, and not a temp dir.
+        let elsewhere = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        std::fs::create_dir(&repo).expect("mkdir");
+        let overrides = PolicyOverrides {
+            profile: Some(SandboxProfile::Strict),
+            allow: vec![dir.path().to_path_buf()],
+            read: vec![repo.clone(), elsewhere.clone()],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+
+        let found = writable_read_paths(&resolved.policy, &overrides.read);
+
+        let canonical_dir = canonicalize_path(dir.path()).expect("canonical");
+        let canonical_repo = canonicalize_path(&repo).expect("canonical");
+        assert!(
+            found.contains(&(canonical_repo, canonical_dir)),
+            "the repo under the allowed dir is writable: {found:?}"
+        );
+        let canonical_elsewhere = canonicalize_path(&elsewhere).expect("canonical");
+        assert!(
+            found.iter().all(|(read, _)| *read != canonical_elsewhere),
+            "a read path outside every write grant stays read-only: {found:?}"
+        );
+    }
+
+    fn writable_reads_with(allow: &Path, read: &Path, deny: &Path) -> Vec<(PathBuf, PathBuf)> {
+        let overrides = PolicyOverrides {
+            profile: Some(SandboxProfile::Strict),
+            allow: vec![allow.to_path_buf()],
+            read: vec![read.to_path_buf()],
+            deny: vec![deny.to_path_buf()],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+        writable_read_paths(&resolved.policy, &overrides.read)
+    }
+
+    #[test]
+    fn a_read_path_whose_write_grant_is_denied_is_not_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir");
+
+        let found = writable_reads_with(dir.path(), &repo, dir.path());
+
+        let canonical_dir = canonicalize_path(dir.path()).expect("canonical");
+        assert!(
+            found.iter().all(|(_, root)| *root != canonical_dir),
+            "--deny drops the grant, so it can't be the one that makes the repo writable: {found:?}"
+        );
+    }
+
+    #[test]
+    fn denying_the_read_path_itself_removes_write_only_on_macos() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir");
+
+        let found = writable_reads_with(dir.path(), &repo, &repo);
+
+        // Seatbelt checks the deny first; Landlock and Windows ACLs keep the
+        // wider grant.
+        assert_eq!(found.is_empty(), cfg!(target_os = "macos"), "{found:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_read_path_in_the_macos_temp_dir_is_reported_as_writable() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let overrides = PolicyOverrides {
+            profile: Some(SandboxProfile::Strict),
+            read: vec![repo.path().to_path_buf()],
+            ..Default::default()
+        };
+        let resolved = resolve_policy(&overrides, &PolicyFileValues::default()).expect("resolve");
+
+        let found = writable_read_paths(&resolved.policy, &overrides.read);
+
+        assert_eq!(found.len(), 1, "the per-user temp dir is always writable: {found:?}");
+        assert!(found[0].1.starts_with("/private/var/folders"), "{found:?}");
     }
 
     #[test]

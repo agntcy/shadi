@@ -161,41 +161,6 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
     }
 
     if compatibility_profile {
-        rules.push("(allow file-read* file-write* (subpath \"/private/var\"))".to_string());
-
-        rules.push("(allow file-read* file-write* (subpath \"/Library/Keychains\"))".to_string());
-        rules.push("(allow file-read* file-write* (subpath \"/private/var/db/Keychains\"))".to_string());
-        rules.push("(allow file-read* file-write* (subpath \"/private/var/db/SystemKey\"))".to_string());
-        if let Ok(home) = std::env::var("HOME") {
-            let home = escape_profile_string(&home)?;
-            rules.push(format!(
-                "(allow file-read* file-write* (subpath \"{}/Library/Keychains\"))",
-                home
-            ));
-            rules.push(format!(
-                "(allow file-read* file-write* (subpath \"{}/Library\"))",
-                home
-            ));
-            // Allow the 1Password CLI config dir (socket, config, lock files).
-            rules.push(format!(
-                "(allow file-read* file-write* (subpath \"{}/.config\"))",
-                home
-            ));
-            // Allow the slim_bindings local storage directory (~/.slim).
-            rules.push(format!(
-                "(allow file-read* file-write* (subpath \"{}/.slim\"))",
-                home
-            ));
-            rules.push(format!(
-                "(allow file-read* file-write* (subpath \"{}/.local\"))",
-                home
-            ));
-            // Allow gh CLI cache directory (~/.cache) used by gh and git credential helpers.
-            rules.push(format!(
-                "(allow file-read* file-write* (subpath \"{}/.cache\"))",
-                home
-            ));
-        }
         // Allow Mach IPC and POSIX IPC for child processes (op daemon, system services).
         rules.push("(allow ipc-posix-shm)".to_string());
     }
@@ -211,19 +176,16 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
     // both `/tmp` and `/private/tmp` so canonicalize cannot drop the
     // literal that `lstat("/tmp")` still uses.
 
-    // Allow the per-user TMPDIR unconditionally.  On macOS this is a path
-    // under /var/folders/… and is required by virtually every runtime
-    // (Node.js, Python, Rust stdlib) for temp file creation, sqlite WAL
-    // locks, and IPC sockets.  Restricting it breaks normal process startup
-    // without meaningfully improving containment since the path is already
-    // per-user and session-scoped.
-    rules.push("(allow file-read* file-write* (subpath \"/var/folders\"))".to_string());
-    rules.push("(allow file-read* file-write* (subpath \"/private/var/folders\"))".to_string());
-    if let Ok(tmpdir) = std::env::var("TMPDIR") {
-        let canonical = escape_profile_string(tmpdir.trim_end_matches('/'))?;
-        rules.push(format!(
-            "(allow file-read* file-write* (subpath \"{canonical}\"))"
-        ));
+    // The per-user TMPDIR (under /var/folders/…) is required by virtually
+    // every runtime (Node.js, Python, Rust stdlib) for temp files, sqlite WAL
+    // locks and IPC sockets, so it is always writable; the compatibility
+    // profile adds its keychain, config and cache dirs.
+    for path in implicit_write_paths(policy) {
+        let Some(s) = path.to_str() else {
+            return Err(SandboxError::InvalidConfig);
+        };
+        let s = escape_profile_string(s)?;
+        rules.push(format!("(allow file-read* file-write* (subpath \"{s}\"))"));
     }
     // /private/var/select contains the `sh` symlink consulted when spawning
     // subprocesses via /bin/sh (e.g. child_process.execSync in Node.js).
@@ -331,6 +293,36 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxErr
     );
 
     Ok(rules.join("\n"))
+}
+
+/// Directories the profile lets a program write beyond `policy.allow_write()`:
+/// the per-user temp dirs always, and with the compatibility profile its
+/// keychain, 1Password config, `~/.slim` and gh cache dirs. `build_profile`
+/// emits its write rules from this list; besides these and the caller's
+/// grants, only `/dev` is writable.
+pub(crate) fn implicit_write_paths(policy: &SandboxPolicy) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if policy.platform_profile() == PlatformSandboxProfile::Compatibility {
+        for path in [
+            "/private/var",
+            "/Library/Keychains",
+            "/private/var/db/Keychains",
+            "/private/var/db/SystemKey",
+        ] {
+            paths.push(path.into());
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            for sub in ["Library/Keychains", "Library", ".config", ".slim", ".local", ".cache"] {
+                paths.push(format!("{home}/{sub}").into());
+            }
+        }
+    }
+    paths.push("/var/folders".into());
+    paths.push("/private/var/folders".into());
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        paths.push(tmpdir.trim_end_matches('/').into());
+    }
+    paths
 }
 
 /// Per-port rules for `net_allow` (see `SandboxPolicy::kernel_net_ports`).

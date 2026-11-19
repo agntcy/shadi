@@ -422,6 +422,10 @@ fn run_cli(mut cli: Cli) -> ExitCode {
         }
     };
 
+    for warning in writable_read_warnings(&resolved.policy, &cli.read) {
+        eprintln!("{warning}");
+    }
+
     let cmd_name = cli.run_command.first().map(|cmd| cmd.as_str()).unwrap_or("");
     if is_command_blocked(cmd_name, &resolved.blocked, &resolved.allow) {
         eprintln!("blocked command: {}", cmd_name);

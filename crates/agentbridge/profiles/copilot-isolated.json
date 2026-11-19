@@ -35,6 +35,7 @@
       "--prompt",
       "{prompt}",
       "--allow-all-tools",
+      "--allow-all-paths",
       "{workdir_flags}",
       "{system}"
     ]
