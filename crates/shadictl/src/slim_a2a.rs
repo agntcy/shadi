@@ -15,8 +15,11 @@ use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretResult, SessionConte
 use agent_transport_slim::client_access::ClientAccess;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use shadi_a2a::{A2AChannelBuilder, A2AGroupChannelBuilder, SLIM_SRC_METADATA_KEY, SlimRpcHandler};
-use slim_bindings::{Name, Service};
+use shadi_a2a::{
+    A2AChannelBuilder, CollaborateGroup, CollaborateGroupConfig, SlimRpcHandler,
+    SLIM_SRC_METADATA_KEY,
+};
+use slim_bindings::Service;
 use slim_rpc::Server;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::Notify;
@@ -602,26 +605,17 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
     let client_access = ClientAccess::from_env(Some(&args.agent_id))?;
     let local_name = slim_name(&args.agent_id);
 
-    let peer_names: Vec<Arc<Name>> = args
+    let peers: Vec<String> = args
         .peer_agent_ids
         .split(',')
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .map(|id| parse_name(&slim_name(id)).map(Arc::new))
-        .collect::<Result<_, _>>()?;
-    if peer_names.is_empty() {
+        .map(slim_name)
+        .collect();
+    if peers.is_empty() {
         return Err("--peer-agent-ids must list at least one peer".to_string());
     }
-
-    let service = Service::new(format!("shadictl-a2a-collab-{}", std::process::id()));
-    let connection_id = service
-        .connect(client_access.client_config(&endpoint))
-        .map_err(format_slim_error)?;
-    let local_name_ref = Arc::new(parse_name(&local_name)?);
-    let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
-        .map_err(format_slim_error)?;
-    app.subscribe(local_name_ref.clone(), Some(connection_id))
-        .map_err(format_slim_error)?;
+    let peer_count = peers.len();
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
         .enable_all()
@@ -631,23 +625,20 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
     let received: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let received_for_handler = received.clone();
 
-    let mut session = SessionContext::new(&args.agent_id, "shadictl-a2a-collaborate");
-    session.verified = true;
     let verifier: Arc<dyn AgentVerifier> = Arc::new(VerifiedSessionVerifier);
-
-    // Both the listener's Server and the initiator's group Channel capture
-    // `tokio::runtime::Handle::current()` at construction, so build them inside
-    // this runtime's context (same fix as the P2P a2a-send path).
-    let (server, channel) = {
-        let _enter = runtime.enter();
-        let server = Arc::new(Server::new_with_shared_rx_and_connection(
-            app.inner(),
-            app.name().as_slim_name(),
-            None,
-            app.notification_receiver(),
-            Some(runtime.handle().clone()),
-        ));
-        shadi_a2a::register_collaborate(server.as_ref(), move |message| {
+    let group = CollaborateGroup::join(
+        runtime.handle(),
+        CollaborateGroupConfig {
+            client: client_access.client_config(&endpoint),
+            auth,
+            service_name: format!("shadictl-a2a-collab-{}", std::process::id()),
+            agent_id: args.agent_id.clone(),
+            session_id: "shadictl-a2a-collaborate".to_string(),
+            local_name,
+            peers,
+            verifier,
+        },
+        move |message| {
             // `register_collaborate`'s listener path has no per-message sender
             // attribution today (see a2a-slimrpc's Collaborate limitations) — only
             // `collaborate()`'s own client-observer stream gets `slim-src` via
@@ -655,15 +646,9 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
             // just surface the text.
             let text = readable_message_text(&message);
             received_for_handler.lock().unwrap().push(text);
-        });
-
-        let channel = A2AGroupChannelBuilder::new(app.clone(), peer_names.clone(), verifier, session)
-            .connection_id(connection_id)
-            .build()
-            .map_err(|err| format!("failed to build group channel: {err}"))?;
-
-        (server, channel)
-    };
+        },
+    )?;
+    let server = group.server();
 
     let intro = Message::new(Role::Agent, vec![Part::text(args.message.clone())]);
     let outbound = futures::stream::once(async move { intro });
@@ -686,7 +671,8 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
         // Unlike the listener above, this is *our own* initiated session, so
         // replies here (if any participant isn't listen-only) carry proper
         // `slim-src` attribution via MulticastItem — surface it.
-        let replies = channel
+        let replies = group
+            .channel()
             .collaborate(outbound, Some(Duration::from_secs(args.timeout_seconds)))
             .map_err(|err| format!("failed to broadcast message: {err}"))?;
         futures::pin_mut!(replies);
@@ -716,23 +702,21 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
         Ok::<(), String>(())
     })?;
 
-    let _ = app.unsubscribe(local_name_ref, Some(connection_id));
-    let _ = service.disconnect(connection_id);
-    let _ = service.shutdown();
+    group.leave();
 
     let received = received.lock().unwrap();
     Ok(if received.is_empty() {
         format!(
             "broadcast {:?} to {} peer(s); received nothing within {}s",
             args.message,
-            peer_names.len(),
+            peer_count,
             args.timeout_seconds
         )
     } else {
         format!(
             "broadcast {:?} to {} peer(s); received:\n  {}",
             args.message,
-            peer_names.len(),
+            peer_count,
             received.join("\n  ")
         )
     })

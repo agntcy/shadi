@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod channel;
+mod collaborate;
 mod locator;
 pub mod message_content;
 mod trace_context;
@@ -11,6 +12,7 @@ pub use channel::{
     request_context, A2AChannel, A2AChannelBuilder, A2AGroupChannel, A2AGroupChannelBuilder,
     GroupMember, A2A_CHALLENGE_METADATA_KEY, A2A_DST_DID_METADATA_KEY, A2A_SRC_DID_METADATA_KEY,
 };
+pub use collaborate::{CollaborateGroup, CollaborateGroupConfig};
 pub use locator::{A2ABinding, A2ALocator};
 pub use trace_context::set_remote_parent;
 pub use a2a_slimrpc::{SLIM_SRC_METADATA_KEY, SlimRpcHandler, register_collaborate};

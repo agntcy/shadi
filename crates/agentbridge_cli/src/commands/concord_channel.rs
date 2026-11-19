@@ -6,28 +6,24 @@
 //! Each member runs two halves, as in `shadictl slim a2a-collaborate`: a
 //! listener that receives what the others broadcast, and a group channel that
 //! broadcasts its own messages to every peer, one Collaborate call per
-//! message. [`CollaborateChannel`] holds
-//! both on a thread of its own and gives the node the blocking [`Channel`] it
-//! expects.
+//! message. [`CollaborateChannel`] holds both on a thread of its own and gives
+//! the node the blocking [`Channel`] it expects.
 //!
 //! The listener path carries no proven sender, so a message is attributed
 //! only by the author it names inside.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use a2a::Message;
-use agent_secrets::SessionContext;
 use agentbridge::concord::binding;
 use agentbridge::concord::channel::Channel;
 use futures::channel::mpsc as async_mpsc;
 use futures::StreamExt;
-use shadi_a2a::{register_collaborate, A2AGroupChannelBuilder};
+use shadi_a2a::{CollaborateGroup, CollaborateGroupConfig};
 use shadi_identity::SlimAuth;
-use slim_bindings::{ClientConfig, Name, Service};
-use slim_rpc::Server;
+use slim_bindings::ClientConfig;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 use super::egress;
@@ -81,12 +77,6 @@ pub fn member_name(agent_id: &str) -> String {
     } else {
         format!("agntcy/shadi/{agent_id}-a2a")
     }
-}
-
-fn parse_name(raw: &str) -> Result<Name, String> {
-    Name::from_string(raw.to_string()).map_err(|e| {
-        format!("invalid SLIM name {raw}: {e} (expected organization/namespace/application)")
-    })
 }
 
 /// One member's end of a CONCORD group.
@@ -179,69 +169,46 @@ fn run(
             timeout,
             settle,
         } = config;
-        let local = member_name(&agent_id);
-        let local_name = Arc::new(parse_name(&local)?);
-        let peer_names: Vec<Arc<Name>> = peers
-            .iter()
-            .map(|p| parse_name(&member_name(p)).map(Arc::new))
-            .collect::<Result<_, _>>()?;
-        if peer_names.is_empty() {
-            return Err("a CONCORD group needs at least one peer".to_string());
-        }
-
-        let service = Service::new(format!(
-            "agentbridge-concord-{agent_id}-{}",
-            std::process::id()
-        ));
-        let connection_id = service.connect(client).map_err(|e| e.to_string())?;
-        let app = shadi_identity::create_app(&service, local_name.clone(), &auth)
-            .map_err(|e| e.to_string())?;
-        app.subscribe(local_name.clone(), Some(connection_id))
-            .map_err(|e| e.to_string())?;
-
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("failed to create a tokio runtime: {e}"))?;
-        let mut session = SessionContext::new(&agent_id, "concord-collaborate");
-        session.verified = true;
-        let (server, channel) = {
-            let _enter = runtime.enter();
-            let server = Arc::new(Server::new_with_shared_rx_and_connection(
-                app.inner(),
-                app.name().as_slim_name(),
-                None,
-                app.notification_receiver(),
-                Some(runtime.handle().clone()),
-            ));
-            register_collaborate(server.as_ref(), move |message| {
+        let group = CollaborateGroup::join(
+            runtime.handle(),
+            CollaborateGroupConfig {
+                client,
+                auth,
+                service_name: format!("agentbridge-concord-{agent_id}-{}", std::process::id()),
+                local_name: member_name(&agent_id),
+                peers: peers.iter().map(|p| member_name(p)).collect(),
+                session_id: "concord-collaborate".to_string(),
+                agent_id,
+                verifier: egress::policy(),
+            },
+            move |message| {
                 for text in binding::texts(&message) {
                     // the node is gone: nobody to tell
                     let _ = inbound.send(text);
                 }
-            });
-            let channel =
-                A2AGroupChannelBuilder::new(app.clone(), peer_names, egress::policy(), session)
-                    .connection_id(connection_id)
-                    .build()
-                    .map_err(|e| format!("failed to build the group channel: {e}"))?;
-            (server, channel)
-        };
+            },
+        )?;
+        let server = group.server();
 
-        runtime.block_on(async move {
+        runtime.block_on(async {
             let serving = {
                 let server = server.clone();
                 tokio::spawn(async move { server.serve().await })
             };
             let _ = ready_in.send(Ok(()));
             tokio::time::sleep(settle).await;
-            // A listener answers a Collaborate call with an empty reply
-            // stream, which ends the call for the sender once every peer has.
-            // So a stream that outlives one message cannot work: each
-            // broadcast is a call of its own.
+            // One call per broadcast, so the end of the call tells `flush` the
+            // message reached the peers. A single call would also deliver
+            // every message, but its replies end early and would not say when
+            // each was sent.
             let mut outbound = outbound;
             while let Some(message) = outbound.next().await {
-                let call = channel
+                let call = group
+                    .channel()
                     .collaborate(futures::stream::once(async move { message }), timeout)
                     .map_err(|e| format!("failed to open the group: {e}"));
                 let replies = match call {
@@ -264,9 +231,7 @@ fn run(
             let _ = serving.await;
             Ok::<(), String>(())
         })?;
-        let _ = app.unsubscribe(local_name, Some(connection_id));
-        let _ = service.disconnect(connection_id);
-        let _ = service.shutdown();
+        group.leave();
         Ok(())
     })();
     if let Err(error) = result {
@@ -280,6 +245,8 @@ fn run(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use slim_bindings::Service;
+    use std::sync::Arc;
     use std::time::Instant;
 
     const SECRET: &str = "concord-collaborate-test-secret-0123456789";
@@ -441,5 +408,113 @@ pub(crate) mod tests {
             recv_within(&mut a, Duration::from_secs(10)).as_deref(),
             Some("reply")
         );
+    }
+
+    /// A member of a group, driven by the caller: what it receives lands in `got`.
+    fn group(
+        rt: &tokio::runtime::Runtime,
+        url: &str,
+        id: &str,
+        peer: &str,
+        got: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> CollaborateGroup {
+        let group = CollaborateGroup::join(
+            rt.handle(),
+            CollaborateGroupConfig {
+                client: slim_bindings::new_insecure_client_config(url.to_string()),
+                auth: SlimAuth::SharedSecret(SECRET.to_string()),
+                service_name: format!("concord-test-{id}"),
+                agent_id: id.to_string(),
+                session_id: "concord-test".to_string(),
+                local_name: member_name(id),
+                peers: vec![member_name(peer)],
+                verifier: egress::policy(),
+            },
+            move |message| got.lock().unwrap().extend(binding::texts(&message)),
+        )
+        .unwrap();
+        let server = group.server();
+        rt.spawn(async move {
+            let _ = server.serve().await;
+        });
+        group
+    }
+
+    /// Wait for `done`, at most `limit`; the test asserts what it needs after.
+    fn wait_until(limit: Duration, done: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !done() && start.elapsed() < limit {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The group's calls need a runtime that runs while the test sleeps.
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    // What the channel relies on in the group call, measured:
+    //
+    // - a call made before a peer has joined is held until it has, and then
+    //   delivers (so no settling time is needed before the first message);
+    // - the replies of a call end as soon as the peers have answered, which
+    //   does not stop what the call is still sending: a stream that outlives
+    //   one message still delivers every message.
+
+    #[test]
+    #[ignore = "starts a SLIM node, which sets a global tracing subscriber"]
+    fn a_call_made_before_a_peer_joined_is_held_and_then_delivers() {
+        let (_node, url) = node();
+        let rt = runtime();
+        let got = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let a = group(&rt, &url, "a", "b", Arc::default());
+        let call = a
+            .channel()
+            .collaborate(
+                futures::stream::once(async { binding::message("early") }),
+                Some(Duration::from_secs(15)),
+            )
+            .unwrap();
+        let done = rt.spawn(async move { call.collect::<Vec<_>>().await });
+        // nobody is there to answer yet; a call that gave up at once would end
+        // well within this time
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(!done.is_finished(), "the call must wait for the peer");
+        let _b = group(&rt, &url, "b", "a", got.clone());
+        rt.block_on(done).unwrap();
+        wait_until(Duration::from_secs(10), || got.lock().unwrap().len() == 1);
+        assert_eq!(*got.lock().unwrap(), ["early"]);
+    }
+
+    #[test]
+    #[ignore = "starts a SLIM node, which sets a global tracing subscriber"]
+    fn one_call_delivers_messages_sent_long_after_its_replies_ended() {
+        let (_node, url) = node();
+        let rt = runtime();
+        let got = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _b = group(&rt, &url, "b", "a", got.clone());
+        let a = group(&rt, &url, "a", "b", Arc::default());
+        let slow = futures::stream::unfold(1u32, |n| async move {
+            if n > 4 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Some((binding::message(&format!("m{n}")), n + 1))
+        });
+        let replies = rt.block_on(async {
+            let replies = a
+                .channel()
+                .collaborate(slow, Some(Duration::from_secs(15)))
+                .unwrap();
+            replies.collect::<Vec<_>>().await
+        });
+        // the replies are over after one answer round, long before m4 was sent
+        assert!(replies.len() <= 1);
+        wait_until(Duration::from_secs(20), || got.lock().unwrap().len() == 4);
+        assert_eq!(*got.lock().unwrap(), ["m1", "m2", "m3", "m4"]);
     }
 }
