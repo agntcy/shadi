@@ -174,7 +174,7 @@ impl MemberSource for RunningAgentSource {
         }
         cmd.args(["--server-addr", &self.runtime.server_addr]);
         without_dir_auth(&mut cmd);
-        crate::subprocess::withhold_shadi_secrets(&mut cmd);
+        crate::subprocess::withhold_for_dirctl(&mut cmd);
 
         let output = match run_bounded(cmd, RUNTIME_LIST_TIMEOUT, RUNTIME_LIST_MAX_BYTES) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

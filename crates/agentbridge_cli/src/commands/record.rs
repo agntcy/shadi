@@ -507,19 +507,7 @@ fn dirctl_json_with(args: &[&str], flags: &[&str], server: &str) -> anyhow::Resu
         .args(flags)
         .args(["--server-addr", server, "--output", "json", "--"])
         .args(operands);
-    // dirctl needs none of SHADI's or SLIM's settings, seeds included, nor
-    // SHADI's other secrets; only the DIR token is its own.
-    for (key, _) in std::env::vars_os() {
-        let key_str = key.to_string_lossy();
-        if key_str.starts_with("SHADI_") || key_str.starts_with("SLIM_") {
-            cmd.env_remove(&key);
-        }
-    }
-    for name in agentbridge::subprocess::WITHHELD_FROM_HARNESS {
-        if *name != "DIRECTORY_CLIENT_GITHUB_TOKEN" {
-            cmd.env_remove(name);
-        }
-    }
+    agentbridge::subprocess::withhold_for_dirctl(&mut cmd);
     let output = cmd
         .output()
         .map_err(|e| {

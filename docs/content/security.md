@@ -142,7 +142,16 @@ headless and in containers. Without that variable the store is unavailable.
 - Only key provisioning (`shadictl derive-agent-identity` and
   `derive-agent-did`) creates a keyring; everything else fails with
   `StoreNotFound` until it exists.
-- Writers lock `<keyring>.lock`, so concurrent processes don't lose updates.
+- The keyring always holds a canary item. oo7 accepts any password for a
+  keyring with no items, so without it a wrong password file could re-key a
+  keyring whose keys were all deleted.
+- Writers lock `<keyring>.lock`, so concurrent processes don't lose updates,
+  and give up after 10 seconds rather than hang on a stuck holder.
+- The store counts as configured, and the credential vault picks it, whenever
+  `SHADI_KEYRING_PASSWORD_FILE` is set, also inside a sandbox that denies the
+  file. A credential issued on the host is then not silently missing in the
+  sandbox: reading it fails until the sandbox can read the keyring, or both
+  sides set `SHADI_CREDENTIAL_BACKEND=sqlcipher`.
 - `SHADI_KEYRING_PATH` and `SHADI_KEYRING_PASSWORD_FILE` are withheld from the
   harness agentbridge launches.
 

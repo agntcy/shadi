@@ -4,10 +4,10 @@
 //! Encrypted keyring file in the libsecret file format. No D-Bus, no daemon:
 //! the password comes from a file, so it also works headless in containers.
 //! Without `SHADI_KEYRING_PASSWORD_FILE` the store is unavailable, like the
-//! no-op store; so it is when the keyring file does not exist, unless the
-//! store was built to create it (only key provisioning does). A relative
-//! `SHADI_KEYRING_PATH`, `SHADI_KEYRING_PASSWORD_FILE` or `HOME` is a
-//! misconfiguration: unavailable, and every operation fails.
+//! no-op store. A relative `SHADI_KEYRING_PATH`, `SHADI_KEYRING_PASSWORD_FILE`
+//! or `HOME` is a misconfiguration: unavailable, and every operation fails.
+//! Only a store built to create the keyring (key provisioning) writes one that
+//! does not exist yet.
 //!
 //! Writers also hold an exclusive lock on `<keyring>.lock`; readers do not
 //! lock, so they work on a read-only mount.
@@ -17,6 +17,7 @@ use std::fs::{DirBuilder, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use oo7::file::UnlockedKeyring;
 use oo7::Secret;
@@ -26,12 +27,23 @@ use crate::memory::SecretBytes;
 use crate::{SecretError, SecretResult, SecretStore};
 
 const SERVICE: &str = "agent_secrets";
+/// oo7 accepts any password for a keyring with no items, so every keyring
+/// keeps this item to check the password against. Its `service` differs from
+/// [`SERVICE`], so it is never listed, read or deleted as a key.
+const CANARY: [(&str, &str); 1] = [("service", "agent_secrets/canary")];
 /// Tries when another process saved between our load and our save.
 const SAVE_ATTEMPTS: usize = 5;
+/// How long a writer waits for another process to release `<keyring>.lock`.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_POLL: Duration = Duration::from_millis(50);
 
 /// Serialises load, modify and save within the process: oo7 refuses a save
 /// when the file changed since it was loaded.
 static KEYRING_LOCK: Mutex<()> = Mutex::new(());
+
+/// Queues this process's writers before the file lock, so they don't use up
+/// each other's [`LOCK_TIMEOUT`].
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Misconfigurations already reported, so each is printed once per process.
 static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -42,6 +54,7 @@ pub struct KeyringFileStore {
     config: Result<Option<(PathBuf, PathBuf)>, ()>,
     /// Whether a missing keyring file may be created.
     create: bool,
+    lock_timeout: Duration,
 }
 
 impl KeyringFileStore {
@@ -71,7 +84,11 @@ impl KeyringFileStore {
             };
             Ok(path.zip(abs("SHADI_KEYRING_PASSWORD_FILE")?))
         })();
-        Self { config, create }
+        Self {
+            config,
+            create,
+            lock_timeout: LOCK_TIMEOUT,
+        }
     }
 
     #[cfg(test)]
@@ -79,6 +96,7 @@ impl KeyringFileStore {
         Self {
             config: Ok(Some((path, password_file))),
             create,
+            lock_timeout: LOCK_TIMEOUT,
         }
     }
 
@@ -98,16 +116,33 @@ impl KeyringFileStore {
         }
         let mut name = path.as_os_str().to_owned();
         name.push(".lock");
+        let name = PathBuf::from(name);
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(name)
+            .open(&name)
             .map_err(fail)?;
-        file.lock().map_err(fail)?;
-        Ok(file)
+        let deadline = Instant::now() + self.lock_timeout;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    eprintln!(
+                        "keyring lock still held after {}s: {}",
+                        self.lock_timeout.as_secs_f32(),
+                        name.display()
+                    );
+                    return Err(SecretError::StorageFailure);
+                }
+                Err(std::fs::TryLockError::Error(err)) => return Err(fail(err)),
+            }
+        }
     }
 
     fn password(file: &Path) -> SecretResult<Secret> {
@@ -136,22 +171,23 @@ impl KeyringFileStore {
             Err(()) => return Err(SecretError::StorageFailure),
         };
         let secret = Self::password(password_file)?;
-        let _guard = KEYRING_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let gone = || !path.exists() && !(write && self.create);
         if gone() {
             eprintln!("keyring not found: {}", path.display());
             return Err(SecretError::StoreNotFound);
         }
-        let _file_lock = if write { Some(self.lock_file(path)?) } else { None };
+        // The file lock is taken before KEYRING_LOCK, so a writer waiting on
+        // another process holds up neither this process's reads nor, past
+        // the timeout, its writes.
+        let _write_guard = write.then(|| WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+        let _file_lock = if write {
+            Some(self.lock_file(path)?)
+        } else {
+            None
+        };
+        let _guard = KEYRING_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::thread::scope(|s| {
             s.spawn(move || {
-                let to_secret = |err: oo7::file::Error| match err {
-                    oo7::file::Error::IncorrectSecret => SecretError::NotAuthorized,
-                    err => {
-                        eprintln!("keyring failed: {err}");
-                        SecretError::StorageFailure
-                    }
-                };
                 tokio::runtime::Builder::new_current_thread()
                     .build()
                     .map_err(|_| SecretError::StorageFailure)?
@@ -163,10 +199,21 @@ impl KeyringFileStore {
                                 eprintln!("keyring not found: {}", path.display());
                                 return Err(SecretError::StoreNotFound);
                             }
+                            let created = !path.exists();
                             let keyring = UnlockedKeyring::load(path, Some(secret.clone()))
                                 .await
                                 .map_err(to_secret)?;
-                            match f(keyring).await {
+                            let checked = if write {
+                                ensure_canary(&keyring, created, path).await
+                            } else {
+                                Ok(Ok(()))
+                            };
+                            let result = match checked {
+                                Ok(Ok(())) => f(keyring).await,
+                                Ok(Err(refused)) => return Err(refused),
+                                Err(err) => Err(err),
+                            };
+                            match result {
                                 Err(oo7::file::Error::TargetFileChanged(_))
                                     if attempt < SAVE_ATTEMPTS =>
                                 {
@@ -181,6 +228,43 @@ impl KeyringFileStore {
             .map_err(|_| SecretError::StorageFailure)?
         })
     }
+}
+
+fn to_secret(err: oo7::file::Error) -> SecretError {
+    match err {
+        oo7::file::Error::IncorrectSecret => SecretError::NotAuthorized,
+        err => {
+            eprintln!("keyring failed: {err}");
+            SecretError::StorageFailure
+        }
+    }
+}
+
+/// Before a write, make sure the keyring holds [`CANARY`], so the password is
+/// checked on every later load even once the last key is deleted. A keyring
+/// with items has had its password checked by the load; one with none can
+/// only be trusted if this call is creating it. The inner `Err` refuses the
+/// write.
+async fn ensure_canary(
+    keyring: &UnlockedKeyring,
+    created: bool,
+    path: &Path,
+) -> Result<SecretResult<()>, oo7::file::Error> {
+    if !keyring.search_items(&CANARY).await?.is_empty() {
+        return Ok(Ok(()));
+    }
+    if keyring.n_items().await == 0 && !created {
+        eprintln!(
+            "keyring has no items to check the password against: {}; remove it and \
+             provision the keys again",
+            path.display()
+        );
+        return Ok(Err(SecretError::NotAuthorized));
+    }
+    keyring
+        .create_item("agent_secrets canary", &CANARY, Secret::blob(SERVICE), true)
+        .await?;
+    Ok(Ok(()))
 }
 
 fn attrs(key: &str) -> [(&str, &str); 2] {
@@ -238,10 +322,11 @@ impl SecretStore for KeyringFileStore {
     }
 
     fn is_available(&self) -> bool {
-        // Opening the password file and looking for the keyring is enough:
-        // inside the sandbox the variables are set but the files are denied.
-        matches!(&self.config, Ok(Some((path, password_file)))
-            if std::fs::File::open(password_file).is_ok() && (self.create || path.exists()))
+        // Configuration only, never whether the files can be opened: inside
+        // the sandbox the variables are set but the files are denied, and a
+        // caller choosing a backend by file access (the credential vault)
+        // would then pick a different one there than on the host.
+        matches!(self.config, Ok(Some(_)))
     }
 }
 
@@ -310,13 +395,59 @@ mod tests {
         assert_eq!(s.list_keys().unwrap().len(), 8);
     }
 
+    /// The credential vault picks its backend from `is_available`; a sandbox
+    /// that denies the password file must not make it pick another one.
     #[test]
-    fn unavailable_without_a_readable_password_file() {
+    fn availability_follows_configuration_not_file_access() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path(), b"pw");
-        assert!(s.is_available());
+        s.put("k", b"v").unwrap();
         std::fs::remove_file(dir.path().join("pw")).unwrap();
-        assert!(!s.is_available());
+        assert!(s.is_available());
+        assert!(readonly(&s).is_available());
+        assert!(matches!(s.get("k"), Err(SecretError::StorageFailure)));
+    }
+
+    #[test]
+    fn an_emptied_keyring_still_rejects_a_wrong_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path(), b"right");
+        s.put("k", b"v").unwrap();
+        s.delete("k").unwrap();
+        assert!(s.list_keys().unwrap().is_empty());
+
+        std::fs::write(dir.path().join("pw"), b"wrong").unwrap();
+        assert!(matches!(s.put("k", b"v"), Err(SecretError::NotAuthorized)));
+        assert!(matches!(s.get("k"), Err(SecretError::NotAuthorized)));
+
+        std::fs::write(dir.path().join("pw"), b"right").unwrap();
+        s.put("k", b"v2").unwrap();
+        assert_eq!(value(&s, "k"), b"v2");
+    }
+
+    /// A keyring with no items at all, as written before the canary, can't
+    /// tell a wrong password from the right one, so it is not written to.
+    #[test]
+    fn a_keyring_with_no_items_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path(), b"pw");
+        let (path, pw) = s.config.clone().unwrap().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let secret = KeyringFileStore::password(&pw).unwrap();
+                UnlockedKeyring::load(&path, Some(secret))
+                    .await
+                    .unwrap()
+                    .write()
+                    .await
+                    .unwrap();
+            });
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(s.put("k", b"v"), Err(SecretError::NotAuthorized)));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -444,16 +575,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let creating = store(dir.path(), b"pw");
         let s = readonly(&creating);
-        assert!(!s.is_available());
+        assert!(s.is_available());
         assert!(matches!(s.get("k"), Err(SecretError::StoreNotFound)));
         assert!(matches!(s.put("k", b"v"), Err(SecretError::StoreNotFound)));
         assert!(matches!(s.delete("k"), Err(SecretError::StoreNotFound)));
         assert!(matches!(s.list_keys(), Err(SecretError::StoreNotFound)));
         assert!(!dir.path().join("data").exists());
 
-        assert!(creating.is_available());
         creating.put("k", b"v").unwrap();
-        assert!(s.is_available());
         assert_eq!(value(&s, "k"), b"v");
     }
 
@@ -526,6 +655,26 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(value(&s, "k"), b"v");
+    }
+
+    /// A process that never releases `<keyring>.lock` fails a write after the
+    /// timeout and, meanwhile, doesn't hold up a read.
+    #[test]
+    fn a_stuck_lock_holder_times_out_writes_and_spares_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path(), b"pw");
+        s.put("seed", b"v").unwrap();
+        s.lock_timeout = Duration::from_secs(5);
+        let _held = hold_lock(dir.path());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| tx.send(s.put("k", b"v")).unwrap());
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(value(&s, "seed"), b"v");
+            assert!(rx.try_recv().is_err(), "the write gave up before the read finished");
+            let res = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert!(matches!(res, Err(SecretError::StorageFailure)));
+        });
     }
 
     #[test]

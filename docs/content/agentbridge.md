@@ -510,6 +510,12 @@ permitted to participate. `shadi_identity::require_did_auth_from_env` enforces
 this: it errors out if `SHADI_SLIM_AUTH` isn't `did`, so `register`,
 `delegate`, and `coordinate` cannot silently fall back to a shared secret.
 
+Nothing ties an injected `SHADI_AGENT_KEY` to the agent name it is used with:
+inject the wrong agent's key and the listener signs as that agent. So a
+`register` listener prints the DID it signs as and where the key came from,
+and refuses to start when another live local listener (`list --local`)
+already holds that DID under a different name.
+
 See the [Secure Agent Group Demo](demos/did-agent-group.md) for a full
 worked example, including how DID admission is verified against the
 allow-list.

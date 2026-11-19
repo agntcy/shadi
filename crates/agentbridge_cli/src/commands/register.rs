@@ -339,6 +339,42 @@ fn best_effort_did(agent_id: &str) -> Option<String> {
         .map(|i| i.did())
 }
 
+/// Names the DID a listener for `agent_id` signs as, and refuses to start when
+/// another live local listener already holds that DID under a different name.
+/// Nothing ties an injected `SHADI_AGENT_KEY` to `agent_id`, so a key
+/// provisioned for another agent would otherwise make this one answer as it.
+fn check_own_did(
+    agent_id: &str,
+    did: &str,
+    registry: &LocalAdapterRegistry,
+    own_pid: u32,
+) -> Result<(), String> {
+    let source = if std::env::var("SHADI_AGENT_KEY").is_ok_and(|k| !k.trim().is_empty()) {
+        "key from SHADI_AGENT_KEY"
+    } else {
+        "key derived from SLIM_HUMAN_SEED"
+    };
+    eprintln!("[agentbridge] '{agent_id}' signs as {did} ({source})");
+    let live = match registry.list_live() {
+        Ok(live) => live,
+        Err(err) => {
+            eprintln!("[agentbridge] local registry: {err}");
+            return Ok(());
+        }
+    };
+    match live
+        .iter()
+        .find(|r| r.did == did && r.name != agent_id && r.pid != own_pid)
+    {
+        Some(other) => Err(format!(
+            "'{agent_id}' would sign as {did}, which the live '{}' listener (pid {}) already \
+             uses; check that SHADI_AGENT_KEY holds the key provisioned for '{agent_id}'",
+            other.name, other.pid
+        )),
+        None => Ok(()),
+    }
+}
+
 // ─── SLIM A2A listener ────────────────────────────────────────────────────────
 
 struct AgentBridgeExecutor {
@@ -1196,6 +1232,14 @@ fn run_slim_listener(
     let name_ref = Arc::new(parse_name(&agent_name)?);
     let auth = shadi_identity::require_did_auth_from_env(agent_id)
         .map_err(|e| format!("SLIM auth error: {e}"))?;
+    if let shadi_identity::SlimAuth::Did { did, .. } = &auth {
+        check_own_did(
+            agent_id,
+            did,
+            &LocalAdapterRegistry::from_env(),
+            std::process::id(),
+        )?;
+    }
     let app = shadi_identity::create_app(&service, name_ref.clone(), &auth)
         .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
     app.subscribe(name_ref.clone(), Some(connection_id))
@@ -1739,6 +1783,12 @@ fn run_unicast_listener(
     let did = shadi_identity::agent_identity_from_env(agent_id)
         .map_err(|e| format!("A2A {} auth error: {e}", a2a_binding.as_protocol_binding()))?
         .did();
+    check_own_did(
+        agent_id,
+        &did,
+        &LocalAdapterRegistry::from_env(),
+        std::process::id(),
+    )?;
 
     let a2a_url = advertised_a2a_url(listen);
 
@@ -2242,6 +2292,31 @@ test push ... FAILED
             Some("http://127.0.0.1:50152")
         );
         assert_eq!(target.slim_endpoint, None);
+        drop(_lease);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_did_held_by_another_live_listener_is_refused() {
+        let (dir, registry) = scratch_registry();
+        let _lease = registry
+            .publish(&handoff_record(
+                "codex",
+                "did:key:zCodex",
+                "",
+                "http://127.0.0.1:50153",
+            ))
+            .unwrap();
+        let other_pid = std::process::id().wrapping_add(1);
+
+        let err = check_own_did("claude", "did:key:zCodex", &registry, other_pid)
+            .expect_err("codex's DID");
+        assert!(err.contains("'codex'"), "{err}");
+        assert!(err.contains("SHADI_AGENT_KEY"), "{err}");
+        check_own_did("claude", "did:key:zClaude", &registry, other_pid).expect("own DID");
+        check_own_did("codex", "did:key:zCodex", &registry, other_pid).expect("same name");
+        check_own_did("claude", "did:key:zCodex", &registry, std::process::id())
+            .expect("this process's own lease");
         drop(_lease);
         let _ = fs::remove_dir_all(dir);
     }

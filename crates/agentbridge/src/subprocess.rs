@@ -57,9 +57,22 @@ pub fn withhold_shadi_secrets(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// [`withhold_shadi_secrets`] for `dirctl`, which keeps the DIR token that is
-/// its own.
+/// For `dirctl`, which needs none of SHADI's or SLIM's settings: removes every
+/// `SHADI_*` and `SLIM_*` variable, whether inherited or set on `cmd`, and the
+/// rest of [`WITHHELD_FROM_HARNESS`] except the DIR token, which is dirctl's
+/// own. Call it before setting dirctl's `DIRECTORY_CLIENT_*` variables.
 pub fn withhold_for_dirctl(cmd: &mut Command) -> &mut Command {
+    let names: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .chain(cmd.get_envs().map(|(name, _)| name.to_owned()))
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("SHADI_") || name.starts_with("SLIM_")
+        })
+        .collect();
+    for name in names {
+        cmd.env_remove(name);
+    }
     for name in WITHHELD_FROM_HARNESS {
         if *name != "DIRECTORY_CLIENT_GITHUB_TOKEN" {
             cmd.env_remove(name);
@@ -169,6 +182,31 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&out.stdout).trim(),
             "unset unset unset kept"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirctl_gets_no_shadi_or_slim_settings_but_keeps_its_token() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("SHADI_ANYTHING", "x")
+            .env("SLIM_ENDPOINT", "node:1")
+            .env("A2A_TLS_KEY", "/keys/a2a.key")
+            .env("OP_SERVICE_ACCOUNT_TOKEN", "op")
+            .env("DIRECTORY_CLIENT_GITHUB_TOKEN", "gh")
+            .env("HOME_OK", "kept")
+            .arg("-c")
+            .arg(
+                "echo ${SHADI_ANYTHING-unset} ${SLIM_ENDPOINT-unset} ${A2A_TLS_KEY-unset} \
+                 ${OP_SERVICE_ACCOUNT_TOKEN-unset} ${DIRECTORY_CLIENT_GITHUB_TOKEN-unset} \
+                 ${HOME_OK-unset}",
+            );
+        withhold_for_dirctl(&mut cmd);
+
+        let out = cmd.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "unset unset unset unset gh kept"
         );
     }
 

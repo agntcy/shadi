@@ -69,8 +69,10 @@ pub trait SecretStore: Send + Sync {
     /// secret need the answer *without* touching it: probing with a real
     /// operation prompts the keychain, and a cancelled or locked keychain then
     /// looks the same as having no keychain. Only stores that are not set up
-    /// (the no-op store, or the Linux keyring without a readable password
-    /// file or without a keyring file to open) say false.
+    /// (the no-op store, or the Linux keyring without a password file
+    /// configured) say false. The answer comes from configuration, not from
+    /// whether a file can be opened, so a sandboxed process gets the same
+    /// answer as its host.
     fn is_available(&self) -> bool {
         true
     }

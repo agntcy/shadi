@@ -34,9 +34,19 @@ export SHADI_KEYRING_PATH=/path/to/agent_secrets.keyring      # optional
 - Both must be absolute paths; a relative one makes the store unavailable.
 - Only key provisioning (`shadictl derive-agent-identity` and
   `derive-agent-did`) creates the keyring, through `creating_store()`. Until
-  it exists, the store is unavailable and calls return `StoreNotFound`.
-- Writers hold an exclusive lock on `<keyring>.lock`; readers don't lock, so
-  a keyring on a read-only mount can still be read.
+  it exists, calls return `StoreNotFound`.
+- The store counts as available whenever `SHADI_KEYRING_PASSWORD_FILE` is set,
+  even where the files can't be read. The credential vault picks the keyring
+  from that, in the sandbox as on the host; an agent whose sandbox denies the
+  password file then fails to read its credentials instead of opening an empty
+  SQLCipher vault. To keep the vault in SQLCipher, set
+  `SHADI_CREDENTIAL_BACKEND=sqlcipher` for both.
+- The keyring always holds a canary item, so a wrong password is refused even
+  once every key is deleted. A keyring file with no items at all is not
+  written to; remove it and provision again.
+- Writers hold an exclusive lock on `<keyring>.lock` and give up after 10
+  seconds if another process holds it; readers don't lock, so a keyring on a
+  read-only mount can still be read.
 
 Anyone who can read both the keyring file and its password file can decrypt
 every item, so keep them out of every sandbox grant. Every profile grants the

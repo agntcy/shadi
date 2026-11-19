@@ -162,7 +162,7 @@ fn print_record_summary(record: &OasfRecord, reference: &str) {
 /// The token is then automatically picked up by `shadictl dir pull / info / search`
 /// without the user having to pass it explicitly.
 fn run_dir_login(args: DirLoginArgs, token_key: &str) -> ExitCode {
-    let mut cmd = Command::new(dirctl_binary());
+    let mut cmd = dirctl_command();
     cmd.arg("auth").arg("login");
 
     if args.no_browser {
@@ -240,10 +240,18 @@ fn dirctl_binary() -> String {
     std::env::var("SHADI_DIRCTL_BINARY").unwrap_or_else(|_| "dirctl".to_string())
 }
 
+/// A `dirctl` command that inherits none of SHADI's or SLIM's settings, seeds
+/// and agent keys included; only the DIR token is passed on.
+fn dirctl_command() -> Command {
+    let mut cmd = Command::new(dirctl_binary());
+    agentbridge::subprocess::withhold_for_dirctl(&mut cmd);
+    cmd
+}
+
 fn run_dir_pull(args: DirPullArgs, oidc_token: Option<&str>) -> ExitCode {
     let server_args = server_addr_args(&args.server_addr);
 
-    let mut cmd = Command::new(dirctl_binary());
+    let mut cmd = dirctl_command();
     cmd.arg("pull")
        .arg(&args.reference)
        .args(&server_args)
@@ -305,7 +313,7 @@ fn run_dir_pull(args: DirPullArgs, oidc_token: Option<&str>) -> ExitCode {
 fn run_dir_info(args: DirInfoArgs, oidc_token: Option<&str>) -> ExitCode {
     let server_args = server_addr_args(&args.server_addr);
 
-    let mut cmd = Command::new(dirctl_binary());
+    let mut cmd = dirctl_command();
     cmd.arg("info")
        .arg(&args.reference)
        .args(&server_args);
@@ -332,7 +340,7 @@ fn run_dir_info(args: DirInfoArgs, oidc_token: Option<&str>) -> ExitCode {
 fn run_dir_search(args: DirSearchArgs, token: Option<&str>) -> ExitCode {
     let server_args = server_addr_args(&args.server_addr);
 
-    let mut cmd = Command::new(dirctl_binary());
+    let mut cmd = dirctl_command();
     cmd.arg("search");
     for skill in &args.skill {
         cmd.arg("--skill").arg(skill);
@@ -371,7 +379,7 @@ fn run_dir_search(args: DirSearchArgs, token: Option<&str>) -> ExitCode {
 fn run_dir_verify(args: DirVerifyArgs, token: Option<&str>) -> ExitCode {
     let server_args = server_addr_args(&args.server_addr);
 
-    let mut cmd = Command::new(dirctl_binary());
+    let mut cmd = dirctl_command();
     cmd.arg("verify")
        .arg(&args.cid)
        .args(&server_args);
