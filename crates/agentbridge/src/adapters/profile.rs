@@ -321,6 +321,13 @@ impl ProfileAdapter {
         }
     }
 
+    /// Run as agent `id` instead of the profile id (`register --name`, or a
+    /// name taken from the `--record`).
+    pub fn with_agent_id(mut self, id: impl Into<String>) -> Self {
+        self.id = AgentId(id.into());
+        self
+    }
+
     /// Run the harness isolated, with its configuration under `config_root`
     /// (the profile's `isolation` section). Without that section this changes
     /// nothing.
@@ -1374,6 +1381,13 @@ mod tests {
     fn profile_adapter_constructs() {
         let adapter = ProfileAdapter::new(load_bundled("claude-code"), "/tmp");
         assert_eq!(adapter.agent_id().0, "claude-code");
+    }
+
+    #[test]
+    fn profile_adapter_runs_under_another_agent_id() {
+        let adapter =
+            ProfileAdapter::new(load_bundled("claude-code"), "/tmp").with_agent_id("reviewer");
+        assert_eq!(adapter.agent_id().0, "reviewer");
     }
 
     fn echo_profile(extra: &str) -> CliProfile {

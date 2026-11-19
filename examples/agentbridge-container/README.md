@@ -109,7 +109,7 @@ shadictl --net-block \
 
 ```sh
 dirctl runtime list --label org.agntcy/agent-record=.
-agentbridge delegate --to fake-harness-isolated "Review: return a / b"   # answers with the code-review skill
+agentbridge delegate --to code-review-fake-harness-isolated "Review: return a / b"   # answers with the code-review skill
 ```
 
 ## Containers
