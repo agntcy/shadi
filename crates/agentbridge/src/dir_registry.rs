@@ -140,6 +140,7 @@ pub fn publish_record(
         .arg("raw")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::subprocess::withhold_for_dirctl(&mut cmd);
 
     if let Some(token) = github_token {
         cmd.env("DIRECTORY_CLIENT_AUTH_MODE", "github")

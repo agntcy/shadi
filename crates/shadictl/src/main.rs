@@ -164,6 +164,16 @@ fn default_secret_store() -> Box<dyn SecretStore> {
 }
 
 #[cfg(test)]
+fn creating_secret_store() -> Box<dyn SecretStore> {
+    Box::new(TestSecretStore)
+}
+
+#[cfg(not(test))]
+fn creating_secret_store() -> Box<dyn SecretStore> {
+    agent_secrets::creating_store()
+}
+
+#[cfg(test)]
 fn test_store_put(key: &str, value: &[u8]) {
     let mut guard = test_secret_store_map().lock().expect("test store lock");
     guard.insert(key.to_string(), value.to_vec());

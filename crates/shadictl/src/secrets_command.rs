@@ -32,7 +32,9 @@ pub(crate) fn secrets_backend() {
         "keychain" => {
             #[cfg(target_os = "macos")]
             println!("Type:    macOS Security Framework");
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(target_os = "linux")]
+            println!("Type:    encrypted keyring file (SHADI_KEYRING_PASSWORD_FILE)");
+            #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
             println!("Type:    noop (no native keychain on this platform)");
             #[cfg(windows)]
             println!("Type:    Windows Credential Manager");

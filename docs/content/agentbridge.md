@@ -501,7 +501,11 @@ Controls:
 
 SLIM apps authenticate with a per-agent DID, not a shared secret. Set
 `SHADI_SLIM_AUTH=did` and `SLIM_HUMAN_SEED` (the human root key every agent's
-DID is derived from), plus `SLIM_MEMBER_DIDS` — the allow-list of DIDs
+DID is derived from) or `SHADI_AGENT_KEY` (one agent's base64 signing key,
+usually injected from the secret store with
+`shadictl --inject-keychain agent_keys/<name>/private=SHADI_AGENT_KEY`, so the
+seed never reaches the agent; set only one of the two), plus
+`SLIM_MEMBER_DIDS` — the allow-list of DIDs
 permitted to participate. `shadi_identity::require_did_auth_from_env` enforces
 this: it errors out if `SHADI_SLIM_AUTH` isn't `did`, so `register`,
 `delegate`, and `coordinate` cannot silently fall back to a shared secret.

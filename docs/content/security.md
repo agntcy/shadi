@@ -127,6 +127,43 @@ Rules that must stay true when SLIM node auth is adopted:
 Adopting SLIM's `TokenProvider` / `Verifier` (agntcy/shadi#179) and
 `slim login` / SPIRE (agntcy/shadi#180) must not collapse these layers.
 
+## Linux keyring file backend
+
+On Linux the default secret store is an encrypted keyring file in libsecret's
+file format, unlocked with the password in the file named by
+`SHADI_KEYRING_PASSWORD_FILE`. It needs no D-Bus or daemon, so it works
+headless and in containers. Without that variable the store is unavailable.
+
+- The keyring defaults to `~/.shadi/keyring/agent_secrets.keyring`
+  (`SHADI_KEYRING_PATH` overrides it), outside the home directories the
+  Compatibility profile grants (`~/.config`, `~/.local`, `~/.cache`).
+- Relative paths are rejected, so the keyring can't land in a granted working
+  directory by accident.
+- Only key provisioning (`shadictl derive-agent-identity` and
+  `derive-agent-did`) creates a keyring; everything else fails with
+  `StoreNotFound` until it exists.
+- Writers lock `<keyring>.lock`, so concurrent processes don't lose updates.
+- `SHADI_KEYRING_PATH` and `SHADI_KEYRING_PASSWORD_FILE` are withheld from the
+  harness agentbridge launches.
+
+Unlike the macOS keychain, there is no per-application access control: a
+process that can read both the keyring and its password file can decrypt every
+item, and one that can write the keyring can delete or roll back items. The only
+protection is that the sandbox doesn't grant either file, and Landlock can't
+carve a file out of a granted directory. Keep both files out of every grant:
+
+- **The working directory.** Every profile and preset grants `.`, so launching
+  `shadictl` from `$HOME` or `~/.shadi` exposes the default keyring.
+- **Explicit grants** that contain them, read or write: `--allow $HOME`,
+  `--read $HOME`, `--allow ~/.shadi`.
+- **Paths every Linux sandbox can read:** `/etc`, `/usr` and `/lib*`; under
+  the Compatibility profile also `/tmp`, `/var/tmp`, `/run`, `~/.config`,
+  `~/.local` and `~/.cache`. Don't put the password file there, for example
+  under `/run/secrets` with the Compatibility profile.
+
+Create the password from random bytes and keep it private, for example
+`(umask 077; head -c 32 /dev/urandom | base64 > keyring-password)`.
+
 ## 1Password backend
 
 When `SHADI_SECRET_BACKEND=onepassword` is set, secrets are stored in a
@@ -264,8 +301,8 @@ Every incoming task is forwarded to that tool's subprocess.
 
 Controls:
 
-- SLIM peers authenticate with a per-agent DID (`SHADI_SLIM_AUTH=did`,
-  `SLIM_HUMAN_SEED`), verified against an explicit `SLIM_MEMBER_DIDS`
+- SLIM peers authenticate with a per-agent DID (`SHADI_SLIM_AUTH=did`, and
+  `SLIM_HUMAN_SEED` or one agent's key in `SHADI_AGENT_KEY`), verified against an explicit `SLIM_MEMBER_DIDS`
   allow-list — shared secrets are not accepted for agentbridge listeners
   (`shadi_identity::require_did_auth_from_env` rejects anything else). See the
   [Secure Agent Group Demo](demos/did-agent-group.md) for the full admission

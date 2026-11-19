@@ -419,7 +419,7 @@ pub(crate) fn store_derived_agent_identity(
     let did_key_name = format!("{}/{}/did", prefix, agent_name);
     let diddoc_key_name = format!("{}/{}/diddoc", prefix, agent_name);
 
-    let store = default_secret_store();
+    let store = creating_secret_store();
     let private_b64 = base64::engine::general_purpose::STANDARD.encode(private_key);
     let public_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
 

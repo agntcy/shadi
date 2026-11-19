@@ -1,9 +1,11 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod noop;
 #[cfg(feature = "onepassword")]
 pub mod onepassword;
@@ -11,6 +13,15 @@ pub mod onepassword;
 use crate::SecretStore;
 
 pub fn default_store() -> Box<dyn SecretStore> {
+    store(false)
+}
+
+/// Like `default_store`, but the Linux keyring file may be created.
+pub fn creating_store() -> Box<dyn SecretStore> {
+    store(true)
+}
+
+fn store(create: bool) -> Box<dyn SecretStore> {
     #[cfg(feature = "onepassword")]
     {
         if let Ok(backend) = std::env::var("SHADI_SECRET_BACKEND") {
@@ -20,7 +31,7 @@ pub fn default_store() -> Box<dyn SecretStore> {
         }
     }
 
-    platform_store()
+    platform_store(create)
 }
 
 #[cfg(test)]
@@ -38,12 +49,17 @@ pub(crate) fn selected_backend_for_tests() -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_store() -> Box<dyn SecretStore> {
+fn platform_store(_create: bool) -> Box<dyn SecretStore> {
     Box::new(macos::MacosKeychainStore::new("agent_secrets"))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn platform_store() -> Box<dyn SecretStore> {
+#[cfg(target_os = "linux")]
+fn platform_store(create: bool) -> Box<dyn SecretStore> {
+    Box::new(linux::KeyringFileStore::from_env(create))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn platform_store(_create: bool) -> Box<dyn SecretStore> {
     Box::new(noop::NoopSecretStore::new())
 }
 

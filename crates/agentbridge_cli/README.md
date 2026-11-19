@@ -266,6 +266,7 @@ stdout:  {"ok":true,"data":"fn parse(...) { ... }"}
 | `SHADI_AGENT_ID` | `avatar` | Agent identity for SLIM/DIR |
 | `SHADI_SLIM_AUTH` | — | Must be `did` — see below |
 | `SLIM_HUMAN_SEED` | — | Human root secret DID keys are derived from |
+| `SHADI_AGENT_KEY` | — | One agent's Ed25519 signing key (base64, 32 bytes), used instead of deriving it from `SLIM_HUMAN_SEED`. Set only one of the two. Usually injected from the secret store: `shadictl --inject-keychain agent_keys/<name>/private=SHADI_AGENT_KEY` |
 | `SLIM_MEMBER_DIDS` | — | Comma-separated `did:key` allow-list |
 | `SHADI_AUTH_REQUIRED_POLICY` | `reprove` | `reprove` / `ask` / `deny` when a remote task parks |
 | `SLIM_TLS_CERT` / `SLIM_TLS_KEY` | — | SLIM mTLS client certificate paths (not used for gRPC) |
