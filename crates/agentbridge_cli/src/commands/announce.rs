@@ -303,16 +303,9 @@ fn workload_id(agent_id: &str, agent_did: Option<&str>, pid: u32) -> String {
     id
 }
 
+/// A workload id part: the same characters an agent id holds.
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    super::names::replace_runs(s, super::names::slim_char)
 }
 
 /// What the descriptor says about the agent beyond its name and locators.
