@@ -120,18 +120,23 @@ pub(crate) fn inject_keychain_with_store(
         let (key, env) = parse_key_env(mapping)?;
         let secret = store
             .get(key)
-            .map_err(|err| match err {
-                agent_secrets::SecretError::StoreNotFound => {
-                    format!("keychain lookup failed for {}: {}", key, err)
-                }
-                _ => format!("keychain lookup failed for {}", key),
-            })?;
+            .map_err(|err| lookup_failure(format!("keychain lookup failed for {key}"), &err))?;
         let value = secret.expose(|bytes| bytes.to_vec());
         let value = secret_bytes_to_utf8(&value)?;
         command.env(env, value);
     }
 
     Ok(())
+}
+
+/// `message` with the store's own error after it, so a wrong keyring password
+/// or a corrupt keyring isn't reported as a key that is merely missing. Only
+/// `InvalidInput`, how the stores say a key isn't there, keeps `message` as is.
+pub(crate) fn lookup_failure(message: String, err: &agent_secrets::SecretError) -> String {
+    match err {
+        agent_secrets::SecretError::InvalidInput => message,
+        err => format!("{message}: {err}"),
+    }
 }
 
 pub(crate) fn secret_bytes_to_utf8(value: &[u8]) -> Result<String, String> {

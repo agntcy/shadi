@@ -31,7 +31,12 @@ export SHADI_KEYRING_PATH=/path/to/agent_secrets.keyring      # optional
 - `SHADI_KEYRING_PATH` defaults to `~/.shadi/keyring/agent_secrets.keyring`,
   outside the home directories the Compatibility sandbox profile grants
   (`~/.config`, `~/.local`, `~/.cache`).
-- Both must be absolute paths; a relative one makes the store unavailable.
+- With the password file set, `SHADI_KEYRING_PASSWORD_FILE`,
+  `SHADI_KEYRING_PATH` and `HOME` must be absolute paths; a relative one makes
+  every call fail with `StorageFailure`. Without it nothing else is looked at,
+  so a relative `HOME` alone still gives `NotSupported`.
+- `secrets backend` in `shadictl shell` shows whether the keyring is
+  configured and where its files are.
 - Only key provisioning (`shadictl derive-agent-identity` and
   `derive-agent-did`) creates the keyring, through `creating_store()`. Until
   it exists, calls return `StoreNotFound`.

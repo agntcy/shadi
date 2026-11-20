@@ -33,7 +33,9 @@ pub(crate) fn secrets_backend() {
             #[cfg(target_os = "macos")]
             println!("Type:    macOS Security Framework");
             #[cfg(target_os = "linux")]
-            println!("Type:    encrypted keyring file (SHADI_KEYRING_PASSWORD_FILE)");
+            for line in keyring_lines(&agent_secrets::platform::keyring_config()) {
+                println!("{line}");
+            }
             #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
             println!("Type:    noop (no native keychain on this platform)");
             #[cfg(windows)]
@@ -42,6 +44,31 @@ pub(crate) fn secrets_backend() {
         _ => {
             println!("Type:    unknown");
         }
+    }
+}
+
+/// What `secrets backend` says about the Linux keyring file: whether it is on,
+/// and where its files are. Paths only, never the password.
+#[cfg(target_os = "linux")]
+fn keyring_lines(config: &agent_secrets::platform::KeyringConfig) -> Vec<String> {
+    use agent_secrets::platform::KeyringConfig;
+    match config {
+        KeyringConfig::Configured {
+            keyring,
+            password_file,
+        } => vec![
+            "Type:    encrypted keyring file".to_string(),
+            format!("Keyring: {}", keyring.display()),
+            format!("Password file: {}", password_file.display()),
+        ],
+        KeyringConfig::NotConfigured => {
+            vec!["Type:    not configured (SHADI_KEYRING_PASSWORD_FILE is unset)".to_string()]
+        }
+        KeyringConfig::Misconfigured => vec![
+            "Type:    misconfigured (SHADI_KEYRING_PATH, SHADI_KEYRING_PASSWORD_FILE and HOME \
+             must be absolute paths)"
+                .to_string(),
+        ],
     }
 }
 
@@ -157,6 +184,31 @@ mod tests {
     #[test]
     fn secrets_backend_does_not_panic() {
         secrets_backend();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keyring_lines_say_whether_the_keyring_is_configured_and_where() {
+        use agent_secrets::platform::KeyringConfig;
+
+        let on = keyring_lines(&KeyringConfig::Configured {
+            keyring: "/h/.shadi/keyring/agent_secrets.keyring".into(),
+            password_file: "/run/secrets/pw".into(),
+        })
+        .join("\n");
+        assert!(on.contains("encrypted keyring file"), "{on}");
+        assert!(
+            on.contains("/h/.shadi/keyring/agent_secrets.keyring"),
+            "{on}"
+        );
+        assert!(on.contains("/run/secrets/pw"), "{on}");
+
+        let off = keyring_lines(&KeyringConfig::NotConfigured).join("\n");
+        assert!(off.contains("not configured"), "{off}");
+        assert!(!off.contains("encrypted keyring file"), "{off}");
+
+        let bad = keyring_lines(&KeyringConfig::Misconfigured).join("\n");
+        assert!(bad.contains("misconfigured"), "{bad}");
     }
 
     #[test]

@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{keyring_config, KeyringConfig};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

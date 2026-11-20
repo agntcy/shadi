@@ -3772,6 +3772,28 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
+    fn lookup_failure_names_the_store_error_unless_the_key_is_just_missing() {
+        use agent_secrets::SecretError;
+
+        let message = || "keychain lookup failed for seed/key".to_string();
+        assert_eq!(
+            lookup_failure(message(), &SecretError::InvalidInput),
+            "keychain lookup failed for seed/key"
+        );
+        for (err, shown) in [
+            (SecretError::NotAuthorized, "not authorized"),
+            (SecretError::StorageFailure, "storage failure"),
+            (SecretError::StoreNotFound, "secret store not found"),
+            (SecretError::NotSupported, "operation not supported"),
+        ] {
+            assert_eq!(
+                lookup_failure(message(), &err),
+                format!("keychain lookup failed for seed/key: {shown}")
+            );
+        }
+    }
+
+    #[test]
     fn read_seed_input_requires_secret_or_input() {
         let err = read_seed_input("--human-secret", None, None).expect_err("missing seed source");
         assert!(err.contains("missing --human-secret or --in"));

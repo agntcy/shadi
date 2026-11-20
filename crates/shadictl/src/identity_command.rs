@@ -453,9 +453,9 @@ pub(crate) fn read_seed_input(
 ) -> Result<Vec<u8>, String> {
     if let Some(secret_key) = secret_key {
         let store = default_secret_store();
-        let secret = store
-            .get(secret_key)
-            .map_err(|_| format!("keychain lookup failed for {}", secret_key))?;
+        let secret = store.get(secret_key).map_err(|err| {
+            lookup_failure(format!("keychain lookup failed for {secret_key}"), &err)
+        })?;
         return Ok(secret.expose(|bytes| bytes.to_vec()));
     }
 

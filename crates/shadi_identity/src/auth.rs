@@ -157,12 +157,17 @@ pub fn agent_identity_from_env(agent_id: &str) -> Result<AgentIdentity, Identity
                 .to_string(),
         ));
     }
-    let seed = std::env::var("SLIM_HUMAN_SEED");
+    // A blank value counts as unset, as for SHADI_AGENT_KEY, so a compose file
+    // passing `SLIM_HUMAN_SEED=${SLIM_HUMAN_SEED}` with the host variable unset
+    // is not "set both".
+    let seed = std::env::var("SLIM_HUMAN_SEED")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     if let Some(key) = std::env::var("SHADI_AGENT_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
     {
-        if seed.is_ok() {
+        if seed.is_some() {
             return Err(IdentityError::Config(
                 "set only one of SLIM_HUMAN_SEED and SHADI_AGENT_KEY".to_string(),
             ));
@@ -176,7 +181,7 @@ pub fn agent_identity_from_env(agent_id: &str) -> Result<AgentIdentity, Identity
         return AgentIdentity::from_signing_key_slice(&bytes)
             .map_err(|_| IdentityError::Config("SHADI_AGENT_KEY is not a 32-byte key".to_string()));
     }
-    let human_seed = seed.map_err(|_| {
+    let human_seed = seed.ok_or_else(|| {
         IdentityError::Config(
             "SHADI_SLIM_AUTH=did requires SLIM_HUMAN_SEED or SHADI_AGENT_KEY".to_string(),
         )
@@ -338,6 +343,30 @@ mod tests {
         }
 
         env::remove_var("SHADI_AGENT_KEY");
+        env::remove_var("SHADI_SLIM_AUTH");
+    }
+
+    #[test]
+    fn blank_human_seed_is_unset_so_an_injected_key_is_not_a_conflict() {
+        use base64::Engine as _;
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        let derived = AgentIdentity::derive(b"human", "avatar").unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(derived.signing_key_bytes());
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SHADI_AGENT_KEY", &b64);
+
+        for blank in ["", "  "] {
+            env::set_var("SLIM_HUMAN_SEED", blank);
+            let id = agent_identity_from_env("avatar").expect("blank seed is unset");
+            assert_eq!(id.did(), derived.did());
+        }
+
+        env::remove_var("SHADI_AGENT_KEY");
+        env::set_var("SLIM_HUMAN_SEED", "");
+        let err = agent_identity_from_env("avatar").err().expect("nothing set");
+        assert!(matches!(err, IdentityError::Config(_)));
+        env::remove_var("SLIM_HUMAN_SEED");
         env::remove_var("SHADI_SLIM_AUTH");
     }
 

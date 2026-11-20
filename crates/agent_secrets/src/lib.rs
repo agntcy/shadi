@@ -21,7 +21,10 @@ pub use session::SessionContext;
 #[cfg(feature = "onepassword")]
 pub use platform::onepassword::OnePasswordStore;
 
+/// `#[non_exhaustive]`: a store can report a new failure without breaking
+/// every `match` downstream (`StoreNotFound` was such an addition).
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SecretError {
     NotSupported,
     NotAuthorized,

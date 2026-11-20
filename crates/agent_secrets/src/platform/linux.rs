@@ -4,8 +4,9 @@
 //! Encrypted keyring file in the libsecret file format. No D-Bus, no daemon:
 //! the password comes from a file, so it also works headless in containers.
 //! Without `SHADI_KEYRING_PASSWORD_FILE` the store is unavailable, like the
-//! no-op store. A relative `SHADI_KEYRING_PATH`, `SHADI_KEYRING_PASSWORD_FILE`
-//! or `HOME` is a misconfiguration: unavailable, and every operation fails.
+//! no-op store, whatever else is set. With it set, a relative
+//! `SHADI_KEYRING_PATH`, `SHADI_KEYRING_PASSWORD_FILE` or `HOME` is a
+//! misconfiguration: unavailable, and every operation fails.
 //! Only a store built to create the keyring (key provisioning) writes one that
 //! does not exist yet.
 //!
@@ -48,6 +49,26 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// Misconfigurations already reported, so each is printed once per process.
 static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// How the environment configures the keyring file store, for reporting.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyringConfig {
+    /// `SHADI_KEYRING_PASSWORD_FILE` is unset: the store is off, like the
+    /// no-op store.
+    NotConfigured,
+    /// A path variable is relative, so every operation fails.
+    Misconfigured,
+    Configured {
+        keyring: PathBuf,
+        password_file: PathBuf,
+    },
+}
+
+/// The configuration [`default_store`](crate::default_store) would use. It
+/// reads no file, so it answers the same inside a sandbox as outside.
+pub fn keyring_config() -> KeyringConfig {
+    KeyringFileStore::from_env(false).describe()
+}
+
 pub struct KeyringFileStore {
     /// (keyring file, password file); `None` when not configured, `Err` when
     /// misconfigured.
@@ -60,6 +81,17 @@ pub struct KeyringFileStore {
 impl KeyringFileStore {
     pub fn from_env(create: bool) -> Self {
         Self::from_vars(|name| std::env::var_os(name), create)
+    }
+
+    fn describe(&self) -> KeyringConfig {
+        match &self.config {
+            Ok(Some((keyring, password_file))) => KeyringConfig::Configured {
+                keyring: keyring.clone(),
+                password_file: password_file.clone(),
+            },
+            Ok(None) => KeyringConfig::NotConfigured,
+            Err(()) => KeyringConfig::Misconfigured,
+        }
     }
 
     fn from_vars(var: impl Fn(&str) -> Option<OsString>, create: bool) -> Self {
@@ -77,12 +109,20 @@ impl KeyringFileStore {
             }
         };
         let config = (|| {
-            let path = match abs("SHADI_KEYRING_PATH")? {
-                Some(p) => Some(p),
-                // Outside the paths the sandbox grants to children.
-                None => abs("HOME")?.map(|h| h.join(".shadi/keyring/agent_secrets.keyring")),
+            // The password file decides whether the store is on at all, so it
+            // comes first: a relative HOME is no error for a store that is off.
+            let Some(password_file) = abs("SHADI_KEYRING_PASSWORD_FILE")? else {
+                return Ok(None);
             };
-            Ok(path.zip(abs("SHADI_KEYRING_PASSWORD_FILE")?))
+            let path = match abs("SHADI_KEYRING_PATH")? {
+                Some(p) => p,
+                // Outside the paths the sandbox grants to children.
+                None => match abs("HOME")? {
+                    Some(h) => h.join(".shadi/keyring/agent_secrets.keyring"),
+                    None => return Ok(None),
+                },
+            };
+            Ok(Some((path, password_file)))
         })();
         Self {
             config,
@@ -335,10 +375,27 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn store(dir: &Path, password: &[u8]) -> KeyringFileStore {
+    /// A password that differs on every run, so the tests hard-code none.
+    fn random_password() -> String {
+        use std::io::Read;
+        let mut raw = [0u8; 16];
+        std::fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut raw)
+            .unwrap();
+        raw.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A creating store whose password file holds a fresh random password;
+    /// [`password_file`] reads it back.
+    fn store(dir: &Path) -> KeyringFileStore {
         let pw = dir.join("pw");
-        std::fs::write(&pw, password).unwrap();
+        std::fs::write(&pw, random_password()).unwrap();
         KeyringFileStore::new(dir.join("data/shadi/x.keyring"), pw, true)
+    }
+
+    fn password_file(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("pw")).unwrap()
     }
 
     fn readonly(s: &KeyringFileStore) -> KeyringFileStore {
@@ -353,7 +410,7 @@ mod tests {
     #[test]
     fn roundtrip_binary_replace_list_delete() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"hunter2\n");
+        let s = store(dir.path());
         assert!(s.is_available());
 
         let bin = [0u8, 255, 10, 13, 0, 128];
@@ -385,7 +442,7 @@ mod tests {
     #[test]
     fn concurrent_puts_are_all_saved() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         std::thread::scope(|scope| {
             for i in 0..8 {
                 let s = &s;
@@ -400,7 +457,7 @@ mod tests {
     #[test]
     fn availability_follows_configuration_not_file_access() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("k", b"v").unwrap();
         std::fs::remove_file(dir.path().join("pw")).unwrap();
         assert!(s.is_available());
@@ -411,16 +468,17 @@ mod tests {
     #[test]
     fn an_emptied_keyring_still_rejects_a_wrong_password() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"right");
+        let s = store(dir.path());
+        let right = password_file(dir.path());
         s.put("k", b"v").unwrap();
         s.delete("k").unwrap();
         assert!(s.list_keys().unwrap().is_empty());
 
-        std::fs::write(dir.path().join("pw"), b"wrong").unwrap();
+        std::fs::write(dir.path().join("pw"), random_password()).unwrap();
         assert!(matches!(s.put("k", b"v"), Err(SecretError::NotAuthorized)));
         assert!(matches!(s.get("k"), Err(SecretError::NotAuthorized)));
 
-        std::fs::write(dir.path().join("pw"), b"right").unwrap();
+        std::fs::write(dir.path().join("pw"), &right).unwrap();
         s.put("k", b"v2").unwrap();
         assert_eq!(value(&s, "k"), b"v2");
     }
@@ -430,7 +488,7 @@ mod tests {
     #[test]
     fn a_keyring_with_no_items_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         let (path, pw) = s.config.clone().unwrap().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         tokio::runtime::Builder::new_current_thread()
@@ -453,19 +511,24 @@ mod tests {
     #[test]
     fn wrong_password_is_not_authorized() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"right");
+        let s = store(dir.path());
+        let right = password_file(dir.path());
         s.put("k", b"v").unwrap();
-        std::fs::write(dir.path().join("pw"), b"wrong\r\n").unwrap();
+        std::fs::write(dir.path().join("pw"), format!("{}\r\n", random_password())).unwrap();
         assert!(matches!(s.get("k"), Err(SecretError::NotAuthorized)));
         assert!(matches!(s.list_keys(), Err(SecretError::NotAuthorized)));
-        std::fs::write(dir.path().join("pw"), b"right\r\n").unwrap();
-        assert_eq!(value(&s, "k"), b"v");
+        // The line ending after the password is not part of it.
+        for ending in ["\r\n", "\n"] {
+            std::fs::write(dir.path().join("pw"), format!("{right}{ending}")).unwrap();
+            assert_eq!(value(&s, "k"), b"v");
+        }
     }
 
     #[test]
     fn unreadable_or_empty_password_file_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"\n");
+        let s = store(dir.path());
+        std::fs::write(dir.path().join("pw"), b"\n").unwrap();
         assert!(matches!(s.put("k", b"v"), Err(SecretError::StorageFailure)));
         std::fs::remove_file(dir.path().join("pw")).unwrap();
         assert!(matches!(s.get("k"), Err(SecretError::StorageFailure)));
@@ -474,7 +537,7 @@ mod tests {
     #[test]
     fn corrupt_keyring_file_is_a_storage_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("k", b"v").unwrap();
         std::fs::write(dir.path().join("data/shadi/x.keyring"), b"junk").unwrap();
         assert!(matches!(s.get("k"), Err(SecretError::StorageFailure)));
@@ -483,7 +546,7 @@ mod tests {
     #[test]
     fn files_are_private() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("k", b"v").unwrap();
         let mode = |p: &str| {
             std::fs::metadata(dir.path().join(p))
@@ -500,7 +563,7 @@ mod tests {
     #[test]
     fn works_inside_a_runtime() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
@@ -541,6 +604,31 @@ mod tests {
             Path::new("/k")
         );
         assert!(vars(&[pw]).config.unwrap().is_none());
+
+        // A relative HOME or keyring path matters only once the store is on:
+        // without a password file it is NotSupported, not StorageFailure.
+        for pairs in [
+            vec![("HOME", "relative")],
+            vec![("SHADI_KEYRING_PATH", "relative")],
+            vec![("HOME", "relative"), ("SHADI_KEYRING_PATH", "relative")],
+        ] {
+            let off = vars(&pairs);
+            assert_eq!(off.describe(), KeyringConfig::NotConfigured);
+            assert!(!off.is_available());
+            assert!(matches!(off.get("k"), Err(SecretError::NotSupported)));
+            assert!(matches!(off.put("k", b"v"), Err(SecretError::NotSupported)));
+        }
+        assert_eq!(
+            vars(&[pw, ("HOME", "/h")]).describe(),
+            KeyringConfig::Configured {
+                keyring: "/h/.shadi/keyring/agent_secrets.keyring".into(),
+                password_file: "/pw".into(),
+            }
+        );
+        assert_eq!(
+            vars(&[pw, ("HOME", "relative")]).describe(),
+            KeyringConfig::Misconfigured
+        );
         assert!(vars(&[
             ("SHADI_KEYRING_PATH", "/k"),
             ("SHADI_KEYRING_PASSWORD_FILE", "")
@@ -573,7 +661,7 @@ mod tests {
     #[test]
     fn missing_keyring_is_not_found_unless_creating() {
         let dir = tempfile::tempdir().unwrap();
-        let creating = store(dir.path(), b"pw");
+        let creating = store(dir.path());
         let s = readonly(&creating);
         assert!(s.is_available());
         assert!(matches!(s.get("k"), Err(SecretError::StoreNotFound)));
@@ -589,7 +677,7 @@ mod tests {
     #[test]
     fn writes_take_a_lock_file_and_reads_do_not() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("k", b"v").unwrap();
         let lock = dir.path().join("data/shadi/x.keyring.lock");
         assert_eq!(std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777, 0o600);
@@ -605,7 +693,7 @@ mod tests {
     #[test]
     fn reads_work_on_a_read_only_keyring_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("k", b"v").unwrap();
         let keyring_dir = dir.path().join("data/shadi");
         let lock = keyring_dir.join("x.keyring.lock");
@@ -639,7 +727,7 @@ mod tests {
     #[test]
     fn writers_wait_for_the_file_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("seed", b"v").unwrap();
         // Held outside the store, so only the file lock can block the put.
         let held = hold_lock(dir.path());
@@ -662,7 +750,7 @@ mod tests {
     #[test]
     fn a_stuck_lock_holder_times_out_writes_and_spares_reads() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = store(dir.path(), b"pw");
+        let mut s = store(dir.path());
         s.put("seed", b"v").unwrap();
         s.lock_timeout = Duration::from_secs(5);
         let _held = hold_lock(dir.path());
@@ -680,7 +768,7 @@ mod tests {
     #[test]
     fn non_creating_writer_does_not_recreate_a_keyring_deleted_while_waiting() {
         let dir = tempfile::tempdir().unwrap();
-        let creating = store(dir.path(), b"pw");
+        let creating = store(dir.path());
         creating.put("k", b"v").unwrap();
         let s = readonly(&creating);
         let held = hold_lock(dir.path());
@@ -702,7 +790,7 @@ mod tests {
     #[test]
     fn lock_file_is_not_followed_through_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("k", b"v").unwrap();
         let target = dir.path().join("victim");
         let lock = lock_path(dir.path());
@@ -716,7 +804,7 @@ mod tests {
     #[test]
     fn save_retries_when_the_file_changed_after_load() {
         let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path(), b"pw");
+        let s = store(dir.path());
         s.put("seed", b"v").unwrap();
         let (path, pw) = s.config.clone().unwrap().unwrap();
         let first = std::sync::atomic::AtomicBool::new(true);

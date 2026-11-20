@@ -307,10 +307,7 @@ fn agent_identity(prefix: &str, agent: &str) -> Result<shadi_identity::AgentIden
     let name = format!("{prefix}/{agent}/private");
     let secret = default_secret_store()
         .get(&name)
-        .map_err(|err| match err {
-            agent_secrets::SecretError::StoreNotFound => format!("cannot read {name}: {err}"),
-            _ => format!("missing SHADI key: {name}"),
-        })?;
+        .map_err(|err| lookup_failure(format!("missing SHADI key: {name}"), &err))?;
     let encoded = secret.expose(|bytes| bytes.to_vec());
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
