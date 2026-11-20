@@ -24,6 +24,7 @@ use shadi_mas::{
 ///
 /// Coding-agent adapters authenticate via DID/keys only (`SHADI_SLIM_AUTH=did`,
 /// `SLIM_HUMAN_SEED`, `SLIM_MEMBER_DIDS`) — shared secrets are not supported.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     prompt: &str,
     to_agent_id: &str,
@@ -32,6 +33,7 @@ pub fn run(
     a2a_url: Option<&str>,
     a2a_binding: Option<A2ABinding>,
     runtime: &str,
+    context_id: Option<&str>,
 ) -> anyhow::Result<()> {
     let (peer, found) = resolve_delegate_peer(to_agent_id, a2a_url, a2a_binding, runtime)?;
     match found {
@@ -74,7 +76,8 @@ pub fn run(
         a2a_binding: unicast.as_ref().map(|l| l.binding),
         peer_did: Some(peer.did.clone()),
     };
-    let adapter = super::egress::live_adapter(config);
+    let context_id = delegate_context_id(context_id, |key| std::env::var(key).ok());
+    let adapter = super::egress::live_adapter(config).with_context_id(context_id);
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let via = match locator.as_ref() {
@@ -111,6 +114,26 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Env vars naming the session a delegated task belongs to, in order: the MAS
+/// session, then the calling harness's own session.
+const CONTEXT_ID_ENV: [&str; 3] = [
+    "IOC_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+];
+
+/// The A2A context a delegated task is sent in: `--context-id`, else the first
+/// of [`CONTEXT_ID_ENV`] that is set. The receiver keys its harness session on
+/// the sender's DID and this, so repeated delegates from one caller session
+/// continue one session on the peer.
+fn delegate_context_id(flag: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    flag.map(str::to_string)
+        .into_iter()
+        .chain(CONTEXT_ID_ENV.iter().filter_map(|key| env(key)))
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
 }
 
 /// Where a delegate peer was found.
@@ -367,6 +390,30 @@ fn apply_locator_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_context_id_is_the_flag_else_the_first_session_env_set() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                vars.iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        let all = env(&[
+            ("IOC_SESSION_ID", "mas"),
+            ("CLAUDE_CODE_SESSION_ID", "claude"),
+            ("CODEX_SESSION_ID", "codex"),
+        ]);
+        assert_eq!(
+            delegate_context_id(Some("flag"), all).as_deref(),
+            Some("flag")
+        );
+        assert_eq!(delegate_context_id(None, all).as_deref(), Some("mas"));
+        let harness = env(&[("IOC_SESSION_ID", " "), ("CODEX_SESSION_ID", "codex")]);
+        assert_eq!(delegate_context_id(None, harness).as_deref(), Some("codex"));
+        assert_eq!(delegate_context_id(Some(""), env(&[])), None);
+    }
 
     fn instance(port: u16) -> CandidateMember {
         CandidateMember {
