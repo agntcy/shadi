@@ -53,6 +53,10 @@ pub struct LocalAdapterRecord {
     #[serde(default)]
     pub a2a_binding: A2ABinding,
     pub pid: u32,
+    /// The SLIM name the listener holds. Missing on leases from before
+    /// agntcy/shadi#563, whose listener holds its tool's name.
+    #[serde(default)]
+    pub slim_name: String,
 }
 
 impl LocalAdapterRecord {
@@ -75,6 +79,11 @@ impl LocalAdapterRecord {
             } else {
                 Some(self.a2a_binding)
             },
+            slim_name: Some(if self.slim_name.is_empty() {
+                crate::member_source::slim_channel_name(&self.name)
+            } else {
+                self.slim_name.clone()
+            }),
         }
     }
 }
@@ -332,6 +341,7 @@ mod tests {
             a2a_url: String::new(),
             a2a_binding: A2ABinding::Grpc,
             pid,
+            slim_name: String::new(),
         }
     }
 
@@ -476,6 +486,7 @@ mod tests {
                 a2a_url: String::new(),
                 a2a_binding: A2ABinding::Grpc,
                 pid: 1,
+                slim_name: String::new(),
             })
             .unwrap(),
         )
@@ -512,6 +523,8 @@ mod tests {
                 slim_endpoint: Some("127.0.0.1:47357".to_string()),
                 a2a_url: None,
                 a2a_binding: None,
+                // No SLIM name in the lease: an older listener, on its tool's.
+                slim_name: Some("agntcy/shadi/cursor-agent-a2a".to_string()),
             }]
         );
     }

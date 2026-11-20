@@ -259,7 +259,7 @@ Every incoming task is forwarded to that tool's subprocess.
 
 !!! danger "Registered listeners are a remote code-execution surface"
 
-    Any peer that can reach `agntcy/shadi/<name>-a2a` can drive the local tool
+    Any peer that can reach the listener's SLIM name can drive the local tool
     (some adapters, such as `copilot`, run with `--allow-all-tools`).
 
 Controls:

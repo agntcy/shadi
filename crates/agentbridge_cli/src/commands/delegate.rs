@@ -69,7 +69,7 @@ pub fn run(
         agent_id: local_agent_id.to_string(),
         local_name: None,
         peer_agent_id: peer.name.clone(),
-        destination: Some(format!("agntcy/shadi/{}-a2a", peer.name)),
+        destination: Some(agentbridge::member_source::slim_destination(&peer)),
         a2a_url: unicast.as_ref().map(|l| l.url.clone()),
         a2a_binding: unicast.as_ref().map(|l| l.binding),
         peer_did: Some(peer.did.clone()),
@@ -349,6 +349,7 @@ fn apply_locator_override(
                     slim_endpoint: None,
                     a2a_url: None,
                     a2a_binding: None,
+                    slim_name: None,
                 };
                 apply_parsed_locator(&mut peer, locator);
                 Ok(peer)
@@ -357,6 +358,23 @@ fn apply_locator_override(
                     "{err}. --a2a-url is a locator, not a name. Pass --to did:key:… \
                      (the DID stays valid when the URL changes)"
                 ))
+            } else if let Some(did) = parse_peer_did(to).filter(|did| {
+                agentbridge::member_source::did_slim_name(did).is_some() && not_in_directory(&err)
+            }) {
+                // Nothing knows the DID, but its listener's SLIM name comes
+                // from the DID (agntcy/shadi#563): try the configured node.
+                eprintln!(
+                    "[agentbridge] {did} isn't known here or in the Agent Directory; \
+                     sending to its SLIM name on the configured endpoint"
+                );
+                Ok(CandidateMember {
+                    name: did.clone(),
+                    did,
+                    slim_endpoint: None,
+                    a2a_url: None,
+                    a2a_binding: None,
+                    slim_name: None,
+                })
             } else {
                 Err(err)
             }
@@ -375,6 +393,7 @@ mod tests {
             slim_endpoint: None,
             a2a_url: Some(format!("http://127.0.0.1:{port}")),
             a2a_binding: Some(A2ABinding::HttpJson),
+            slim_name: None,
         }
     }
 
@@ -546,6 +565,7 @@ mod tests {
             slim_endpoint: Some("https://node-b:47357".to_string()),
             a2a_url: None,
             a2a_binding: None,
+            slim_name: None,
         };
         let (peer, found) = resolve_peer_found(
             "did:key:zTwice",
@@ -574,6 +594,49 @@ mod tests {
         .unwrap();
         assert_eq!(peer.name, "copilot");
         assert_eq!(peer.a2a_binding, Some(A2ABinding::HttpJson));
+    }
+
+    #[test]
+    fn a_did_nothing_knows_goes_to_its_slim_name_on_the_configured_endpoint() {
+        let peer = resolve_peer_with(
+            "did:key:zUnlisted",
+            Err("no live adapter".to_string()),
+            || Ok(None),
+            || {
+                Err(
+                    "DID did:key:zUnlisted was not found locally or in the Agent Directory"
+                        .to_string(),
+                )
+            },
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap();
+        assert_eq!(peer.did, "did:key:zUnlisted");
+        assert_eq!(peer.preferred_locator(), None);
+        assert_eq!(
+            agentbridge::member_source::slim_destination(&peer),
+            "agntcy/shadi/zUnlisted-a2a"
+        );
+
+        // Only a did:key has a SLIM name to try.
+        let err = resolve_peer_with(
+            "did:web:example.com",
+            Err("no live adapter".to_string()),
+            || Ok(None),
+            || {
+                Err(
+                    "DID did:web:example.com was not found locally or in the Agent Directory"
+                        .to_string(),
+                )
+            },
+            None,
+            None,
+            "localhost:8888",
+        )
+        .unwrap_err();
+        assert!(err.contains("not found"), "{err}");
     }
 
     #[test]
@@ -658,6 +721,7 @@ mod tests {
                 slim_endpoint: None,
                 a2a_url: Some("http://127.0.0.1:50051".to_string()),
                 a2a_binding: Some(A2ABinding::Grpc),
+                slim_name: None,
             }),
             Some("http://10.0.0.8:50051"),
             None,
@@ -679,6 +743,7 @@ mod tests {
                 slim_endpoint: None,
                 a2a_url: Some("http://127.0.0.1:50051".to_string()),
                 a2a_binding: Some(A2ABinding::Grpc),
+                slim_name: None,
             }),
             None,
             None,
@@ -716,6 +781,7 @@ mod tests {
                 slim_endpoint: None,
                 a2a_url: Some("http://127.0.0.1:50051".to_string()),
                 a2a_binding: Some(A2ABinding::Grpc),
+                slim_name: None,
             }),
             Some("http://127.0.0.1:8080"),
             Some(A2ABinding::HttpJson),

@@ -218,6 +218,7 @@ mod tests {
             slim_endpoint: None,
             a2a_url: Some(url.into()),
             a2a_binding: Some(shadi_a2a::A2ABinding::HttpJson),
+            slim_name: None,
         }
     }
 
@@ -304,6 +305,7 @@ mod tests {
                 a2a_url: String::new(),
                 a2a_binding: A2ABinding::Grpc,
                 pid: 1,
+                slim_name: String::new(),
             },
             LocalAdapterRecord {
                 name: "codex".to_string(),
@@ -312,6 +314,7 @@ mod tests {
                 a2a_url: "http://127.0.0.1:50051".to_string(),
                 a2a_binding: A2ABinding::Grpc,
                 pid: 2,
+                slim_name: String::new(),
             },
             LocalAdapterRecord {
                 name: "goose".to_string(),
@@ -320,6 +323,7 @@ mod tests {
                 a2a_url: "http://127.0.0.1:8080".to_string(),
                 a2a_binding: A2ABinding::Jsonrpc,
                 pid: 3,
+                slim_name: String::new(),
             },
         ];
         let rendered = render_local_listing(&records);

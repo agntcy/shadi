@@ -259,6 +259,7 @@ pub fn start(
 /// Locators for the listeners `register` starts.
 pub fn listener_locators(
     agent_id: &str,
+    did: Option<&str>,
     slim_endpoint: Option<&str>,
     a2a_listen: Option<&str>,
     a2a_binding: A2ABinding,
@@ -269,7 +270,11 @@ pub fn listener_locators(
     if let Some(endpoint) = slim_endpoint {
         locators.push(Locator {
             protocol: "slim".to_string(),
-            url: format!("slim://{}/agntcy/shadi/{agent_id}-a2a", slim_node(endpoint)),
+            url: format!(
+                "slim://{}/{}",
+                slim_node(endpoint),
+                agentbridge::member_source::peer_slim_name(agent_id, did)
+            ),
         });
     }
 
@@ -810,6 +815,7 @@ mod tests {
     fn locators_cover_slim_and_unicast_listeners() {
         let locators = listener_locators(
             "codex",
+            None,
             Some("127.0.0.1:47357"),
             Some("127.0.0.1:50051"),
             A2ABinding::Grpc,
@@ -832,6 +838,7 @@ mod tests {
 
         let http = listener_locators(
             "codex",
+            None,
             None,
             Some("0.0.0.0:8443"),
             A2ABinding::HttpJson,
@@ -1001,7 +1008,7 @@ mod tests {
     fn a_slim_locator_names_the_node_without_its_scheme() {
         for endpoint in ["node:47357", "http://node:47357", "https://node:47357/"] {
             let locators =
-                listener_locators("codex", Some(endpoint), None, A2ABinding::Grpc, |u| {
+                listener_locators("codex", None, Some(endpoint), None, A2ABinding::Grpc, |u| {
                     u.into()
                 });
             assert_eq!(
@@ -1009,5 +1016,14 @@ mod tests {
                 "{endpoint}"
             );
         }
+        let named = listener_locators(
+            "codex",
+            Some("did:key:zKey"),
+            Some("node:47357"),
+            None,
+            A2ABinding::Grpc,
+            |u| u.into(),
+        );
+        assert_eq!(named[0].url, "slim://node:47357/agntcy/shadi/zKey-a2a");
     }
 }

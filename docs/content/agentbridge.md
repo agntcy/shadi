@@ -77,7 +77,7 @@ flowchart LR
     tool -- "stdin / stdout" --> ca --> srv
   end
 
-  slim{{"SLIM node\nagntcy/shadi/&lt;name&gt;-a2a\nmTLS · DID auth"}}
+  slim{{"SLIM node\nagntcy/shadi/&lt;key&gt;-a2a\nmTLS · DID auth"}}
 
   subgraph coord["agentbridge coordinate"]
     direction TB
@@ -226,7 +226,8 @@ A bare subprocess command still opens GenericStdio. `--save` /
 
 Bare tool names open a **local** `CliAdapter` (`snapshot_context` /
 `inject_context`). `slim:<id>` is A2A: `LiveA2ATaskAdapter` proves as
-`SHADI_AGENT_ID` and `SendMessage`s to `agntcy/shadi/<id>-a2a`. When
+`SHADI_AGENT_ID` and `SendMessage`s to `<id>`'s listener, named after the DID
+in its lease. When
 `SHADI_AGENT_ID` matches `--from slim:<id>`, the source is that agent
 acting as an A2A *client* — snapshot stays local so the process does not
 call its own listener; only the destination inject is an A2A task.
@@ -336,11 +337,20 @@ clients use reqwest and can speak HTTPS.
 
 ### SLIM address
 
-Each adapter registers under the hierarchical name:
+Each adapter registers under a name derived from its DID:
 
 ```text
-agntcy/shadi/<name>-a2a
+agntcy/shadi/<key>-a2a
 ```
+
+`<key>` is the agent's `did:key` without `did:key:`, so two people's `copilot`
+get different names, and whoever holds the DID can address the listener:
+`delegate --to did:key:…` sends there on the configured endpoint when the
+Agent Directory answers that it has no record of the DID (a failed lookup is
+still reported). A caller sends to the name a peer advertises in its card,
+dir-runtime entry or local lease, so `--agents slim:copilot` uses the name in
+`copilot`'s lease. For an agent on another host, use its DID:
+`--agents slim:did:key:…@<node>`.
 
 `<name>` is the agent's name, which is also its card and workload name, its
 local lease, the name `delegate --to` takes and, with `SLIM_HUMAN_SEED`, the
@@ -355,12 +365,16 @@ source of its DID. It is:
   too long to fit keeps its start and gains the same digest; with a profile id
   too long for that, only the digest is kept, and an id too long for the
   digest is refused;
-- else the profile id, so `--tool copilot` listens as `agntcy/shadi/copilot-a2a`.
+- else the profile id, so `--tool copilot` is `copilot`.
 
 A name SLIM can't hold is refused at start, whichever of these it came from.
-The `coordinate` command reaches an agent with `--agents slim:<name>`, for
-example `--agents slim:copilot`, and a `SLIM_MEMBER_DIDS` allowlist names the
-DID derived from that same name.
+The `coordinate` command reaches an agent with `--agents slim:<name>`, and a
+`SLIM_MEMBER_DIDS` allowlist names the DID derived from that same name.
+
+For one release a listener also answers on `agntcy/shadi/<name>-a2a`, which
+callers from before this change use. Until it goes, two people's `copilot`
+still share that name, and `slim:<name>@<node>` reaches a remote listener only
+through it.
 
 A task an agent sends (`delegate`, `handoff`, a `NEXT` hop) goes out under
 `agntcy/shadi/<tool>-a2a-client-<suffix>`, a name of its own for each send, and
@@ -444,10 +458,10 @@ register --slim-endpoint 127.0.0.1:47357
   ├─ service.connect()               connect to SLIM node (TLS 1.3)
   ├─ shadi_identity::require_did_auth_from_env()
   │    + shadi_identity::create_app() authenticate with this agent's DID
-  ├─ app.subscribe()                 subscribe to agntcy/shadi/<name>-a2a
+  ├─ app.subscribe()                 subscribe to agntcy/shadi/<key>-a2a (and <name>-a2a)
   ├─ srv.serve()                     start the A2A/SLIMRPC event loop
   │
-  │  [agentbridge] ready — listening on agntcy/shadi/<name>-a2a
+  │  [agentbridge] ready — listening on agntcy/shadi/<key>-a2a
   │
   ├─ … handles tasks until Ctrl-C …
   │
@@ -488,7 +502,7 @@ so it can act non-interactively.
 
 !!! warning "Any peer able to reach the listener can drive local code execution"
 
-    Any peer able to reach `agntcy/shadi/<name>-a2a` on the SLIM node can drive
+    Any peer able to reach the listener's SLIM name on the node can drive
     local code execution through the wrapped CLI tool.
 
 Controls:
