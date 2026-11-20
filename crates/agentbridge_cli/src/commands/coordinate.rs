@@ -1,6 +1,7 @@
 use agentbridge::{
     adapter::CliToolAdapter,
     adapters::generic_stdio::GenericStdioAdapter,
+    local_registry::LocalAdapterRegistry,
     mas::{
         derive, infer_pattern, parse_announce, parse_converge_vote, AgentId, AssemblySession,
         CascadeEngine, CascadeEngineConfig, ConvergeBallot, ConvergeController, ConvergeHalt,
@@ -9,6 +10,7 @@ use agentbridge::{
         MasRuntime, PatternKind, PreferenceEngine, PreferenceEngineConfig, ResourceEngine,
         ResourceEngineConfig, SemanticEvent, SemanticPayload, UpdateRule,
     },
+    member_source::{find_running_peer_at, resolve_adapter_peer, DirLookupOptions},
     open_profile_adapter,
 };
 use shadi_mas::{
@@ -868,6 +870,41 @@ fn truncate(s: &str, max: usize) -> String {
 
 // ─── Agent spec parser ────────────────────────────────────────────────────────
 
+/// The DID of the agent behind a `slim:` spec, looked up the way `delegate`
+/// does: the local lease or published record first, then what dir-runtime
+/// reports, since publishing took DIR access and anything on the host can
+/// announce a workload.
+///
+/// A credential-gated listener challenges the caller, and the caller refuses
+/// to answer a challenge it cannot check the audience of, so without this the
+/// agent drops out of every round. `None` keeps the unauthenticated path
+/// working, which is all a listener without an admission policy needs.
+fn peer_did(agent_id: &str) -> Option<String> {
+    let registry = LocalAdapterRegistry::from_env();
+    let dir = DirLookupOptions {
+        server_addr: std::env::var("DIRECTORY_SERVER")
+            .unwrap_or_else(|_| "prod.gateway.ads.outshift.io:443".to_string()),
+        gh_token: std::env::var("DIRECTORY_CLIENT_GITHUB_TOKEN").ok(),
+        limit: 5,
+    };
+    if let Ok(peer) = resolve_adapter_peer(agent_id, &registry, Some(&dir)) {
+        return Some(peer.did);
+    }
+
+    // An agent registered with `--dir-announce` has no local lease, so a
+    // name only resolves here.
+    let runtime = DirLookupOptions {
+        server_addr: std::env::var("DIRECTORY_CLIENT_SERVER_ADDRESS")
+            .unwrap_or_else(|_| "localhost:8888".to_string()),
+        gh_token: None,
+        limit: 0,
+    };
+    find_running_peer_at(agent_id, &runtime, None)
+        .ok()
+        .flatten()
+        .map(|peer| peer.did)
+}
+
 fn build_agents(
     specs: &[String],
     slim_endpoint: &str,
@@ -912,7 +949,7 @@ fn build_agents(
                 )),
                 a2a_url: None,
                 a2a_binding: None,
-                peer_did: None,
+                peer_did: peer_did(&agent_id),
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
                 agent_id: agent_id.clone(),
