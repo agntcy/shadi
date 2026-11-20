@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.3.0...agntcy-agentbridge-cli-v0.4.0) - 2026-11-20
+
+### Added
+
+- *(agentbridge)* [**breaking**] name a listener on SLIM after its did:key ([#578](https://github.com/agntcy/shadi/pull/578))
+- *(agentbridge)* name a record agent after its record, and add --name ([#551](https://github.com/agntcy/shadi/pull/551))
+- *(agentbridge)* wire the OID4VP holder and verifier ([#524](https://github.com/agntcy/shadi/pull/524))
+- *(agentbridge)* find running agents through dir-runtime ([#490](https://github.com/agntcy/shadi/pull/490))
+- *(agentbridge)* register --record runs an agent skill from DIR ([#483](https://github.com/agntcy/shadi/pull/483))
+- *(agentbridge)* announce a running register to dir-runtime ([#478](https://github.com/agntcy/shadi/pull/478))
+- *(agentbridge)* [**breaking**] advertise OASF skills, domains and version in the agent card ([#477](https://github.com/agntcy/shadi/pull/477))
+
+### Fixed
+
+- *(agentbridge)* call out under a SLIM name of its own while listening ([#576](https://github.com/agntcy/shadi/pull/576))
+- *(deps)* update patch and minor ([#502](https://github.com/agntcy/shadi/pull/502))
+- *(agentbridge)* let sandboxed Copilot and Cursor run without their own approvals ([#550](https://github.com/agntcy/shadi/pull/550))
+- *(mas)* [**breaking**] finalize a development round on endorsements, not proposals ([#556](https://github.com/agntcy/shadi/pull/556))
+- *(agentbridge)* scope harness sessions to the sender's DID ([#528](https://github.com/agntcy/shadi/pull/528))
+
+### Other
+
+- *(agentbridge)* add the runtime discovery demo and container example ([#493](https://github.com/agntcy/shadi/pull/493))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-cli-v0.2.0...agntcy-agentbridge-cli-v0.3.0) - 2026-10-16
 
 ### Added
