@@ -251,7 +251,7 @@ pub async fn agentbridge_delegate(
         let config = LiveA2ATaskAdapterConfig {
             endpoint,
             agent_id: agent_id.clone(),
-            local_name: Some(format!("agntcy/shadi/{agent_id}-a2a")),
+            local_name: None,
             peer_agent_id: to.clone(),
             destination: Some(format!("agntcy/shadi/{to}-a2a")),
             a2a_url: None,

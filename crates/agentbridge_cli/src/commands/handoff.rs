@@ -208,7 +208,7 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
         let config = LiveA2ATaskAdapterConfig {
             endpoint,
             agent_id: local_id.clone(),
-            local_name: Some(format!("agntcy/shadi/{local_id}-a2a")),
+            local_name: None,
             peer_agent_id: agent_id.clone(),
             destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
             a2a_url: None,

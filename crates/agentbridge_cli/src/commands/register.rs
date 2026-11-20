@@ -746,7 +746,7 @@ fn dispatch_peer_handoff(
     let adapter = super::egress::live_adapter(LiveA2ATaskAdapterConfig {
         endpoint: target.slim_endpoint.clone().unwrap_or_default(),
         agent_id: from.to_string(),
-        local_name: Some(format!("agntcy/shadi/{from}-a2a-client")),
+        local_name: None,
         peer_agent_id: target.peer_agent_id.clone(),
         destination: Some(format!("agntcy/shadi/{}-a2a", target.peer_agent_id)),
         a2a_url: target.a2a_url,
@@ -3983,5 +3983,250 @@ test push ... FAILED
             None => std::env::remove_var("A2A_TLS_KEY"),
         }
         let _ = fs::remove_dir_all(&tmp);
+    }
+    /// Answers a task with its prompt.
+    #[cfg(not(windows))]
+    struct EchoAdapter(shadi_mas::AgentId);
+
+    #[cfg(not(windows))]
+    impl CliAdapter for EchoAdapter {
+        fn agent_id(&self) -> &shadi_mas::AgentId {
+            &self.0
+        }
+        fn snapshot_context(
+            &self,
+        ) -> Result<agentbridge::ContextPacket, agentbridge::CliAdapterError> {
+            Err(agentbridge::CliAdapterError::Subprocess("not used".into()))
+        }
+        fn inject_context(
+            &self,
+            _: &agentbridge::ContextPacket,
+        ) -> Result<(), agentbridge::CliAdapterError> {
+            Ok(())
+        }
+        fn execute_prompt(&self, prompt: &str) -> Result<String, agentbridge::CliAdapterError> {
+            Ok(format!("{} heard: {prompt}", self.0 .0))
+        }
+    }
+
+    /// A SLIM listener for `agent_id` that echoes its tasks, as `register` runs one.
+    #[cfg(not(windows))]
+    fn serve_echo(
+        agent_id: &str,
+        endpoint: &str,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let service = Service::new(format!("echo-listener-{agent_id}"));
+        let access = ClientAccess::from_env(Some(agent_id)).unwrap();
+        let connection_id = service.connect(access.client_config(endpoint)).unwrap();
+        let name = Arc::new(parse_name(&format!("agntcy/shadi/{agent_id}-a2a")).unwrap());
+        let auth = shadi_identity::require_did_auth_from_env(agent_id).unwrap();
+        let app = shadi_identity::create_app(&service, name.clone(), &auth).unwrap();
+        app.subscribe(name, Some(connection_id)).unwrap();
+        let did = shadi_identity::agent_identity_from_env(agent_id)
+            .unwrap()
+            .did();
+        let server = Arc::new(Server::new_with_shared_rx_and_connection(
+            app.inner(),
+            app.name().as_slim_name(),
+            None,
+            app.notification_receiver(),
+            Some(slim_bindings::get_runtime()),
+        ));
+        let handler = Arc::new(AgentBridgeRequestHandler::new(
+            Arc::new(EchoAdapter(shadi_mas::AgentId(agent_id.to_string()))),
+            agent_id,
+            Some(did.as_str()),
+            Some(endpoint),
+            None,
+            A2ABinding::Grpc,
+            Arc::new(Notify::new()),
+            false,
+            egress::policy(),
+            None,
+        ));
+        SlimRpcHandler::new(handler).register(server.as_ref());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let srv = server.clone();
+                let serving = tokio::spawn(async move { srv.serve().await });
+                let _ = stopped.await;
+                server.shutdown().await;
+                let _ = serving.await;
+            });
+            let _ = service.shutdown();
+        });
+        (thread, stop)
+    }
+
+    /// A listening agent calls out under its own DID while its listener holds
+    /// its name, three times at once (agntcy/shadi#570). Each send is given the
+    /// listener's name, as `delegate` used to pass, to show the adapter keeps
+    /// them apart anyway.
+    ///
+    /// The body runs in a child process: SLIM installs the global tracing
+    /// subscriber the span tests above rely on, and the body sets the env.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_listening_agent_calls_out_while_its_listener_runs() {
+        const CHILD: &str = "AGENTBRIDGE_TEST_570_CHILD";
+        let _guard = super::super::test_env_lock();
+        if std::env::var_os(CHILD).is_none() {
+            let (_, module) = module_path!().split_once("::").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    &format!("{module}::a_listening_agent_calls_out_while_its_listener_runs"),
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "the child run failed: {status}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tls = dir.path().join("shadi-slim-mtls");
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/generate_slim_mtls_certs.sh");
+        let generated = std::process::Command::new("bash")
+            .arg(&script)
+            .arg(&tls)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let seed = "shadi-570-test-seed";
+        let did = |id: &str| {
+            shadi_identity::AgentIdentity::derive(seed.as_bytes(), id)
+                .unwrap()
+                .did()
+        };
+        let vars = [
+            ("SHADI_SLIM_AUTH", Some("did".to_string())),
+            ("SLIM_HUMAN_SEED", Some(seed.to_string())),
+            (
+                "SLIM_MEMBER_DIDS",
+                Some(format!("{},{}", did("caller"), did("callee"))),
+            ),
+            (
+                "SLIM_TLS_CERT",
+                Some(tls.join("client-avatar.crt").display().to_string()),
+            ),
+            (
+                "SLIM_TLS_KEY",
+                Some(tls.join("client-avatar.key").display().to_string()),
+            ),
+            (
+                "SLIM_TLS_CA",
+                Some(tls.join("ca.crt").display().to_string()),
+            ),
+            ("SHADI_TMP_DIR", Some(dir.path().display().to_string())),
+            ("SLIM_AUTH_TOKEN_FILE", None),
+            ("SHADI_MEMBER_HUMAN_DIDS", None),
+        ];
+        let saved: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        let endpoint = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string();
+        let node = Service::new("issue-570-node".to_string());
+        let server_config = slim_bindings::ServerConfig {
+            endpoint: endpoint.clone(),
+            tls: slim_bindings::TlsServerConfig {
+                insecure: false,
+                source: slim_bindings::TlsSource::File {
+                    cert: tls.join("server.crt").display().to_string(),
+                    key: tls.join("server.key").display().to_string(),
+                },
+                client_ca: slim_bindings::CaSource::File {
+                    path: tls.join("ca.crt").display().to_string(),
+                },
+                include_system_ca_certs_pool: Some(false),
+                tls_version: Some("tls1.3".to_string()),
+                reload_client_ca_file: Some(false),
+            },
+            ..Default::default()
+        };
+        node.run_server(server_config).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+
+        let listeners = [
+            serve_echo("caller", &endpoint),
+            serve_echo("callee", &endpoint),
+        ];
+        std::thread::sleep(Duration::from_millis(500));
+
+        let sends: Vec<_> = (0..3)
+            .map(|i| {
+                let endpoint = endpoint.clone();
+                let callee = did("callee");
+                std::thread::spawn(move || {
+                    let adapter = egress::live_adapter(LiveA2ATaskAdapterConfig {
+                        endpoint,
+                        agent_id: "caller".to_string(),
+                        local_name: Some("agntcy/shadi/caller-a2a".to_string()),
+                        peer_agent_id: "callee".to_string(),
+                        destination: Some("agntcy/shadi/callee-a2a".to_string()),
+                        a2a_url: None,
+                        a2a_binding: None,
+                        peer_did: Some(callee),
+                    });
+                    adapter
+                        .dispatch(TaskEnvelope {
+                            task_id: format!("issue-570-{i}"),
+                            pattern: PatternKind::Development,
+                            epoch: Epoch(0),
+                            correlation_id: None,
+                            body: format!("ping {i}").into_bytes(),
+                        })
+                        .map(|()| adapter.dispatches().unwrap().remove(0).response)
+                })
+            })
+            .collect();
+        let replies: Vec<_> = sends.into_iter().map(|send| send.join().unwrap()).collect();
+
+        for (thread, stop) in listeners {
+            let _ = stop.send(());
+            let _ = thread.join();
+        }
+        let _ = node.stop_server(endpoint);
+        let _ = node.shutdown();
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        for (i, reply) in replies.into_iter().enumerate() {
+            let reply = reply.unwrap_or_else(|err| panic!("send {i} failed: {err}"));
+            assert!(
+                reply.contains(&format!("callee heard: ping {i}")),
+                "{reply}"
+            );
+        }
     }
 }
