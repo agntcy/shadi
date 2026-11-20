@@ -352,10 +352,29 @@ dir-runtime entry or local lease, so `--agents slim:copilot` uses the name in
 `copilot`'s lease. For an agent on another host, use its DID:
 `--agents slim:did:key:…@<node>`.
 
-For one release a listener also answers on its tool's name,
-`agntcy/shadi/<tool>-a2a`, which callers from before this change use. Until it
-goes, two people's `copilot` still share that name, and `slim:<tool>@<node>`
-reaches a remote listener only through it.
+`<name>` is the agent's name, which is also its card and workload name, its
+local lease, the name `delegate --to` takes and, with `SLIM_HUMAN_SEED`, the
+source of its DID. It is:
+
+- `--name <NAME>` when given (ASCII letters, digits, `-` and `_`, at most 64);
+- else, with `--record`, `<record name>-<profile id>`, so `--tool
+  claude-code-isolated --record code-review` is
+  `code-review-claude-code-isolated`. A record name with characters SLIM can't
+  hold has each run of them turned into `-` and gains an 8-character digest of
+  the original name, so `org/skill` and `org-skill` stay apart. A record name
+  too long to fit keeps its start and gains the same digest; with a profile id
+  too long for that, only the digest is kept, and an id too long for the
+  digest is refused;
+- else the profile id, so `--tool copilot` is `copilot`.
+
+A name SLIM can't hold is refused at start, whichever of these it came from.
+The `coordinate` command reaches an agent with `--agents slim:<name>`, and a
+`SLIM_MEMBER_DIDS` allowlist names the DID derived from that same name.
+
+For one release a listener also answers on `agntcy/shadi/<name>-a2a`, which
+callers from before this change use. Until it goes, two people's `copilot`
+still share that name, and `slim:<name>@<node>` reaches a remote listener only
+through it.
 
 A task an agent sends (`delegate`, `handoff`, a `NEXT` hop) goes out under
 `agntcy/shadi/<tool>-a2a-client-<suffix>`, a name of its own for each send, and
@@ -439,7 +458,7 @@ register --slim-endpoint 127.0.0.1:47357
   ├─ service.connect()               connect to SLIM node (TLS 1.3)
   ├─ shadi_identity::require_did_auth_from_env()
   │    + shadi_identity::create_app() authenticate with this agent's DID
-  ├─ app.subscribe()                 subscribe to agntcy/shadi/<key>-a2a (and <tool>-a2a)
+  ├─ app.subscribe()                 subscribe to agntcy/shadi/<key>-a2a (and <name>-a2a)
   ├─ srv.serve()                     start the A2A/SLIMRPC event loop
   │
   │  [agentbridge] ready — listening on agntcy/shadi/<key>-a2a

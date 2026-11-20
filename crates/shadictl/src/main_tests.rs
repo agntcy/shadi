@@ -26,6 +26,40 @@
         tempfile::tempdir().expect("tempdir")
     }
 
+    #[test]
+    fn a_read_path_left_writable_is_warned_about_with_its_grant() {
+        let dir = temp_dir();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir");
+        let cli = Cli::try_parse_from([
+            "shadictl",
+            "--profile",
+            "strict",
+            "--allow",
+            dir.path().to_str().unwrap(),
+            "--read",
+            repo.to_str().unwrap(),
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let resolved = resolve_policy(&cli, &PolicyFile::default()).expect("resolve");
+
+        let warnings = writable_read_warnings(&resolved.policy, &cli.read);
+
+        let repo = shadi_sandbox::canonicalize_path(&repo).expect("canonical");
+        let dir = shadi_sandbox::canonicalize_path(dir.path()).expect("canonical");
+        assert_eq!(
+            warnings,
+            [format!(
+                "warning: --read {} stays writable: {} is granted write \
+                 (start shadictl outside it, or drop that grant)",
+                repo.display(),
+                dir.display()
+            )]
+        );
+    }
+
     fn write_mas_config(dir: &Path, contents: &str) -> PathBuf {
         let path = dir.join("mas.toml");
         std::fs::write(&path, contents).expect("write mas config");

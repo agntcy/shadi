@@ -1013,18 +1013,11 @@ fn unpack_bundle(archive: &[u8], dir: &Path, limit: u64) -> std::io::Result<u64>
     Ok(tar_bytes.len() as u64)
 }
 
-/// A directory name from a skill or tool name.
+/// A directory name from a skill or tool name. It keeps `.`, which an agent
+/// id can't (see [`super::names`]), and never starts or ends with one, so
+/// `..` can't name a parent.
 fn sanitize(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
+    let cleaned = super::names::replace_runs(name, super::names::file_char);
     let cleaned = cleaned.trim_matches('.').to_string();
     if cleaned.is_empty() {
         "skill".to_string()

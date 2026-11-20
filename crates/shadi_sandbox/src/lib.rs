@@ -24,7 +24,8 @@ pub fn seatbelt_profile_text(policy: &SandboxPolicy) -> Result<String, SandboxEr
 pub use policy::{PlatformSandboxProfile, ProfileDefaults, SandboxPolicy, SandboxProfile};
 pub use resolve::{
     canonicalize_path, default_blocked_commands, describe_policy, is_command_blocked,
-    resolve_policy, PolicyDescription, PolicyFileValues, PolicyOverrides, ResolvedPolicy,
+    resolve_policy, writable_read_paths, PolicyDescription, PolicyFileValues, PolicyOverrides,
+    ResolvedPolicy,
 };
 pub use policy_patch::{
     apply_policy_patch, ControlMessage, ControlResponse, PatchAxisStatus,

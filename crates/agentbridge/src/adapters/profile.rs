@@ -321,6 +321,13 @@ impl ProfileAdapter {
         }
     }
 
+    /// Run as agent `id` instead of the profile id (`register --name`, or a
+    /// name taken from the `--record`).
+    pub fn with_agent_id(mut self, id: impl Into<String>) -> Self {
+        self.id = AgentId(id.into());
+        self
+    }
+
     /// Run the harness isolated, with its configuration under `config_root`
     /// (the profile's `isolation` section). Without that section this changes
     /// nothing.
@@ -986,6 +993,131 @@ mod tests {
         }
     }
 
+    /// Arguments that turn off a harness's own approvals or its own sandbox.
+    /// `--allow-all` and `--yolo` are in no bundled profile; they stay so a
+    /// profile that adds them fails.
+    const APPROVAL_BYPASS: &[&str] = &[
+        "--allow-all",
+        "--allow-all-paths",
+        "--allow-all-tools",
+        "--auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--force",
+        "--sandbox disabled",
+        "--trust",
+        "--yolo",
+    ];
+
+    /// Plain profiles that pass one of those without `require_sandbox` today.
+    /// Each is a known gap, listed so it stays visible; any other profile, or
+    /// another flag on these, fails the rule.
+    const UNSANDBOXED_BYPASS: &[(&str, &str)] = &[
+        ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+        ("copilot", "--allow-all-tools"),
+        ("cursor-agent", "--sandbox disabled"),
+        ("cursor-agent", "--trust"),
+        ("opencode", "--auto"),
+    ];
+
+    /// Every argument the harness gets: the isolation args, which go first at
+    /// spawn, then the rendered argv. `extra_args_env` is ignored, so a value
+    /// in the host environment (`CODEX_ARGS="--yolo"`) can't decide the test.
+    fn spawn_args(id: &str, include_workdir_flags: bool) -> Vec<String> {
+        let mut p = load_bundled(id);
+        p.extra_args_env = None;
+        let mut args: Vec<String> = p
+            .isolation
+            .iter()
+            .flat_map(|i| i.args.iter().cloned())
+            .collect();
+        args.extend(render_argv(
+            &p,
+            "/ws",
+            "hi",
+            None,
+            None,
+            include_workdir_flags,
+        ));
+        args
+    }
+
+    /// The bypass arguments in `args`; a two-token one like `--sandbox
+    /// disabled` matches when its tokens are adjacent.
+    fn bypass_in(args: &[String]) -> Vec<&'static str> {
+        APPROVAL_BYPASS
+            .iter()
+            .copied()
+            .filter(|bypass| {
+                let words: Vec<&str> = bypass.split(' ').collect();
+                args.windows(words.len())
+                    .any(|w| w.iter().map(String::as_str).eq(words.iter().copied()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn approval_bypass_requires_the_sandbox_except_known_plain_profiles() {
+        for id in bundled_profile_ids() {
+            let p = load_bundled(id);
+            for workdir_flags in [true, false] {
+                let bypass: Vec<_> = bypass_in(&spawn_args(id, workdir_flags))
+                    .into_iter()
+                    .filter(|flag| !UNSANDBOXED_BYPASS.contains(&(*id, *flag)))
+                    .collect();
+                assert!(
+                    bypass.is_empty() || p.require_sandbox,
+                    "{id} passes {bypass:?} without require_sandbox"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_rule_sees_isolation_args_and_two_token_flags() {
+        let args: Vec<String> = ["--sandbox", "disabled", "--trust"]
+            .map(String::from)
+            .into();
+        assert_eq!(bypass_in(&args), ["--sandbox disabled", "--trust"]);
+        let args: Vec<String> = ["--sandbox", "enabled"].map(String::from).into();
+        assert!(bypass_in(&args).is_empty());
+        // claude-code-isolated's isolation args are part of what is checked.
+        assert!(spawn_args("claude-code-isolated", true)
+            .iter()
+            .any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn sandboxed_harnesses_run_without_their_own_approvals() {
+        // A fresh HOME has no saved approvals to fall back on, so each
+        // isolated profile that needs a bypass keeps it.
+        for (id, flags) in [
+            (
+                "codex-isolated",
+                &["--dangerously-bypass-approvals-and-sandbox"][..],
+            ),
+            (
+                "copilot-isolated",
+                &["--allow-all-tools", "--allow-all-paths"][..],
+            ),
+            (
+                "cursor-agent-isolated",
+                &["--force", "--trust", "--sandbox disabled"][..],
+            ),
+            ("opencode-isolated", &["--auto"][..]),
+        ] {
+            // Whatever the profile does with its working-directory flags.
+            for workdir_flags in [true, false] {
+                let found = bypass_in(&spawn_args(id, workdir_flags));
+                for flag in flags {
+                    assert!(
+                        found.contains(flag),
+                        "{id} (workdir flags {workdir_flags}): {found:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn claude_argv_matches_native_order() {
         let p = load_bundled("claude-code");    
@@ -1374,6 +1506,13 @@ mod tests {
     fn profile_adapter_constructs() {
         let adapter = ProfileAdapter::new(load_bundled("claude-code"), "/tmp");
         assert_eq!(adapter.agent_id().0, "claude-code");
+    }
+
+    #[test]
+    fn profile_adapter_runs_under_another_agent_id() {
+        let adapter =
+            ProfileAdapter::new(load_bundled("claude-code"), "/tmp").with_agent_id("reviewer");
+        assert_eq!(adapter.agent_id().0, "reviewer");
     }
 
     fn echo_profile(extra: &str) -> CliProfile {
