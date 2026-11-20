@@ -1,5 +1,6 @@
 use agentbridge::{
-    adapters::generic_stdio::GenericStdioAdapter, open_profile_adapter, CliAdapter, ContextPacket,
+    adapters::generic_stdio::GenericStdioAdapter, local_registry::LocalAdapterRegistry,
+    open_profile_adapter, CliAdapter, ContextPacket,
 };
 use shadi_mas::{
     experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
@@ -205,6 +206,7 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
         if local_id == agent_id {
             return Ok(HandoffPeer::SelfSlim { agent_id });
         }
+        let peer_did = resolve_peer_did(&agent_id);
         let config = LiveA2ATaskAdapterConfig {
             endpoint,
             agent_id: local_id.clone(),
@@ -213,7 +215,7 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
             destination: Some(format!("agntcy/shadi/{agent_id}-a2a")),
             a2a_url: None,
             a2a_binding: None,
-            peer_did: None,
+            peer_did,
         };
         return Ok(HandoffPeer::Slim {
             agent_id,
@@ -221,6 +223,16 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
         });
     }
     spawn_stdio(spec, spec)
+}
+
+/// Seal the destination DID when it is locally known; remote/unregistered
+/// peers fall back to None rather than failing here.
+fn resolve_peer_did(agent_id: &str) -> Option<String> {
+    LocalAdapterRegistry::from_env()
+        .resolve_live(agent_id)
+        .ok()
+        .map(|r| r.did)
+        .filter(|did| !did.is_empty())
 }
 
 fn spawn_stdio(label: &str, cmd: &str) -> anyhow::Result<HandoffPeer> {
@@ -256,6 +268,36 @@ mod tests {
         match open_peer("slim:peer@10.0.0.1:9", "127.0.0.1:47357").expect("slim") {
             HandoffPeer::Slim { agent_id, .. } => assert_eq!(agent_id, "peer"),
             other => panic!("expected slim peer, got {}", other.label()),
+        }
+    }
+
+    #[test]
+    fn resolve_peer_did_finds_a_locally_registered_agent() {
+        let _guard = super::super::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("SHADI_TMP_DIR");
+        std::env::set_var("SHADI_TMP_DIR", tmp.path());
+
+        let _lease = LocalAdapterRegistry::from_env()
+            .publish(&agentbridge::local_registry::LocalAdapterRecord {
+                name: "copilot".to_string(),
+                did: "did:key:zCopilot".to_string(),
+                slim_endpoint: "127.0.0.1:47357".to_string(),
+                a2a_url: String::new(),
+                a2a_binding: shadi_a2a::A2ABinding::Grpc,
+                pid: std::process::id(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            resolve_peer_did("copilot"),
+            Some("did:key:zCopilot".to_string())
+        );
+        assert_eq!(resolve_peer_did("unregistered-agent"), None);
+
+        match prev {
+            Some(value) => std::env::set_var("SHADI_TMP_DIR", value),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
         }
     }
 

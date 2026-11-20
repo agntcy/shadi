@@ -202,8 +202,11 @@ impl LiveA2ATaskAdapter {
                     payload = shadi_identity::wrap_vp(&token, &payload)
                         .map_err(|err| err.to_string())?;
                 }
-                let signed = shadi_identity::sign_message_from_env(&self.config.agent_id, &payload)
-                    .map_err(|err| err.to_string())?;
+                let signed = seal_and_sign_from_env(
+                    &self.config.agent_id,
+                    self.config.peer_did.as_deref(),
+                    &payload,
+                )?;
                 let signed_text = String::from_utf8(signed)
                     .map_err(|err| format!("DID proof envelope is not UTF-8: {err}"))?;
                 // Only a task-scoped challenge needs the retry to land on the
@@ -431,6 +434,14 @@ impl LiveA2ATaskAdapter {
             format!("failed to send A2A task {} for an unknown reason", task.task_id)
         }))
     }
+}
+
+/// Sign `body` for `agent_id` the way [`shadi_identity::sign_message_from_env`]
+/// does, but sealed (nonce, timestamp, and `aud` when the peer DID is known) —
+/// the receiver now requires a sealed payload, not a bare signed one.
+fn seal_and_sign_from_env(agent_id: &str, aud: Option<&str>, body: &[u8]) -> Result<Vec<u8>, String> {
+    let identity = shadi_identity::agent_identity_from_env(agent_id).map_err(|e| e.to_string())?;
+    shadi_identity::seal_and_sign(&identity, aud, body, None).map_err(|e| e.to_string())
 }
 
 fn escalate_auth_required(config: &AuthRequiredConfig) -> Result<String, String> {

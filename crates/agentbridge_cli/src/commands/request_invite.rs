@@ -15,17 +15,9 @@ pub fn run(
     invitee_did: &str,
     agent_id: &str,
     endpoint: &str,
+    owner_did: Option<&str>,
 ) -> anyhow::Result<()> {
-    let config = LiveA2ATaskAdapterConfig {
-        endpoint: endpoint.to_string(),
-        agent_id: agent_id.to_string(),
-        local_name: Some(format!("agntcy/shadi/{agent_id}-a2a-client")),
-        peer_agent_id: owner.to_string(),
-        destination: Some(owner_service_name(owner)),
-        a2a_url: None,
-        a2a_binding: None,
-        peer_did: None,
-    };
+    let config = build_config(owner, agent_id, endpoint, owner_did);
     let adapter = super::egress::live_adapter(config);
 
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -46,4 +38,39 @@ pub fn run(
         None => println!("request sent to {}", owner_service_name(owner)),
     }
     Ok(())
+}
+
+fn build_config(
+    owner: &str,
+    agent_id: &str,
+    endpoint: &str,
+    owner_did: Option<&str>,
+) -> LiveA2ATaskAdapterConfig {
+    LiveA2ATaskAdapterConfig {
+        endpoint: endpoint.to_string(),
+        agent_id: agent_id.to_string(),
+        local_name: Some(format!("agntcy/shadi/{agent_id}-a2a-client")),
+        peer_agent_id: owner.to_string(),
+        destination: Some(owner_service_name(owner)),
+        a2a_url: None,
+        a2a_binding: None,
+        peer_did: owner_did.map(str::to_string),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_did_seals_into_peer_did_when_given() {
+        let config = build_config("avatar", "copilot", "127.0.0.1:47357", Some("did:key:zOwner"));
+        assert_eq!(config.peer_did.as_deref(), Some("did:key:zOwner"));
+    }
+
+    #[test]
+    fn missing_owner_did_leaves_peer_did_none() {
+        let config = build_config("avatar", "copilot", "127.0.0.1:47357", None);
+        assert_eq!(config.peer_did, None);
+    }
 }

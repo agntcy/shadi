@@ -6,9 +6,7 @@ mod native;
 mod stdio_bridge;
 
 use agent_secrets::{AgentVerifier, SecretError, SecretResult, SecretStore, SessionContext};
-use shadi_identity::{
-    looks_like_did_proof, unwrap_signed_message, wrap_signed_message, AgentIdentity,
-};
+use shadi_identity::{looks_like_did_proof, seal_and_sign, verify_and_open, AgentIdentity, ReplayCache};
 
 pub use native::{NativeSlimBootstrap, NativeSlimSession};
 pub use stdio_bridge::{
@@ -28,6 +26,8 @@ pub struct SecureAgentChannel<'a> {
     /// When set, send wraps the payload in a DID-proof envelope and recv
     /// requires a valid envelope. This is the agentbridge SLIM path.
     signer: Option<&'a AgentIdentity>,
+    /// Remembers spent nonces, so a captured envelope cannot replay.
+    replay: &'a ReplayCache,
 }
 
 impl<'a> SecureAgentChannel<'a> {
@@ -35,12 +35,14 @@ impl<'a> SecureAgentChannel<'a> {
         session: &'a dyn SlimSession,
         verifier: &'a dyn AgentVerifier,
         store: &'a dyn SecretStore,
+        replay: &'a ReplayCache,
     ) -> Self {
         Self {
             session,
             verifier,
             store,
             signer: None,
+            replay,
         }
     }
 
@@ -53,11 +55,14 @@ impl<'a> SecureAgentChannel<'a> {
 
     pub fn send(&self, ctx: &SessionContext, message: &[u8]) -> SecretResult<()> {
         let outgoing = if let Some(identity) = self.signer {
-            wrap_signed_message(identity, message).map_err(|_| SecretError::NotAuthorized)?
+            self.verifier
+                .verify(&ctx.clone().with_proven_did(&identity.did()))?;
+            seal_and_sign(identity, ctx.did.as_deref(), message, None)
+                .map_err(|_| SecretError::NotAuthorized)?
         } else {
+            self.verifier.verify(ctx)?;
             message.to_vec()
         };
-        self.authorize_bytes(ctx, &outgoing)?;
         let _ = self.store;
         self.session.send(&outgoing)
     }
@@ -81,16 +86,18 @@ impl<'a> SecureAgentChannel<'a> {
         bytes: &[u8],
     ) -> SecretResult<Option<Vec<u8>>> {
         if looks_like_did_proof(bytes) {
-            let verified = unwrap_signed_message(bytes).map_err(|_| SecretError::NotAuthorized)?;
+            let self_did = self.signer.map(AgentIdentity::did);
+            let (did, payload, _hint) = verify_and_open(bytes, self_did.as_deref(), self.replay)
+                .map_err(|_| SecretError::NotAuthorized)?;
             if let Some(expected) = ctx.did.as_deref() {
-                if expected != verified.did {
+                if expected != did {
                     // Mesh member presenting another agent's DID.
                     return Err(SecretError::NotAuthorized);
                 }
             }
-            let proven = ctx.clone().with_proven_did(&verified.did);
+            let proven = ctx.clone().with_proven_did(&did);
             self.verifier.verify(&proven)?;
-            return Ok(Some(verified.payload));
+            return Ok(Some(payload));
         }
         if self.signer.is_some() {
             return Err(SecretError::NotAuthorized);
@@ -181,12 +188,17 @@ mod tests {
         }
     }
 
+    fn replay_cache() -> ReplayCache {
+        ReplayCache::new(16, 16)
+    }
+
     #[test]
     fn send_requires_verifier_success() {
         let session = TestSession::new();
         let store = MemoryStore;
         let allow = AllowVerifier;
-        let channel = SecureAgentChannel::new(&session, &allow, &store);
+        let replay = replay_cache();
+        let channel = SecureAgentChannel::new(&session, &allow, &store, &replay);
         let ctx = SessionContext::new("agent", "session");
 
         channel.send(&ctx, b"hello").unwrap();
@@ -199,7 +211,8 @@ mod tests {
         let session = TestSession::new();
         let store = MemoryStore;
         let deny = DenyVerifier;
-        let channel = SecureAgentChannel::new(&session, &deny, &store);
+        let replay = replay_cache();
+        let channel = SecureAgentChannel::new(&session, &deny, &store, &replay);
         let ctx = SessionContext::new("agent", "session");
 
         let err = channel.recv(&ctx).unwrap_err();
@@ -211,7 +224,8 @@ mod tests {
         let session = TestSession::new();
         let store = MemoryStore;
         let allow = AllowVerifier;
-        let channel = SecureAgentChannel::new(&session, &allow, &store);
+        let replay = replay_cache();
+        let channel = SecureAgentChannel::new(&session, &allow, &store, &replay);
         let ctx = SessionContext::new("agent", "session");
 
         let payload = channel.recv(&ctx).unwrap();
@@ -223,7 +237,8 @@ mod tests {
         let session = TestSession::new();
         let store = MemoryStore;
         let deny = DenyVerifier;
-        let channel = SecureAgentChannel::new(&session, &deny, &store);
+        let replay = replay_cache();
+        let channel = SecureAgentChannel::new(&session, &deny, &store, &replay);
         let ctx = SessionContext::new("agent", "session");
 
         let err = channel.send(&ctx, b"hello").unwrap_err();
@@ -235,7 +250,8 @@ mod tests {
         let session = FailingSession;
         let store = MemoryStore;
         let allow = AllowVerifier;
-        let channel = SecureAgentChannel::new(&session, &allow, &store);
+        let replay = replay_cache();
+        let channel = SecureAgentChannel::new(&session, &allow, &store, &replay);
         let ctx = SessionContext::new("agent", "session");
 
         let err = channel.send(&ctx, b"hello").unwrap_err();
@@ -247,7 +263,8 @@ mod tests {
         let session = FailingSession;
         let store = MemoryStore;
         let allow = AllowVerifier;
-        let channel = SecureAgentChannel::new(&session, &allow, &store);
+        let replay = replay_cache();
+        let channel = SecureAgentChannel::new(&session, &allow, &store, &replay);
         let ctx = SessionContext::new("agent", "session");
 
         let err = channel.recv(&ctx).unwrap_err();
@@ -263,27 +280,34 @@ mod tests {
     }
 
     #[test]
-    fn send_wraps_payload_in_did_proof() {
+    fn send_wraps_payload_in_a_sealed_did_proof_addressed_to_the_session_peer() {
         let session = TestSession::new();
         let store = MemoryStore;
         let allow = AllowVerifier;
         let identity = shadi_identity::AgentIdentity::generate().unwrap();
-        let channel = SecureAgentChannel::new(&session, &allow, &store).with_signer(&identity);
-        let ctx = SessionContext::new("agent", "session").with_did(identity.did());
+        let dest = shadi_identity::AgentIdentity::generate().unwrap();
+        let replay = replay_cache();
+        let channel =
+            SecureAgentChannel::new(&session, &allow, &store, &replay).with_signer(&identity);
+        // ctx.did is the session's peer, per SessionContext's own doc — the
+        // destination this envelope gets sealed for, not the local signer.
+        let ctx = SessionContext::new("agent", "session").with_did(dest.did());
 
         channel.send(&ctx, b"hello").unwrap();
         let sent = session.sent.lock().unwrap().clone();
         assert!(shadi_identity::looks_like_did_proof(&sent));
-        let verified = shadi_identity::unwrap_signed_message(&sent).unwrap();
-        assert_eq!(verified.did, identity.did());
-        assert_eq!(verified.payload, b"hello");
+        let opened = replay_cache();
+        let (did, body, _hint) =
+            shadi_identity::verify_and_open(&sent, Some(dest.did().as_str()), &opened).unwrap();
+        assert_eq!(did, identity.did());
+        assert_eq!(body, b"hello");
     }
 
     #[test]
     fn recv_rejects_forged_peer_did() {
         let honest = shadi_identity::AgentIdentity::generate().unwrap();
         let impostor = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&honest, None, b"task", None).unwrap();
 
         let session = TestSession {
             sent: Mutex::new(Vec::new()),
@@ -291,7 +315,9 @@ mod tests {
         };
         let store = MemoryStore;
         let proof = agent_secrets::DidProofVerifier;
-        let channel = SecureAgentChannel::new(&session, &proof, &store).with_signer(&impostor);
+        let replay = replay_cache();
+        let channel =
+            SecureAgentChannel::new(&session, &proof, &store, &replay).with_signer(&impostor);
         // Context claims the impostor's DID; the message is signed by someone else.
         let ctx = SessionContext::new("agent", "session").with_did(impostor.did());
 
@@ -302,18 +328,40 @@ mod tests {
     #[test]
     fn recv_accepts_matching_proven_did() {
         let honest = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&honest, b"task").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&honest, None, b"task", None).unwrap();
         let session = TestSession {
             sent: Mutex::new(Vec::new()),
             recv_data: envelope,
         };
         let store = MemoryStore;
         let proof = agent_secrets::DidProofVerifier;
-        let channel = SecureAgentChannel::new(&session, &proof, &store).with_signer(&honest);
+        let replay = replay_cache();
+        let channel =
+            SecureAgentChannel::new(&session, &proof, &store, &replay).with_signer(&honest);
         let ctx = SessionContext::new("agent", "session").with_did(honest.did());
 
         let payload = channel.recv(&ctx).unwrap();
         assert_eq!(payload, b"task");
+    }
+
+    #[test]
+    fn recv_rejects_a_replayed_envelope() {
+        let honest = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::seal_and_sign(&honest, None, b"task", None).unwrap();
+        let session = TestSession {
+            sent: Mutex::new(Vec::new()),
+            recv_data: envelope,
+        };
+        let store = MemoryStore;
+        let proof = agent_secrets::DidProofVerifier;
+        let replay = replay_cache();
+        let channel =
+            SecureAgentChannel::new(&session, &proof, &store, &replay).with_signer(&honest);
+        let ctx = SessionContext::new("agent", "session").with_did(honest.did());
+
+        channel.recv(&ctx).expect("first delivery is admitted");
+        let err = channel.recv(&ctx).unwrap_err();
+        assert!(matches!(err, SecretError::NotAuthorized));
     }
 
     #[test]
@@ -322,7 +370,9 @@ mod tests {
         let session = TestSession::new();
         let store = MemoryStore;
         let proof = agent_secrets::DidProofVerifier;
-        let channel = SecureAgentChannel::new(&session, &proof, &store).with_signer(&identity);
+        let replay = replay_cache();
+        let channel =
+            SecureAgentChannel::new(&session, &proof, &store, &replay).with_signer(&identity);
         let ctx = SessionContext::new("agent", "session").with_did(identity.did());
         let err = channel.recv(&ctx).unwrap_err();
         assert!(matches!(err, SecretError::NotAuthorized));
@@ -331,14 +381,16 @@ mod tests {
     #[test]
     fn recv_accepts_envelope_when_session_did_is_unset() {
         let identity = shadi_identity::AgentIdentity::generate().unwrap();
-        let envelope = shadi_identity::wrap_signed_message(&identity, b"task").unwrap();
+        let envelope = shadi_identity::seal_and_sign(&identity, None, b"task", None).unwrap();
         let session = TestSession {
             sent: Mutex::new(Vec::new()),
             recv_data: envelope,
         };
         let store = MemoryStore;
         let allow = AllowVerifier;
-        let channel = SecureAgentChannel::new(&session, &allow, &store).with_signer(&identity);
+        let replay = replay_cache();
+        let channel =
+            SecureAgentChannel::new(&session, &allow, &store, &replay).with_signer(&identity);
         let ctx = SessionContext::new("agent", "session");
         let payload = channel.recv(&ctx).unwrap();
         assert_eq!(payload, b"task");
