@@ -31,9 +31,8 @@ security-framework = "2.11"
 security-framework-sys = "2.17"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
-oo7 = { version = "0.7.1", default-features = false, features = ["tokio", "native_crypto"] }
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# Links the distro's libcrypto, like shadi_memory; building needs libssl-dev.
+rusqlite = { workspace = true, features = ["bundled-sqlcipher"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tempfile = "3.27"

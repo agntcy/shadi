@@ -57,7 +57,7 @@ fn keyring_lines(config: &agent_secrets::platform::KeyringConfig) -> Vec<String>
             keyring,
             password_file,
         } => vec![
-            "Type:    encrypted keyring file".to_string(),
+            "Type:    encrypted keyring file (SQLCipher)".to_string(),
             format!("Keyring: {}", keyring.display()),
             format!("Password file: {}", password_file.display()),
         ],
@@ -192,13 +192,13 @@ mod tests {
         use agent_secrets::platform::KeyringConfig;
 
         let on = keyring_lines(&KeyringConfig::Configured {
-            keyring: "/h/.shadi/keyring/agent_secrets.keyring".into(),
+            keyring: "/h/.shadi/keyring/agent_secrets.db".into(),
             password_file: "/run/secrets/pw".into(),
         })
         .join("\n");
         assert!(on.contains("encrypted keyring file"), "{on}");
         assert!(
-            on.contains("/h/.shadi/keyring/agent_secrets.keyring"),
+            on.contains("/h/.shadi/keyring/agent_secrets.db"),
             "{on}"
         );
         assert!(on.contains("/run/secrets/pw"), "{on}");

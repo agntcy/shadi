@@ -129,12 +129,12 @@ Adopting SLIM's `TokenProvider` / `Verifier` (agntcy/shadi#179) and
 
 ## Linux keyring file backend
 
-On Linux the default secret store is an encrypted keyring file in libsecret's
-file format, unlocked with the password in the file named by
+On Linux the default secret store is an encrypted keyring file, a SQLCipher
+database, unlocked with the password in the file named by
 `SHADI_KEYRING_PASSWORD_FILE`. It needs no D-Bus or daemon, so it works
 headless and in containers. Without that variable the store is unavailable.
 
-- The keyring defaults to `~/.shadi/keyring/agent_secrets.keyring`
+- The keyring defaults to `~/.shadi/keyring/agent_secrets.db`
   (`SHADI_KEYRING_PATH` overrides it), outside the home directories the
   Compatibility profile grants (`~/.config`, `~/.local`, `~/.cache`).
 - Relative paths are rejected, so the keyring can't land in a granted working
@@ -142,11 +142,17 @@ headless and in containers. Without that variable the store is unavailable.
 - Only key provisioning (`shadictl derive-agent-identity` and
   `derive-agent-did`) creates a keyring; everything else fails with
   `StoreNotFound` until it exists.
-- The keyring always holds a canary item. oo7 accepts any password for a
-  keyring with no items, so without it a wrong password file could re-key a
-  keyring whose keys were all deleted.
-- Writers lock `<keyring>.lock`, so concurrent processes don't lose updates,
-  and give up after 10 seconds rather than hang on a stuck holder.
+- SQLCipher checks the password on every open, also for a keyring with no
+  keys. An empty file would take any password, so it is refused instead of
+  being written. A password file with a NUL byte is refused, so the password
+  never reaches an error message.
+- SQLite's file locks keep concurrent processes from losing updates; a write
+  gives up after 10 seconds rather than hang on a stuck process. A keyring
+  that is renamed or removed during a write reports `StoreNotFound` instead of
+  writing to the old file. A read that finds an interrupted write rolls it
+  back, which needs write access to the keyring.
+- Each call opens the keyring and closes it again, so neither the derived key
+  nor decrypted pages stay in memory between calls.
 - The store counts as configured, and the credential vault picks it, whenever
   `SHADI_KEYRING_PASSWORD_FILE` is set, also inside a sandbox that denies the
   file. A credential issued on the host is then not silently missing in the

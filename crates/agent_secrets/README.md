@@ -16,19 +16,19 @@ until native backends are implemented.
 
 ### Linux keyring file
 
-An encrypted keyring file in libsecret's file format, read through `oo7`. It
-needs no D-Bus, no daemon and no login session, so it also works headless and in
-containers.
+An encrypted keyring file: a SQLCipher database (SQLite with AES-256 page
+encryption), unlocked with a password from a file. It needs no D-Bus, no daemon
+and no login session, so it also works headless and in containers.
 
 ```bash
 export SHADI_KEYRING_PASSWORD_FILE=/path/to/keyring-password  # required
-export SHADI_KEYRING_PATH=/path/to/agent_secrets.keyring      # optional
+export SHADI_KEYRING_PATH=/path/to/agent_secrets.db           # optional
 ```
 
 - `SHADI_KEYRING_PASSWORD_FILE` names a file holding the keyring password (a
   trailing newline is ignored). Without it the store is unavailable and every
   call returns `NotSupported`, as the no-op store did.
-- `SHADI_KEYRING_PATH` defaults to `~/.shadi/keyring/agent_secrets.keyring`,
+- `SHADI_KEYRING_PATH` defaults to `~/.shadi/keyring/agent_secrets.db`,
   outside the home directories the Compatibility sandbox profile grants
   (`~/.config`, `~/.local`, `~/.cache`).
 - With the password file set, `SHADI_KEYRING_PASSWORD_FILE`,
@@ -46,12 +46,22 @@ export SHADI_KEYRING_PATH=/path/to/agent_secrets.keyring      # optional
   password file then fails to read its credentials instead of opening an empty
   SQLCipher vault. To keep the vault in SQLCipher, set
   `SHADI_CREDENTIAL_BACKEND=sqlcipher` for both.
-- The keyring always holds a canary item, so a wrong password is refused even
-  once every key is deleted. A keyring file with no items at all is not
-  written to; remove it and provision again.
-- Writers hold an exclusive lock on `<keyring>.lock` and give up after 10
-  seconds if another process holds it; readers don't lock, so a keyring on a
-  read-only mount can still be read.
+- The password is checked whenever the keyring is opened, even with no keys
+  in it. The password file must be UTF-8 without NUL bytes. An empty keyring
+  file is never written to; remove it and provision again.
+- Concurrent processes are ordered by SQLite's file locks. A write gives up
+  after 10 seconds if another process holds the lock, and reports
+  `StoreNotFound` if the keyring is removed or replaced meanwhile. Reads open
+  the file read-only, so a keyring on a read-only mount can still be read;
+  only rolling back an interrupted write needs write access.
+- Every call opens the keyring and derives the key from the password (about
+  80 ms); nothing stays unlocked between calls.
+- If the keyring can't be decrypted, the error names both causes: a wrong
+  password or a damaged file. Check the password file, and restore a damaged
+  keyring from a backup rather than provisioning it again. SQLCipher prints
+  its own `hmac check failed` lines on stderr before this message.
+- The keyring directory must support hard links: new keyrings are written to a
+  temporary file and linked into place.
 
 Anyone who can read both the keyring file and its password file can decrypt
 every item, so keep them out of every sandbox grant. Every profile grants the
