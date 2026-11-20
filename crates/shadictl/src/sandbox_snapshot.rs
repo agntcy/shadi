@@ -6,35 +6,49 @@ use agent_transport_slim::{
 use shadi_sandbox::SandboxedChild;
 
 #[cfg(all(not(test), unix))]
-fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
     use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+    count_signals(&[SIGINT, SIGTERM, SIGHUP, SIGQUIT])
+}
 
-    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    for signal in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
-        if let Err(err) = signal_hook::flag::register(signal, std::sync::Arc::clone(&interrupted)) {
+/// Count every delivery of `signals`. A count, not a flag: two signals that
+/// land between two polls still read as two, so the second kills at once.
+#[cfg(unix)]
+fn count_signals(signals: &[i32]) -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for &signal in signals {
+        let handler_count = std::sync::Arc::clone(&count);
+        // SAFETY: the handler only does an atomic add, which is
+        // async-signal-safe.
+        let registered = unsafe {
+            signal_hook::low_level::register(signal, move || {
+                handler_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        if let Err(err) = registered {
             eprintln!("warning: failed to install signal handler for {}: {}", signal, err);
             return None;
         }
     }
 
-    Some(interrupted)
+    Some(count)
 }
 
 #[cfg(all(not(test), windows))]
-fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
-    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handler_flag = std::sync::Arc::clone(&interrupted);
+fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_count = std::sync::Arc::clone(&count);
     if let Err(err) = ctrlc::set_handler(move || {
-        handler_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        handler_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }) {
         eprintln!("warning: failed to install signal handler: {}", err);
         return None;
     }
-    Some(interrupted)
+    Some(count)
 }
 
 #[cfg(test)]
-fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+fn install_interrupt_flag() -> Option<std::sync::Arc<std::sync::atomic::AtomicUsize>> {
     None
 }
 
@@ -45,15 +59,43 @@ enum ChildWaitOutcome {
     Terminated(std::process::ExitStatus),
 }
 
+/// How long a child has, after a stop signal, to exit on its own before
+/// `shadictl` kills it.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait for the child to exit. The first stop signal counted in `interrupted`
+/// forwards `SIGTERM` to the child's process group and gives it `grace` to
+/// clean up; the group is killed after that, on another signal, or on
+/// `terminate_requested`. A process the child leaves in its group is waited
+/// for and killed the same way, so none outlives `shadictl`.
 fn wait_for_child_or_interrupt(
     child: &mut SandboxedChild,
-    interrupted: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    interrupted: Option<&std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     terminate_requested: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     restart_requested: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    grace: std::time::Duration,
 ) -> std::io::Result<ChildWaitOutcome> {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    // Signals already acted on.
+    let mut handled = 0;
+    // Set once a stop signal was forwarded: kill the group after this.
+    let mut kill_at: Option<std::time::Instant> = None;
+    // The child's own status, once it exited while stopping.
+    let mut exited: Option<std::process::ExitStatus> = None;
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(ChildWaitOutcome::Exited(status));
+        if exited.is_none() {
+            if let Some(status) = child.try_wait()? {
+                if kill_at.is_none() {
+                    return Ok(ChildWaitOutcome::Exited(status));
+                }
+                exited = Some(status);
+            }
+        }
+        if let Some(status) = exited {
+            if !child.group_alive() {
+                return Ok(ChildWaitOutcome::Terminated(status));
+            }
         }
 
         // Read restart before terminate. Both are read once per iteration so
@@ -61,16 +103,41 @@ fn wait_for_child_or_interrupt(
         // first means a terminate stored before it is always visible here, so
         // terminate keeps its priority even when both land mid-iteration.
         // Reading terminate first let a restart stored in between win.
-        let restart =
-            restart_requested.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
-        let terminate = interrupted
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-            || terminate_requested
-                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
+        let restart = restart_requested.is_some_and(|flag| flag.load(SeqCst));
+        let signals = interrupted.map_or(0, |count| count.load(SeqCst));
+        let new_signals = signals.saturating_sub(handled);
+        handled = signals;
+        let terminate = terminate_requested.is_some_and(|flag| flag.load(SeqCst));
 
-        if terminate {
+        let kill_now = terminate
+            || match kill_at {
+                Some(at) => new_signals > 0 || std::time::Instant::now() >= at,
+                // Two signals before this poll: the second one escalates.
+                None => new_signals > 1,
+            };
+        if kill_now {
             let _ = child.kill();
-            return child.wait().map(ChildWaitOutcome::Terminated);
+            return match exited {
+                Some(status) => Ok(ChildWaitOutcome::Terminated(status)),
+                None => child.wait().map(ChildWaitOutcome::Terminated),
+            };
+        }
+
+        if new_signals > 0 {
+            // Let the child stop on its own first: `--record` and
+            // `--dir-announce` runs remove what they created on SIGTERM.
+            if child.terminate().is_err() {
+                let _ = child.kill();
+                return child.wait().map(ChildWaitOutcome::Terminated);
+            }
+            kill_at = Some(std::time::Instant::now() + grace);
+            continue;
+        }
+
+        if kill_at.is_some() {
+            // Stopping: a restart no longer applies.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
         }
 
         if restart {
@@ -441,6 +508,7 @@ pub(crate) fn run_sandboxed_command(
             interrupted.as_ref(),
             terminate_requested.as_ref(),
             restart_requested.as_ref(),
+            STOP_GRACE,
         ) {
             Ok(ChildWaitOutcome::RestartRequested) => {
                 let bridge_report = match stop_internal_slim_bridge(slim_bridge.take()) {
@@ -1354,12 +1422,31 @@ mod tests {
     use super::*;
     use crate::{Cli, PolicyFile, resolve_policy};
     #[cfg(unix)]
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use std::sync::mpsc;
     #[cfg(unix)]
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn every_delivered_signal_is_counted() {
+        use signal_hook::consts::signal::SIGUSR1;
+        // SIGUSR1, not a stop signal: the handler stays installed for the
+        // rest of the test binary, and nothing else here uses it.
+        let count = count_signals(&[SIGUSR1]).expect("handler installs");
+        signal_hook::low_level::raise(SIGUSR1).expect("raise");
+        signal_hook::low_level::raise(SIGUSR1).expect("raise");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_that_cannot_be_handled_installs_no_counter() {
+        // Not a signal number on any platform, so `sigaction` rejects it.
+        assert!(count_signals(&[9999]).is_none());
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     const TEST_SHARED_SECRET: &str = "my_shared_secret_for_testing_purposes_only";
@@ -1524,7 +1611,7 @@ mod tests {
             signal_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let outcome = wait_for_child_or_interrupt(&mut child, None, Some(&terminate_requested), None)
+        let outcome = wait_for_child_or_interrupt(&mut child, None, Some(&terminate_requested), None, STOP_GRACE)
             .expect("wait for terminated child");
         match outcome {
             ChildWaitOutcome::Terminated(status) => assert!(!status.success()),
@@ -1540,15 +1627,10 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let mut child = SandboxedChild::from_std(child);
-        let interrupted = Arc::new(AtomicBool::new(false));
-        let signal_flag = Arc::clone(&interrupted);
+        let interrupted = Arc::new(AtomicUsize::new(0));
+        interrupt_after(&interrupted, &[100]);
 
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            signal_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-
-        let outcome = wait_for_child_or_interrupt(&mut child, Some(&interrupted), None, None)
+        let outcome = wait_for_child_or_interrupt(&mut child, Some(&interrupted), None, None, STOP_GRACE)
             .expect("wait for interrupted child");
         match outcome {
             ChildWaitOutcome::Terminated(status) => assert!(!status.success()),
@@ -1572,7 +1654,7 @@ mod tests {
             signal_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let outcome = wait_for_child_or_interrupt(&mut child, None, None, Some(&restart_requested))
+        let outcome = wait_for_child_or_interrupt(&mut child, None, None, Some(&restart_requested), STOP_GRACE)
             .expect("wait for restart");
         assert!(matches!(outcome, ChildWaitOutcome::RestartRequested));
     }
@@ -1585,7 +1667,7 @@ mod tests {
             .expect("spawn true");
         let mut child = SandboxedChild::from_std(child);
 
-        let outcome = wait_for_child_or_interrupt(&mut child, None, None, None)
+        let outcome = wait_for_child_or_interrupt(&mut child, None, None, None, STOP_GRACE)
             .expect("wait for exit");
         match outcome {
             ChildWaitOutcome::Exited(status) => assert!(status.success()),
@@ -1613,9 +1695,266 @@ mod tests {
             r.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let outcome = wait_for_child_or_interrupt(&mut child, None, Some(&terminate), Some(&restart))
-            .expect("wait");
+        let outcome = wait_for_child_or_interrupt(
+            &mut child,
+            None,
+            Some(&terminate),
+            Some(&restart),
+            STOP_GRACE,
+        )
+        .expect("wait");
         assert!(matches!(outcome, ChildWaitOutcome::Terminated(_)));
+    }
+
+    /// A child that cleans up on SIGTERM: writes `marker` and exits 0.
+    /// `ignore` makes it ignore SIGTERM instead.
+    #[cfg(unix)]
+    fn spawn_sigterm_child(marker: &Path, ignore: bool) -> SandboxedChild {
+        let trap = if ignore {
+            "trap '' TERM".to_string()
+        } else {
+            format!("trap 'echo cleaned > {}; exit 0' TERM", marker.display())
+        };
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{trap}; while :; do sleep 0.05; done"))
+            .spawn()
+            .expect("spawn sh");
+        // Let the shell install its trap before the test signals it.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        SandboxedChild::from_std(child)
+    }
+
+    /// Count a stop signal after each delay, as the signal handler does.
+    #[cfg(unix)]
+    fn interrupt_after(count: &Arc<AtomicUsize>, delays_ms: &[u64]) {
+        let count = Arc::clone(count);
+        let delays = delays_ms.to_vec();
+        std::thread::spawn(move || {
+            for delay in delays {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    /// Whether `pid` is a live process. A zombie isn't: it may wait a long
+    /// time to be reaped where init doesn't reap orphans (containers).
+    fn is_running(pid: i32) -> bool {
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let state = String::from_utf8_lossy(&output.stdout);
+        let state = state.trim();
+        !state.is_empty() && !state.starts_with('Z')
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_signal_lets_the_child_clean_up_before_it_is_killed() {
+        let dir = temp_dir();
+        let marker = dir.path().join("cleaned");
+        let mut child = spawn_sigterm_child(&marker, false);
+        let interrupted = Arc::new(AtomicUsize::new(0));
+        interrupt_after(&interrupted, &[50]);
+
+        let outcome = wait_for_child_or_interrupt(
+            &mut child,
+            Some(&interrupted),
+            None,
+            None,
+            std::time::Duration::from_secs(10),
+        )
+        .expect("wait");
+
+        match outcome {
+            ChildWaitOutcome::Terminated(status) => assert!(status.success(), "{status:?}"),
+            other => panic!("expected Terminated, got {other:?}"),
+        }
+        assert!(
+            marker.exists(),
+            "the child should have run its SIGTERM handler"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_ignores_the_stop_signal_is_killed_after_the_grace_period() {
+        let dir = temp_dir();
+        let mut child = spawn_sigterm_child(&dir.path().join("unused"), true);
+        let interrupted = Arc::new(AtomicUsize::new(0));
+        interrupt_after(&interrupted, &[50]);
+        let grace = std::time::Duration::from_millis(500);
+        let start = std::time::Instant::now();
+
+        let outcome =
+            wait_for_child_or_interrupt(&mut child, Some(&interrupted), None, None, grace)
+                .expect("wait");
+
+        match outcome {
+            ChildWaitOutcome::Terminated(status) => assert!(!status.success(), "{status:?}"),
+            other => panic!("expected Terminated, got {other:?}"),
+        }
+        assert!(
+            start.elapsed() >= grace,
+            "killed before the grace period ended"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_stop_signal_kills_the_child_at_once() {
+        let dir = temp_dir();
+        let mut child = spawn_sigterm_child(&dir.path().join("unused"), true);
+        let interrupted = Arc::new(AtomicUsize::new(0));
+        interrupt_after(&interrupted, &[50, 300]);
+        let start = std::time::Instant::now();
+
+        let outcome = wait_for_child_or_interrupt(
+            &mut child,
+            Some(&interrupted),
+            None,
+            None,
+            std::time::Duration::from_secs(30),
+        )
+        .expect("wait");
+
+        assert!(matches!(outcome, ChildWaitOutcome::Terminated(_)));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "a second signal should not wait out the grace period"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_stop_signals_before_the_first_poll_kill_the_child_at_once() {
+        let dir = temp_dir();
+        let mut child = spawn_sigterm_child(&dir.path().join("unused"), true);
+        // Both handled before the wait loop looks.
+        let interrupted = Arc::new(AtomicUsize::new(2));
+        let start = std::time::Instant::now();
+
+        let outcome = wait_for_child_or_interrupt(
+            &mut child,
+            Some(&interrupted),
+            None,
+            None,
+            std::time::Duration::from_secs(30),
+        )
+        .expect("wait");
+
+        assert!(matches!(outcome, ChildWaitOutcome::Terminated(_)));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "two signals should not wait out the grace period"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_that_ignores_the_stop_signal_is_killed_after_the_grace_period() {
+        use std::os::unix::process::CommandExt;
+
+        let dir = temp_dir();
+        let pid_file = dir.path().join("descendant.pid");
+        // The leader exits on SIGTERM; the descendant it started, in the same
+        // process group, ignores it.
+        let script = format!(
+            "trap 'exit 0' TERM; \
+             (trap '' TERM; while :; do sleep 0.05; done) & echo $! > {}; \
+             while :; do sleep 0.05; done",
+            pid_file.display()
+        );
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .process_group(0)
+            .spawn()
+            .expect("spawn sh");
+        let mut child = SandboxedChild::from_std(child);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let descendant: i32 = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        assert!(is_running(descendant));
+
+        let interrupted = Arc::new(AtomicUsize::new(0));
+        interrupt_after(&interrupted, &[50]);
+        let grace = std::time::Duration::from_millis(500);
+        let start = std::time::Instant::now();
+
+        let outcome =
+            wait_for_child_or_interrupt(&mut child, Some(&interrupted), None, None, grace)
+                .expect("wait");
+
+        match outcome {
+            ChildWaitOutcome::Terminated(status) => {
+                assert!(status.success(), "the leader's own exit status: {status:?}")
+            }
+            other => panic!("expected Terminated, got {other:?}"),
+        }
+        assert!(
+            start.elapsed() >= grace,
+            "killed before the grace period ended"
+        );
+        // SIGKILL can take a moment to land.
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            !is_running(descendant)
+        });
+        assert!(gone, "the descendant outlived shadictl");
+    }
+
+    /// When `shadictl` is PID 1 (a container without init), a group member the
+    /// child leaves behind becomes `shadictl`'s own child, and its zombie still
+    /// counts as a group member on Linux until `shadictl` reaps it. Here the
+    /// test process stands in for `shadictl`: the member is its direct child.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_group_member_left_as_our_zombie_does_not_hold_up_the_stop() {
+        use std::os::unix::process::CommandExt;
+
+        let leader = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap 'exit 0' TERM; while :; do sleep 0.05; done")
+            .process_group(0)
+            .spawn()
+            .expect("spawn leader");
+        let pgid = leader.id() as i32;
+        let mut member = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap 'exit 0' TERM; while :; do sleep 0.05; done")
+            .process_group(pgid)
+            .spawn()
+            .expect("spawn member");
+        let mut child = SandboxedChild::from_std(leader);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let interrupted = Arc::new(AtomicUsize::new(0));
+        interrupt_after(&interrupted, &[50]);
+        let start = std::time::Instant::now();
+        let outcome = wait_for_child_or_interrupt(
+            &mut child,
+            Some(&interrupted),
+            None,
+            None,
+            std::time::Duration::from_secs(5),
+        )
+        .expect("wait");
+        let elapsed = start.elapsed();
+        let _ = member.kill();
+        let _ = member.wait();
+
+        assert!(matches!(outcome, ChildWaitOutcome::Terminated(_)));
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "waited {elapsed:?} on a group of zombies"
+        );
     }
 
     #[test]
