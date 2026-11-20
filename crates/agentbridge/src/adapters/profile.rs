@@ -1503,10 +1503,10 @@ mod tests {
         let untraced_receive = adapter.execute_prompt_in_traced("ctx", "ignored", &[]);
         let plain = adapter.execute_prompt_in("ctx", "ignored");
         for (name, value) in prior {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
+            value.map_or_else(
+                || std::env::remove_var(name),
+                |value| std::env::set_var(name, value),
+            );
         }
         assert_eq!(traced.unwrap().trim(), "tp=00-receive-span ts=unset");
         assert_eq!(untraced_receive.unwrap().trim(), "tp=unset ts=unset");
