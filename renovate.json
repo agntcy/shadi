@@ -88,6 +88,14 @@
       "minimumReleaseAge": "1 day"
     },
     {
+      "description": "@vitejs/plugin-react tracks vite majors (6 imports vite/internal, which only vite 8 exports), so a plugin bump on its own breaks the dev server.",
+      "matchPackageNames": [
+        "vite",
+        "@vitejs/plugin-react"
+      ],
+      "groupName": "vite"
+    },
+    {
       "matchManagers": [
         "github-actions"
       ],
