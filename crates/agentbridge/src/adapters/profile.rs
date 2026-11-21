@@ -407,6 +407,7 @@ impl ProfileAdapter {
         system: Option<&str>,
         include_workdir_flags: bool,
         use_session: bool,
+        trace_env: Option<&[(String, String)]>,
     ) -> Result<String, CliAdapterError> {
         let session = if use_session {
             self.session_id(conversation)?
@@ -484,6 +485,8 @@ impl ProfileAdapter {
                     .map(|arg| substitute_config_root(arg, root)),
             );
         }
+        // After pass_env, so a profile cannot pass the listener's own trace on.
+        apply_trace_env(&mut cmd, trace_env);
         if self.profile.current_dir_workdir {
             cmd.current_dir(&self.work_dir);
         }
@@ -810,6 +813,7 @@ impl CliAdapter for ProfileAdapter {
             None,
             self.profile.workdir_flags_on_snapshot,
             true,
+            None,
         )?;
         let mut pkt = ContextPacket::new(self.id.0.clone());
         pkt.conversation.push(ConversationMessage {
@@ -833,6 +837,7 @@ impl CliAdapter for ProfileAdapter {
                 Some(&inject_system(ctx)),
                 self.profile.workdir_flags_on_inject,
                 false,
+                None,
             )?;
         } else {
             let mut prompt = inject_system(ctx);
@@ -843,6 +848,7 @@ impl CliAdapter for ProfileAdapter {
                 None,
                 self.profile.workdir_flags_on_inject,
                 false,
+                None,
             )?;
         }
         Ok(())
@@ -857,6 +863,30 @@ impl CliAdapter for ProfileAdapter {
         conversation: &str,
         prompt: &str,
     ) -> Result<String, CliAdapterError> {
+        self.execute(conversation, prompt, None)
+    }
+
+    fn execute_prompt_in_traced(
+        &self,
+        conversation: &str,
+        prompt: &str,
+        trace_env: &[(String, String)],
+    ) -> Result<String, CliAdapterError> {
+        self.execute(conversation, prompt, Some(trace_env))
+    }
+
+    fn kill_in_flight(&self) {
+        self.subprocess.kill();
+    }
+}
+
+impl ProfileAdapter {
+    fn execute(
+        &self,
+        conversation: &str,
+        prompt: &str,
+        trace_env: Option<&[(String, String)]>,
+    ) -> Result<String, CliAdapterError> {
         let session = self.session_id(conversation)?;
         match self.run(
             conversation,
@@ -864,6 +894,7 @@ impl CliAdapter for ProfileAdapter {
             None,
             self.profile.workdir_flags_on_execute,
             true,
+            trace_env,
         ) {
             Err(err)
                 if session.is_some()
@@ -881,14 +912,29 @@ impl CliAdapter for ProfileAdapter {
                     None,
                     self.profile.workdir_flags_on_execute,
                     false,
+                    trace_env,
                 )
             }
             other => other,
         }
     }
+}
 
-    fn kill_in_flight(&self) {
-        self.subprocess.kill();
+/// Run the harness as a child of the trace `trace_env` names. Inherited
+/// `TRACEPARENT`/`TRACESTATE` are removed first: a listener started from a
+/// harness's shell inherits that shell's span, and a task the listener runs
+/// must not join it. `None` leaves the environment as it is.
+fn apply_trace_env(cmd: &mut Command, trace_env: Option<&[(String, String)]>) {
+    let Some(trace_env) = trace_env else {
+        return;
+    };
+    for (_, name) in shadi_a2a::TRACE_ENV_VARS {
+        cmd.env_remove(name);
+    }
+    for (name, value) in trace_env {
+        if shadi_a2a::TRACE_ENV_VARS.iter().any(|(_, var)| var == name) {
+            cmd.env(name, value);
+        }
     }
 }
 
@@ -1563,6 +1609,78 @@ mod tests {
             }
         }
         assert_eq!(out.unwrap().trim(), "seed=unset tls=unset op=unset dir=unset");
+    }
+
+    /// The listener's own TRACEPARENT (from the shell that started it) never
+    /// reaches the harness: a traced run gets the receive span's instead, and
+    /// a profile's `pass_env` cannot put the inherited one back.
+    #[cfg(unix)]
+    #[test]
+    fn a_traced_run_replaces_the_inherited_trace_context() {
+        let _guard = profile_env_lock().lock().unwrap();
+        let prior: Vec<_> = ["TRACEPARENT", "TRACESTATE"]
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect();
+        std::env::set_var("TRACEPARENT", "00-listener-shell");
+        std::env::set_var("TRACESTATE", "listener=1");
+        let profile = parse_profile(
+            r#"{
+              "id": "trace-echo",
+              "bin": "/bin/sh",
+              "current_dir_workdir": false,
+              "pass_env": ["TRACEPARENT", "TRACESTATE"],
+              "execute": { "args": ["-c", "echo tp=${TRACEPARENT-unset} ts=${TRACESTATE-unset}"] },
+              "result": { "kind": "stdout" }
+            }"#,
+        )
+        .unwrap();
+        let adapter = ProfileAdapter::new(profile, std::env::temp_dir());
+
+        let receive = vec![("TRACEPARENT".to_string(), "00-receive-span".to_string())];
+        let traced = adapter.execute_prompt_in_traced("ctx", "ignored", &receive);
+        let untraced_receive = adapter.execute_prompt_in_traced("ctx", "ignored", &[]);
+        let plain = adapter.execute_prompt_in("ctx", "ignored");
+        for (name, value) in prior {
+            value.map_or_else(
+                || std::env::remove_var(name),
+                |value| std::env::set_var(name, value),
+            );
+        }
+        assert_eq!(traced.unwrap().trim(), "tp=00-receive-span ts=unset");
+        assert_eq!(untraced_receive.unwrap().trim(), "tp=unset ts=unset");
+        assert_eq!(
+            plain.unwrap().trim(),
+            "tp=00-listener-shell ts=listener=1",
+            "an untraced call leaves the environment alone"
+        );
+    }
+
+    #[test]
+    fn only_trace_variables_are_applied() {
+        let mut cmd = Command::new("true");
+        apply_trace_env(
+            &mut cmd,
+            Some(&[
+                ("TRACEPARENT".to_string(), "tp".to_string()),
+                ("PATH".to_string(), "/evil".to_string()),
+            ]),
+        );
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(
+            envs.contains(&("TRACEPARENT".to_string(), Some("tp".to_string()))),
+            "{envs:?}"
+        );
+        assert!(envs.contains(&("TRACESTATE".to_string(), None)), "{envs:?}");
+        assert!(!envs.iter().any(|(k, _)| k == "PATH"), "{envs:?}");
     }
 
     fn write_session_retry_bin() -> (tempfile::TempDir, PathBuf) {
