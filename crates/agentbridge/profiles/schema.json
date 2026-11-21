@@ -118,11 +118,16 @@
     },
     "session": {
       "type": "object",
-      "required": ["json_field", "flag"],
       "additionalProperties": false,
+      "allOf": [
+        { "oneOf": [{ "required": ["json_field"] }, { "required": ["stderr_prefix"] }] },
+        { "oneOf": [{ "required": ["flag"] }, { "required": ["args"] }] }
+      ],
       "properties": {
         "json_field": { "type": "string" },
+        "stderr_prefix": { "type": "string" },
         "flag": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
         "retry_stderr_contains": { "type": "string" }
       }
     },

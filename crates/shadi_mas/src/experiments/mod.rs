@@ -116,6 +116,7 @@ pub struct LiveA2ATaskAdapter {
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
     policy: Option<Arc<dyn AgentVerifier>>,
     presenter: Option<Presenter>,
+    context_id: Option<String>,
 }
 
 /// Turns an opaque challenge into a `vp_token`.
@@ -128,6 +129,7 @@ impl LiveA2ATaskAdapter {
             dispatches: Mutex::new(Vec::new()),
             policy: None,
             presenter: None,
+            context_id: None,
         }
     }
 
@@ -143,6 +145,14 @@ impl LiveA2ATaskAdapter {
     /// The adapter frames the token onto the signed payload itself.
     pub fn with_presenter(mut self, presenter: Presenter) -> Self {
         self.presenter = Some(presenter);
+        self
+    }
+
+    /// Send every task as part of A2A context `context_id`, so the peer can
+    /// continue one harness session across tasks. `None` lets the peer pick
+    /// a new context per task.
+    pub fn with_context_id(mut self, context_id: Option<String>) -> Self {
+        self.context_id = context_id;
         self
     }
 
@@ -179,12 +189,16 @@ impl LiveA2ATaskAdapter {
             a2a.task_id = %task.task_id,
             peer.agent_id = %self.config.peer_agent_id,
             peer.did = tracing::field::Empty,
+            a2a.context_id = tracing::field::Empty,
             a2a.outcome = tracing::field::Empty,
             gen_ai.input.messages = tracing::field::Empty,
             gen_ai.output.messages = tracing::field::Empty,
         );
         if let Some(did) = self.config.peer_did.as_deref() {
             span.record("peer.did", did);
+        }
+        if let Some(context_id) = self.context_id.as_deref() {
+            span.record("a2a.context_id", context_id);
         }
         let _guard = span.enter();
 
@@ -272,6 +286,7 @@ impl LiveA2ATaskAdapter {
     fn task_message(&self, signed_text: &str, task_id: Option<&str>) -> Message {
         let mut message = Message::new(Role::User, vec![Part::text(signed_text.to_string())]);
         message.task_id = task_id.map(str::to_string);
+        message.context_id = self.context_id.clone();
         match self.config.peer_did.as_deref() {
             Some(peer_did) => insert_dest_did(message, peer_did),
             None => message,
@@ -990,6 +1005,28 @@ mod transport_tests {
         let retry = adapter.task_message("signed", Some("parked"));
         assert_eq!(retry.task_id.as_deref(), Some("parked"));
         assert_eq!(adapter.task_message("signed", None).task_id, None);
+    }
+
+    #[test]
+    fn task_message_sets_the_context_id_only_when_given() {
+        let adapter = || {
+            LiveA2ATaskAdapter::new(LiveA2ATaskAdapterConfig {
+                endpoint: "node:47357".to_string(),
+                agent_id: "avatar".to_string(),
+                local_name: None,
+                peer_agent_id: "peer".to_string(),
+                destination: None,
+                a2a_url: None,
+                a2a_binding: None,
+                peer_did: None,
+            })
+        };
+        let continued = adapter().with_context_id(Some("ctx-1".to_string()));
+        assert_eq!(
+            continued.task_message("signed", None).context_id.as_deref(),
+            Some("ctx-1")
+        );
+        assert_eq!(adapter().task_message("signed", None).context_id, None);
     }
 
     struct Allow;

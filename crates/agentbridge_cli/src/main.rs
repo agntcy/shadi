@@ -279,6 +279,14 @@ enum Cmd {
         /// host (agents announced with `register --dir-announce`).
         #[arg(long, value_name = "ADDR", default_value = "localhost:8888")]
         runtime: String,
+
+        /// A2A context to send the task in. Tasks from you in the same
+        /// context continue one harness session on the peer. Defaults to
+        /// `IOC_SESSION_ID`, else the calling harness's session
+        /// (`CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`); with none set, the
+        /// peer starts a new session per task.
+        #[arg(long)]
+        context_id: Option<String>,
     },
 
     /// Ask a channel's owner over A2A to let someone into the channel.
@@ -652,6 +660,7 @@ fn main() {
             a2a_url,
             a2a_binding,
             runtime,
+            context_id,
         } => commands::delegate::run(
             &prompt,
             &to,
@@ -660,6 +669,7 @@ fn main() {
             a2a_url.as_deref(),
             a2a_binding,
             &runtime,
+            context_id.as_deref(),
         ),
         Cmd::RequestInvite {
             owner,
