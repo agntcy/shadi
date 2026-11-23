@@ -39,7 +39,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
 
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -144,7 +144,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       - name: Setup Python
@@ -360,7 +360,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       - name: Setup Python
@@ -523,7 +523,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
 
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
