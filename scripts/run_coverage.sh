@@ -4,8 +4,7 @@
 set -euo pipefail
 
 mode="${1:-lcov}"
-python_bin="${2:-${PYO3_PYTHON:-python3.12}}"
-rustflags_value="${3:-${RUSTFLAGS:-}}"
+rustflags_value="${2:-${RUSTFLAGS:-}}"
 
 mkdir -p coverage
 
@@ -84,7 +83,6 @@ case "$mode" in
 esac
 
 SHADI_KEYCHAIN_TESTS="${SHADI_KEYCHAIN_TESTS:-1}" \
-PYO3_PYTHON="$python_bin" \
 RUSTFLAGS="$rustflags_value" \
 LLVM_COV="$llvm_cov" \
 LLVM_PROFDATA="$llvm_profdata" \

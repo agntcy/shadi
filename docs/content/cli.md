@@ -7,9 +7,8 @@ encrypted memory ([`shadictl memory`](#shadictl-memory-shadictl-memory)),
 native SLIM/A2A helpers ([`shadictl slim`](#shadictl-slim-shadictl-slim)), and
 SLIM group membership rules ([`shadictl slim-mas`](#shadictl-slim-mas-shadictl-slim-mas)).
 
-Most agents use the Python bindings (`shadi` module) for secrets, SQLCipher
-memory, and sandbox execution — see [API Guide → Language Bindings](api_integration.md#language-bindings).
-The CLI remains useful for ops and debugging.
+Rust applications can embed the same secrets, memory, and sandbox layers
+directly — see [API Guide → Rust API](api_integration.md#rust-api).
 
 ## shadictl (`shadi`)
 

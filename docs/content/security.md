@@ -306,8 +306,6 @@ Controls:
 ### Network abuse
 
 - **Stopped**: Network access when `net_block` is enabled.
-- **Mitigated**: Unapproved endpoints with best-effort `net_allow` guard for
-  Python sandbox runners.
 
 ### Agent-to-agent data leakage
 

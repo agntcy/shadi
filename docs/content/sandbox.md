@@ -173,10 +173,6 @@ allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 | `--git-snapshot-dir DIR` | Override the default snapshot root at `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`. |
 | `--git-snapshot-untracked` | Include an explicit untracked-file inventory in the artifact. |
 
-!!! note
-
-    `net_allow` is honored by the Python sandbox runner. It injects a `sitecustomize.py` hook that blocks connections outside the allowlist (best-effort; not OS-enforced).
-
 ## Compiled defaults, aliases, and deny
 
 `--allow`, `--read`, and `--write` only add paths. Each OS backend also

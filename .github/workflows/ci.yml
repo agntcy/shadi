@@ -70,8 +70,6 @@ jobs:
           - ubuntu-latest
           - macos-latest
           - windows-latest
-    env:
-      PYO3_PYTHON: python
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -118,10 +116,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config nettle-dev libssl-dev
       - name: Install macOS dependencies
         if: runner.os == 'macOS' && needs.changes.outputs.workspace == 'true'
-        run: brew install python@3.12 nettle pkg-config
-      - name: Set Python for PyO3 (macOS)
-        if: runner.os == 'macOS' && needs.changes.outputs.workspace == 'true'
-        run: echo "PYO3_PYTHON=/opt/homebrew/opt/python@3.12/bin/python3.12" >> "$GITHUB_ENV"
+        run: brew install nettle pkg-config
       - name: Validate Linux installer
         if: runner.os == 'Linux' && needs.changes.outputs.workspace == 'true'
         run: bash scripts/test_install_shadictl.sh
@@ -148,11 +143,6 @@ jobs:
         with:
           toolchain: 1.99.0
           components: clippy
-      - name: Setup Python
-        if: needs.changes.outputs.workspace == 'true'
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.15"
       - name: Restore Rust cache
         if: needs.changes.outputs.workspace == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -173,8 +163,6 @@ jobs:
       # so feature-gated code is checked too.
       - name: Clippy
         if: needs.changes.outputs.workspace == 'true'
-        env:
-          PYO3_PYTHON: python
         run: just lint
 
   lockfiles:

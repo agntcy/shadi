@@ -6,7 +6,6 @@ The workspace contains these crates:
 - shadictl: CLI for sandboxing, key management, identity, and policy resolution
 - shadi_memory: SQLCipher-backed encrypted memory store
 - shadi_sandbox: OS sandbox enforcement layer
-- shadi_py: Python bindings for secrets, SQLCipher memory, and sandbox execution
 - shadi_identity: DID identity derivation and SLIM DID-JWT auth
 - shadi_a2a: A2A-over-SLIM wrapper, including secure group (Collaborate) messaging
 - slim_mas: SLIM multi-agent group config and DID allow-list evaluation (a library, consumed by `shadictl slim-mas`, not itself a CLI). Not SHADI MAS.
