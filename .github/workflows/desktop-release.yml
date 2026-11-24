@@ -99,7 +99,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       - name: Install Tauri Linux dependencies
@@ -117,7 +117,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 11.28.5
+          version: 11.29.0
 
       # No dependency cache: what this job builds is published.
       - name: Setup Node
