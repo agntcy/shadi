@@ -51,9 +51,7 @@ jobs:
             echo "workspace=true" >>"$GITHUB_OUTPUT"; exit 0
           fi
           echo "Changed files:"; printf '%s\n' "$changed" | sed 's/^/  /'
-          # apps/shadi_desktop is its own workspace and is excluded from every
-          # build here, so a desktop-only change cannot affect these jobs.
-          if printf '%s\n' "$changed" | grep -qvE '(^docs/|\.md$|^LICENSE$|^CODEOWNERS$|^\.gitignore$|^apps/shadi_desktop/|^\.github/ISSUE_TEMPLATE/)'; then
+          if printf '%s\n' "$changed" | grep -qvE '(^docs/|\.md$|^LICENSE$|^CODEOWNERS$|^\.gitignore$|^\.github/ISSUE_TEMPLATE/)'; then
             echo "workspace=true" >>"$GITHUB_OUTPUT"
           else
             echo "workspace=false" >>"$GITHUB_OUTPUT"
@@ -122,7 +120,7 @@ jobs:
         run: bash scripts/test_install_shadictl.sh
       - name: Build and test
         if: runner.os != 'Windows' && needs.changes.outputs.workspace == 'true'
-        run: cargo test --workspace --exclude shadi_desktop
+        run: cargo test --workspace
       - name: Build and test (Windows)
         if: runner.os == 'Windows' && needs.changes.outputs.workspace == 'true'
         shell: pwsh
@@ -180,7 +178,7 @@ jobs:
       # `cargo test` below does not pass --locked, so a PR that changes a
       # dependency without committing the lock would pass silently and leave
       # main to resolve it. `cargo metadata` resolves without compiling, so
-      # this costs seconds and needs none of Tauri's system deps.
+      # this costs seconds and needs no system deps.
       - name: Check the lockfile is current
         run: |
           if ! cargo metadata --locked --format-version 1 >/dev/null; then

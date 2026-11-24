@@ -14,7 +14,7 @@ windows-test: test
 [group('core')]
 [doc('Run the Rust workspace test suite.')]
 test:
-  cargo test --workspace --exclude shadi_desktop
+  cargo test --workspace
 
 [group('core')]
 [doc('Run Clippy across all targets and features.')]
@@ -57,7 +57,7 @@ coverage-html:
 [group('core')]
 [doc('Run the Windows integration-oriented Cargo tests.')]
 windows-integration:
-  $env:SHADI_WINDOWS_INTEGRATION = "1"; cargo test --workspace --exclude shadi_desktop
+  $env:SHADI_WINDOWS_INTEGRATION = "1"; cargo test --workspace
 
 [group('docs')]
 [doc('Build the MkDocs site locally.')]

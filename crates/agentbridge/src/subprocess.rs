@@ -30,7 +30,7 @@ pub const WITHHELD_FROM_HARNESS: &[&str] = &[
     "SLIM_TLS_KEY",
     "A2A_TLS_KEY",
     "SLIM_AUTH_TOKEN_FILE",
-    // The channel manager's API token, as a path (SHADI desktop).
+    // The channel manager's API token, as a path.
     "SHADI_CHANNEL_MANAGER_TOKEN_FILE",
     // The GitHub token SHADI publishes to and looks up in the Agent
     // Directory with; agentbridge sets it only on the `dirctl` it runs.

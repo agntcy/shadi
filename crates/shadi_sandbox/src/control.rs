@@ -5,8 +5,8 @@
 //!
 //! `shadictl --watch-policy` serves a local `AF_UNIX` control socket; the
 //! server half lives with it. This is the caller's half, so everything outside
-//! that process — `shadictl policy patch`, the shell's session commands, SHADI
-//! Desktop — reaches a running session through one implementation instead of
+//! that process — `shadictl policy patch`, the shell's session commands —
+//! reaches a running session through one implementation instead of
 //! restating the protocol.
 //!
 //! Sockets are named `shadi-ctl-<pid>.sock` for the PID-based default and
