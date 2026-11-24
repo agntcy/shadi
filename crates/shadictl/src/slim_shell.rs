@@ -479,11 +479,11 @@ pub(crate) fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial
 }
 
 pub(crate) fn resolve_server_tls_material() -> Result<TlsMaterial, String> {
-    let cert_dir = slim_tls_dir();
+    let tls_dir = slim_tls_dir();
     let tls = TlsMaterial {
-        cert: cert_dir.join("server.crt"),
-        key: cert_dir.join("server.key"),
-        ca: cert_dir.join("ca.crt"),
+        cert: tls_dir.join("server.crt"),
+        key: tls_dir.join("server.key"),
+        ca: tls_dir.join("ca.crt"),
     };
 
     ensure_file_exists(&tls.cert, "SLIM server certificate")?;

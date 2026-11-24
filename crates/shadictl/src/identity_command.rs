@@ -448,14 +448,14 @@ pub(crate) fn store_derived_agent_identity(
 
 pub(crate) fn read_seed_input(
     label: &str,
-    secret_key: Option<&str>,
+    key_ref: Option<&str>,
     input: Option<&PathBuf>,
 ) -> Result<Vec<u8>, String> {
-    if let Some(secret_key) = secret_key {
+    if let Some(key_ref) = key_ref {
         let store = default_secret_store();
         let secret = store
-            .get(secret_key)
-            .map_err(|_| format!("keychain lookup failed for {}", secret_key))?;
+            .get(key_ref)
+            .map_err(|_| format!("keychain lookup failed for {}", key_ref))?;
         return Ok(secret.expose(|bytes| bytes.to_vec()));
     }
 
@@ -494,14 +494,14 @@ pub(crate) fn run_put_key(args: PutKeyArgs) -> Result<(), String> {
 
 pub(crate) fn read_openpgp_input(
     label: &str,
-    secret_key: Option<&str>,
+    key_ref: Option<&str>,
     input: Option<&PathBuf>,
 ) -> Result<Vec<u8>, String> {
-    if let Some(secret_key) = secret_key {
+    if let Some(key_ref) = key_ref {
         let store = default_secret_store();
         let secret = store
-            .get(secret_key)
-            .map_err(|_| format!("keychain lookup failed for {}", secret_key))?;
+            .get(key_ref)
+            .map_err(|_| format!("keychain lookup failed for {}", key_ref))?;
         return Ok(secret.expose(|bytes| bytes.to_vec()));
     }
 
@@ -649,11 +649,11 @@ pub(crate) fn resolve_ssh_passphrase(secret_ref: Option<&str>) -> Result<Option<
 /// Reduce an OpenSSH private key to the seed agent derivation roots in.
 pub(crate) fn read_ssh_seed_input(
     label: &str,
-    secret_key: Option<&str>,
+    key_ref: Option<&str>,
     input: Option<&PathBuf>,
     passphrase_secret: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let key_bytes = read_seed_input(label, secret_key, input)?;
+    let key_bytes = read_seed_input(label, key_ref, input)?;
     let passphrase = resolve_ssh_passphrase(passphrase_secret)?;
     let seed = shadi_identity::ssh::seed_from_openssh_private_key(&key_bytes, passphrase.as_deref())
         .map_err(|err| err.to_string())?;
