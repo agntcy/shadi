@@ -113,7 +113,7 @@ pub(crate) struct LaunchSecretConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedProcessSecretPolicyRule {
-    pub(crate) secret: String,
+    pub(crate) key: String,
     pub(crate) actions: Vec<SecretAction>,
     pub(crate) children: Vec<PathBuf>,
     pub(crate) child_sha256: Vec<[u8; 32]>,
@@ -131,7 +131,7 @@ impl LaunchSecretConfig {
                 .process_secret_policy
                 .iter()
                 .map(|rule| crate::policy_watch::ProcessSecretRuleSummary {
-                    secret: rule.secret.clone(),
+                    secret: rule.key.clone(),
                     actions: rule.actions.clone(),
                     children: rule
                         .children
@@ -234,7 +234,7 @@ impl PendingTrustedSecretDelivery {
                 let name = rule.name.as_ref().ok_or_else(|| {
                     format!(
                         "process secret policy for '{}' uses delegate-to-child but does not declare a name",
-                        rule.secret
+                        rule.key
                     )
                 })?;
                 if !seen_names.insert(name.clone()) {
@@ -247,7 +247,7 @@ impl PendingTrustedSecretDelivery {
                 let fd_env = rule.fd_env.as_ref().ok_or_else(|| {
                     format!(
                         "process secret policy for '{}' uses delegate-to-child but does not declare fd_env",
-                        rule.secret
+                        rule.key
                     )
                 })?;
 
@@ -256,8 +256,8 @@ impl PendingTrustedSecretDelivery {
                 }
 
                 let secret = store
-                    .get(&rule.secret)
-                    .map_err(|_| format!("keychain lookup failed for {}", rule.secret))?;
+                    .get(&rule.key)
+                    .map_err(|_| format!("keychain lookup failed for {}", rule.key))?;
                 let allowed_children = rule
                     .children
                     .iter()
@@ -622,7 +622,7 @@ pub(crate) fn resolve_launch_secret_config(
         }
 
         resolved.process_secret_policy.push(ResolvedProcessSecretPolicyRule {
-            secret: rule.secret.clone(),
+            key: rule.secret.clone(),
             actions: rule.actions.clone(),
             children,
             child_sha256,
@@ -1431,7 +1431,7 @@ mod tests {
             trusted_secret_exec: vec!["deploy=/usr/bin/deploy".to_string()],
             trusted_secret_fd_env: vec!["TOKEN=TOKEN_FD".to_string()],
             process_secret_policy: vec![ResolvedProcessSecretPolicyRule {
-                secret: "secops/token".to_string(),
+                key: "secops/token".to_string(),
                 actions: vec![SecretAction::Use],
                 children: vec![PathBuf::from("/usr/bin/curl")],
                 child_sha256: vec![digest],
@@ -1536,7 +1536,7 @@ mod tests {
             vec![format!("token={}", helper_canonical.display())]
         );
         assert_eq!(resolved.process_secret_policy.len(), 1);
-        assert_eq!(resolved.process_secret_policy[0].secret, "secops/github_token");
+        assert_eq!(resolved.process_secret_policy[0].key, "secops/github_token");
         assert_eq!(
             resolved.process_secret_policy[0].actions,
             vec![SecretAction::DelegateToChild]
@@ -1755,7 +1755,7 @@ mod tests {
         command.current_dir(temp.path());
 
         let delegated_rule = ResolvedProcessSecretPolicyRule {
-            secret: key.clone(),
+            key: key.clone(),
             actions: vec![SecretAction::DelegateToChild],
             children: vec![std::fs::canonicalize(&child).expect("canonical child")],
             child_sha256: Vec::new(),
@@ -1813,7 +1813,7 @@ mod tests {
         command.current_dir(temp.path());
 
         let delegated_rule = ResolvedProcessSecretPolicyRule {
-            secret: key.clone(),
+            key: key.clone(),
             actions: vec![SecretAction::DelegateToChild],
             children: vec![std::fs::canonicalize(&child).expect("canonical child")],
             child_sha256: Vec::new(),
@@ -1903,7 +1903,7 @@ mod tests {
         command.current_dir(temp.path());
 
         let delegated_rule = ResolvedProcessSecretPolicyRule {
-            secret: key.clone(),
+            key: key.clone(),
             actions: vec![SecretAction::DelegateToChild],
             children: vec![std::fs::canonicalize(&child).expect("canonical child")],
             child_sha256: vec![[0_u8; 32]],
@@ -1954,7 +1954,7 @@ mod tests {
         command.current_dir(temp.path());
 
         let delegated_rule = ResolvedProcessSecretPolicyRule {
-            secret: key.clone(),
+            key: key.clone(),
             actions: vec![SecretAction::DelegateToChild],
             children: vec![std::fs::canonicalize(&child).expect("canonical child")],
             child_sha256: Vec::new(),
