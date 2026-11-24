@@ -40,7 +40,6 @@ changelog_include = [
   "agntcy-shadi-identity",
   "agntcy-shadi-mas",
   "agntcy-shadi-memory",
-  "agntcy-shadi-py",
   "agntcy-shadi-sandbox",
   "agntcy-shadi-slim-mas",
   "agntcy-shadi-telemetry",

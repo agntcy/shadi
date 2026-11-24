@@ -49,7 +49,6 @@ SHADI presents the runtime as four product layers:
 
 - Git-backed sandbox snapshots for before/after capture and audit trails.
 - Process-scoped secret injection and trusted delivery with exact executable matching.
-- Python bindings for secrets, memory, and sandboxed execution.
 - CLI workflows for policy, identity, key management, and sandbox execution.
 - Example agents and demos, including a SecOps workflow against real GitHub signals.
 - **SHADI MAS**: epoch-disciplined coordination runtime (`shadi_mas`) that

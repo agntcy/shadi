@@ -83,8 +83,6 @@ jobs:
             runner: windows-2025
             target: x86_64-pc-windows-msvc
     name: ${{ matrix.name }}
-    env:
-      PYO3_PYTHON: python
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
