@@ -58,7 +58,7 @@ pub(crate) struct SlimStatus {
 
 #[derive(Clone)]
 pub(crate) struct TlsMaterial {
-    pub(crate) cert: PathBuf,
+    pub(crate) crt: PathBuf,
     pub(crate) key: PathBuf,
     pub(crate) ca: PathBuf,
 }
@@ -465,7 +465,7 @@ pub(crate) fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial
     config.tls = TlsServerConfig {
         insecure: false,
         source: TlsSource::File {
-            cert: tls.cert.display().to_string(),
+            cert: tls.crt.display().to_string(),
             key: tls.key.display().to_string(),
         },
         client_ca: CaSource::File {
@@ -481,12 +481,12 @@ pub(crate) fn build_server_config_for_endpoint(endpoint: &str, tls: &TlsMaterial
 pub(crate) fn resolve_server_tls_material() -> Result<TlsMaterial, String> {
     let tls_dir = slim_tls_dir();
     let tls = TlsMaterial {
-        cert: tls_dir.join("server.crt"),
+        crt: tls_dir.join("server.crt"),
         key: tls_dir.join("server.key"),
         ca: tls_dir.join("ca.crt"),
     };
 
-    ensure_file_exists(&tls.cert, "SLIM server certificate")?;
+    ensure_file_exists(&tls.crt, "SLIM server certificate")?;
     ensure_file_exists(&tls.key, "SLIM server key")?;
     ensure_file_exists(&tls.ca, "SLIM client CA")?;
 
@@ -991,7 +991,7 @@ mod tests {
     #[test]
     fn given_endpoint_and_tls_when_building_server_config_then_paths_are_embedded() {
         let tls = TlsMaterial {
-            cert: PathBuf::from("/tmp/server.crt"),
+            crt: PathBuf::from("/tmp/server.crt"),
             key: PathBuf::from("/tmp/server.key"),
             ca: PathBuf::from("/tmp/ca.crt"),
         };

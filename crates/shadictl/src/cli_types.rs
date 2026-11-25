@@ -1021,14 +1021,14 @@ pub(crate) struct DeriveAgentDidArgs {
         required_unless_present = "input",
         conflicts_with = "input"
     )]
-    pub(crate) secret: Option<String>,
+    pub(crate) key_ref: Option<String>,
 
     #[arg(
         short = 'i',
         long = "in",
         value_name = "FILE",
-        required_unless_present = "secret",
-        conflicts_with = "secret"
+        required_unless_present = "key_ref",
+        conflicts_with = "key_ref"
     )]
     pub(crate) input: Option<PathBuf>,
 
@@ -1064,14 +1064,14 @@ pub(crate) struct DeriveAgentIdentityArgs {
         required_unless_present = "input",
         conflicts_with = "input"
     )]
-    pub(crate) human_secret: Option<String>,
+    pub(crate) human_key_ref: Option<String>,
 
     #[arg(
         short = 'i',
         long = "in",
         value_name = "FILE",
-        required_unless_present = "human_secret",
-        conflicts_with = "human_secret"
+        required_unless_present = "human_key_ref",
+        conflicts_with = "human_key_ref"
     )]
     pub(crate) input: Option<PathBuf>,
 
@@ -1112,14 +1112,14 @@ pub(crate) struct VerifyAgentIdentityArgs {
         required_unless_present = "input",
         conflicts_with = "input"
     )]
-    pub(crate) human_secret: Option<String>,
+    pub(crate) human_key_ref: Option<String>,
 
     #[arg(
         short = 'i',
         long = "in",
         value_name = "FILE",
-        required_unless_present = "human_secret",
-        conflicts_with = "human_secret"
+        required_unless_present = "human_key_ref",
+        conflicts_with = "human_key_ref"
     )]
     pub(crate) input: Option<PathBuf>,
 
