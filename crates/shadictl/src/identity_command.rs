@@ -196,7 +196,7 @@ pub(crate) fn run_delete_secret(args: DeleteSecretArgs) -> Result<(), String> {
 }
 
 pub(crate) fn run_derive_agent_did(args: DeriveAgentDidArgs) -> Result<(), String> {
-    let secret_key = read_openpgp_input("--secret", args.secret.as_deref(), args.input.as_ref())?;
+    let secret_key = read_openpgp_input("--secret", args.key_ref.as_deref(), args.input.as_ref())?;
     let (private_key, public_key) = derive_agent_keypair(&secret_key, &args.agent_name)?;
     let (did, vm_id, doc) = build_did_document(&public_key)?;
     let output = serde_json::to_string_pretty(&doc).map_err(|err| err.to_string())?;
@@ -247,14 +247,14 @@ pub(crate) fn run_derive_agent_did(args: DeriveAgentDidArgs) -> Result<(), Strin
 pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result<(), String> {
     let seed_material = match args.source {
         HumanIdentitySource::Gpg => {
-            read_openpgp_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
+            read_openpgp_input("--human-secret", args.human_key_ref.as_deref(), args.input.as_ref())?
         }
         HumanIdentitySource::Seed => {
-            read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
+            read_seed_input("--human-secret", args.human_key_ref.as_deref(), args.input.as_ref())?
         }
         HumanIdentitySource::Ssh => read_ssh_seed_input(
             "--human-secret",
-            args.human_secret.as_deref(),
+            args.human_key_ref.as_deref(),
             args.input.as_ref(),
             args.ssh_passphrase_secret.as_deref(),
         )?,
@@ -322,14 +322,14 @@ pub(crate) fn run_derive_agent_identity(args: DeriveAgentIdentityArgs) -> Result
 pub(crate) fn run_verify_agent_identity(args: VerifyAgentIdentityArgs) -> Result<(), String> {
     let seed_material = match args.source {
         HumanIdentitySource::Gpg => {
-            read_openpgp_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
+            read_openpgp_input("--human-secret", args.human_key_ref.as_deref(), args.input.as_ref())?
         }
         HumanIdentitySource::Seed => {
-            read_seed_input("--human-secret", args.human_secret.as_deref(), args.input.as_ref())?
+            read_seed_input("--human-secret", args.human_key_ref.as_deref(), args.input.as_ref())?
         }
         HumanIdentitySource::Ssh => read_ssh_seed_input(
             "--human-secret",
-            args.human_secret.as_deref(),
+            args.human_key_ref.as_deref(),
             args.input.as_ref(),
             args.ssh_passphrase_secret.as_deref(),
         )?,
