@@ -18,11 +18,6 @@ publish = false
 release = false
 
 [[package]]
-name = "shadi_desktop"
-publish = false
-release = false
-
-[[package]]
 name = "agntcy-shadi-cli"
 git_release_enable = true
 # The root CHANGELOG is the workspace-wide view, so release-plz owns it rather

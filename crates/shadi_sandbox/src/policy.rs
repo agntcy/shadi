@@ -33,8 +33,7 @@ pub struct SandboxPolicy {
     net_proxy_port: Option<u16>,
 }
 
-/// The named launch profiles offered by `shadictl --profile` and the desktop
-/// sandbox panel.
+/// The named launch profiles offered by `shadictl --profile`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxProfile {

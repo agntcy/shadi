@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The `did:key` document for an Ed25519 public key, as `shadictl
-//! did-from-gpg` and the Desktop write it.
+//! did-from-gpg` writes it.
 
 use serde_json::{json, Value};
 

@@ -14,8 +14,7 @@ members = [
   "crates/shadi_credential",
   "crates/shadi_sandbox",
   "crates/shadi_telemetry",
-  "crates/shadictl",
-  "apps/shadi_desktop/src-tauri"
+  "crates/shadictl"
 ]
 default-members = [
   "crates/agent_secrets",

@@ -46,7 +46,6 @@ SHOULD_SKIP = [
     ["crates/shadictl/src/main.rs"],
     ["Cargo.toml"],
     ["Cargo.lock"],
-    ["apps/shadi_desktop/src/App.tsx"],
     [".github/workflows/ci.yml"],
     ["just/vars.just"],
     ["Formula/shadictl.rb"],

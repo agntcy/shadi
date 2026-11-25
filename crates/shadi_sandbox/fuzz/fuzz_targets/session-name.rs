@@ -3,8 +3,8 @@
 use libfuzzer_sys::fuzz_target;
 use shadi_sandbox::control;
 
-// A session name can come from a caller-supplied string — the desktop panel's
-// launch form, or `--session <name>` on the command line. named_socket_path
+// A session name can come from a caller-supplied string, such as
+// `--session <name>` on the command line. named_socket_path
 // turns it into a filesystem path underneath socket_dir(), and the only
 // thing standing between an arbitrary name and a path-traversal escape is
 // sanitize_session_name's character filter. This checks that invariant

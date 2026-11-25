@@ -7,7 +7,7 @@
 //! Standing rules decide most requests, so agents stay autonomous: *allow*
 //! signs a grant on the spot, *block* refuses, and *ask* waits for the human,
 //! denying on timeout. Every decision is appended to an audit log. See
-//! agntcy/shadi#420 for the contract and #421 for the Desktop view.
+//! agntcy/shadi#420 for the contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
