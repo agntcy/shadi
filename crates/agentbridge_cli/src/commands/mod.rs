@@ -18,3 +18,35 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// Holds `test_env_lock` with `SLIM_MEMBER_DIDS` set to `value` (`None`:
+/// unset) and restores the previous value on drop. `Some(did)` is closed
+/// mode, `None` is open admission.
+#[cfg(test)]
+pub(crate) struct MemberDidsEnv {
+    prev: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl MemberDidsEnv {
+    pub(crate) fn set(value: Option<&str>) -> Self {
+        let lock = test_env_lock();
+        let prev = std::env::var_os("SLIM_MEMBER_DIDS");
+        match value {
+            Some(v) => std::env::set_var("SLIM_MEMBER_DIDS", v),
+            None => std::env::remove_var("SLIM_MEMBER_DIDS"),
+        }
+        Self { prev, _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for MemberDidsEnv {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => std::env::set_var("SLIM_MEMBER_DIDS", v),
+            None => std::env::remove_var("SLIM_MEMBER_DIDS"),
+        }
+    }
+}

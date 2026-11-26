@@ -205,6 +205,13 @@ fn open_peer(spec: &str, slim_endpoint: &str) -> anyhow::Result<HandoffPeer> {
         if local_id == agent_id {
             return Ok(HandoffPeer::SelfSlim { agent_id });
         }
+        // The config below names no peer DID, so under open admission there is
+        // nothing to pin: refuse now rather than at the first dispatch.
+        shadi_mas::experiments::require_peer_did_when_open(
+            None,
+            &format!("handoff slim:{agent_id}"),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
         let config = LiveA2ATaskAdapterConfig {
             endpoint,
             agent_id: local_id.clone(),
@@ -248,6 +255,7 @@ mod tests {
 
     #[test]
     fn open_peer_accepts_native_and_slim_specs() {
+        let _env = crate::commands::MemberDidsEnv::set(Some("did:key:zMember"));
         let claude = open_peer("claude-code", "127.0.0.1:47357").expect("claude");
         assert_eq!(claude.label(), "claude-code");
         let copilot = open_peer("copilot", "127.0.0.1:47357").expect("copilot");
@@ -264,6 +272,8 @@ mod tests {
 
     #[test]
     fn slim_from_self_does_not_open_a2a_client_to_own_listener() {
+        // Open admission: it dials nobody, so it needs no peer DID.
+        let _env = crate::commands::MemberDidsEnv::set(None);
         let prev = std::env::var("SHADI_AGENT_ID").ok();
         std::env::set_var("SHADI_AGENT_ID", "claude-code");
         let peer = open_peer("slim:claude-code", "127.0.0.1:47357").expect("self slim");
@@ -273,6 +283,36 @@ mod tests {
         }
         match prev {
             Some(value) => std::env::set_var("SHADI_AGENT_ID", value),
+            None => std::env::remove_var("SHADI_AGENT_ID"),
+        }
+    }
+
+    #[test]
+    fn open_peer_refuses_a_slim_peer_without_a_did_under_open_admission() {
+        // Holds the env lock throughout; its drop restores SLIM_MEMBER_DIDS.
+        let _env = crate::commands::MemberDidsEnv::set(None);
+        let prev_agent = std::env::var_os("SHADI_AGENT_ID");
+        std::env::set_var("SHADI_AGENT_ID", "avatar");
+
+        let err = open_peer("slim:peer@10.0.0.1:9", "127.0.0.1:47357")
+            .err()
+            .expect("open admission needs a peer DID");
+        let err = err.to_string();
+        assert!(
+            err.starts_with("handoff slim:peer: open admission"),
+            "{err}"
+        );
+        assert!(err.contains("did:key"), "{err}");
+        // Local peers never dial SLIM.
+        assert!(open_peer("claude-code", "127.0.0.1:47357").is_ok());
+
+        std::env::set_var("SLIM_MEMBER_DIDS", "did:key:zMember");
+        match open_peer("slim:peer@10.0.0.1:9", "127.0.0.1:47357").expect("closed") {
+            HandoffPeer::Slim { agent_id, .. } => assert_eq!(agent_id, "peer"),
+            other => panic!("expected slim peer, got {}", other.label()),
+        }
+        match prev_agent {
+            Some(v) => std::env::set_var("SHADI_AGENT_ID", v),
             None => std::env::remove_var("SHADI_AGENT_ID"),
         }
     }

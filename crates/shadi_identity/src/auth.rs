@@ -179,6 +179,18 @@ pub fn require_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityErr
     })
 }
 
+/// Whether a member allow-list is configured: `SLIM_MEMBER_DIDS` is set and not
+/// blank after trimming.
+///
+/// This is the interim "closed mode" test. A caller that dials a peer pins the
+/// peer's DID only when this is `false` (open admission, where any `did:key`
+/// may connect); when it is `true` the allow-list decides. The explicit
+/// admission switch (`SHADI_SLIM_ADMISSION`) replaces this predicate, so every
+/// caller must go through it rather than read `SLIM_MEMBER_DIDS` itself.
+pub fn member_allow_list_configured() -> bool {
+    std::env::var("SLIM_MEMBER_DIDS").is_ok_and(|v| !v.trim().is_empty())
+}
+
 /// DID auth for a caller that dialled exactly `peer_did`, from the environment.
 ///
 /// Pins the verifier to `{peer_did, own DID}` and never reads `SLIM_MEMBER_DIDS`,
@@ -553,6 +565,26 @@ mod tests {
         }
 
         env::remove_var("SHADI_SLIM_AUTH");
+    }
+
+    #[test]
+    fn member_allow_list_configured_means_set_and_not_blank() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        let did = AgentIdentity::derive(b"human", "peer").unwrap().did();
+
+        env::remove_var("SLIM_MEMBER_DIDS");
+        assert!(!member_allow_list_configured(), "unset");
+        for blank in ["", "  ", " \t\n"] {
+            env::set_var("SLIM_MEMBER_DIDS", blank);
+            assert!(!member_allow_list_configured(), "{blank:?}");
+        }
+        env::set_var("SLIM_MEMBER_DIDS", &did);
+        assert!(member_allow_list_configured(), "a did:key");
+        env::set_var("SLIM_MEMBER_DIDS", format!("  {did} "));
+        assert!(member_allow_list_configured(), "a padded did:key");
+
+        env::remove_var("SLIM_MEMBER_DIDS");
     }
 
     #[test]

@@ -732,6 +732,28 @@ struct HandoffTarget {
     slim_endpoint: Option<String>,
 }
 
+impl HandoffTarget {
+    /// Whether the send goes over SLIM, as opposed to a unicast A2A locator.
+    /// Same rule as the transport's: no locator, or a SLIM-binding one.
+    fn dials_slim(&self) -> bool {
+        self.a2a_url.is_none() || !self.a2a_binding.unwrap_or(A2ABinding::Grpc).is_unicast()
+    }
+}
+
+/// Refuse a `NEXT` hop over SLIM to a peer whose DID is unknown, under open
+/// admission, where the DID is the only thing there is to pin. `peer_did` is
+/// `None` for a lease with an empty DID and for the `--slim-endpoint` fallback.
+/// A unicast hop dials no SLIM, so it is unaffected.
+fn require_handoff_peer_did(target: &HandoffTarget, to: &str) -> Result<(), String> {
+    if !target.dials_slim() {
+        return Ok(());
+    }
+    shadi_mas::experiments::require_peer_did_when_open(
+        target.peer_did.as_deref(),
+        &format!("NEXT handoff to {to}"),
+    )
+}
+
 /// Resolve a `NEXT` peer from on-host leases. Prefer the unicast locator when
 /// the lease has one so an HTTP-only collab can token-pass without a SLIM node.
 fn resolve_handoff_target(
@@ -808,6 +830,7 @@ fn dispatch_peer_handoff(
 ) -> Result<(), String> {
     let registry = LocalAdapterRegistry::from_env();
     let target = resolve_handoff_target(to, slim_fallback, &registry)?;
+    require_handoff_peer_did(&target, to)?;
     let adapter = super::egress::live_adapter(LiveA2ATaskAdapterConfig {
         endpoint: target.slim_endpoint.clone().unwrap_or_default(),
         agent_id: from.to_string(),
@@ -2796,6 +2819,77 @@ test push ... FAILED
         );
         let err = resolve_handoff_target("claude-code", None, &registry).unwrap_err();
         assert!(err.contains("list --local"), "{err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_slim_handoff_needs_the_peer_did_under_open_admission() {
+        let (dir, registry) = scratch_registry();
+        let _lease = registry
+            .publish(&handoff_record(
+                "withdid",
+                "did:key:zWithDid",
+                "127.0.0.1:47357",
+                "",
+            ))
+            .unwrap();
+        // `publish` refuses an empty DID, so a lease without one (an older
+        // writer's) is built directly.
+        let nodid = |a2a_url: Option<&str>, a2a_binding: Option<A2ABinding>| HandoffTarget {
+            peer_agent_id: "nodid".to_string(),
+            peer_did: None,
+            slim_name: "agntcy/shadi/nodid-a2a".to_string(),
+            a2a_url: a2a_url.map(str::to_string),
+            a2a_binding,
+            slim_endpoint: Some("127.0.0.1:47357".to_string()),
+        };
+
+        let open = crate::commands::MemberDidsEnv::set(None);
+        // An empty lease DID and the `--slim-endpoint` fallback both have none.
+        let err = require_handoff_peer_did(&nodid(None, None), "nodid").unwrap_err();
+        assert!(
+            err.starts_with("NEXT handoff to nodid: open admission"),
+            "{err}"
+        );
+        let slim_locator = nodid(Some("slim://127.0.0.1:47357"), Some(A2ABinding::Slim));
+        assert!(require_handoff_peer_did(&slim_locator, "nodid").is_err());
+        let unleased = resolve_handoff_target("ghost", Some("127.0.0.1:9"), &registry).unwrap();
+        assert_eq!(unleased.peer_did, None);
+        let err = require_handoff_peer_did(&unleased, "ghost").unwrap_err();
+        assert!(
+            err.starts_with("NEXT handoff to ghost: open admission"),
+            "{err}"
+        );
+        // A leased DID is pinned; a unicast hop dials no SLIM.
+        let leased = resolve_handoff_target("withdid", None, &registry).unwrap();
+        assert_eq!(leased.peer_did.as_deref(), Some("did:key:zWithDid"));
+        assert!(require_handoff_peer_did(&leased, "withdid").is_ok());
+        let grpc = nodid(Some("http://127.0.0.1:50153"), Some(A2ABinding::Grpc));
+        assert!(!grpc.dials_slim());
+        assert!(require_handoff_peer_did(&grpc, "nodid").is_ok());
+
+        // The hop fails with that message before anything is built or dialled.
+        let prev_tmp = std::env::var_os("SHADI_TMP_DIR");
+        let empty = std::env::temp_dir().join(format!("ab-handoff-empty-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("SHADI_TMP_DIR", &empty);
+        let err = dispatch_peer_handoff("avatar", "ghost", Some("127.0.0.1:9"), "prompt", "reply")
+            .unwrap_err();
+        match prev_tmp {
+            Some(v) => std::env::set_var("SHADI_TMP_DIR", v),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        assert!(
+            err.starts_with("NEXT handoff to ghost: open admission"),
+            "{err}"
+        );
+        drop(open);
+
+        // Closed mode: the allow-list decides, so a missing DID is fine.
+        let _closed = crate::commands::MemberDidsEnv::set(Some("did:key:zMember"));
+        assert!(require_handoff_peer_did(&nodid(None, None), "nodid").is_ok());
+        assert!(require_handoff_peer_did(&unleased, "ghost").is_ok());
+
+        drop(_lease);
         let _ = fs::remove_dir_all(dir);
     }
 
