@@ -316,15 +316,17 @@ struct Session {
     nonce_endpoint: Option<Url>,
     token_url: Url,
     access_token: String,
-    now: i64,
 }
+
+/// Unix seconds, read at each use: the device login can wait minutes for the human.
+pub(crate) type Clock<'a> = &'a dyn Fn() -> Result<i64, String>;
 
 fn login(
     http: &dyn Http,
     vault: &dyn CredentialVault,
     args: &IssueArgs<'_>,
     agents: &[&str],
-    now: i64,
+    now: Clock<'_>,
 ) -> Result<Session, String> {
     let origin = IdpOrigin::new(args.idp).map_err(|err| err.to_string())?;
 
@@ -384,7 +386,7 @@ fn login(
         &oidc_issuer,
         args.client_id,
         args.email,
-        now,
+        now()?,
     )
     .map_err(|err| err.to_string())?;
 
@@ -402,7 +404,6 @@ fn login(
         nonce_endpoint,
         token_url,
         access_token: token.access_token,
-        now,
     })
 }
 
@@ -412,6 +413,7 @@ fn issue_for(
     identity: &AgentIdentity,
     session: &Session,
     args: &IssueArgs<'_>,
+    now: Clock<'_>,
 ) -> Result<CredentialRecord, String> {
     let offer_ref = mint_offer(http, args.idp, args.configuration_id, &session.access_token)?;
     let offer = resolve_offer(http, &session.origin, &offer_ref)?;
@@ -431,7 +433,7 @@ fn issue_for(
         args.client_id,
         &session.credential_issuer,
         &nonce,
-        session.now,
+        now()?,
     );
     let proofs = json!({ "jwt": [proof] });
     let body = match credential_identifier(&access_token, args.configuration_id) {
@@ -448,7 +450,7 @@ fn issue_for(
     if !same_id(&parsed.issuer, &session.credential_issuer) {
         return Err("the issued credential names another issuer".to_string());
     }
-    shadi_credential::import(vault, &raw, session.now).map_err(|err| err.to_string())
+    shadi_credential::import(vault, &raw, now()?).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -457,10 +459,10 @@ pub(crate) fn issue(
     vault: &dyn CredentialVault,
     identity: &AgentIdentity,
     args: &IssueArgs<'_>,
-    now: i64,
+    now: Clock<'_>,
 ) -> Result<CredentialRecord, String> {
     let session = login(http, vault, args, &[], now)?;
-    issue_for(http, vault, identity, &session, args)
+    issue_for(http, vault, identity, &session, args, now)
 }
 
 /// One outcome per agent, in the order asked for.
@@ -472,7 +474,7 @@ pub(crate) fn issue_all(
     vault: &dyn CredentialVault,
     identities: &[(String, AgentIdentity)],
     args: &IssueArgs<'_>,
-    now: i64,
+    now: Clock<'_>,
 ) -> Result<IssuedPerAgent, String> {
     let names: Vec<&str> = identities.iter().map(|(name, _)| name.as_str()).collect();
     let session = login(http, vault, args, &names, now)?;
@@ -481,7 +483,7 @@ pub(crate) fn issue_all(
         .map(|(name, identity)| {
             (
                 name.clone(),
-                issue_for(http, vault, identity, &session, args),
+                issue_for(http, vault, identity, &session, args, now),
             )
         })
         .collect())
@@ -493,7 +495,7 @@ mod tests {
     use base64::Engine;
     use sha2::Digest;
     use shadi_credential::SqlCipherVault;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, VecDeque};
 
     const IDP: &str = "https://idp.example/realms/eng";
@@ -533,8 +535,12 @@ mod tests {
     }
 
     fn id_token() -> String {
+        id_token_expiring(5_000)
+    }
+
+    fn id_token_expiring(exp: i64) -> String {
         let payload = json!({
-            "iss": IDP, "aud": "agent-cli", "sub": "sub-1", "exp": 5_000,
+            "iss": IDP, "aud": "agent-cli", "sub": "sub-1", "exp": exp,
             "email": "dev@example.com", "email_verified": true,
         });
         format!(
@@ -572,6 +578,9 @@ mod tests {
         script: RefCell<HashMap<String, VecDeque<Value>>>,
         requests: RefCell<Vec<(String, Value)>>,
         sleeps: RefCell<Vec<Duration>>,
+        /// Fake unix seconds: sleeps advance it, as does each request to a ticking path.
+        clock: Cell<i64>,
+        ticks: RefCell<HashMap<String, i64>>,
     }
 
     impl Fake {
@@ -581,10 +590,17 @@ mod tests {
                 .insert(path.to_string(), responses.into());
         }
 
+        fn advance(&self, secs: i64) {
+            self.clock.set(self.clock.get() + secs);
+        }
+
         fn reply(&self, url: &Url, body: Value) -> Result<Value, String> {
             self.requests
                 .borrow_mut()
                 .push((url.path().to_string(), body));
+            if let Some(&secs) = self.ticks.borrow().get(url.path()) {
+                self.advance(secs);
+            }
             let mut script = self.script.borrow_mut();
             let queue = script
                 .get_mut(url.path())
@@ -618,6 +634,7 @@ mod tests {
         }
         fn sleep(&self, duration: Duration) {
             self.sleeps.borrow_mut().push(duration);
+            self.advance(duration.as_secs() as i64);
         }
     }
 
@@ -626,6 +643,8 @@ mod tests {
             script: RefCell::default(),
             requests: RefCell::default(),
             sleeps: RefCell::default(),
+            clock: Cell::new(NOW),
+            ticks: RefCell::default(),
         };
         fake.set(
             META,
@@ -687,7 +706,7 @@ mod tests {
                 email: "dev@example.com",
                 configuration_id: "agent-admission",
             },
-            NOW,
+            &|| Ok(NOW),
         )
     }
 
@@ -718,7 +737,7 @@ mod tests {
                 .map(|(_, id)| json!({ "credential": sd_jwt(id, IDP) }))
                 .collect(),
         );
-        let results = issue_all(&fake, &vault, &ids, &args(), NOW).expect("login");
+        let results = issue_all(&fake, &vault, &ids, &args(), &|| Ok(NOW)).expect("login");
 
         assert_eq!(fake.requests_to("/realms/eng/device").len(), 1);
         assert_eq!(results.len(), 2);
@@ -740,7 +759,7 @@ mod tests {
                 json!({ "error": "invalid_proof" }),
             ],
         );
-        let results = issue_all(&fake, &vault, &ids, &args(), NOW).expect("login");
+        let results = issue_all(&fake, &vault, &ids, &args(), &|| Ok(NOW)).expect("login");
 
         assert!(results[0].1.is_ok());
         let err = results[1].1.as_ref().expect_err("second fails");
@@ -785,6 +804,91 @@ mod tests {
             part(0)["jwk"]["x"],
             b64(&identity.verifying_key_bytes()).as_str()
         );
+    }
+
+    fn device_polling_every(fake: &Fake, secs: u64) {
+        fake.set(
+            "/realms/eng/device",
+            vec![json!({
+                "device_code": "dc", "user_code": "ABCD", "interval": secs,
+                "verification_uri": "https://idp.example/realms/eng/activate",
+            })],
+        );
+    }
+
+    #[test]
+    fn the_proof_iat_is_read_after_the_device_login() {
+        let fake = fake();
+        device_polling_every(&fake, 60);
+        fake.set(TOKEN, vec![pending(), pending(), success(), second_token()]);
+        let vault = vault();
+        let identity = AgentIdentity::generate().expect("identity");
+        serve(&fake, sd_jwt(&identity, IDP));
+        let record =
+            issue(&fake, &vault, &identity, &args(), &|| Ok(fake.clock.get())).expect("issue");
+
+        assert_eq!(fake.clock.get(), NOW + 120);
+        let sent = &fake.requests_to("/realms/eng/credential")[0];
+        assert_eq!(proof_part(sent, 1)["iat"], NOW + 120);
+        assert_eq!(record.created_at, NOW + 120);
+    }
+
+    #[test]
+    fn each_agent_s_proof_carries_its_own_fresh_iat() {
+        let fake = fake();
+        device_polling_every(&fake, 60);
+        fake.set(TOKEN, vec![pending(), success(), second_token()]);
+        fake.ticks
+            .borrow_mut()
+            .insert("/realms/eng/credential".to_string(), 30);
+        let vault = vault();
+        let ids = [named("worker"), named("planner")];
+        fake.set(
+            "/realms/eng/credential",
+            ids.iter()
+                .map(|(_, id)| json!({ "credential": sd_jwt(id, IDP) }))
+                .collect(),
+        );
+        let results =
+            issue_all(&fake, &vault, &ids, &args(), &|| Ok(fake.clock.get())).expect("login");
+
+        let iats: Vec<Value> = fake
+            .requests_to("/realms/eng/credential")
+            .iter()
+            .map(|sent| proof_part(sent, 1)["iat"].clone())
+            .collect();
+        assert_eq!(iats, [json!(NOW + 60), json!(NOW + 90)]);
+        let stored: Vec<i64> = results
+            .iter()
+            .map(|(_, outcome)| outcome.as_ref().expect("issued").created_at)
+            .collect();
+        assert_eq!(stored, [NOW + 90, NOW + 120]);
+    }
+
+    #[test]
+    fn the_id_token_expiry_is_checked_after_the_login_wait() {
+        let approved = json!({
+            "access_token": "at", "id_token": id_token_expiring(NOW + 60), "c_nonce": "n-first",
+        });
+        for waits in [0, 2] {
+            let fake = fake();
+            device_polling_every(&fake, 60);
+            let mut tokens = vec![pending(); waits];
+            tokens.extend([approved.clone(), second_token()]);
+            fake.set(TOKEN, tokens);
+            let identity = AgentIdentity::generate().expect("identity");
+            serve(&fake, sd_jwt(&identity, IDP));
+            let result = issue(&fake, &vault(), &identity, &args(), &|| {
+                Ok(fake.clock.get())
+            });
+            if waits == 0 {
+                result.expect("still valid at NOW");
+            } else {
+                let err = result.expect_err("expired by the time the login was approved");
+                assert!(err.contains("expired"), "{err}");
+                assert!(fake.requests_to("/realms/eng/credential").is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1081,7 +1185,7 @@ mod tests {
                 email: "dev@example.com",
                 configuration_id: "agent-admission",
             },
-            NOW,
+            &|| Ok(NOW),
         )
         .expect("issue");
     }

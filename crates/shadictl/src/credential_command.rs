@@ -229,10 +229,12 @@ fn run_issue(command: &CredentialCommand, vault: &dyn CredentialVault) -> ExitCo
     let result = (|| {
         let identities = agent_identities(key_prefix, agent)?;
         span.record("credential.agents", identities.len());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "system clock is before the unix epoch".to_string())?
-            .as_secs() as i64;
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs() as i64)
+                .map_err(|_| "system clock is before the unix epoch".to_string())
+        };
         let http = crate::credential_issue::client()?;
         crate::credential_issue::issue_all(
             &http,
@@ -244,7 +246,7 @@ fn run_issue(command: &CredentialCommand, vault: &dyn CredentialVault) -> ExitCo
                 email,
                 configuration_id,
             },
-            now,
+            &now,
         )
     })();
 
