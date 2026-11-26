@@ -9,8 +9,7 @@ use a2a::*;
 use a2a_grpc::GrpcHandler;
 use a2a_pb::proto::a2a_service_server::A2aServiceServer;
 use a2a_server::{
-    AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
-    ServiceParams as A2AServiceParams,
+    AgentExecutor, DefaultRequestHandler, RequestHandler, ServiceParams as A2AServiceParams,
 };
 use agent_secrets::{AgentVerifier, RequestContext, SessionContext};
 use agent_transport_slim::client_access::ClientAccess;
@@ -19,6 +18,7 @@ use agentbridge::{
         generic_stdio::GenericStdioAdapter,
         profile::{bundled_profile_ids, load_profile, ProfileAdapter},
     },
+    bounded_task_store::{BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY},
     dir_registry::DirError,
     local_registry::{LocalAdapterRecord, LocalAdapterRegistry},
     CliAdapter,
@@ -1139,7 +1139,7 @@ impl AgentBridgeRequestHandler {
                     gate,
                     session_bound,
                 },
-                InMemoryTaskStore::new(),
+                BoundedTaskStore::new(DEFAULT_TASK_CAPACITY, DEFAULT_PARKED_TTL),
             ),
             ready,
             agent_id: agent_id.to_string(),
