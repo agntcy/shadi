@@ -18,11 +18,10 @@ those phases run on.
 | Name | Role |
 |------|------|
 | **SHADI MAS** (`shadi_mas`) | Coordination state machines and class engines |
-| **`slim_mas`** | SLIM group membership and DID allow-list evaluation (`shadictl slim-mas`) |
 | **AgentBridge** | Register, list, handoff, delegate, and the `coordinate` driver that feeds this runtime |
 
-`slim_mas` admits *who* may sit on a SLIM channel. SHADI MAS decides
-*how* a roster advances a shared problem once those peers can talk.
+SHADI MAS decides *how* a roster advances a shared problem once its peers can
+talk.
 
 ## Place in the stack
 

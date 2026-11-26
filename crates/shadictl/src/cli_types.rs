@@ -233,8 +233,6 @@ pub(crate) enum Commands {
     Credential(CredentialCli),
     #[command(name = "trace")]
     Trace(TraceCli),
-    #[command(name = "slim-mas")]
-    SlimMas(SlimMasCli),
     #[command(name = "did-from-gpg")]
     DidFromGpg(DidFromGpgArgs),
     #[command(name = "did-from-github")]
@@ -477,11 +475,6 @@ pub(crate) struct SlimCreateGroupArgs {
     /// Max results per resolved skill:/did:/running: member source.
     #[arg(long, default_value_t = 20)]
     pub(crate) limit: usize,
-
-    /// Write the resolved trust set as a slim_mas GroupConfig TOML file, so
-    /// `shadictl slim-mas --config <path> list-members/validate` can audit it.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) write_config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -830,36 +823,6 @@ pub(crate) enum TraceCommand {
         #[arg(long, default_value = "200")]
         limit: usize,
     },
-}
-
-#[derive(Parser, Debug)]
-#[command(name = "slim-mas", about = "SLIM multi-agent system moderator helper")]
-pub(crate) struct SlimMasCli {
-    #[arg(long = "config", value_name = "FILE", default_value = "mas.toml")]
-    pub(crate) config: PathBuf,
-
-    #[command(subcommand)]
-    pub(crate) command: SlimMasCommand,
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum SlimMasCommand {
-    Admit {
-        #[arg(long = "group", value_name = "GROUP")]
-        group: Option<String>,
-
-        #[arg(long = "did", value_name = "DID")]
-        did: String,
-
-        #[arg(long = "role", value_name = "ROLE")]
-        role: Option<String>,
-    },
-    ListGroups,
-    ListMembers {
-        #[arg(long = "group", value_name = "GROUP")]
-        group: Option<String>,
-    },
-    Validate,
 }
 
 #[derive(Subcommand, Debug)]

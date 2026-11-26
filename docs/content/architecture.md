@@ -141,9 +141,6 @@ The system can be read as four presentation layers:
 - **Engines**: `DevelopmentEngine` (code artifact), plus the paper
   examples `PreferenceEngine`, `CascadeEngine`, and `ResourceEngine`.
   `Unmapped` has no solver.
-- **Not `slim_mas`**: that crate evaluates SLIM group membership
-  (`shadictl slim-mas`). SHADI MAS decides how an admitted roster
-  advances a shared problem.
 
 See [SHADI MAS](shadi-mas.md) for the event loop, adapters, and file
 map, and [ASSEMBLY and CONVERGE](assembly-converge.md) for the protocol.

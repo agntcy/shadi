@@ -84,9 +84,7 @@ human root key, so the group can tell which human every agent belongs to —
 enforced by DID allow-list: the moderator's `create`/`invite` control
 messages carry its DID-JWT, and each participant verifies that JWT against
 the allow-list before replying, so a non-member DID is dropped. The
-allow-list itself is evaluated separately by `shadictl slim-mas` — see the
-[CLI Reference](cli.md#shadictl-slim-mas-shadictl-slim-mas) for
-`list-groups`/`list-members`/`validate`/`admit`.
+allow-list is the set of DIDs in `SLIM_MEMBER_DIDS`.
 
 For a full worked example — moderator + four coding-agent CLIs, DID
 admission, an A2A Collaborate roll call, and real task delegation via
