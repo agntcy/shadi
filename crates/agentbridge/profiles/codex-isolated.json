@@ -25,12 +25,17 @@
   "execute": {
     "args": [
       "exec",
+      "{session}",
       "{prompt}",
       "--dangerously-bypass-approvals-and-sandbox",
       "--skip-git-repo-check",
-      "--ephemeral",
       "{extra_args}"
     ]
+  },
+  "session": {
+    "stderr_prefix": "session id: ",
+    "args": ["resume", "{session_id}"],
+    "retry_stderr_contains": "no rollout found"
   },
   "result": { "kind": "strip_after_first_line", "line": "--------" }
 }

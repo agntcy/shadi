@@ -93,7 +93,13 @@ fn load_profile_file(path: &Path) -> Result<Option<CliProfile>, CliAdapterError>
 }
 
 fn parse_profile(raw: &str) -> Result<CliProfile, CliAdapterError> {
-    serde_json::from_str(raw).map_err(CliAdapterError::from)
+    let profile: CliProfile = serde_json::from_str(raw)?;
+    if let Some(session) = &profile.session {
+        session.validate().map_err(|reason| {
+            CliAdapterError::Protocol(format!("profile '{}': {reason}", profile.id))
+        })?;
+    }
+    Ok(profile)
 }
 
 /// `{id}` or `{id}:{workdir}` → [`ProfileAdapter`] when a profile exists.
@@ -249,12 +255,65 @@ pub struct ExecuteSpec {
     pub args: Vec<String>,
 }
 
+/// How a harness continues a session: where a run reports its session id,
+/// and how `{session}` hands that id to the next run. Exactly one of
+/// `json_field` / `stderr_prefix`, and one of `flag` / `args`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionSpec {
-    pub json_field: String,
-    pub flag: String,
+    /// The id is this field of the JSON on stdout (Claude Code).
+    #[serde(default)]
+    pub json_field: Option<String>,
+    /// The id is the rest of the stderr line starting with this (Codex).
+    #[serde(default)]
+    pub stderr_prefix: Option<String>,
+    /// `{session}` renders `flag <id>`.
+    #[serde(default)]
+    pub flag: Option<String>,
+    /// `{session}` renders these, `{session_id}` replaced by the id, e.g. a
+    /// `resume <id>` subcommand.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
     #[serde(default)]
     pub retry_stderr_contains: Option<String>,
+}
+
+impl SessionSpec {
+    fn validate(&self) -> Result<(), String> {
+        if self.json_field.is_some() == self.stderr_prefix.is_some() {
+            return Err("session needs exactly one of json_field, stderr_prefix".to_string());
+        }
+        if self.flag.is_some() == self.args.is_some() {
+            return Err("session needs exactly one of flag, args".to_string());
+        }
+        Ok(())
+    }
+
+    /// The session id a run reported, if any.
+    fn session_id_in(&self, stdout: &str, stderr: &str) -> Option<String> {
+        if let Some(field) = &self.json_field {
+            let value = serde_json::from_str::<serde_json::Value>(stdout).ok()?;
+            return value.get(field)?.as_str().map(str::to_string);
+        }
+        let prefix = self.stderr_prefix.as_deref()?;
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(str::trim)
+            .filter(|sid| !sid.is_empty())
+            .map(str::to_string)
+    }
+
+    /// What `{session}` expands to for `session_id`.
+    fn render(&self, session_id: &str) -> Vec<String> {
+        match (&self.flag, &self.args) {
+            (Some(flag), _) => vec![flag.clone(), session_id.to_string()],
+            (None, Some(args)) => args
+                .iter()
+                .map(|arg| arg.replace("{session_id}", session_id))
+                .collect(),
+            (None, None) => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -515,10 +574,8 @@ impl ProfileAdapter {
                     return Err(CliAdapterError::Subprocess(needle.clone()));
                 }
             }
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                if let Some(sid) = value.get(&spec.json_field).and_then(|v| v.as_str()) {
-                    self.store_session(conversation, sid.to_string());
-                }
+            if let Some(sid) = spec.session_id_in(&stdout, &stderr) {
+                self.store_session(conversation, sid);
             }
         }
 
@@ -669,8 +726,7 @@ pub fn render_argv(
             }
             "{session}" => {
                 if let (Some(spec), Some(sid)) = (&profile.session, session_id) {
-                    out.push(spec.flag.clone());
-                    out.push(sid.to_string());
+                    out.extend(spec.render(sid));
                 }
             }
             "{extra_args}" => out.extend(extra.iter().cloned()),
@@ -1218,9 +1274,52 @@ mod tests {
                 "implement fifo",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
-                "--ephemeral",
             ]
         );
+    }
+
+    #[test]
+    fn codex_argv_resumes_a_stored_session() {
+        for id in ["codex", "codex-isolated"] {
+            let p = load_bundled(id);
+            let argv = render_argv(&p, "/ws", "and now?", None, Some("sid-1"), true);
+            assert_eq!(
+                argv,
+                vec![
+                    "exec",
+                    "resume",
+                    "sid-1",
+                    "and now?",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--skip-git-repo-check",
+                ],
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_spec_needs_one_reader_and_one_way_to_pass_the_id() {
+        let parse = |session: serde_json::Value| {
+            parse_profile(
+                &serde_json::json!({
+                    "id": "bad-session",
+                    "bin": "tool",
+                    "execute": { "args": ["{session}", "{prompt}"] },
+                    "session": session
+                })
+                .to_string(),
+            )
+        };
+        for bad in [
+            serde_json::json!({ "flag": "--session-id" }),
+            serde_json::json!({ "json_field": "id", "stderr_prefix": "id: ", "flag": "-s" }),
+            serde_json::json!({ "json_field": "id" }),
+            serde_json::json!({ "json_field": "id", "flag": "-s", "args": ["resume"] }),
+        ] {
+            assert!(parse(bad.clone()).is_err(), "accepted {bad}");
+        }
+        assert!(parse(serde_json::json!({ "stderr_prefix": "id: ", "args": ["r"] })).is_ok());
     }
 
     #[test]
@@ -1898,6 +1997,72 @@ echo '{"result":"ok","session_id":"sid-9"}'
         assert_eq!(adapter.execute_prompt("two").unwrap(), "ok");
         adapter.clear_session(DEFAULT_CONVERSATION);
         assert!(adapter.session_id(DEFAULT_CONVERSATION).unwrap().is_none());
+    }
+
+    /// Like `codex exec`: reports its session id on stderr, resumes with
+    /// `resume <id> <prompt>`, and fails a resume of an unknown id.
+    #[cfg(not(windows))]
+    fn write_resume_bin() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resume.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+if [ "$1" = resume ]; then
+  if [ "$2" = gone ]; then
+    echo "no rollout found for thread id $2" >&2
+    exit 1
+  fi
+  echo "session id: $2" >&2
+  echo "resumed $2: $3"
+else
+  echo "session id: new-1" >&2
+  echo "fresh: $1"
+fi
+"#,
+        )
+        .unwrap();
+        (dir, path)
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_session_read_from_stderr_is_resumed_and_an_unknown_one_restarts() {
+        let (_dir, script) = write_resume_bin();
+        let (bin, args) = script_args(&script);
+        let profile = parse_profile(
+            &serde_json::json!({
+                "id": "resume",
+                "bin": bin,
+                "current_dir_workdir": false,
+                "execute": { "args": args },
+                "session": {
+                    "stderr_prefix": "session id: ",
+                    "args": ["resume", "{session_id}"],
+                    "retry_stderr_contains": "no rollout found"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let adapter = ProfileAdapter::new(profile, std::env::temp_dir());
+
+        assert_eq!(
+            adapter.execute_prompt_in("ctx", "one").unwrap().trim(),
+            "fresh: one"
+        );
+        assert_eq!(adapter.session_id("ctx").unwrap().as_deref(), Some("new-1"));
+        assert_eq!(
+            adapter.execute_prompt_in("ctx", "two").unwrap().trim(),
+            "resumed new-1: two"
+        );
+
+        adapter.store_session("ctx", "gone".to_string());
+        assert_eq!(
+            adapter.execute_prompt_in("ctx", "three").unwrap().trim(),
+            "fresh: three"
+        );
+        assert_eq!(adapter.session_id("ctx").unwrap().as_deref(), Some("new-1"));
     }
 
     fn write_session_echo_bin() -> (tempfile::TempDir, PathBuf) {
