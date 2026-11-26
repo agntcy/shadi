@@ -2249,7 +2249,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         test_store_fail_put(private_key);
 
         let code = run_derive_agent_did_command(DeriveAgentDidArgs {
-            secret: Some(root_key),
+            key_ref: Some(root_key),
             input: None,
             agent_name: "agent-store-failure".to_string(),
             prefix: "agents".to_string(),
@@ -2264,7 +2264,7 @@ members = [{ did = "did:key:zA", role = "human" }]
     #[test]
     fn run_cli_derive_agent_did_missing_secret_returns_error() {
         let code = run_derive_agent_did_command(DeriveAgentDidArgs {
-            secret: None,
+            key_ref: None,
             input: None,
             agent_name: "agent-missing-secret".to_string(),
             prefix: "agents".to_string(),
@@ -2465,7 +2465,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: None,
+            human_key_ref: None,
             input: None,
             agent_names: vec!["agent-missing-seed".to_string()],
             prefix: "agents".to_string(),
@@ -2485,7 +2485,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: Some(seed_key),
+            human_key_ref: Some(seed_key),
             input: None,
             agent_names: vec![unique_key("missing-human-did-agent")],
             prefix: "agents".to_string(),
@@ -2508,7 +2508,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: Some(seed_key),
+            human_key_ref: Some(seed_key),
             input: None,
             agent_names: vec![unique_key("out-dir-conflict-agent")],
             prefix: "agents".to_string(),
@@ -2534,7 +2534,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: Some(seed_key),
+            human_key_ref: Some(seed_key),
             input: None,
             agent_names: vec![agent_name.clone()],
             prefix: "agents".to_string(),
@@ -3397,7 +3397,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Ssh,
-            human_secret: None,
+            human_key_ref: None,
             input: Some(key_path.clone()),
             agent_names: vec![agent.clone()],
             prefix: prefix.clone(),
@@ -3415,7 +3415,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_verify_agent_identity_command(VerifyAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Ssh,
-            human_secret: None,
+            human_key_ref: None,
             input: Some(key_path),
             agent_name: agent,
             prefix,
@@ -3443,7 +3443,7 @@ members = [{ did = "did:key:zA", role = "human" }]
             let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
                 ssh_passphrase_secret: None,
                 source,
-                human_secret: None,
+                human_key_ref: None,
                 input: Some(key_path.clone()),
                 agent_names: vec![agent.clone()],
                 prefix: prefix.clone(),
