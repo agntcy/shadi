@@ -9,10 +9,20 @@
 //! config assembly. In DID mode, [`SlimMembers`] says which peers an app admits:
 //! an allow-list of `did:key`s, or any `did:key` that proves its key (open).
 
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use slim_bindings::{App, IdentityProviderConfig, IdentityVerifierConfig, Name, Service};
+use serde_json::Value;
+use slim_auth::errors::AuthError;
+use slim_auth::traits::{TokenProvider, Verifier};
+use slim_bindings::{
+    App, Direction, IdentityCallbackError, IdentityExport, IdentityProvider,
+    IdentityProviderConfig, IdentityVerifier, IdentityVerifierConfig, Name, Service, SignatureKeys,
+};
 
+use crate::provider::DidKeyProvider;
+use crate::verifier::DidKeyVerifier;
 use crate::{config, jwks_from_dids, parse_did_key, AgentIdentity, IdentityError};
 
 /// How a SLIM app authenticates to the mesh.
@@ -20,27 +30,43 @@ pub enum SlimAuth {
     /// Symmetric mesh secret (legacy; a homogeneous mesh shares one secret).
     SharedSecret(String),
     /// DID-JWT admission: prove `did` by signing with `signing_pem`; admit peers
-    /// per `members`.
+    /// per `members`, with the token implementation `tokens`.
     Did {
         signing_pem: String,
         did: String,
         members: SlimMembers,
+        tokens: DidTokens,
     },
+}
+
+/// Which DID-JWT implementation a DID-mode app signs and verifies with. The
+/// constructors choose it; closed admission never uses [`DidTokens::DidKey`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DidTokens {
+    /// SLIM's stock JWT signer and JWKS verifier (closed admission).
+    SlimJwt,
+    /// shadi's [`DidKeyProvider`] and [`DidKeyVerifier`] (open admission): the
+    /// listener, and a caller pinned to the peer it dials.
+    DidKey,
 }
 
 /// Which peers a DID-mode app admits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlimMembers {
-    /// Peers whose `did:key` is in `jwks` (the cryptographic allow-list), checked
-    /// by SLIM's stock JWT verifier.
+    /// Peers whose `did:key` is in `jwks` (the cryptographic allow-list): each `kid`
+    /// is an admitted DID. Closed admission checks it with SLIM's stock JWT verifier;
+    /// a caller pinned to its peer checks it with [`DidKeyVerifier`].
     AllowList { jwks: String },
-    /// Any `did:key` that proves its key. Needs SHADI's `did:key` verifier, which
-    /// this build does not include, so [`SlimAuth::configs`] refuses it.
+    /// Any `did:key` that proves its key, with [`DidKeyVerifier::any_did_key`]. Only
+    /// a [`DidTokens::DidKey`] app can admit this.
     Open,
 }
 
-const OPEN_ADMISSION_UNSUPPORTED: &str =
-    "open admission needs SHADI's did:key verifier, which this build does not include";
+const CUSTOM_IDENTITY_NOT_A_CONFIG: &str =
+    "open admission builds a custom SLIM identity, which is not a config pair; create the app with create_app";
+
+const OPEN_NEEDS_DID_KEY_TOKENS: &str =
+    "open admission needs DID-JWT tokens (DidTokens::DidKey); the stock JWT signer cannot admit any did:key";
 
 impl SlimAuth {
     /// DID auth for `agent`, trusting `member_dids` as the allow-list.
@@ -54,22 +80,26 @@ impl SlimAuth {
             members: SlimMembers::AllowList {
                 jwks: jwks_from_dids(member_dids)?,
             },
+            tokens: DidTokens::SlimJwt,
         })
     }
 
-    /// DID auth for `agent`, admitting any `did:key` that proves its key.
+    /// DID auth for `agent`, admitting any `did:key` that proves its key. Build the
+    /// app with [`create_app`]; [`SlimAuth::configs`] has no config pair for it.
     pub fn did_open(agent: &AgentIdentity) -> Result<Self, IdentityError> {
         Ok(SlimAuth::Did {
             signing_pem: agent.to_pkcs8_pem()?,
             did: agent.did(),
             members: SlimMembers::Open,
+            tokens: DidTokens::DidKey,
         })
     }
 
     /// Build the `(provider, verifier)` config pair for an app named `name`.
     ///
-    /// Fails closed for [`SlimMembers::Open`]: this build has no verifier for it,
-    /// and it never falls back to an allow-list or a shared secret.
+    /// Only the stock DID mode (closed admission) and the shared secret have a config
+    /// pair. Open admission fails closed here: it is a custom identity, built by
+    /// [`create_app`], and this never falls back to an allow-list or a shared secret.
     pub fn configs(
         &self,
         name: &Name,
@@ -89,31 +119,254 @@ impl SlimAuth {
                 signing_pem,
                 did,
                 members: SlimMembers::AllowList { jwks },
+                tokens: DidTokens::SlimJwt,
             } => Ok((
                 config::did_provider_config(signing_pem, did, None),
                 config::did_verifier_config(jwks, None),
             )),
             SlimAuth::Did {
-                members: SlimMembers::Open,
+                tokens: DidTokens::DidKey,
                 ..
             } => Err(IdentityError::Config(
-                OPEN_ADMISSION_UNSUPPORTED.to_string(),
+                CUSTOM_IDENTITY_NOT_A_CONFIG.to_string(),
             )),
+            SlimAuth::Did {
+                members: SlimMembers::Open,
+                tokens: DidTokens::SlimJwt,
+                ..
+            } => Err(IdentityError::Config(OPEN_NEEDS_DID_KEY_TOKENS.to_string())),
         }
     }
 }
 
 /// Create an app on `service` authenticated per `auth` — the DID-aware replacement
-/// for `Service::create_app_with_secret`. A config error from
-/// [`SlimAuth::configs`] is returned before `service` is touched; SLIM's own
-/// failure comes back as [`IdentityError::Slim`].
+/// for `Service::create_app_with_secret`. A config error is returned before `service`
+/// is touched; SLIM's own failure comes back as [`IdentityError::Slim`].
+///
+/// [`DidTokens::DidKey`] apps are created with SLIM's custom identity, from
+/// [`DidKeyProvider`] and [`DidKeyVerifier`]. Every other mode goes through
+/// [`SlimAuth::configs`].
 pub fn create_app(
     service: &Service,
     name: Arc<Name>,
     auth: &SlimAuth,
 ) -> Result<Arc<App>, IdentityError> {
+    if let SlimAuth::Did {
+        signing_pem,
+        did,
+        members,
+        tokens: DidTokens::DidKey,
+    } = auth
+    {
+        let (provider, verifier) = did_key_identity(signing_pem, did, members)?;
+        return Ok(service.create_app_with_custom_identity(
+            name,
+            provider,
+            verifier,
+            Direction::Bidirectional,
+        )?);
+    }
     let (provider, verifier) = auth.configs(&name)?;
     Ok(service.create_app(name, provider, verifier)?)
+}
+
+/// A custom SLIM identity: the provider and verifier SLIM's custom-identity entry
+/// point takes.
+type CustomIdentity = (Arc<dyn IdentityProvider>, Arc<dyn IdentityVerifier>);
+
+/// The custom identity of a [`DidTokens::DidKey`] app, as SLIM's foreign-facing
+/// traits. The verifier is built first, so a bad member list creates nothing.
+fn did_key_identity(
+    signing_pem: &str,
+    did: &str,
+    members: &SlimMembers,
+) -> Result<CustomIdentity, IdentityError> {
+    let verifier = did_key_verifier(members)?;
+    let agent = AgentIdentity::from_pkcs8_pem(signing_pem)?;
+    if agent.did() != did {
+        return Err(IdentityError::Config(
+            "the signing key is not the DID the app is configured with".to_string(),
+        ));
+    }
+    let provider = DidKeyProvider::new(agent)?;
+    Ok((
+        Arc::new(DidKeyIdentityProvider(Mutex::new(provider))),
+        Arc::new(DidKeyIdentityVerifier(verifier)),
+    ))
+}
+
+/// The [`DidKeyVerifier`] for `members`: any `did:key` for [`SlimMembers::Open`],
+/// or exactly the DIDs named by the JWKS for [`SlimMembers::AllowList`].
+fn did_key_verifier(members: &SlimMembers) -> Result<DidKeyVerifier, IdentityError> {
+    match members {
+        SlimMembers::Open => DidKeyVerifier::any_did_key(),
+        SlimMembers::AllowList { jwks } => {
+            let dids = dids_in_jwks(jwks)?;
+            DidKeyVerifier::allow_list(dids.iter().map(String::as_str))
+        }
+    }
+}
+
+/// The DIDs of a member JWKS: each entry's `kid`. An empty or malformed set is an
+/// error, never an allow-list that admits nobody without saying so.
+fn dids_in_jwks(jwks: &str) -> Result<Vec<String>, IdentityError> {
+    let set: Value = serde_json::from_str(jwks)
+        .map_err(|e| IdentityError::Config(format!("member JWKS is not JSON: {e}")))?;
+    let keys = set["keys"]
+        .as_array()
+        .filter(|keys| !keys.is_empty())
+        .ok_or_else(|| IdentityError::Config("member JWKS has no keys".to_string()))?;
+    keys.iter()
+        .map(|key| {
+            key["kid"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| IdentityError::Config("member JWKS entry has no kid".to_string()))
+        })
+        .collect()
+}
+
+/// A SLIM provider failure, as the callback error the foreign-facing trait returns.
+fn callback_failed(err: AuthError) -> IdentityCallbackError {
+    IdentityCallbackError::Failed {
+        message: err.to_string(),
+    }
+}
+
+/// [`DidKeyProvider`] as SLIM's [`IdentityProvider`].
+///
+/// SLIM 3.5.1 builds a custom-identity app from its foreign-facing traits, not
+/// from slim-auth's `TokenProvider`. This adapter bridges the two. Every method is
+/// synchronous except `initialize`, which has nothing to do.
+struct DidKeyIdentityProvider(Mutex<DidKeyProvider>);
+
+impl DidKeyIdentityProvider {
+    /// The provider. A poisoned lock is recovered: its only mutation is a plain
+    /// assignment, so the state cannot be half-updated.
+    fn inner(&self) -> MutexGuard<'_, DidKeyProvider> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl IdentityProvider for DidKeyIdentityProvider {
+    fn initialize<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), IdentityCallbackError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn get_token(&self) -> Result<String, IdentityCallbackError> {
+        self.inner().get_token().map_err(callback_failed)
+    }
+
+    fn get_id(&self) -> Result<String, IdentityCallbackError> {
+        self.inner().get_id().map_err(callback_failed)
+    }
+
+    fn get_signature_keys(&self) -> Result<SignatureKeys, IdentityCallbackError> {
+        let (secret_key, public_key) =
+            self.inner().get_signature_keys().map_err(callback_failed)?;
+        Ok(SignatureKeys {
+            secret_key,
+            public_key,
+        })
+    }
+
+    fn mls_signature_keys_installed(&self) -> Result<bool, IdentityCallbackError> {
+        self.inner()
+            .mls_signature_keys_installed()
+            .map_err(callback_failed)
+    }
+
+    fn set_signature_keys(
+        &self,
+        private_key: Vec<u8>,
+        public_key: Vec<u8>,
+    ) -> Result<(), IdentityCallbackError> {
+        self.inner().install_signature_keys(private_key, public_key);
+        Ok(())
+    }
+
+    /// No persistence: the app is not saved, so there is nothing to export.
+    fn export_identity(&self) -> Result<Option<IdentityExport>, IdentityCallbackError> {
+        Ok(None)
+    }
+
+    /// The MLS key is generated per process and never persisted, so it is not long-term.
+    fn holds_long_term_signing_key(&self) -> Result<bool, IdentityCallbackError> {
+        Ok(false)
+    }
+
+    fn restore_identity(&self, _identity: IdentityExport) -> Result<(), IdentityCallbackError> {
+        Err(IdentityCallbackError::Failed {
+            message: "DID-JWT identities cannot be restored from persistence".to_string(),
+        })
+    }
+}
+
+/// [`DidKeyVerifier`] as SLIM's [`IdentityVerifier`]. See [`DidKeyIdentityProvider`].
+struct DidKeyIdentityVerifier(DidKeyVerifier);
+
+impl IdentityVerifier for DidKeyIdentityVerifier {
+    fn initialize<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), IdentityCallbackError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// SLIM verifies through the synchronous [`IdentityVerifier::verify`] only.
+    fn verify_async<'life0, 'async_trait>(
+        &'life0 self,
+        token: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), IdentityCallbackError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(std::future::ready(self.verify(token)))
+    }
+
+    fn verify(&self, token: String) -> Result<(), IdentityCallbackError> {
+        self.0.verify(&token).map_err(callback_failed)
+    }
+
+    fn get_claims(&self, token: String) -> Result<String, IdentityCallbackError> {
+        let claims: Value = self.0.get_claims(&token).map_err(callback_failed)?;
+        serde_json::to_string(&claims).map_err(|e| IdentityCallbackError::Failed {
+            message: e.to_string(),
+        })
+    }
+
+    fn get_subject(&self, token: String) -> Result<String, IdentityCallbackError> {
+        self.0.get_subject(&token).map_err(callback_failed)
+    }
+
+    fn get_public_key(&self, token: String) -> Result<Vec<u8>, IdentityCallbackError> {
+        self.0.public_key_of(&token).map_err(callback_failed)
+    }
+
+    fn verify_key_binding(
+        &self,
+        token: String,
+        public_key: Vec<u8>,
+    ) -> Result<(), IdentityCallbackError> {
+        self.0
+            .verify_key_binding(&token, &public_key)
+            .map_err(|e| match e {
+                AuthError::PublicKeyMismatch { .. } => IdentityCallbackError::PublicKeyMismatch {
+                    message: e.to_string(),
+                },
+                other => callback_failed(other),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -300,6 +553,9 @@ const OPEN_NOT_SUPPORTED_BY_ALLOW_LIST: &str =
 /// credential, the caller's own among them. Needs `SHADI_SLIM_AUTH=did` and
 /// `SLIM_HUMAN_SEED`; a missing or malformed `peer_did` is an error, never a
 /// fallback to the env allow-list.
+///
+/// This is an open-admission flow: its tokens are DID-JWTs ([`DidTokens::DidKey`]),
+/// which open listeners accept.
 pub fn require_did_auth_for_peer(
     agent_id: &str,
     peer_did: &str,
@@ -328,11 +584,18 @@ pub fn build_did_auth_for_peer(
 fn did_auth_for_peer(agent: &AgentIdentity, peer_did: &str) -> Result<SlimAuth, IdentityError> {
     let peer_key = parse_did_key(peer_did)?;
     let own_did = agent.did();
-    if peer_key.as_bytes() == &agent.verifying_key_bytes() {
+    let jwks = if peer_key.as_bytes() == &agent.verifying_key_bytes() {
         // Dialling ourselves: one entry, not a duplicate `kid`.
-        return SlimAuth::did(agent, [own_did.as_str()]);
-    }
-    SlimAuth::did(agent, [peer_did, own_did.as_str()])
+        jwks_from_dids([own_did.as_str()])?
+    } else {
+        jwks_from_dids([peer_did, own_did.as_str()])?
+    };
+    Ok(SlimAuth::Did {
+        signing_pem: agent.to_pkcs8_pem()?,
+        did: own_did,
+        members: SlimMembers::AllowList { jwks },
+        tokens: DidTokens::DidKey,
+    })
 }
 
 /// The agent's own key from the environment: `SHADI_SLIM_AUTH=did` plus
@@ -369,7 +632,12 @@ fn resolve_did_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verifier::DID_JWT_AUDIENCE;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+    use serde_json::json;
     use slim_bindings::Name;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn shared_secret_configs_match_create_app_with_secret() {
@@ -423,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn open_configs_fail_closed_with_the_reason() {
+    fn open_configs_refuse_a_config_pair_and_point_to_create_app() {
         let agent = AgentIdentity::generate().unwrap();
         let name = Name::from_string("org/ns/app".to_string()).unwrap();
         let auth = SlimAuth::did_open(&agent).unwrap();
@@ -431,29 +699,76 @@ mod tests {
             &auth,
             SlimAuth::Did {
                 members: SlimMembers::Open,
+                tokens: DidTokens::DidKey,
                 ..
             }
         ));
         match auth.configs(&name) {
             Err(IdentityError::Config(msg)) => {
-                assert!(msg.contains("open admission"), "{msg}");
-                assert!(msg.contains("did:key verifier"), "{msg}");
+                assert!(msg.contains("custom SLIM identity"), "{msg}");
+                assert!(msg.contains("create_app"), "{msg}");
             }
             Err(e) => panic!("expected a config error, got {e:?}"),
-            Ok(_) => panic!("open admission must not yield configs"),
+            Ok(_) => panic!("open admission must not yield a config pair"),
         }
     }
 
     #[test]
-    fn create_app_refuses_open_before_creating_an_app() {
+    fn open_members_on_stock_jwt_tokens_fail_closed() {
+        // Not reachable through the constructors, but the stock signer must never
+        // be asked to admit any did:key.
         let agent = AgentIdentity::generate().unwrap();
-        let name = Arc::new(Name::from_string("org/ns/open-app".to_string()).unwrap());
-        let auth = SlimAuth::did_open(&agent).unwrap();
-        let service = Service::new("shadi-identity-open-admission-test".to_string());
+        let name = Name::from_string("org/ns/app".to_string()).unwrap();
+        let auth = SlimAuth::Did {
+            signing_pem: agent.to_pkcs8_pem().unwrap(),
+            did: agent.did(),
+            members: SlimMembers::Open,
+            tokens: DidTokens::SlimJwt,
+        };
+        match auth.configs(&name) {
+            Err(IdentityError::Config(msg)) => assert!(msg.contains("DidTokens::DidKey"), "{msg}"),
+            _ => panic!("open members must not get stock JWT configs"),
+        }
+    }
+
+    #[test]
+    fn create_app_under_open_admission_builds_a_custom_identity_app() {
+        let listener = AgentIdentity::derive(b"seed", "listener").unwrap();
+        let listener_name =
+            Arc::new(Name::from_string("org/ns/open-listener".to_string()).unwrap());
+        let service = Service::new("shadi-identity-open-listener-test".to_string());
+        let app = create_app(
+            &service,
+            listener_name,
+            &SlimAuth::did_open(&listener).unwrap(),
+        )
+        .expect("an open listener app is created in-process");
+        assert!(app.name().to_string().starts_with("org/ns/open-listener"));
+
+        let peer = AgentIdentity::derive(b"seed", "peer").unwrap().did();
+        let caller_name = Arc::new(Name::from_string("org/ns/open-caller".to_string()).unwrap());
+        let caller_auth = build_did_auth_for_peer(b"seed", "caller", &peer).unwrap();
+        let caller = create_app(&service, caller_name, &caller_auth)
+            .expect("a caller pinned to its peer is created in-process");
+        assert!(caller.name().to_string().starts_with("org/ns/open-caller"));
+    }
+
+    #[test]
+    fn create_app_refuses_a_signing_key_for_another_did_and_creates_nothing() {
+        let signer = AgentIdentity::derive(b"seed", "signer").unwrap();
+        let other = AgentIdentity::derive(b"seed", "other").unwrap();
+        let auth = SlimAuth::Did {
+            signing_pem: signer.to_pkcs8_pem().unwrap(),
+            did: other.did(),
+            members: SlimMembers::Open,
+            tokens: DidTokens::DidKey,
+        };
+        let name = Arc::new(Name::from_string("org/ns/mismatch".to_string()).unwrap());
+        let service = Service::new("shadi-identity-mismatch-test".to_string());
         match create_app(&service, name, &auth) {
-            Err(IdentityError::Config(msg)) => assert!(msg.contains("open admission"), "{msg}"),
+            Err(IdentityError::Config(msg)) => assert!(msg.contains("not the DID"), "{msg}"),
             Err(e) => panic!("expected a config error, got {e:?}"),
-            Ok(_) => panic!("open admission must not create an app"),
+            Ok(_) => panic!("a mismatched key must not create an app"),
         }
     }
 
@@ -942,5 +1257,265 @@ mod tests {
 
         env::remove_var("SHADI_SLIM_AUTH");
         env::remove_var("SLIM_HUMAN_SEED");
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// A token minted by `id`'s DID-JWT provider, the way a SLIM app presents it.
+    fn token_from(id: AgentIdentity) -> String {
+        DidKeyProvider::new(id).unwrap().get_token().unwrap()
+    }
+
+    /// `header.claims` signed by `signer` over the signing input, as a JWS.
+    fn signed_jwt(signer: &AgentIdentity, header: Value, claims: Value) -> String {
+        let signing_input = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header.to_string()),
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        let signature = signer.sign_bytes(signing_input.as_bytes());
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature))
+    }
+
+    /// Claims a DID-JWT for `did` carries, valid now, with the given `aud`.
+    fn claims_for(did: &str, aud: Value) -> Value {
+        let t = now_secs();
+        json!({
+            "iss": did,
+            "sub": did,
+            "aud": aud,
+            "iat": t,
+            "nbf": t,
+            "exp": t + 300,
+            "pubkey": STANDARD.encode([7u8; 32]),
+        })
+    }
+
+    /// The claims of a token's payload segment.
+    fn payload(token: &str) -> Value {
+        let part = token.split('.').nth(1).unwrap();
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn open_listener_verifier_admits_a_token_from_any_did_key() {
+        let v = did_key_verifier(&SlimMembers::Open).unwrap();
+        // A stranger the listener has no record of: it proves only its key.
+        let stranger = AgentIdentity::generate().unwrap();
+        let stranger_did = stranger.did();
+        let token = token_from(stranger);
+        assert!(v.verify(&token).is_ok());
+        assert_eq!(v.get_subject(&token).unwrap(), stranger_did);
+        // The listener's own token is admitted as well.
+        let listener = AgentIdentity::derive(b"seed", "listener").unwrap();
+        assert!(v.verify(token_from(listener)).is_ok());
+    }
+
+    #[test]
+    fn open_listener_verifier_rejects_wrong_audience_and_bad_signatures() {
+        let v = did_key_verifier(&SlimMembers::Open).unwrap();
+        let id = AgentIdentity::generate().unwrap();
+        let did = id.did();
+        let eddsa = json!({ "alg": "EdDSA", "typ": "JWT" });
+
+        // Control: the same shape with the right audience is admitted.
+        let good = signed_jwt(
+            &id,
+            eddsa.clone(),
+            claims_for(&did, json!(DID_JWT_AUDIENCE)),
+        );
+        assert!(v.verify(&good).is_ok());
+
+        // Signed by this DID's own key, but minted for another audience.
+        let wrong_aud = signed_jwt(
+            &id,
+            eddsa.clone(),
+            claims_for(&did, json!("some-other-service")),
+        );
+        assert!(v.verify(&wrong_aud).is_err(), "accepted a wrong audience");
+
+        // The claims name `did`, but another key signed them.
+        let other = AgentIdentity::generate().unwrap();
+        let forged = signed_jwt(
+            &other,
+            eddsa.clone(),
+            claims_for(&did, json!(DID_JWT_AUDIENCE)),
+        );
+        assert!(v.verify(&forged).is_err(), "accepted a bad signature");
+
+        // A valid token whose payload is swapped after signing.
+        let mut tampered_claims = claims_for(&did, json!(DID_JWT_AUDIENCE));
+        tampered_claims["pubkey"] = json!(STANDARD.encode([9u8; 32]));
+        let mut parts: Vec<String> = good.split('.').map(str::to_owned).collect();
+        parts[1] = URL_SAFE_NO_PAD.encode(tampered_claims.to_string());
+        assert!(
+            v.verify(parts.join(".")).is_err(),
+            "accepted a tampered payload"
+        );
+
+        // Not a DID-JWT: an HS256 token, with no EdDSA signature to check.
+        let hs256 = signed_jwt(
+            &id,
+            json!({ "alg": "HS256", "typ": "JWT" }),
+            claims_for(&did, json!(DID_JWT_AUDIENCE)),
+        );
+        assert!(v.verify(&hs256).is_err(), "accepted a non-EdDSA token");
+
+        // A token with no audience at all.
+        let mut no_aud = claims_for(&did, json!(DID_JWT_AUDIENCE));
+        no_aud.as_object_mut().unwrap().remove("aud");
+        assert!(v.verify(signed_jwt(&id, eddsa, no_aud)).is_err());
+    }
+
+    #[test]
+    fn pinned_caller_verifier_admits_its_peer_and_itself_but_no_third_did() {
+        let seed = b"seed";
+        let peer_did = AgentIdentity::derive(seed, "peer").unwrap().did();
+        let auth = build_did_auth_for_peer(seed, "caller", &peer_did).unwrap();
+        let SlimAuth::Did {
+            members, tokens, ..
+        } = &auth
+        else {
+            panic!("expected DID auth");
+        };
+        assert_eq!(*tokens, DidTokens::DidKey);
+        let v = did_key_verifier(members).unwrap();
+        let mint = |name: &str| token_from(AgentIdentity::derive(seed, name).unwrap());
+
+        assert!(
+            v.verify(mint("peer")).is_ok(),
+            "the dialled peer must be admitted"
+        );
+        assert!(
+            v.verify(mint("caller")).is_ok(),
+            "the caller's own credential must be admitted"
+        );
+        assert!(
+            v.verify(mint("third")).is_err(),
+            "a DID that was not dialled must be rejected"
+        );
+    }
+
+    #[test]
+    fn did_key_verifier_refuses_an_empty_or_malformed_member_list() {
+        for jwks in [
+            r#"{"keys":[]}"#,
+            r#"{}"#,
+            "not json",
+            r#"{"keys":[{"x":"1"}]}"#,
+            r#"{"keys":[{"kid":"did:web:example.com"}]}"#,
+        ] {
+            let members = SlimMembers::AllowList {
+                jwks: jwks.to_string(),
+            };
+            assert!(
+                matches!(
+                    did_key_verifier(&members),
+                    Err(IdentityError::Config(_) | IdentityError::InvalidDid(_))
+                ),
+                "{jwks} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn closed_admission_stays_on_the_stock_jwt_configs() {
+        let agent = AgentIdentity::derive(b"seed", "agent-x").unwrap();
+        let member = AgentIdentity::derive(b"seed", "peer").unwrap().did();
+        let name = Name::from_string("org/ns/closed".to_string()).unwrap();
+        let auths = [
+            SlimAuth::did(&agent, [agent.did().as_str(), member.as_str()]).unwrap(),
+            build_did_auth(b"seed", &member, "agent-x").unwrap(),
+        ];
+        for auth in &auths {
+            assert!(matches!(
+                auth,
+                SlimAuth::Did {
+                    members: SlimMembers::AllowList { .. },
+                    tokens: DidTokens::SlimJwt,
+                    ..
+                }
+            ));
+            let (p, v) = auth.configs(&name).unwrap();
+            assert!(matches!(p, IdentityProviderConfig::Jwt { .. }));
+            assert!(matches!(v, IdentityVerifierConfig::Jwt { .. }));
+        }
+
+        // Closed creates its app through the stock config pair, as before.
+        let service = Service::new("shadi-identity-closed-regression-test".to_string());
+        let closed_name = Arc::new(name);
+        create_app(&service, closed_name, &auths[0]).expect("closed app is created");
+    }
+
+    #[test]
+    fn identity_provider_adapter_reports_the_keys_its_tokens_carry() {
+        let id = AgentIdentity::generate().unwrap();
+        let did = id.did();
+        let adapter = DidKeyIdentityProvider(Mutex::new(DidKeyProvider::new(id).unwrap()));
+        assert_eq!(adapter.get_id().unwrap(), did);
+        assert!(adapter.mls_signature_keys_installed().unwrap());
+
+        // The token's pubkey claim is the MLS public key a peer checks.
+        let keys = adapter.get_signature_keys().unwrap();
+        assert_eq!(
+            payload(&adapter.get_token().unwrap())["pubkey"],
+            STANDARD.encode(&keys.public_key)
+        );
+
+        // SLIM installs its own pair; the adapter keeps it and the next token carries it.
+        adapter
+            .set_signature_keys(vec![1u8; 32], vec![2u8; 32])
+            .unwrap();
+        let keys = adapter.get_signature_keys().unwrap();
+        assert_eq!(keys.secret_key, vec![1u8; 32]);
+        assert_eq!(keys.public_key, vec![2u8; 32]);
+        assert_eq!(
+            payload(&adapter.get_token().unwrap())["pubkey"],
+            STANDARD.encode([2u8; 32])
+        );
+
+        // No persistence: nothing to export, and a restore is refused.
+        assert!(adapter.export_identity().unwrap().is_none());
+        assert!(!adapter.holds_long_term_signing_key().unwrap());
+        let restore = IdentityExport {
+            id: did,
+            credential: vec![],
+            signature_secret_key: vec![1],
+            signature_public_key: vec![2],
+        };
+        assert!(adapter.restore_identity(restore).is_err());
+    }
+
+    #[tokio::test]
+    async fn identity_verifier_adapter_maps_the_verifier_and_its_errors() {
+        let id = AgentIdentity::generate().unwrap();
+        let did = id.did();
+        let provider = DidKeyProvider::new(id).unwrap();
+        let mls_public = provider.get_signature_keys().unwrap().1;
+        let token = provider.get_token().unwrap();
+        let adapter = DidKeyIdentityVerifier(DidKeyVerifier::any_did_key().unwrap());
+
+        adapter.initialize().await.unwrap();
+        adapter.verify_async(token.clone()).await.unwrap();
+        assert!(adapter.verify(token.clone()).is_ok());
+        assert!(adapter.verify("not-a-token".to_string()).is_err());
+
+        let claims: Value =
+            serde_json::from_str(&adapter.get_claims(token.clone()).unwrap()).unwrap();
+        assert_eq!(claims["sub"], did);
+        assert_eq!(adapter.get_subject(token.clone()).unwrap(), did);
+        assert_eq!(adapter.get_public_key(token.clone()).unwrap(), mls_public);
+        assert!(adapter
+            .verify_key_binding(token.clone(), mls_public.clone())
+            .is_ok());
+        assert!(matches!(
+            adapter.verify_key_binding(token, vec![0u8; 32]),
+            Err(IdentityCallbackError::PublicKeyMismatch { .. })
+        ));
     }
 }

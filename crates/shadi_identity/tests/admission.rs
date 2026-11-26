@@ -9,8 +9,7 @@
 use std::time::Duration;
 
 use shadi_identity::config::{did_provider_config_with_ttl, did_verifier_config};
-use shadi_identity::{build_did_auth_for_peer, jwks_from_dids, AgentIdentity};
-use slim_bindings::Name;
+use shadi_identity::{jwks_from_dids, AgentIdentity};
 
 use slim_auth::traits::{TokenProvider, Verifier};
 use slim_config::auth::identity::{
@@ -51,36 +50,6 @@ async fn did_admission_accepts_member_rejects_nonmember() {
     assert!(
         verifier.verify(&intruder_token).is_err(),
         "a non-member DID must be rejected by the allow-list"
-    );
-}
-
-/// A caller pinned to the peer it dialled trusts that peer and itself (SLIM's MLS
-/// Welcome verifies the caller's own credential too) and no one else.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn peer_pinned_caller_verifies_peer_and_self_but_not_a_third_did() {
-    slim_config::tls::provider::initialize_crypto_provider();
-
-    let caller = AgentIdentity::derive(b"seed", "caller").unwrap();
-    let peer = AgentIdentity::derive(b"seed", "peer").unwrap();
-    let third = AgentIdentity::derive(b"seed", "third").unwrap();
-
-    let auth = build_did_auth_for_peer(b"seed", "caller", &peer.did()).unwrap();
-    let name = Name::from_string("org/ns/caller".to_string()).unwrap();
-    let (_, verifier_cfg) = auth.configs(&name).unwrap();
-    let verifier_cfg: CoreVerifier = verifier_cfg.into();
-    let verifier = verifier_cfg.build_auth_verifier().unwrap();
-
-    assert!(
-        verifier.verify(mint(&peer)).is_ok(),
-        "the dialled peer must be admitted"
-    );
-    assert!(
-        verifier.verify(mint(&caller)).is_ok(),
-        "the caller's own credential must be admitted"
-    );
-    assert!(
-        verifier.verify(mint(&third)).is_err(),
-        "a DID that was not dialled must be rejected"
     );
 }
 

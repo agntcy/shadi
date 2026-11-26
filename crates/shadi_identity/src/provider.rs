@@ -50,6 +50,13 @@ impl DidKeyProvider {
         })
     }
 
+    /// Install the MLS signature key pair, as [`TokenProvider::set_signature_keys`]
+    /// does. Synchronous for the custom-identity adapter in `auth.rs`, whose
+    /// callbacks cannot await; the trait method delegates here.
+    pub(crate) fn install_signature_keys(&mut self, private_key: Vec<u8>, public_key: Vec<u8>) {
+        self.signature_keys = (private_key, public_key);
+    }
+
     /// Mint a DID-JWT whose `iat` and `nbf` are `now` (seconds since the Unix epoch).
     fn mint_at(&self, now: u64) -> String {
         let did = self.identity.did();
@@ -114,7 +121,7 @@ impl TokenProvider for DidKeyProvider {
         private_key: Vec<u8>,
         public_key: Vec<u8>,
     ) -> Result<(), AuthError> {
-        self.signature_keys = (private_key, public_key);
+        self.install_signature_keys(private_key, public_key);
         Ok(())
     }
 }

@@ -35,7 +35,7 @@ pub mod vp_layer;
 pub use auth::{
     agent_identity_from_env, build_did_auth, build_did_auth_for_peer, create_app,
     did_auth_from_env, parse_slim_admission, require_did_auth_for_peer, require_did_auth_from_env,
-    slim_admission_from_env, SlimAdmission, SlimAuth, SlimMembers,
+    slim_admission_from_env, DidTokens, SlimAdmission, SlimAuth, SlimMembers,
 };
 pub use binding::{
     issue_binding, looks_like_binding, split_binding, verify_binding, VerifiedBinding,

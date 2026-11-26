@@ -98,6 +98,13 @@ impl DidKeyVerifier {
         Self::new(Policy::AllowList(allowed), DID_JWT_AUDIENCE)
     }
 
+    /// The public key carried by a token that passes every check. Synchronous for the
+    /// custom-identity adapter in `auth.rs`, whose callbacks cannot await; the trait
+    /// method [`Verifier::get_public_key`] delegates here.
+    pub(crate) fn public_key_of(&self, token: &str) -> Result<Vec<u8>, AuthError> {
+        Ok(self.check(token)?.pubkey)
+    }
+
     /// A verifier that requires `aud` to equal `audience`. The public constructors
     /// pass [`DID_JWT_AUDIENCE`]; tests pass other values to show a mismatch is rejected.
     /// An empty or whitespace-only audience is rejected as a misconfiguration.
@@ -263,7 +270,7 @@ impl Verifier for DidKeyVerifier {
     }
 
     async fn get_public_key(&self, token: impl AsRef<str> + Send) -> Result<Vec<u8>, AuthError> {
-        Ok(self.check(token.as_ref())?.pubkey)
+        self.public_key_of(token.as_ref())
     }
 }
 
