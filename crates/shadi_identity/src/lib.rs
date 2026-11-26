@@ -28,6 +28,7 @@ pub mod grant;
 pub mod openpgp;
 pub mod ssh;
 pub mod trust_anchor;
+pub mod verifier;
 pub mod vp_layer;
 
 pub use auth::{
@@ -44,6 +45,7 @@ pub use did_proof::{
 };
 pub use grant::{issue_grant, verify_grant, ChannelGrant, GrantAction, GrantRole};
 pub use trust_anchor::{DeclaredKeysAnchor, KeyListFetcher, PublishedKeysAnchor, TrustAnchor};
+pub use verifier::{DidKeyVerifier, DID_JWT_AUDIENCE};
 pub use vp_layer::{looks_like_vp, split_vp, wrap_vp, VP_MAX_BYTES};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
