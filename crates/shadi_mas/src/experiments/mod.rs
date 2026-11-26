@@ -13,8 +13,8 @@ use agent_transport_slim::client_access::ClientAccess;
 pub mod auth_required;
 pub use auth_required::{
     audit_auth_required, decide_auth_required, is_auth_required, run_auth_required_loop,
-    AuthChallenge, AuthRequiredAction, AuthRequiredConfig, AuthRequiredPolicy,
-    MAX_CHALLENGE_BYTES,
+    run_auth_required_loop_with_sleep, AuthChallenge, AuthRequiredAction, AuthRequiredConfig,
+    AuthRequiredPolicy, MAX_CHALLENGE_BYTES, MAX_RETRY_AFTER_WAITS,
 };
 use crate::adapters::{MessagingAdapter, TaskAdapter, TaskEnvelope};
 use shadi_a2a::{
@@ -209,13 +209,14 @@ impl LiveA2ATaskAdapter {
                     .map_err(|err| err.to_string())?;
                 let signed_text = String::from_utf8(signed)
                     .map_err(|err| format!("DID proof envelope is not UTF-8: {err}"))?;
-                // Only a task-scoped challenge needs the retry to land on the
-                // parked task; the re-prove path keeps minting its own.
+                // Only a task-scoped challenge, or a busy park waiting for one,
+                // needs the retry to land on the parked task; the re-prove path
+                // keeps minting its own.
                 self.send_signed_task(
                     task,
                     &signed_text,
                     parked
-                        .filter(|p| p.challenge.is_some())
+                        .filter(|p| p.challenge.is_some() || p.retry_after.is_some())
                         .map(|p| p.task_id.as_str()),
                 )
             },

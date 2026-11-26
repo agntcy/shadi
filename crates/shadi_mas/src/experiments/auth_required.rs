@@ -18,8 +18,14 @@ use a2a::{SendMessageResponse, TaskState};
 pub const MAX_CHALLENGE_BYTES: usize = 32 * 1024;
 /// How many times the client will re-prove or escalate before denying.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 2;
-/// Wall-clock budget for an escalate prompt. Expired escalate is a deny.
+/// Wall-clock budget for an escalate prompt, and the most one send sits out
+/// in listener retry-after waits. Past either is a deny.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Most retry-after waits one send sits out before denying. A wait is not a
+/// failed proof, so it does not count against `max_attempts`.
+pub const MAX_RETRY_AFTER_WAITS: u32 = 3;
+
+const LISTENER_BUSY: &str = "AUTH_REQUIRED denied: listener busy: challenge capacity exhausted";
 
 /// What a parked task hands the next send attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +35,9 @@ pub struct AuthChallenge {
     pub task_id: String,
     /// Opaque challenge the listener attached, if it attached one.
     pub challenge: Option<String>,
+    /// How long the listener asked to be left alone before the next send,
+    /// when it was too busy to issue a challenge.
+    pub retry_after: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,17 +151,35 @@ pub fn is_auth_required(response: &SendMessageResponse) -> bool {
 ///
 /// `send` is called for every attempt (including the first, which gets `None`;
 /// later ones get what the previous parked response carried). `escalate` runs
-/// only when policy is `Ask` and the first re-prove was not enough.
+/// only when policy is `Ask` and the first re-prove was not enough. A park with
+/// a retry-after is waited out on this thread before the next send.
 pub fn run_auth_required_loop<S, E>(
-    mut send: S,
+    send: S,
     config: &AuthRequiredConfig,
-    mut escalate: E,
+    escalate: E,
 ) -> Result<SendMessageResponse, String>
 where
     S: FnMut(Option<&AuthChallenge>) -> Result<SendMessageResponse, String>,
     E: FnMut() -> Result<String, String>,
 {
+    run_auth_required_loop_with_sleep(send, config, escalate, std::thread::sleep)
+}
+
+/// As [`run_auth_required_loop`], with `sleep` doing the retry-after waits.
+pub fn run_auth_required_loop_with_sleep<S, E, W>(
+    mut send: S,
+    config: &AuthRequiredConfig,
+    mut escalate: E,
+    mut sleep: W,
+) -> Result<SendMessageResponse, String>
+where
+    S: FnMut(Option<&AuthChallenge>) -> Result<SendMessageResponse, String>,
+    E: FnMut() -> Result<String, String>,
+    W: FnMut(Duration),
+{
     let mut attempt = 0u32;
+    let mut waits = 0u32;
+    let mut waited = Duration::ZERO;
     let mut parked: Option<AuthChallenge> = None;
     loop {
         let response = send(parked.as_ref())?;
@@ -160,6 +187,30 @@ where
             return Ok(response);
         }
         parked = parked_challenge(&response)?;
+        // A deny policy denies a busy park like any other.
+        if let Some(wait) = parked
+            .as_ref()
+            .and_then(|p| p.retry_after)
+            .filter(|_| config.policy != AuthRequiredPolicy::Deny)
+        {
+            waits += 1;
+            waited = waited.saturating_add(wait);
+            if waits > MAX_RETRY_AFTER_WAITS || waited > config.timeout {
+                let action = AuthRequiredAction::Deny {
+                    reason: LISTENER_BUSY.to_string(),
+                };
+                audit_auth_required(attempt, &action);
+                return Err(LISTENER_BUSY.to_string());
+            }
+            tracing::info!(
+                waits,
+                wait_secs = wait.as_secs(),
+                decision = "wait",
+                "AUTH_REQUIRED"
+            );
+            sleep(wait);
+            continue;
+        }
         attempt += 1;
         let action = decide_auth_required(attempt, config);
         audit_auth_required(attempt, &action);
@@ -187,11 +238,8 @@ fn parked_challenge(response: &SendMessageResponse) -> Result<Option<AuthChallen
     let SendMessageResponse::Task(task) = response else {
         return Ok(None);
     };
-    let challenge = task
-        .status
-        .message
-        .as_ref()
-        .and_then(shadi_a2a::challenge_from_message);
+    let message = task.status.message.as_ref();
+    let challenge = message.and_then(shadi_a2a::challenge_from_message);
     if challenge.is_some_and(|c| c.len() > MAX_CHALLENGE_BYTES) {
         return Err(format!(
             "AUTH_REQUIRED denied: challenge exceeds {MAX_CHALLENGE_BYTES} bytes"
@@ -200,6 +248,9 @@ fn parked_challenge(response: &SendMessageResponse) -> Result<Option<AuthChallen
     Ok(Some(AuthChallenge {
         task_id: task.id.clone(),
         challenge: challenge.map(str::to_string),
+        retry_after: message
+            .and_then(shadi_a2a::retry_after_from_message)
+            .map(Duration::from_secs),
     }))
 }
 
@@ -526,5 +577,145 @@ mod tests {
         .expect_err("oversized challenge must deny");
         assert!(err.contains("AUTH_REQUIRED denied"));
         assert!(err.contains(&MAX_CHALLENGE_BYTES.to_string()));
+    }
+
+    fn parked_task_with_retry_after(secs: u64) -> SendMessageResponse {
+        let SendMessageResponse::Task(mut task) = parked_task() else {
+            unreachable!()
+        };
+        task.status.message = Some(shadi_a2a::insert_retry_after(
+            Message::new(Role::Agent, vec![Part::text("busy".to_string())]),
+            secs,
+        ));
+        SendMessageResponse::Task(task)
+    }
+
+    fn reprove(max_attempts: u32, timeout: Duration) -> AuthRequiredConfig {
+        AuthRequiredConfig {
+            policy: AuthRequiredPolicy::ReProve,
+            max_attempts,
+            timeout,
+        }
+    }
+
+    /// Runs the loop over `responses` in order, recording what each send saw
+    /// and every wait instead of sleeping.
+    fn run_scripted(
+        responses: Vec<SendMessageResponse>,
+        cfg: &AuthRequiredConfig,
+    ) -> (
+        Result<SendMessageResponse, String>,
+        Vec<Option<AuthChallenge>>,
+        Vec<Duration>,
+    ) {
+        let mut responses = responses.into_iter();
+        let mut seen = Vec::new();
+        let mut slept = Vec::new();
+        let result = run_auth_required_loop_with_sleep(
+            |previous| {
+                seen.push(previous.cloned());
+                Ok(responses.next().expect("no send past the script"))
+            },
+            cfg,
+            || Ok(String::new()),
+            |wait| slept.push(wait),
+        );
+        (result, seen, slept)
+    }
+
+    #[test]
+    fn a_retry_after_wait_then_a_challenge_completes() {
+        let (result, seen, slept) = run_scripted(
+            vec![
+                parked_task_with_retry_after(5),
+                parked_task_with_challenge("{\"nonce\":\"n1\"}"),
+                completed_message(),
+            ],
+            &reprove(2, DEFAULT_TIMEOUT),
+        );
+        assert!(!is_auth_required(&result.expect("completes")));
+        assert_eq!(slept, [Duration::from_secs(5)]);
+        let after_wait = seen[1].as_ref().expect("the wait reaches attempt two");
+        assert_eq!(after_wait.task_id, "parked");
+        assert_eq!(after_wait.retry_after, Some(Duration::from_secs(5)));
+        assert_eq!(after_wait.challenge, None);
+        assert_eq!(
+            seen[2].as_ref().and_then(|p| p.challenge.as_deref()),
+            Some("{\"nonce\":\"n1\"}")
+        );
+    }
+
+    #[test]
+    fn retry_after_waits_do_not_spend_attempts() {
+        let mut script: Vec<_> = (0..MAX_RETRY_AFTER_WAITS)
+            .map(|_| parked_task_with_retry_after(1))
+            .collect();
+        script.push(parked_task_with_challenge("{\"nonce\":\"n1\"}"));
+        script.push(completed_message());
+        let (result, _, slept) = run_scripted(script, &reprove(1, DEFAULT_TIMEOUT));
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(slept.len(), MAX_RETRY_AFTER_WAITS as usize);
+    }
+
+    #[test]
+    fn retry_after_waits_past_the_timeout_deny_as_busy() {
+        let (result, seen, slept) = run_scripted(
+            vec![
+                parked_task_with_retry_after(20),
+                parked_task_with_retry_after(20),
+            ],
+            &reprove(2, Duration::from_secs(30)),
+        );
+        let err = result.expect_err("40s of waits exceed a 30s budget");
+        assert!(err.contains("listener busy"), "{err}");
+        assert!(err.contains("challenge capacity exhausted"), "{err}");
+        assert_eq!(slept, [Duration::from_secs(20)]);
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn a_retry_after_longer_than_the_timeout_denies_without_waiting() {
+        let (result, _, slept) = run_scripted(
+            vec![parked_task_with_retry_after(50)],
+            &reprove(2, Duration::from_secs(30)),
+        );
+        assert!(result.expect_err("too long").contains("listener busy"));
+        assert!(slept.is_empty());
+    }
+
+    #[test]
+    fn more_retry_after_waits_than_the_cap_deny_as_busy() {
+        let script = (0..=MAX_RETRY_AFTER_WAITS)
+            .map(|_| parked_task_with_retry_after(1))
+            .collect();
+        let (result, seen, slept) = run_scripted(script, &reprove(2, DEFAULT_TIMEOUT));
+        assert!(result.expect_err("capped").contains("listener busy"));
+        assert_eq!(slept.len(), MAX_RETRY_AFTER_WAITS as usize);
+        assert_eq!(seen.len(), MAX_RETRY_AFTER_WAITS as usize + 1);
+    }
+
+    #[test]
+    fn a_park_without_retry_after_never_waits() {
+        let (result, seen, slept) = run_scripted(
+            vec![parked_task(), parked_task()],
+            &reprove(1, DEFAULT_TIMEOUT),
+        );
+        let err = result.expect_err("must deny after max attempts");
+        assert!(err.contains("exceeded"), "{err}");
+        assert!(slept.is_empty());
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].as_ref().and_then(|p| p.retry_after), None);
+    }
+
+    #[test]
+    fn a_deny_policy_denies_a_busy_park_without_waiting() {
+        let cfg = AuthRequiredConfig {
+            policy: AuthRequiredPolicy::Deny,
+            max_attempts: 2,
+            timeout: DEFAULT_TIMEOUT,
+        };
+        let (result, _, slept) = run_scripted(vec![parked_task_with_retry_after(5)], &cfg);
+        assert!(result.expect_err("deny").contains("policy"));
+        assert!(slept.is_empty());
     }
 }
