@@ -13,4 +13,18 @@ pub use channel::{
 };
 pub use locator::{A2ABinding, A2ALocator};
 pub use trace_context::set_remote_parent;
-pub use a2a_slimrpc::{SLIM_SRC_METADATA_KEY, SlimRpcHandler, register_collaborate};
+pub use a2a_slimrpc::{
+    SLIM_PEER_SUBJECT_METADATA_KEY, SLIM_SRC_METADATA_KEY, SlimRpcHandler, register_collaborate,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key under which SLIM's verified session peer reaches a handler.
+    /// Open admission relies on it, so a rename upstream must fail here.
+    #[test]
+    fn the_session_peer_key_is_the_one_slim_sets() {
+        assert_eq!(SLIM_PEER_SUBJECT_METADATA_KEY, "slim-peer-subject");
+    }
+}
