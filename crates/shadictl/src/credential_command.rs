@@ -305,7 +305,14 @@ fn issue_report(results: &[(String, Result<CredentialRecord, String>)]) -> Strin
 }
 
 /// The derived agent key that signs the proof of possession.
+///
+/// Under DID auth it is the key agentbridge signs with, derived from
+/// `SLIM_HUMAN_SEED`: a credential bound to any other key is refused by the
+/// listener, since the envelope signer must be the credential holder.
 fn agent_identity(prefix: &str, agent: &str) -> Result<shadi_identity::AgentIdentity, String> {
+    if did_auth_selected() {
+        return shadi_identity::agent_identity_from_env(agent).map_err(|err| err.to_string());
+    }
     let name = format!("{prefix}/{agent}/private");
     let secret = default_secret_store()
         .get(&name)
@@ -316,6 +323,15 @@ fn agent_identity(prefix: &str, agent: &str) -> Result<shadi_identity::AgentIden
         .map_err(|_| format!("the secret {name} is not base64"))?;
     shadi_identity::AgentIdentity::from_signing_key_slice(&bytes)
         .map_err(|_| format!("the secret {name} is not a 32-byte signing key"))
+}
+
+/// The mode test of [`shadi_identity::agent_identity_from_env`], which has no
+/// public predicate of its own. Issuance needs no `SLIM_MEMBER_DIDS`, so
+/// `did_auth_from_env` would demand more than this command uses.
+fn did_auth_selected() -> bool {
+    std::env::var("SHADI_SLIM_AUTH")
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("did")
 }
 
 /// What may be printed about a credential. Never the credential itself, and
@@ -815,14 +831,139 @@ mod tests {
         );
     }
 
+    struct ScopedEnvVar {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    const TEST_HUMAN_SEED: &str = "credential-command-test-human-seed";
+
     #[test]
     fn agent_identity_names_a_missing_secret() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         let err = agent_identity("absent_prefix", "nobody").err().expect("missing");
         assert!(err.contains("absent_prefix/nobody/private"), "{err}");
     }
 
+    /// The key agentbridge signs its envelopes and presentations with, so the
+    /// listener sees the credential holder as the signer. A stored key under
+    /// the same name must not win.
+    #[test]
+    fn did_mode_binds_to_the_agentbridge_key_not_the_stored_one() {
+        let _lock = crate::lock_test_env();
+        let _seed = ScopedEnvVar::set("SLIM_HUMAN_SEED", TEST_HUMAN_SEED);
+        let _members = ScopedEnvVar::unset("SLIM_MEMBER_DIDS");
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put("did_mode/avatar/private", b64.encode([3u8; 32]).as_bytes());
+        let stored = shadi_identity::AgentIdentity::from_signing_key_slice(&[3u8; 32])
+            .expect("stored key")
+            .did();
+
+        for mode in ["did", "DID"] {
+            let _auth = ScopedEnvVar::set("SHADI_SLIM_AUTH", mode);
+            let expected = shadi_identity::agent_identity_from_env("avatar")
+                .expect("agentbridge identity")
+                .did();
+            let got = agent_identity("did_mode", "avatar").expect("derived").did();
+            assert_eq!(got, expected, "{mode}");
+            assert_ne!(got, stored, "{mode}");
+        }
+    }
+
+    #[test]
+    fn did_mode_needs_no_member_allow_list() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::set("SHADI_SLIM_AUTH", "did");
+        let _seed = ScopedEnvVar::set("SLIM_HUMAN_SEED", TEST_HUMAN_SEED);
+        let _members = ScopedEnvVar::unset("SLIM_MEMBER_DIDS");
+
+        let agents: Vec<String> = ["avatar", "claude-code", "avatar"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let identities = agent_identities("did_no_members", &agents).expect("derived");
+        let got: Vec<(&str, String)> = identities
+            .iter()
+            .map(|(name, id)| (name.as_str(), id.did()))
+            .collect();
+        let expected: Vec<(&str, String)> = ["avatar", "claude-code"]
+            .into_iter()
+            .map(|name| {
+                let id = shadi_identity::AgentIdentity::derive(TEST_HUMAN_SEED.as_bytes(), name)
+                    .expect("derive");
+                (name, id.did())
+            })
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    /// A missing seed is an error, never a silent fall back to a stored key
+    /// that the listener would then refuse.
+    #[test]
+    fn did_mode_without_a_seed_names_it_and_does_not_fall_back() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::set("SHADI_SLIM_AUTH", "did");
+        let _seed = ScopedEnvVar::unset("SLIM_HUMAN_SEED");
+        let b64 = base64::engine::general_purpose::STANDARD;
+        test_store_put(
+            "did_no_seed/avatar/private",
+            b64.encode([4u8; 32]).as_bytes(),
+        );
+
+        let err = agent_identity("did_no_seed", "avatar")
+            .err()
+            .expect("no seed");
+        assert!(err.contains("SLIM_HUMAN_SEED"), "{err}");
+        assert!(!err.contains("did_no_seed/avatar/private"), "{err}");
+    }
+
+    #[test]
+    fn without_did_mode_the_stored_key_is_used_even_with_a_seed() {
+        let _lock = crate::lock_test_env();
+        let _seed = ScopedEnvVar::set("SLIM_HUMAN_SEED", TEST_HUMAN_SEED);
+        for mode in [None, Some("shared-secret"), Some(" did")] {
+            let _auth = match mode {
+                Some(value) => ScopedEnvVar::set("SHADI_SLIM_AUTH", value),
+                None => ScopedEnvVar::unset("SHADI_SLIM_AUTH"),
+            };
+            let err = agent_identity("absent_stored", "avatar")
+                .err()
+                .expect("missing");
+            assert_eq!(
+                err, "missing SHADI key: absent_stored/avatar/private",
+                "{mode:?}"
+            );
+        }
+    }
+
     #[test]
     fn agent_identity_rejects_a_malformed_secret_without_echoing_it() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         let b64 = base64::engine::general_purpose::STANDARD;
         test_store_put("bad_b64/a/private", b"not base64 !!SECRET");
         test_store_put("short/a/private", b64.encode([9u8; 16]).as_bytes());
@@ -837,6 +978,8 @@ mod tests {
 
     #[test]
     fn agent_identity_loads_a_stored_key() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         let b64 = base64::engine::general_purpose::STANDARD;
         test_store_put("good/a/private", b64.encode([7u8; 32]).as_bytes());
         assert!(agent_identity("good", "a").is_ok());
@@ -1016,6 +1159,8 @@ mod tests {
 
     #[test]
     fn a_missing_agent_key_is_refused_before_any_login() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         let b64 = base64::engine::general_purpose::STANDARD;
         test_store_put("multi_missing/a/private", b64.encode([7u8; 32]).as_bytes());
 
@@ -1036,6 +1181,8 @@ mod tests {
 
     #[test]
     fn duplicate_agents_are_loaded_once_in_order() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         let b64 = base64::engine::general_purpose::STANDARD;
         test_store_put("multi_dup/a/private", b64.encode([1u8; 32]).as_bytes());
         test_store_put("multi_dup/b/private", b64.encode([2u8; 32]).as_bytes());
@@ -1134,6 +1281,8 @@ mod tests {
 
     #[test]
     fn run_issue_proceeds_past_identity_loading_before_failing_on_the_network() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         let b64 = base64::engine::general_purpose::STANDARD;
         test_store_put("single_present/a/private", b64.encode([9u8; 32]).as_bytes());
 
@@ -1146,6 +1295,8 @@ mod tests {
 
     #[test]
     fn run_credential_command_dispatches_issue_to_run_issue() {
+        let _lock = crate::lock_test_env();
+        let _auth = ScopedEnvVar::unset("SHADI_SLIM_AUTH");
         let file = tempfile::NamedTempFile::new().expect("tempfile");
         let path = file.path().to_path_buf();
         std::mem::forget(file);
