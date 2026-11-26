@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use slim_bindings::{App, IdentityProviderConfig, IdentityVerifierConfig, Name, Service};
 
-use crate::{config, jwks_from_dids, AgentIdentity, IdentityError};
+use crate::{config, jwks_from_dids, parse_did_key, AgentIdentity, IdentityError};
 
 /// How a SLIM app authenticates to the mesh.
 pub enum SlimAuth {
@@ -177,6 +177,49 @@ pub fn require_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityErr
                 .to_string(),
         ))
     })
+}
+
+/// DID auth for a caller that dialled exactly `peer_did`, from the environment.
+///
+/// Pins the verifier to `{peer_did, own DID}` and never reads `SLIM_MEMBER_DIDS`,
+/// so under open admission a caller trusts the peer it dialled, not any `did:key`.
+/// The own DID is included because SLIM's MLS Welcome verifies every member
+/// credential, the caller's own among them. Needs `SHADI_SLIM_AUTH=did` and
+/// `SLIM_HUMAN_SEED`; a missing or malformed `peer_did` is an error, never a
+/// fallback to the env allow-list.
+pub fn require_did_auth_for_peer(
+    agent_id: &str,
+    peer_did: &str,
+) -> Result<SlimAuth, IdentityError> {
+    let mode = std::env::var("SHADI_SLIM_AUTH").unwrap_or_default();
+    if !mode.eq_ignore_ascii_case("did") {
+        return Err(IdentityError::Config(
+            "coding-agent adapters must authenticate via DID (set SHADI_SLIM_AUTH=did \
+             and SLIM_HUMAN_SEED); shared secrets are not permitted"
+                .to_string(),
+        ));
+    }
+    did_auth_for_peer(&agent_identity_from_env(agent_id)?, peer_did)
+}
+
+/// Like [`require_did_auth_for_peer`], with the key derived from `human_seed` (via
+/// SHADI's HKDF agent derivation). Pure (no environment access) for unit tests.
+pub fn build_did_auth_for_peer(
+    human_seed: &[u8],
+    agent_id: &str,
+    peer_did: &str,
+) -> Result<SlimAuth, IdentityError> {
+    did_auth_for_peer(&AgentIdentity::derive(human_seed, agent_id)?, peer_did)
+}
+
+fn did_auth_for_peer(agent: &AgentIdentity, peer_did: &str) -> Result<SlimAuth, IdentityError> {
+    let peer_key = parse_did_key(peer_did)?;
+    let own_did = agent.did();
+    if peer_key.as_bytes() == &agent.verifying_key_bytes() {
+        // Dialling ourselves: one entry, not a duplicate `kid`.
+        return SlimAuth::did(agent, [own_did.as_str()]);
+    }
+    SlimAuth::did(agent, [peer_did, own_did.as_str()])
 }
 
 /// The agent's own key from the environment: `SHADI_SLIM_AUTH=did` plus
@@ -373,6 +416,143 @@ mod tests {
 
         env::remove_var("SHADI_SLIM_AUTH");
         env::remove_var("SLIM_MEMBER_DIDS");
+    }
+
+    /// The `kid`s of an allow-list `auth`'s JWKS, in order.
+    fn jwks_kids(auth: &SlimAuth) -> Vec<String> {
+        let SlimAuth::Did {
+            members: SlimMembers::AllowList { jwks },
+            ..
+        } = auth
+        else {
+            panic!("expected an allow-list DID auth");
+        };
+        let jwks: serde_json::Value = serde_json::from_str(jwks).unwrap();
+        jwks["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k["kid"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn build_did_auth_for_peer_pins_exactly_the_peer_and_own_did() {
+        let own = AgentIdentity::derive(b"seed", "agent-x").unwrap().did();
+        let peer = AgentIdentity::derive(b"seed", "peer").unwrap().did();
+        let auth = build_did_auth_for_peer(b"seed", "agent-x", &peer).unwrap();
+        match &auth {
+            SlimAuth::Did { did, .. } => assert_eq!(did, &own),
+            SlimAuth::SharedSecret(_) => panic!("expected DID auth"),
+        }
+        assert_eq!(jwks_kids(&auth), vec![peer.clone(), own.clone()]);
+        // Each entry is a real key for its DID, not just a label.
+        let SlimAuth::Did {
+            members: SlimMembers::AllowList { jwks },
+            ..
+        } = &auth
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            jwks,
+            &jwks_from_dids([peer.as_str(), own.as_str()]).unwrap()
+        );
+    }
+
+    #[test]
+    fn build_did_auth_for_peer_dedupes_when_the_peer_is_the_caller() {
+        let own = AgentIdentity::derive(b"seed", "agent-x").unwrap().did();
+        let auth = build_did_auth_for_peer(b"seed", "agent-x", &own).unwrap();
+        assert_eq!(jwks_kids(&auth), vec![own]);
+    }
+
+    #[test]
+    fn build_did_auth_for_peer_rejects_a_bad_peer() {
+        let non_ed25519 = format!(
+            "did:key:z{}",
+            bs58::encode([&[0xe7u8, 0x01][..], &[2u8; 33][..]].concat()).into_string()
+        );
+        let good = AgentIdentity::derive(b"seed", "peer").unwrap().did();
+        let padded = format!(" {good}");
+        for bad in [
+            "",
+            "   ",
+            "peer",
+            "did:web:example.com",
+            "did:key:z",
+            non_ed25519.as_str(),
+            padded.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    build_did_auth_for_peer(b"seed", "agent-x", bad),
+                    Err(IdentityError::InvalidDid(_))
+                ),
+                "{bad:?} must be an invalid did:key"
+            );
+        }
+    }
+
+    #[test]
+    fn require_did_auth_for_peer_ignores_slim_member_dids() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        let own = AgentIdentity::derive(b"human", "avatar").unwrap().did();
+        let peer = AgentIdentity::derive(b"human", "peer").unwrap().did();
+        let third = AgentIdentity::derive(b"human", "third").unwrap().did();
+        env::set_var("SHADI_SLIM_AUTH", "DID");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+
+        // Works with no allow-list at all (open admission).
+        env::remove_var("SLIM_MEMBER_DIDS");
+        let auth = require_did_auth_for_peer("avatar", &peer).expect("no member list needed");
+        assert_eq!(jwks_kids(&auth), vec![peer.clone(), own.clone()]);
+
+        // A listed DID, even a valid one, never widens the pin.
+        env::set_var("SLIM_MEMBER_DIDS", format!("{third},{peer}"));
+        let auth = require_did_auth_for_peer("avatar", &peer).unwrap();
+        assert_eq!(jwks_kids(&auth), vec![peer.clone(), own.clone()]);
+        // Nor does a bad peer fall back to it.
+        assert!(matches!(
+            require_did_auth_for_peer("avatar", ""),
+            Err(IdentityError::InvalidDid(_))
+        ));
+
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_HUMAN_SEED");
+        env::remove_var("SLIM_MEMBER_DIDS");
+    }
+
+    #[test]
+    fn require_did_auth_for_peer_needs_did_mode_and_a_seed() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        let peer = AgentIdentity::derive(b"human", "peer").unwrap().did();
+        env::remove_var("SLIM_MEMBER_DIDS");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+
+        for mode in [None, Some("shared-secret"), Some("")] {
+            match mode {
+                Some(m) => env::set_var("SHADI_SLIM_AUTH", m),
+                None => env::remove_var("SHADI_SLIM_AUTH"),
+            }
+            match require_did_auth_for_peer("avatar", &peer) {
+                Err(IdentityError::Config(msg)) => {
+                    assert!(msg.contains("shared secrets are not permitted"), "{msg}")
+                }
+                _ => panic!("mode {mode:?} must be a config error"),
+            }
+        }
+
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::remove_var("SLIM_HUMAN_SEED");
+        match require_did_auth_for_peer("avatar", &peer) {
+            Err(IdentityError::Config(msg)) => assert!(msg.contains("SLIM_HUMAN_SEED"), "{msg}"),
+            _ => panic!("a missing seed must be a config error"),
+        }
+
+        env::remove_var("SHADI_SLIM_AUTH");
     }
 
     #[test]

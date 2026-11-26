@@ -361,8 +361,7 @@ impl LiveA2ATaskAdapter {
                 let local_name_ref = Arc::new(parse_slim_name(&outbound_name(&local_prefix))?);
                 let remote_name_ref = Arc::new(parse_slim_name(&destination)?);
 
-                let auth = shadi_identity::require_did_auth_from_env(&self.config.agent_id)
-                    .map_err(|e| e.to_string())?;
+                let auth = slim_app_auth(&self.config.agent_id, self.config.peer_did.as_deref())?;
                 let proven_did = match &auth {
                     shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
                     shadi_identity::SlimAuth::SharedSecret(_) => {
@@ -607,6 +606,36 @@ fn canonical_slim_name(agent_id: &str) -> String {
         agent_id.to_string()
     } else {
         format!("{}/{}/{}", DEFAULT_LOCAL_ORG, DEFAULT_LOCAL_NAMESPACE, agent_id)
+    }
+}
+
+/// DID auth for a send's SLIM app.
+///
+/// Interim selection rule, until the explicit `SHADI_SLIM_ADMISSION` switch lands
+/// (commit 13): `SLIM_MEMBER_DIDS` decides the mode.
+/// - Set to a non-blank value (closed mode): the `SLIM_MEMBER_DIDS` allow-list,
+///   exactly as before open admission, whatever `peer_did` is. `peer_did` is
+///   unverified (a Directory record can name any DID), so it must never widen
+///   or replace the preregistered allow-list.
+/// - Unset or blank and `peer_did` is known: the verifier is pinned to that peer
+///   (and this agent).
+/// - Unset or blank and no `peer_did`: the env allow-list path, which errors
+///   because `SLIM_MEMBER_DIDS` is required.
+///
+/// An empty `peer_did` is an error in both modes (a caller bug, not "no pin").
+fn slim_app_auth(
+    agent_id: &str,
+    peer_did: Option<&str>,
+) -> Result<shadi_identity::SlimAuth, String> {
+    if peer_did == Some("") {
+        return Err("peer DID is empty; refusing to dial without a pinned peer".to_string());
+    }
+    let closed = std::env::var("SLIM_MEMBER_DIDS").is_ok_and(|v| !v.trim().is_empty());
+    match peer_did {
+        Some(peer_did) if !closed => {
+            shadi_identity::require_did_auth_for_peer(agent_id, peer_did).map_err(|e| e.to_string())
+        }
+        _ => shadi_identity::require_did_auth_from_env(agent_id).map_err(|e| e.to_string()),
     }
 }
 
@@ -991,6 +1020,78 @@ mod transport_tests {
         let retry = adapter.task_message("signed", Some("parked"));
         assert_eq!(retry.task_id.as_deref(), Some("parked"));
         assert_eq!(adapter.task_message("signed", None).task_id, None);
+    }
+
+    fn jwks_kids(auth: &shadi_identity::SlimAuth) -> Vec<String> {
+        let shadi_identity::SlimAuth::Did {
+            members: shadi_identity::SlimMembers::AllowList { jwks },
+            ..
+        } = auth
+        else {
+            panic!("expected an allow-list DID auth");
+        };
+        let jwks: serde_json::Value = serde_json::from_str(jwks).unwrap();
+        jwks["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k["kid"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn slim_app_auth_keeps_the_allow_list_when_closed_and_pins_the_peer_otherwise() {
+        use shadi_identity::AgentIdentity;
+        use std::env;
+        static ENV: Mutex<()> = Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+
+        let did = |name: &str| AgentIdentity::derive(b"human", name).unwrap().did();
+        let (own, peer, listed, unlisted) =
+            (did("avatar"), did("peer"), did("listed"), did("unlisted"));
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+
+        // Closed mode: SLIM_MEMBER_DIDS wins whatever peer_did says.
+        env::set_var("SLIM_MEMBER_DIDS", format!("{peer},{listed}"));
+        let allow_list = vec![peer.clone(), listed.clone()];
+        let known = slim_app_auth("avatar", Some(&peer)).unwrap();
+        assert_eq!(jwks_kids(&known), allow_list, "not pinned to the peer");
+        // An unverified peer_did naming an unlisted DID must not be trusted.
+        let unlisted_peer = slim_app_auth("avatar", Some(&unlisted)).unwrap();
+        assert_eq!(jwks_kids(&unlisted_peer), allow_list);
+        assert!(!jwks_kids(&unlisted_peer).contains(&unlisted));
+        // A malformed peer_did does not matter either: the allow-list decides.
+        let malformed = slim_app_auth("avatar", Some("not-a-did")).unwrap();
+        assert_eq!(jwks_kids(&malformed), allow_list);
+        let none = slim_app_auth("avatar", None).unwrap();
+        assert_eq!(jwks_kids(&none), allow_list);
+        // Some(""): an error in closed mode too, never "no pin".
+        let err = slim_app_auth("avatar", Some("")).err().expect("empty peer");
+        assert!(err.contains("peer DID is empty"), "{err}");
+
+        // Unset or blank SLIM_MEMBER_DIDS: a known peer is pinned (peer + own).
+        for unset in [None, Some(""), Some("  "), Some(" \t\n")] {
+            match unset {
+                Some(v) => env::set_var("SLIM_MEMBER_DIDS", v),
+                None => env::remove_var("SLIM_MEMBER_DIDS"),
+            }
+            let pinned = slim_app_auth("avatar", Some(&peer)).unwrap();
+            assert_eq!(
+                jwks_kids(&pinned),
+                vec![peer.clone(), own.clone()],
+                "SLIM_MEMBER_DIDS={unset:?}"
+            );
+            assert!(slim_app_auth("avatar", Some("not-a-did")).is_err());
+            // No peer and no allow-list: still the env path's error.
+            assert!(slim_app_auth("avatar", None).is_err());
+            let err = slim_app_auth("avatar", Some("")).err().expect("empty peer");
+            assert!(err.contains("peer DID is empty"), "{err}");
+        }
+
+        env::remove_var("SLIM_MEMBER_DIDS");
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_HUMAN_SEED");
     }
 
     struct Allow;
