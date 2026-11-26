@@ -215,6 +215,7 @@ dependencies = [
 name = "agntcy-agentbridge-cli"
 version = "0.3.0"
 dependencies = [
+ "a2a-client-lf",
  "a2a-grpc",
  "a2a-lf",
  "a2a-pb",

@@ -10,9 +10,22 @@
 //! - running: every other state, i.e. `Submitted`, `Working` and
 //!   `Unspecified`.
 //!
+//! A parked task is resumable when the caller has something to come back
+//! with: an `AuthRequired` park carrying a challenge or a retry-after, or any
+//! `InputRequired`. An `AuthRequired` park with neither (an unsigned message,
+//! a missing binding) is a refusal the caller never resumes, so it is the
+//! first parked task to go.
+//!
 //! To admit a new task when full, it evicts the task that finished earliest,
-//! or failing that, the task that was parked earliest. It never evicts a
-//! running task: when every task is running, `create` fails instead.
+//! else the earliest-parked task nobody can resume, else the earliest-parked
+//! resumable one. It never evicts a running task: when every task is running,
+//! `create` fails instead. A flood of unsigned messages therefore only ever
+//! displaces its own kind.
+//!
+//! A resumable park the listener stamped with its owner's DID (see
+//! [`PARKED_OWNER_METADATA_KEY`]) also counts against that owner: past
+//! [`MAX_PARKED_PER_OWNER`], the owner's own oldest park is evicted, so one
+//! caller re-sending fresh tasks never displaces another caller's park.
 //!
 //! An `AuthRequired` task also expires once it has been parked for longer than
 //! the parked TTL, and from then on reads as a task that never existed.
@@ -33,19 +46,47 @@ use a2a_server::pagination::resolve_page_size;
 use a2a_server::task_store::{StoredTask, TaskVersion};
 use a2a_server::TaskStore;
 use async_trait::async_trait;
-use shadi_credential::nonce::NONCE_TTL_SECS;
+use shadi_credential::nonce::{MAX_NONCES_PER_DID, MAX_RETRY_AFTER_SECS, NONCE_TTL_SECS};
 
 /// The capacity a listener uses, so that its memory stays bounded when any
 /// caller can create tasks. Finished tasks are evicted first, then parked
 /// ones.
 pub const DEFAULT_TASK_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
-/// How long a listener keeps an `AuthRequired` task. A parked challenge is
-/// useless once its nonce has expired: the caller can no longer answer it, so
-/// the task could only ever take up room.
+/// `Task.metadata` key naming the DID a parked task is waiting on.
+///
+/// Only the listener's executor sets it, on a task it parks for a DID the
+/// message proved. The handler stores the task the executor emits as given,
+/// and a caller's own metadata only ever reaches the task's history, so the
+/// value is never the caller's to choose.
+pub const PARKED_OWNER_METADATA_KEY: &str = "shadi-parked-owner";
+
+/// Most resumable parked tasks one owner holds. Past the nonce store's own
+/// per-DID bound an older challenge has already lost its nonce, so keeping
+/// more of one owner's parks would only take room from other callers.
+pub const MAX_PARKED_PER_OWNER: usize = MAX_NONCES_PER_DID;
+
+/// Slack on the parked TTL for the caller's resend to arrive after it has
+/// waited out its hint or answered its challenge.
+const PARKED_TTL_GRACE_SECS: u64 = 30;
+
+/// How long a listener keeps an `AuthRequired` task: the longer of a nonce's
+/// lifetime and the longest retry-after a full nonce store hands out, plus
+/// [`PARKED_TTL_GRACE_SECS`]. A challenge park is useless once its nonce has
+/// expired, but a busy park must still be there when a caller that waited the
+/// whole hint sends again.
 pub const DEFAULT_PARKED_TTL: Duration = {
     assert!(NONCE_TTL_SECS > 0, "the nonce TTL must be positive");
-    Duration::from_secs(NONCE_TTL_SECS.unsigned_abs())
+    assert!(
+        MAX_RETRY_AFTER_SECS > 0,
+        "the longest retry-after must be positive"
+    );
+    let longest = if NONCE_TTL_SECS > MAX_RETRY_AFTER_SECS {
+        NONCE_TTL_SECS
+    } else {
+        MAX_RETRY_AFTER_SECS
+    };
+    Duration::from_secs(longest.unsigned_abs() + PARKED_TTL_GRACE_SECS)
 };
 
 /// A [`TaskStore`] holding at most `capacity` tasks.
@@ -87,6 +128,10 @@ struct Parked {
     /// For the eviction order: the clock is read under the lock and never goes
     /// back, so a lower `order` was parked no later, and ties are broken.
     order: u64,
+    /// Whether the caller can come back to it (see the module docs).
+    resumable: bool,
+    /// The DID the listener parked a resumable task for, if it named one.
+    owner: Option<String>,
 }
 
 impl BoundedTaskStore {
@@ -137,34 +182,87 @@ impl Entry {
     }
 }
 
-/// The parked marker for a task now entering `state`: none unless `state` is
-/// parked, and otherwise a new one, taking the next `order`. Every write of a
-/// parked state restarts the age, as each `AuthRequired` carries a fresh
-/// challenge.
-fn park(next_park: &mut u64, state: &TaskState, now: Instant) -> Option<Parked> {
-    if !matches!(state, TaskState::AuthRequired | TaskState::InputRequired) {
-        return None;
-    }
+/// The parked marker for `task`: none unless its state is parked, and
+/// otherwise a new one, taking the next `order`. Every write of a parked state
+/// restarts the age, as each `AuthRequired` carries a fresh challenge.
+fn park(next_park: &mut u64, task: &Task, now: Instant) -> Option<Parked> {
+    let resumable = match task.status.state {
+        TaskState::InputRequired => true,
+        TaskState::AuthRequired => task.status.message.as_ref().is_some_and(|message| {
+            shadi_a2a::challenge_from_message(message).is_some()
+                || shadi_a2a::retry_after_from_message(message).is_some()
+        }),
+        _ => return None,
+    };
+    let owner = resumable
+        .then(|| {
+            task.metadata
+                .as_ref()?
+                .get(PARKED_OWNER_METADATA_KEY)?
+                .as_str()
+        })
+        .flatten()
+        .filter(|owner| !owner.is_empty())
+        .map(str::to_owned);
     let order = *next_park;
     *next_park += 1;
-    Some(Parked { since: now, order })
+    Some(Parked {
+        since: now,
+        order,
+        resumable,
+        owner,
+    })
 }
 
 impl Tasks {
     /// Evicts one task to make room: the one that finished earliest, else the
-    /// one parked earliest. Returns false, evicting nothing, when every task is
-    /// running.
+    /// earliest-parked one nobody can resume, else the earliest-parked one.
+    /// Returns false, evicting nothing, when every task is running.
     fn evict_one(&mut self) -> bool {
-        let victim = self.terminal.pop_front().or_else(|| {
-            self.entries
-                .iter()
-                .filter_map(|(id, entry)| Some((entry.parked.as_ref()?.order, id)))
-                .min()
-                .map(|(_, id)| id.clone())
-        });
+        let victim = self
+            .terminal
+            .pop_front()
+            .or_else(|| self.earliest_parked(|parked| !parked.resumable))
+            .or_else(|| self.earliest_parked(|_| true));
         match victim {
             Some(id) => self.entries.remove(&id).is_some(),
             None => false,
+        }
+    }
+
+    /// The earliest-parked task whose marker passes `filter`.
+    fn earliest_parked(&self, filter: impl Fn(&Parked) -> bool) -> Option<TaskId> {
+        self.entries
+            .iter()
+            .filter_map(|(id, entry)| Some((entry.parked.as_ref()?, id)))
+            .filter(|(parked, _)| filter(parked))
+            .min_by_key(|(parked, _)| parked.order)
+            .map(|(_, id)| id.clone())
+    }
+
+    /// Before `id` parks as `parked`, evicts its owner's oldest other resumable
+    /// parks until the owner holds fewer than [`MAX_PARKED_PER_OWNER`]. Only
+    /// that owner's parks are touched; an unowned park counts against nobody.
+    fn evict_owner_excess(&mut self, id: &str, parked: &Parked) {
+        let Some(owner) = parked.owner.as_deref() else {
+            return;
+        };
+        let mut theirs: Vec<(u64, TaskId)> = self
+            .entries
+            .iter()
+            .filter(|(other, _)| other.as_str() != id)
+            .filter_map(|(other, entry)| {
+                let parked = entry.parked.as_ref()?;
+                (parked.resumable && parked.owner.as_deref() == Some(owner))
+                    .then(|| (parked.order, other.clone()))
+            })
+            .collect();
+        if theirs.len() < MAX_PARKED_PER_OWNER {
+            return;
+        }
+        theirs.sort_unstable();
+        for (_, victim) in theirs.iter().take(theirs.len() + 1 - MAX_PARKED_PER_OWNER) {
+            self.entries.remove(victim);
         }
     }
 }
@@ -196,7 +294,10 @@ impl TaskStore for BoundedTaskStore {
         }
         let id = task.id.clone();
         let finished = task.status.state.is_terminal();
-        let parked = park(&mut tasks.next_park, &task.status.state, now);
+        let parked = park(&mut tasks.next_park, &task, now);
+        if let Some(parked) = &parked {
+            tasks.evict_owner_excess(&id, parked);
+        }
         tasks.entries.insert(
             id.clone(),
             Entry {
@@ -213,11 +314,14 @@ impl TaskStore for BoundedTaskStore {
     async fn update(&self, task: Task) -> Result<TaskVersion, A2AError> {
         let (mut guard, now) = self.lock();
         let tasks = &mut *guard;
-        let entry = tasks
+        let state = &tasks
             .entries
-            .get_mut(&task.id)
-            .ok_or_else(|| A2AError::task_not_found(&task.id))?;
-        let state = &entry.stored.task.status.state;
+            .get(&task.id)
+            .ok_or_else(|| A2AError::task_not_found(&task.id))?
+            .stored
+            .task
+            .status
+            .state;
         // A finished state can be re-applied (idempotent re-emission, e.g. from
         // cancel flows) but never replaced by a different state.
         if state.is_terminal() && *state != task.status.state {
@@ -227,12 +331,21 @@ impl TaskStore for BoundedTaskStore {
             )));
         }
         let finishes = !state.is_terminal() && task.status.state.is_terminal();
+        let parked = park(&mut tasks.next_park, &task, now);
+        if let Some(parked) = &parked {
+            tasks.evict_owner_excess(&task.id, parked);
+        }
+        // `evict_owner_excess` never removes the task it makes room for.
+        let entry = tasks
+            .entries
+            .get_mut(&task.id)
+            .ok_or_else(|| A2AError::task_not_found(&task.id))?;
         entry.stored.version += 1;
         let version = entry.stored.version;
         if finishes {
             tasks.terminal.push_back(task.id.clone());
         }
-        entry.parked = park(&mut tasks.next_park, &task.status.state, now);
+        entry.parked = parked;
         entry.stored.task = task;
         Ok(version)
     }
@@ -428,6 +541,55 @@ mod tests {
             history: None,
             metadata: None,
         }
+    }
+
+    /// `id` parked `AuthRequired` as the listener parks a challenge: the
+    /// challenge on the status message, and `owner` stamped when given.
+    fn challenged(id: &str, owner: Option<&str>) -> Task {
+        let message = shadi_a2a::insert_challenge(
+            Message::new(Role::Agent, vec![Part::text("answer this".to_string())]),
+            "{}",
+        );
+        owned(
+            with_message(task(id, "c1", TaskState::AuthRequired), message),
+            owner,
+        )
+    }
+
+    /// `id` parked `AuthRequired` as the listener parks a busy refusal: a
+    /// retry-after of `secs` and no challenge.
+    fn busy(id: &str, owner: Option<&str>, secs: u64) -> Task {
+        let message = shadi_a2a::insert_retry_after(
+            Message::new(Role::Agent, vec![Part::text("busy".to_string())]),
+            secs,
+        );
+        owned(
+            with_message(task(id, "c1", TaskState::AuthRequired), message),
+            owner,
+        )
+    }
+
+    fn with_message(mut task: Task, message: Message) -> Task {
+        task.status.message = Some(message);
+        task
+    }
+
+    fn owned(mut task: Task, owner: Option<&str>) -> Task {
+        task.metadata = owner.map(|owner| {
+            [(PARKED_OWNER_METADATA_KEY.to_string(), owner.into())]
+                .into_iter()
+                .collect()
+        });
+        task
+    }
+
+    /// Creates `parked.id` as `Submitted` and then parks it as given.
+    async fn create_then_park(store: &BoundedTaskStore, parked: Task) {
+        store
+            .create(task(&parked.id, "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        store.update(parked).await.unwrap();
     }
 
     fn stamped(mut task: Task, secs: u64) -> Task {
@@ -803,8 +965,41 @@ mod tests {
     }
 
     #[test]
-    fn the_default_parked_ttl_is_the_nonce_ttl() {
-        assert_eq!(DEFAULT_PARKED_TTL, Duration::from_secs(60));
+    fn the_default_parked_ttl_outlives_a_nonce_and_the_longest_retry_after() {
+        let nonce = Duration::from_secs(NONCE_TTL_SECS.unsigned_abs());
+        let wait = Duration::from_secs(MAX_RETRY_AFTER_SECS.unsigned_abs());
+        assert!(DEFAULT_PARKED_TTL > nonce, "{DEFAULT_PARKED_TTL:?}");
+        assert!(DEFAULT_PARKED_TTL > wait, "{DEFAULT_PARKED_TTL:?}");
+        assert_eq!(DEFAULT_PARKED_TTL, Duration::from_secs(90));
+    }
+
+    /// A caller told to wait the longest retry-after a full nonce store hands
+    /// out, and slow to send again, still finds its parked task.
+    #[tokio::test]
+    async fn a_busy_park_survives_the_longest_retry_after_and_the_resend() {
+        let clock = TestClock::new();
+        let store = {
+            let clock = clock.clone();
+            BoundedTaskStore::with_clock(DEFAULT_TASK_CAPACITY, DEFAULT_PARKED_TTL, move || {
+                clock.now()
+            })
+        };
+        let wait = MAX_RETRY_AFTER_SECS.unsigned_abs();
+        create_then_park(&store, busy("t1", Some("did:key:zA"), wait)).await;
+
+        clock.advance(Duration::from_secs(wait + 5));
+        assert!(store.get("t1").await.unwrap().is_some());
+
+        // The resend lands on the task and parks it with a challenge, which
+        // restarts the age.
+        store
+            .update(challenged("t1", Some("did:key:zA")))
+            .await
+            .unwrap();
+        clock.advance(DEFAULT_PARKED_TTL);
+        assert!(store.get("t1").await.unwrap().is_some());
+        clock.advance(Duration::from_nanos(1));
+        assert_eq!(store.get("t1").await.unwrap(), None);
     }
 
     /// A store holding `t1`, parked `AuthRequired` and now just past the TTL,
@@ -941,8 +1136,8 @@ mod tests {
         );
     }
 
-    /// The order is by when a task was parked, not when it was created, and a
-    /// running task is never the one evicted.
+    /// Among resumable parks, the order is by when a task was parked, not when
+    /// it was created, and a running task is never the one evicted.
     #[tokio::test]
     async fn a_full_store_with_no_finished_task_evicts_the_earliest_parked() {
         let clock = TestClock::new();
@@ -961,10 +1156,7 @@ mod tests {
             .unwrap();
         create_then_set(&store, "input", TaskState::InputRequired).await;
         clock.advance(Duration::from_secs(1));
-        store
-            .update(task("auth", "c1", TaskState::AuthRequired))
-            .await
-            .unwrap();
+        store.update(challenged("auth", None)).await.unwrap();
 
         store
             .create(task("new1", "c1", TaskState::Submitted))
@@ -1041,6 +1233,89 @@ mod tests {
 
         clock.advance(DEFAULT_PARKED_TTL);
         assert_eq!(listed_ids(&store).await, ["signed"]);
+    }
+
+    /// A flood of refusals nobody resumes, sent after a caller was challenged,
+    /// only ever evicts its own kind: the challenged park outlives it.
+    #[tokio::test]
+    async fn unresumable_parks_never_displace_a_challenged_one() {
+        let store = store(4);
+        create_then_park(&store, challenged("victim", Some("did:key:zVictim"))).await;
+        create_then_set(&store, "input", TaskState::InputRequired).await;
+        for i in 0..16 {
+            create_then_set(&store, &format!("unsigned{i:02}"), TaskState::AuthRequired).await;
+        }
+        assert_eq!(
+            listed_ids(&store).await,
+            ["input", "unsigned14", "unsigned15", "victim"]
+        );
+    }
+
+    /// Unresumable parks go before resumable ones even when they are newer.
+    #[tokio::test]
+    async fn a_full_store_evicts_an_unresumable_park_before_an_older_resumable_one() {
+        let clock = TestClock::new();
+        let store = clocked_store(3, &clock);
+        create_then_park(&store, busy("busy", None, 10)).await;
+        clock.advance(Duration::from_secs(1));
+        create_then_park(&store, challenged("challenged", None)).await;
+        clock.advance(Duration::from_secs(1));
+        create_then_set(&store, "unsigned", TaskState::AuthRequired).await;
+
+        store
+            .create(task("new", "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        assert_eq!(listed_ids(&store).await, ["busy", "challenged", "new"]);
+    }
+
+    /// One owner parking task after task evicts only its own oldest park, so
+    /// another caller's challenge survives however fast the first one sends.
+    #[tokio::test]
+    async fn an_owner_past_its_park_cap_evicts_only_its_own_oldest() {
+        let store = store(DEFAULT_TASK_CAPACITY.get());
+        create_then_park(&store, challenged("other", Some("did:key:zOther"))).await;
+        for i in 0..10 {
+            create_then_park(
+                &store,
+                challenged(&format!("flood{i}"), Some("did:key:zFlood")),
+            )
+            .await;
+        }
+        assert_eq!(MAX_PARKED_PER_OWNER, 2);
+        assert_eq!(listed_ids(&store).await, ["flood8", "flood9", "other"]);
+
+        // A busy park counts against its owner too.
+        create_then_park(&store, busy("flood-busy", Some("did:key:zFlood"), 5)).await;
+        assert_eq!(listed_ids(&store).await, ["flood-busy", "flood9", "other"]);
+    }
+
+    /// Re-parking the same task never counts it against its own owner, and an
+    /// unowned or unresumable park counts against nobody.
+    #[tokio::test]
+    async fn the_owner_cap_ignores_the_task_itself_and_unowned_parks() {
+        let store = store(DEFAULT_TASK_CAPACITY.get());
+        create_then_park(&store, challenged("a1", Some("did:key:zA"))).await;
+        create_then_park(&store, challenged("a2", Some("did:key:zA"))).await;
+        for _ in 0..3 {
+            store
+                .update(challenged("a2", Some("did:key:zA")))
+                .await
+                .unwrap();
+        }
+        for i in 0..4 {
+            create_then_park(&store, challenged(&format!("anon{i}"), None)).await;
+        }
+        // An unresumable park carrying an owner stamp is not counted either.
+        let refused = owned(
+            task("refused", "c1", TaskState::AuthRequired),
+            Some("did:key:zA"),
+        );
+        create_then_park(&store, refused).await;
+        assert_eq!(
+            listed_ids(&store).await,
+            ["a1", "a2", "anon0", "anon1", "anon2", "anon3", "refused"]
+        );
     }
 
     /// One operation of the parity script.

@@ -18,7 +18,9 @@ use agentbridge::{
         generic_stdio::GenericStdioAdapter,
         profile::{bundled_profile_ids, load_profile, ProfileAdapter},
     },
-    bounded_task_store::{BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY},
+    bounded_task_store::{
+        BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY, PARKED_OWNER_METADATA_KEY,
+    },
     dir_registry::DirError,
     local_registry::{LocalAdapterRecord, LocalAdapterRegistry},
     CliAdapter,
@@ -876,19 +878,23 @@ impl AgentExecutor for AgentBridgeExecutor {
             shadi_a2a::set_remote_parent(&span, message);
         }
         let _guard = span.enter();
-        let refuse_with =
-            |state, reason: String, challenge: Option<&str>, retry_after_secs: Option<u64>| {
-                let reason = format!("{reason} ({evaluation_id})");
-                terminal_task(
-                    task_id.clone(),
-                    context_id.clone(),
-                    state,
-                    reason,
-                    challenge,
-                    retry_after_secs,
-                )
-            };
-        let refuse = |state, reason: String| refuse_with(state, reason, None, None);
+        let refuse_with = |state,
+                           reason: String,
+                           challenge: Option<&str>,
+                           retry_after_secs: Option<u64>,
+                           owner: Option<&str>| {
+            let reason = format!("{reason} ({evaluation_id})");
+            terminal_task(
+                task_id.clone(),
+                context_id.clone(),
+                state,
+                reason,
+                challenge,
+                retry_after_secs,
+                owner,
+            )
+        };
+        let refuse = |state, reason: String| refuse_with(state, reason, None, None, None);
         if let Some(message) = ctx.message.as_ref() {
             if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
                 span.record("a2a.outcome", "rejected");
@@ -920,6 +926,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                 reason,
                 challenge,
                 retry_after_secs,
+                owner,
             }) => {
                 // Non-terminal: the client re-proves and sends again with this
                 // task id, and the stored task carries on from here.
@@ -930,6 +937,7 @@ impl AgentExecutor for AgentBridgeExecutor {
                     reason,
                     challenge.as_deref(),
                     retry_after_secs,
+                    owner.as_deref(),
                 );
             }
             Some(MessageAdmission::Forged { reason }) => {
@@ -1766,6 +1774,10 @@ fn parse_name(name: &str) -> Result<Name, String> {
 /// Emitted as `StreamResponse::Task`, which the handler persists, so the task
 /// the client is told about exists in the store — `AuthRequired` is
 /// non-terminal in the protocol and has to be fetchable to be resumed.
+///
+/// `owner` is the proven DID a resumable park waits on. It is stamped under
+/// [`PARKED_OWNER_METADATA_KEY`], so the task store caps that DID's parks
+/// without touching anyone else's.
 fn terminal_task(
     task_id: String,
     context_id: String,
@@ -1773,6 +1785,7 @@ fn terminal_task(
     reason: String,
     challenge: Option<&str>,
     retry_after_secs: Option<u64>,
+    owner: Option<&str>,
 ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
     let message = Message::new(Role::Agent, vec![Part::text(reason)]);
     let message = match challenge {
@@ -1793,7 +1806,11 @@ fn terminal_task(
         },
         artifacts: None,
         history: None,
-        metadata: None,
+        metadata: owner.map(|owner| {
+            [(PARKED_OWNER_METADATA_KEY.to_string(), owner.into())]
+                .into_iter()
+                .collect()
+        }),
     };
     Box::pin(futures::stream::once(async move {
         Ok(StreamResponse::Task(task))
@@ -1816,6 +1833,9 @@ enum MessageAdmission {
         /// Seconds the caller should wait before sending again, when no
         /// challenge could be issued yet.
         retry_after_secs: Option<u64>,
+        /// The proven DID a resumable park waits on: set with a challenge or
+        /// a retry-after, `None` for a refusal the caller cannot resume.
+        owner: Option<String>,
     },
     Forged {
         reason: String,
@@ -1861,6 +1881,7 @@ fn admit_message(
             reason: "DID proof required on the message".to_string(),
             challenge: None,
             retry_after_secs: None,
+            owner: None,
         };
     }
     let verified = match shadi_identity::unwrap_signed_message(text.as_bytes()) {
@@ -1873,6 +1894,7 @@ fn admit_message(
                 reason: "DID proof required on the message".to_string(),
                 challenge: None,
                 retry_after_secs: None,
+                owner: None,
             };
         }
     };
@@ -1963,6 +1985,7 @@ fn challenge_for(gate: &CredentialGate, task_id: &str, did: &str, now: i64) -> M
                 reason: format!("listener busy: {err}"),
                 challenge: None,
                 retry_after_secs: Some(retry_after_secs),
+                owner: Some(did.to_string()),
             };
         }
         Err(err) => return forged(err.to_string()),
@@ -1972,6 +1995,7 @@ fn challenge_for(gate: &CredentialGate, task_id: &str, did: &str, now: i64) -> M
             reason: "credential required: answer the challenge with a presentation".to_string(),
             challenge: Some(json),
             retry_after_secs: None,
+            owner: Some(did.to_string()),
         },
         Err(err) => forged(err.to_string()),
     }
@@ -2000,6 +2024,7 @@ fn admit_binding(
             reason: "agent binding required: this listener admits agents by human DID".to_string(),
             challenge: None,
             retry_after_secs: None,
+            owner: None,
         };
     }
 
@@ -2010,6 +2035,7 @@ fn admit_binding(
                 reason: format!("agent binding is malformed: {err}"),
                 challenge: None,
                 retry_after_secs: None,
+                owner: None,
             };
         }
     };
@@ -4189,6 +4215,7 @@ test push ... FAILED
                 reason,
                 challenge: Some(json),
                 retry_after_secs: None,
+                ..
             } => {
                 assert!(reason.contains("credential required"), "{reason}");
                 let challenge: shadi_credential::Challenge = serde_json::from_str(&json).unwrap();
@@ -4482,6 +4509,7 @@ test push ... FAILED
                 reason,
                 challenge: None,
                 retry_after_secs: Some(50),
+                ..
             } => assert!(reason.contains("retry in 50s"), "{reason}"),
             MessageAdmission::Forged { reason } => {
                 panic!("a busy listener must not reject: {reason}")
@@ -4508,6 +4536,7 @@ test push ... FAILED
                 reason,
                 challenge: None,
                 retry_after_secs: Some(secs),
+                ..
             } => {
                 assert!((1..=60).contains(&secs), "{secs}");
                 assert!(reason.contains("listener busy"), "{reason}");
@@ -4690,6 +4719,7 @@ test push ... FAILED
                 "why".into(),
                 challenge,
                 retry_after,
+                None,
             );
             match stream.next().await {
                 Some(Ok(StreamResponse::Task(task))) => task.status.message.unwrap(),
@@ -4992,7 +5022,8 @@ test push ... FAILED
         }
     }
 
-    /// A SLIM listener for `agent_id` that echoes its tasks, as `register` runs one.
+    /// A SLIM listener for `agent_id` that echoes its tasks, as `register` runs one,
+    /// including its startup refusal of an open listener with no message gate.
     #[cfg(not(windows))]
     fn serve_echo(
         agent_id: &str,
@@ -5002,6 +5033,7 @@ test push ... FAILED
         std::thread::JoinHandle<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
+        open_admission_gate_check(admission, false, allowed_human_dids().len()).unwrap();
         let service = Service::new(format!("echo-listener-{agent_id}"));
         let access = ClientAccess::from_env(Some(agent_id)).unwrap();
         let connection_id = service.connect(access.client_config(endpoint)).unwrap();
@@ -5138,11 +5170,11 @@ test push ... FAILED
         }
     }
 
-    /// Open admission over real SLIM, through the listener `register` runs: the
-    /// listener has no allow-list (`SLIM_MEMBER_DIDS` is unset), and the caller
-    /// is a DID it has never been told about. The transport admits the caller;
-    /// its message is admitted by the session-bound check, and the echo proves
-    /// the task ran.
+    /// Open admission over real SLIM, through the listener `register` runs: no
+    /// allow-list (`SLIM_MEMBER_DIDS` is unset), the human-DID gate its startup
+    /// requires, and a caller it has never been told about. The transport admits
+    /// the caller; its bound message passes the session-bound check and the human
+    /// gate, and the echo proves the task ran.
     #[cfg(not(windows))]
     #[test]
     fn an_open_listener_admits_a_caller_it_has_never_seen() {
@@ -5151,56 +5183,183 @@ test push ... FAILED
         if !in_child_process("an_open_listener_admits_a_caller_it_has_never_seen", CHILD) {
             return;
         }
+        let reply = with_open_listener("shadi-open-admission-test-seed", |mesh| {
+            let stranger = mesh.agent("stranger");
+            mesh.send_bound("stranger", &stranger, b"ping open")
+        });
+        let reply = reply.unwrap_or_else(|err| {
+            panic!("the open listener refused a caller it has never seen: {err}")
+        });
+        let json = response_json(&reply);
+        assert!(json.contains("callee heard: ping open"), "{json}");
+    }
+
+    /// Open admission binds each message to its SLIM session: a caller the
+    /// transport admitted cannot pass off another agent's signed, bound message.
+    /// The envelope is valid (the agent it names signed it, and its human is
+    /// admitted), so the session binding is the only thing refusing it.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_open_listener_refuses_a_message_relayed_over_another_callers_session() {
+        const CHILD: &str = "AGENTBRIDGE_TEST_OPEN_RELAY_CHILD";
+        let _guard = super::super::test_env_lock();
+        if !in_child_process(
+            "an_open_listener_refuses_a_message_relayed_over_another_callers_session",
+            CHILD,
+        ) {
+            return;
+        }
+        let relayed = with_open_listener("shadi-open-relay-test-seed", |mesh| {
+            let stranger = mesh.agent("stranger");
+            mesh.send_bound("relay", &stranger, b"ping relayed")
+        });
+        let relayed = relayed.unwrap_or_else(|err| panic!("the relayed send failed: {err}"));
+        let a2a::SendMessageResponse::Task(task) = &relayed else {
+            panic!("expected a refused task: {relayed:?}");
+        };
+        assert_eq!(task.status.state, TaskState::Rejected, "{relayed:?}");
+        let json = response_json(&relayed);
+        assert!(json.contains("arrived over the SLIM session of"), "{json}");
+        assert!(!json.contains("callee heard"), "{json}");
+    }
+
+    /// An open SLIM mesh for one test: the env, the node, and `callee` listening
+    /// under open admission with the human-DID gate set to `human`.
+    #[cfg(not(windows))]
+    struct OpenMesh {
+        seed: &'static str,
+        endpoint: String,
+        human: shadi_identity::AgentIdentity,
+    }
+
+    #[cfg(not(windows))]
+    impl OpenMesh {
+        /// The agent `id` derives to under this mesh's seed, as the env derives it.
+        fn agent(&self, id: &str) -> shadi_identity::AgentIdentity {
+            shadi_identity::AgentIdentity::derive(self.seed.as_bytes(), id).unwrap()
+        }
+
+        /// Sends, over a session `sender` opens to `callee`, a message `signer`
+        /// signed carrying `payload` and a binding from this mesh's human.
+        fn send_bound(
+            &self,
+            sender: &str,
+            signer: &shadi_identity::AgentIdentity,
+            payload: &[u8],
+        ) -> Result<a2a::SendMessageResponse, String> {
+            let envelope = bound_envelope(&self.human, signer, "agent", now_unix() + 300, payload);
+            send_text_over_slim(
+                &self.endpoint,
+                sender,
+                &self.agent("callee").did(),
+                String::from_utf8(envelope).unwrap(),
+            )
+        }
+    }
+
+    /// Runs `body` against an open mesh, then tears it down and restores the env.
+    #[cfg(not(windows))]
+    fn with_open_listener<T>(seed: &'static str, body: impl FnOnce(&OpenMesh) -> T) -> T {
         let dir = tempfile::tempdir().unwrap();
         let tls = generate_slim_mtls(dir.path());
-
-        let seed = "shadi-open-admission-test-seed";
-        let callee = shadi_identity::AgentIdentity::derive(seed.as_bytes(), "callee")
-            .unwrap()
-            .did();
-        let saved = set_env(&mtls_mesh_env(&tls, dir.path(), seed, Some("open"), None));
+        let human = shadi_identity::AgentIdentity::generate().unwrap();
+        let mut env = mtls_mesh_env(&tls, dir.path(), seed, Some("open"), None);
+        for (key, value) in &mut env {
+            if *key == "SHADI_MEMBER_HUMAN_DIDS" {
+                *value = Some(human.did());
+            }
+        }
+        let saved = set_env(&env);
         let (node, endpoint) = run_mtls_node(&tls);
-
         let (listener, stop) = serve_echo("callee", &endpoint, shadi_identity::SlimAdmission::Open);
         std::thread::sleep(Duration::from_millis(500));
 
-        let destination = agentbridge::member_source::did_slim_name(&callee);
-        let send = std::thread::spawn({
-            let endpoint = endpoint.clone();
-            move || {
-                let adapter = egress::live_adapter(LiveA2ATaskAdapterConfig {
-                    endpoint,
-                    agent_id: "stranger".to_string(),
-                    local_name: Some("agntcy/shadi/stranger-a2a".to_string()),
-                    peer_agent_id: "callee".to_string(),
-                    destination,
-                    a2a_url: None,
-                    a2a_binding: None,
-                    peer_did: Some(callee),
-                });
-                adapter
-                    .dispatch(TaskEnvelope {
-                        task_id: "open-admission-0".to_string(),
-                        pattern: PatternKind::Development,
-                        epoch: Epoch(0),
-                        correlation_id: None,
-                        body: b"ping open".to_vec(),
-                    })
-                    .map(|()| adapter.dispatches().unwrap().remove(0).response)
-            }
-        });
-        let reply = send.join().unwrap();
+        let mesh = OpenMesh {
+            seed,
+            endpoint: endpoint.clone(),
+            human,
+        };
+        let result = body(&mesh);
 
         let _ = stop.send(());
         let _ = listener.join();
         let _ = node.stop_server(endpoint);
         let _ = node.shutdown();
         restore_env(saved);
+        result
+    }
 
-        let reply = reply.unwrap_or_else(|err| {
-            panic!("the open listener refused a caller it has never seen: {err}")
-        });
-        assert!(reply.contains("callee heard: ping open"), "{reply}");
+    /// Sends `text` as one A2A message over a SLIM session `agent_id` opens to the
+    /// listener of `peer_did`, pinned to that DID as an open-admission caller is.
+    /// Unlike the live adapter it sends the text as given, so a test chooses whose
+    /// DID-proof envelope rides on whose session.
+    #[cfg(not(windows))]
+    fn send_text_over_slim(
+        endpoint: &str,
+        agent_id: &str,
+        peer_did: &str,
+        text: String,
+    ) -> Result<a2a::SendMessageResponse, String> {
+        use a2a_client::transport::{ServiceParams, Transport};
+
+        let service = Service::new(format!("text-sender-{agent_id}-{}", std::process::id()));
+        let sent = (|| -> Result<a2a::SendMessageResponse, String> {
+            let access = ClientAccess::from_env(Some(agent_id))?;
+            let connection_id = service
+                .connect(access.client_config(endpoint))
+                .map_err(|e| e.to_string())?;
+            let local = Arc::new(parse_name(&format!("agntcy/shadi/{agent_id}-text-sender"))?);
+            let remote = agentbridge::member_source::did_slim_name(peer_did)
+                .ok_or_else(|| format!("{peer_did} has no SLIM name"))?;
+            let remote = Arc::new(parse_name(&remote)?);
+            let auth = shadi_identity::require_did_auth_for_peer(agent_id, peer_did)
+                .map_err(|e| e.to_string())?;
+            let shadi_identity::SlimAuth::Did { did, .. } = &auth else {
+                return Err("an open-admission caller authenticates with its DID".to_string());
+            };
+            let session = agent_secrets::SessionContext::new(agent_id, "text-sender")
+                .with_proven_did(did.clone());
+            let app = shadi_identity::create_app(&service, local.clone(), &auth)
+                .map_err(|e| e.to_string())?;
+            app.subscribe(local, Some(connection_id))
+                .map_err(|e| e.to_string())?;
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            // slim_rpc captures the current runtime handle when the channel is built.
+            let channel = {
+                let _enter = runtime.enter();
+                shadi_a2a::A2AChannelBuilder::new(
+                    app,
+                    remote,
+                    Arc::new(agent_secrets::DidProofVerifier),
+                    session,
+                )
+                .connection_id(connection_id)
+                .build()
+            };
+            let request = a2a::SendMessageRequest {
+                message: shadi_a2a::insert_dest_did(
+                    Message::new(Role::User, vec![Part::text(text)]),
+                    peer_did,
+                ),
+                configuration: None,
+                metadata: None,
+                tenant: None,
+            };
+            runtime
+                .block_on(channel.send_message(&ServiceParams::new(), &request))
+                .map_err(|e| e.to_string())
+        })();
+        let _ = service.shutdown();
+        sent
+    }
+
+    /// The response as JSON, to assert on the text a listener sent back.
+    #[cfg(not(windows))]
+    fn response_json(response: &a2a::SendMessageResponse) -> String {
+        serde_json::to_string(response).unwrap()
     }
 
     /// Runs a test body in a child process, which SLIM needs: it installs a global

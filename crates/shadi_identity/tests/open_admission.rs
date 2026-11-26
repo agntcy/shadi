@@ -55,6 +55,8 @@ const SETTLE: Duration = Duration::from_millis(300);
 const LISTENER_NAME: &str = "agntcy/open-admission/listener";
 const CALLER_NAME: &str = "agntcy/open-admission/caller";
 const PING: &[u8] = b"ping";
+/// The metadata key SLIM's MLS layer sets to the verified sender's subject.
+const PEER_SUBJECT_KEY: &str = "slim-peer-subject";
 const PONG: &[u8] = b"pong";
 
 static SERVICE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -425,6 +427,9 @@ struct ForgingProvider {
     signer: AgentIdentity,
     audience: String,
     keys: Mutex<SignatureKeys>,
+    /// The MLS public key the token names, when it is not this provider's own:
+    /// a token taken from another app, presented with keys it never bound.
+    presented_pubkey: Option<Vec<u8>>,
 }
 
 impl ForgingProvider {
@@ -434,6 +439,7 @@ impl ForgingProvider {
             signer,
             audience: audience.to_string(),
             keys: Mutex::new(generate_signature_keys().expect("MLS signature keys")),
+            presented_pubkey: None,
         }
     }
 
@@ -460,7 +466,10 @@ impl IdentityProvider for ForgingProvider {
     }
 
     fn get_token(&self) -> Result<String, IdentityCallbackError> {
-        let public_key = self.keys().public_key.clone();
+        let public_key = match &self.presented_pubkey {
+            Some(stolen) => stolen.clone(),
+            None => self.keys().public_key.clone(),
+        };
         Ok(did_jwt(
             &self.subject,
             &self.signer,
@@ -574,18 +583,9 @@ impl IdentityVerifier for AnyDidVerifier {
     }
 }
 
-/// A caller that presents a forged DID-JWT, built with the given audience and signed
-/// by its own key or by another one.
-fn forging_caller(node: &Node, audience: &str, signed_by_other_key: bool) -> (Host, Arc<App>) {
-    let subject = AgentIdentity::generate().unwrap();
-    let signer = if signed_by_other_key {
-        AgentIdentity::generate().unwrap()
-    } else {
-        AgentIdentity::from_signing_key_bytes(&subject.signing_key_bytes())
-    };
-    let provider = ForgingProvider::new(&subject, signer, audience);
+/// A caller app on `node` built from `provider`, routed to the listener.
+fn custom_caller(node: &Node, provider: ForgingProvider) -> (Host, Arc<App>) {
     let verifier = AnyDidVerifier(DidKeyVerifier::any_did_key().unwrap());
-
     let host = node.join("forger");
     let app = host
         .service
@@ -602,6 +602,18 @@ fn forging_caller(node: &Node, audience: &str, signed_by_other_key: bool) -> (Ho
         .expect("route to the listener");
     thread::sleep(SETTLE);
     (host, app)
+}
+
+/// A caller that presents a forged DID-JWT, built with the given audience and signed
+/// by its own key or by another one.
+fn forging_caller(node: &Node, audience: &str, signed_by_other_key: bool) -> (Host, Arc<App>) {
+    let subject = AgentIdentity::generate().unwrap();
+    let signer = if signed_by_other_key {
+        AgentIdentity::generate().unwrap()
+    } else {
+        AgentIdentity::from_signing_key_bytes(&subject.signing_key_bytes())
+    };
+    custom_caller(node, ForgingProvider::new(&subject, signer, audience))
 }
 
 #[test]
@@ -648,6 +660,89 @@ fn open_listener_refuses_a_did_jwt_signed_by_another_key() {
         result.is_err(),
         "a DID-JWT whose subject did not sign it reached the open listener: {result:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Negative: a stolen DID-JWT is refused when presented with other MLS keys.
+// ---------------------------------------------------------------------------
+
+/// The victim's token is genuine: signed by the victim's DID key, for the right
+/// audience, naming the victim's MLS key. The thief presents it unchanged but holds
+/// only its own MLS keys, so the key binding the listener checks does not hold.
+#[test]
+fn open_listener_refuses_a_stolen_did_jwt_presented_with_other_mls_keys() {
+    let node = Node::start("stolen-token");
+    let listener_id = AgentIdentity::generate().unwrap();
+    let listener_host = node.join("listener");
+    let listener = open_listener(&listener_host, &listener_id);
+
+    let victim = AgentIdentity::generate().unwrap();
+    let victim_mls = generate_signature_keys().expect("the victim's MLS keys");
+    let signer = || AgentIdentity::from_signing_key_bytes(&victim.signing_key_bytes());
+
+    // Control: the victim's own token with the victim's own MLS keys is admitted.
+    let mut honest = ForgingProvider::new(&victim, signer(), DID_JWT_AUDIENCE);
+    honest.keys = Mutex::new(victim_mls.clone());
+    let (_honest_host, honest) = custom_caller(&node, honest);
+    assert_eq!(
+        attempt(&listener, &honest, SESSION_TIMEOUT),
+        Ok(PING.to_vec()),
+        "control: the victim's own token and MLS keys reach the open listener"
+    );
+
+    let mut thief = ForgingProvider::new(&victim, signer(), DID_JWT_AUDIENCE);
+    thief.presented_pubkey = Some(victim_mls.public_key.clone());
+    let (_thief_host, thief) = custom_caller(&node, thief);
+    let result = attempt(&listener, &thief, REFUSAL_TIMEOUT);
+    assert!(
+        result.is_err(),
+        "a stolen DID-JWT presented with other MLS keys reached the open listener: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Positive: the open listener sees the caller's DID as the verified session peer.
+// ---------------------------------------------------------------------------
+
+/// agentbridge binds each admitted message to `slim-peer-subject`, so it must be the
+/// caller's DID, set by SLIM for a caller the listener has never seen.
+#[test]
+fn open_listener_sees_the_callers_did_as_the_verified_peer() {
+    let node = Node::start("peer-subject");
+    let listener_id = AgentIdentity::generate().unwrap();
+    let listener_host = node.join("listener");
+    let listener = open_listener(&listener_host, &listener_id);
+
+    let auth = build_did_auth_for_peer(&fresh_seed(), "stranger", &listener_id.did()).unwrap();
+    let SlimAuth::Did { did: caller_did, .. } = &auth else {
+        panic!("a pinned caller authenticates with its DID");
+    };
+    let caller_did = caller_did.clone();
+    let caller_host = node.join("caller");
+    let caller = caller_app(&caller_host, &auth);
+
+    let (caller_session, listener_session) = open_session(&listener, &caller);
+    let inbound = spawn_call({
+        let listener_session = listener_session.clone();
+        move || listener_session.get_message(Some(SESSION_TIMEOUT))
+    });
+    let sent = spawn_call({
+        let caller_session = caller_session.clone();
+        move || caller_session.publish_and_wait(PING.to_vec(), None, None)
+    });
+    wait_for(&sent, SESSION_TIMEOUT)
+        .expect("the caller's publish finishes within the deadline")
+        .expect("the caller publishes");
+    let got = wait_for(&inbound, SESSION_TIMEOUT)
+        .expect("the listener's read finishes within the deadline")
+        .expect("the listener receives the caller's message");
+    assert_eq!(
+        got.context.metadata.get(PEER_SUBJECT_KEY),
+        Some(&caller_did),
+        "the listener's verified peer is the caller's DID"
+    );
+    end_session(&caller, caller_session);
+    end_session(&listener, listener_session);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,11 @@ use crate::CredentialError;
 /// Short enough that a leaked challenge goes stale fast, long enough for one round trip.
 pub const NONCE_TTL_SECS: i64 = 60;
 
+/// The longest retry-after a full store hands out: the wait until the earliest
+/// live nonce expires, which is never more than a nonce's lifetime. Whatever
+/// keeps a busy-parked task around must outlive this wait.
+pub const MAX_RETRY_AFTER_SECS: i64 = NONCE_TTL_SECS;
+
 /// Hard bound on parked nonces; the TTL alone is bounded only by inbound rate.
 /// When full, a slot comes only from a DID holding a spare or from the caller's
 /// own; a new DID is refused until one expires, never handed another's only one.
@@ -64,7 +69,7 @@ fn rejected() -> CredentialError {
 // the earliest live nonce expires, the soonest a slot can free on its own.
 fn exhausted(map: &HashMap<String, Issued>, now: i64) -> CredentialError {
     let earliest = map.values().map(|v| v.expires_at).min().unwrap_or(now);
-    let wait = earliest.saturating_sub(now).clamp(1, NONCE_TTL_SECS);
+    let wait = earliest.saturating_sub(now).clamp(1, MAX_RETRY_AFTER_SECS);
     CredentialError::ChallengeCapacity {
         retry_after_secs: wait.unsigned_abs(),
     }
