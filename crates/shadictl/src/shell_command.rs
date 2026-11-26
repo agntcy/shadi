@@ -1644,9 +1644,8 @@ pub(crate) fn run_shell_command(args: ShellArgs, initial_lines: &[String]) -> Ex
 }
 
 /// `shadictl slim create-group` — resolve `--members` specs into a DID trust
-/// superset, fold it into `SLIM_MEMBER_DIDS` for this process, optionally
-/// persist it as a `slim_mas` `GroupConfig` TOML, then create the channel and
-/// hand off into the normal interactive shell as its moderator. `/slim
+/// superset, fold it into `SLIM_MEMBER_DIDS` for this process, then create the
+/// channel and hand off into the normal interactive shell as its moderator. `/slim
 /// create`/`/slim invite`/`/slim join` are not touched by any of this — a
 /// moderator who already knows exactly who they want still uses those
 /// directly, unchanged.
@@ -1672,8 +1671,7 @@ pub(crate) fn run_slim_create_group_command(args: SlimCreateGroupArgs) -> ExitCo
 }
 
 /// Resolve `args.members`, union with any pre-existing `SLIM_MEMBER_DIDS`,
-/// persist the DIR server and trust set into this process's environment, and
-/// optionally write the result out as a `slim_mas` `GroupConfig` TOML.
+/// persist the DIR server and trust set into this process's environment.
 ///
 /// No SLIM/network I/O of its own — `resolve_members` is the only call that
 /// touches the network, and `explicit:` specs skip even that — so this is
@@ -1721,34 +1719,6 @@ fn resolve_and_persist_group_trust(args: &SlimCreateGroupArgs) -> Result<(), Str
         v
     };
     std::env::set_var("SLIM_MEMBER_DIDS", trust_dids.join(","));
-
-    if let Some(path) = &args.write_config {
-        let agent_id = std::env::var("SHADI_AGENT_ID").unwrap_or_else(|_| "agent".to_string());
-        let moderator_did = std::env::var("SLIM_HUMAN_SEED")
-            .ok()
-            .and_then(|seed| shadi_identity::AgentIdentity::derive(seed.as_bytes(), &agent_id).ok())
-            .map(|agent| agent.did());
-
-        let mut groups = std::collections::BTreeMap::new();
-        groups.insert(
-            args.channel.clone(),
-            slim_mas::GroupConfig {
-                moderator_did,
-                members: trust_dids
-                    .iter()
-                    .map(|did| slim_mas::MemberConfig { did: did.clone(), role: None })
-                    .collect(),
-            },
-        );
-        let config = slim_mas::MasConfig {
-            mas: Some(slim_mas::MasSettings { default_group: Some(args.channel.clone()) }),
-            groups,
-        };
-        match slim_mas::save_config(&config, path) {
-            Ok(()) => println!("wrote group config to {}", path.display()),
-            Err(err) => eprintln!("warning: failed to write group config: {}", err),
-        }
-    }
 
     Ok(())
 }
@@ -2298,7 +2268,6 @@ mod tests {
             runtime: "localhost:9999".to_string(),
             gh_token: None,
             limit: 10,
-            write_config: None,
         };
         assert_eq!(run_slim_create_group_command(args), ExitCode::from(2));
     }
@@ -2322,7 +2291,6 @@ mod tests {
             runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
-            write_config: None,
         };
 
         resolve_and_persist_group_trust(&args).expect("resolve");
@@ -2345,7 +2313,6 @@ mod tests {
             runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
-            write_config: None,
         };
 
         resolve_and_persist_group_trust(&args).expect("resolve");
@@ -2367,7 +2334,6 @@ mod tests {
             runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
-            write_config: None,
         };
 
         let err = resolve_and_persist_group_trust(&args).unwrap_err();
@@ -2386,40 +2352,10 @@ mod tests {
             runtime: "localhost:8888".to_string(),
             gh_token: None,
             limit: 10,
-            write_config: None,
         };
 
         let err = resolve_and_persist_group_trust(&args).unwrap_err();
         assert!(err.contains("error resolving --members"));
-    }
-
-    #[test]
-    fn resolve_and_persist_group_trust_writes_group_config_toml() {
-        let _lock = crate::lock_test_env();
-        let _trust = ScopedEnvVar::unset("SLIM_MEMBER_DIDS");
-        let _dir_server = ScopedEnvVar::unset("SHADI_DIR_SERVER");
-        let _agent_id = ScopedEnvVar::set("SHADI_AGENT_ID", "avatar");
-        let _seed = ScopedEnvVar::set("SLIM_HUMAN_SEED", "test-human-seed");
-        let path = std::env::temp_dir().join(format!(
-            "shadi-test-create-group-{}.toml",
-            std::process::id()
-        ));
-        let args = SlimCreateGroupArgs {
-            channel: "agntcy/shadi/room".to_string(),
-            members: vec!["explicit:copilot=did:key:agent".to_string()],
-            dir_server: "localhost:8888".to_string(),
-            runtime: "localhost:8888".to_string(),
-            gh_token: None,
-            limit: 10,
-            write_config: Some(path.clone()),
-        };
-
-        resolve_and_persist_group_trust(&args).expect("resolve");
-
-        let written = std::fs::read_to_string(&path).expect("config file written");
-        let _ = std::fs::remove_file(&path);
-        assert!(written.contains("did:key:agent"));
-        assert!(written.contains("agntcy/shadi/room"));
     }
 
     #[test]

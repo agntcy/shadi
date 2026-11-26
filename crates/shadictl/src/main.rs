@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 use shadi_sandbox::{spawn_sandboxed, NetAllowlist, NetProxy, SandboxPolicy};
 use agent_secrets::SecretStore;
 use shadi_memory::{MemoryEntry, SqlCipherStore};
-use slim_mas::{is_member_allowed, load_config as load_mas_config, resolve_group, resolve_group_dids};
 #[cfg(test)]
 use sequoia_openpgp as openpgp;
 use tracing::{field, info_span};
@@ -43,7 +42,6 @@ mod secrets_command;
 mod slim_shell;
 mod slim_a2a;
 mod slim_controller;
-mod slim_mas_command;
 mod snapshot_command;
 mod trace_command;
 mod trusted_secret_delivery;
@@ -58,7 +56,6 @@ use memory_command::*;
 use policy_helpers::*;
 use policy_watch::*;
 use sandbox_snapshot::*;
-use slim_mas_command::*;
 use trace_command::*;
 use trusted_secret_delivery::*;
 use shell_command::*;
@@ -265,7 +262,6 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::Memory(command) => run_memory_command(command),
         Commands::Credential(command) => run_credential_command(command),
         Commands::Trace(command) => run_trace_command(command),
-        Commands::SlimMas(command) => run_slim_mas_command(command),
         Commands::DidFromGpg(command) => run_did_from_gpg_command(command),
         Commands::DidFromGitHub(command) => run_did_from_github_command(command),
         Commands::DidFromSsh(command) => run_did_from_ssh_command(command),

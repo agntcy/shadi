@@ -9,8 +9,7 @@ group phases are
 [ASSEMBLY and CONVERGE](../../docs/content/assembly-converge.md).
 
 This crate does not own transport, identity, sandboxing, or the
-`agentbridge` CLI. It is also not `slim_mas` (SLIM group membership /
-`shadictl slim-mas`).
+`agentbridge` CLI.
 
 ## Role
 

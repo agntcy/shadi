@@ -26,9 +26,6 @@ and `/slim join` are untouched by any of this.
 - **The fully-manual technique, formalized** — `--members
   explicit:<name>=<did>[@<endpoint>]` names an agent directly, no Directory
   round-trip at all, as a peer to the two discovery techniques above.
-- **A live audit trail for the trust set** — `--write-config` persists the
-  resolved DID trust superset as a `slim_mas` `GroupConfig` TOML, so
-  `shadictl slim-mas list-members`/`validate` can inspect it later.
 - **Dynamic growth** — `/slim invite-from <spec>` re-resolves a member source
   *live*, inside an already-running group session, and invites whichever
   matches are already in the group's trust set.
@@ -202,7 +199,6 @@ target/debug/agentbridge list --local
 target/debug/shadictl slim create-group \
   --members "skill:ai_ml_engineering/agent_orchestration/multi_agent_coordination" \
   --dir-server "$SHADI_DIR_SERVER" \
-  --write-config /tmp/shadi-dir-demo/mas.toml \
   agntcy/shadi/dir-room
 ```
 
@@ -210,7 +206,6 @@ target/debug/shadictl slim create-group \
 Resolved 2 candidate member(s):
   codex     did=did:key:z6MkjFJX8CHfgsZKWpS2FfQz38KyzHkf2mDo1vKJ9rMfSUvg  slim://127.0.0.1:47660
   copilot   did=did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb  slim://127.0.0.1:47660
-wrote group config to /tmp/shadi-dir-demo/mas.toml
 
 shadi> /slim create agntcy/shadi/dir-room
 created channel agntcy/shadi/dir-room as moderator agntcy/shadi/avatar (did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76)
@@ -222,33 +217,6 @@ handed off into the same interactive shell `shadictl shell` gives you —
 `/slim invite <name>`, `/slim status`, `/slim whoami`, etc. all work here
 exactly as in [the other demo](did-agent-group.md), because they're the same
 commands, unmodified.
-
-The written config is a real `slim_mas` `GroupConfig`:
-
-```toml
-[mas]
-default_group = "agntcy/shadi/dir-room"
-
-[groups."agntcy/shadi/dir-room"]
-moderator_did = "did:key:z6MkwE1Y6L4KLgaQMACssnKN9LSEGTJpgdJxATgvRJAgkF76"
-
-[[groups."agntcy/shadi/dir-room".members]]
-did = "did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb"
-
-[[groups."agntcy/shadi/dir-room".members]]
-did = "did:key:z6MkjFJX8CHfgsZKWpS2FfQz38KyzHkf2mDo1vKJ9rMfSUvg"
-```
-
-Audit it independently at any time:
-
-```bash
-target/debug/shadictl slim-mas --config /tmp/shadi-dir-demo/mas.toml list-members
-```
-
-```text
-did:key:z6MkfGB4nkEoDvT6KgdPbobdXqnWh5K8jQSy3Ho5Ga6CdJFb
-did:key:z6MkjFJX8CHfgsZKWpS2FfQz38KyzHkf2mDo1vKJ9rMfSUvg
-```
 
 ## 6. Members join, moderator invites
 

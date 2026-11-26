@@ -325,7 +325,6 @@ dependencies = [
  "agntcy-shadi-identity",
  "agntcy-shadi-memory",
  "agntcy-shadi-sandbox",
- "agntcy-shadi-slim-mas",
  "agntcy-shadi-telemetry",
  "agntcy-slim-bindings",
  "agntcy-slim-config",
@@ -451,16 +450,6 @@ dependencies = [
  "tracing",
  "uds_windows",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "agntcy-shadi-slim-mas"
-version = "0.1.7"
-dependencies = [
- "agntcy-shadi-agent-secrets",
- "serde",
- "tempfile",
- "toml",
 ]
 
 [[package]]

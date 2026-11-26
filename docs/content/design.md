@@ -8,7 +8,6 @@ The workspace contains these crates:
 - shadi_sandbox: OS sandbox enforcement layer
 - shadi_identity: DID identity derivation and SLIM DID-JWT auth
 - shadi_a2a: A2A-over-SLIM wrapper, including secure group (Collaborate) messaging
-- slim_mas: SLIM multi-agent group config and DID allow-list evaluation (a library, consumed by `shadictl slim-mas`, not itself a CLI). Not SHADI MAS.
 - shadi_mas: SHADI MAS coordination runtime — epochs, engines, ASSEMBLY / CONVERGE. See [SHADI MAS](shadi-mas.md) and [ASSEMBLY and CONVERGE](assembly-converge.md).
 - agentbridge / agentbridge_cli: general-purpose A2A agent interconnect (register, handoff, delegate, coordinate); ships with CLI coding-tool adapters (Claude Code, Copilot, Codex, Cursor Agent) as its flagship use case
 - agent_transport_slim: transport adapter for SLIM/A2A and stdio bridge for SHADI-managed sessions

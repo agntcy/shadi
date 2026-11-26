@@ -1,11 +1,10 @@
 # CLI Reference
 
 This page documents the command-line tools shipped with SHADI. `shadictl`
-(binary name `shadi`) covers four distinct surfaces, each its own section
+(binary name `shadi`) covers three distinct surfaces, each its own section
 below: sandboxed execution + secrets + identity ([`shadictl`](#shadictl-shadi)),
-encrypted memory ([`shadictl memory`](#shadictl-memory-shadictl-memory)),
-native SLIM/A2A helpers ([`shadictl slim`](#shadictl-slim-shadictl-slim)), and
-SLIM group membership rules ([`shadictl slim-mas`](#shadictl-slim-mas-shadictl-slim-mas)).
+encrypted memory ([`shadictl memory`](#shadictl-memory-shadictl-memory)), and
+native SLIM/A2A helpers ([`shadictl slim`](#shadictl-slim-shadictl-slim)).
 
 Rust applications can embed the same secrets, memory, and sandbox layers
 directly — see [API Guide → Rust API](api_integration.md#rust-api).
@@ -709,7 +708,6 @@ cargo run -p agntcy-shadi-cli -- slim create-group \
   --members "did:did:key:z6Mk..." \
   --members "explicit:trusted-bot=did:key:z6Mk...@10.0.0.5:47560" \
   --dir-server 127.0.0.1:8888 \
-  --write-config /tmp/mas.toml \
   agntcy/shadi/dir-room
 ```
 
@@ -726,8 +724,6 @@ cargo run -p agntcy-shadi-cli -- slim create-group \
 - `--dir-server`: Agent Directory address (default `prod.gateway.ads.outshift.io:443`).
 - `--runtime`: dir-runtime address for `running:` specs (default `localhost:8888`, a local `dirctl daemon`); it gets no DIR credentials.
 - `--gh-token` / `--limit`: DIR auth token and max results per source.
-- `--write-config PATH`: persist the resolved trust set as a `slim_mas`
-  `GroupConfig` TOML — see [`shadictl slim-mas`](#shadictl-slim-mas-shadictl-slim-mas) below.
 
 Requires `SHADI_SLIM_AUTH=did` — a discovered trust set is meaningless under
 shared-secret auth.
@@ -752,48 +748,6 @@ for the admission model, the [Secure Agent Group Demo](demos/did-agent-group.md)
 for a full walkthrough with real coding-agent CLIs and a hand-written allow-list, and the
 [Agent Directory Discovery Demo](demos/dir-group-discovery.md) for the discovery-driven
 equivalent of `create`/`invite`.
-
-## shadictl slim-mas (`shadictl slim-mas`)
-
-`shadictl slim-mas` evaluates SLIM multi-agent membership rules from a TOML config.
-This is the `slim_mas` crate. It is not [SHADI MAS](shadi-mas.md)
-(`shadi_mas`), which owns coordination engines and ASSEMBLY / CONVERGE.
-
-### Global flags
-
-- `--config FILE`: Path to the MAS config (default `mas.toml`).
-
-### Commands
-
-List available groups:
-
-```bash
-cargo run -p agntcy-shadi-cli -- slim-mas list-groups
-```
-
-List members for a group:
-
-```bash
-cargo run -p agntcy-shadi-cli -- slim-mas list-members --group team-a
-```
-
-Validate config (ensures a default group exists):
-
-```bash
-cargo run -p agntcy-shadi-cli -- slim-mas validate
-```
-
-Admit or deny a member:
-
-```bash
-cargo run -p agntcy-shadi-cli -- slim-mas admit --group team-a --did did:key:human --role human
-```
-
-Exit codes:
-
-- `0`: allow / success
-- `3`: deny (member not allowed)
-- `2`: error
 
 ## Next steps
 
