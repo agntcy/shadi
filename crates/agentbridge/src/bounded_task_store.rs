@@ -3,60 +3,169 @@
 //!
 //! [`InMemoryTaskStore`](a2a_server::InMemoryTaskStore) keeps every task for
 //! the life of the process. [`BoundedTaskStore`] keeps at most `capacity`
-//! tasks, live and finished alike. To admit a new task when full, it evicts
-//! the finished task that finished earliest. It never evicts a live task: when
-//! every task is live, `create` fails instead.
+//! tasks. Tasks fall into three groups:
 //!
-//! Apart from that eviction, the semantics are `InMemoryTaskStore`'s. The
-//! parity test below runs the same operations against both stores and compares
-//! the results.
+//! - finished: `Completed`, `Failed`, `Canceled` and `Rejected`;
+//! - parked, waiting on the caller: `AuthRequired` and `InputRequired`;
+//! - running: every other state, i.e. `Submitted`, `Working` and
+//!   `Unspecified`.
+//!
+//! To admit a new task when full, it evicts the task that finished earliest,
+//! or failing that, the task that was parked earliest. It never evicts a
+//! running task: when every task is running, `create` fails instead.
+//!
+//! An `AuthRequired` task also expires once it has been parked for longer than
+//! the parked TTL, and from then on reads as a task that never existed.
+//! `InputRequired` does not expire, as it may be waiting on a human.
+//!
+//! Apart from eviction and expiry, the semantics are `InMemoryTaskStore`'s.
+//! The parity test below runs the same operations against both stores and
+//! compares the results.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
 use std::num::NonZeroUsize;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use a2a::{A2AError, ListTasksRequest, ListTasksResponse, Task, TaskId, TaskState};
 use a2a_server::pagination::resolve_page_size;
 use a2a_server::task_store::{StoredTask, TaskVersion};
 use a2a_server::TaskStore;
 use async_trait::async_trait;
+use shadi_credential::nonce::NONCE_TTL_SECS;
+
+/// The capacity a listener uses, so that its memory stays bounded when any
+/// caller can create tasks. Finished tasks are evicted first, then parked
+/// ones.
+pub const DEFAULT_TASK_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
+
+/// How long a listener keeps an `AuthRequired` task. A parked challenge is
+/// useless once its nonce has expired: the caller can no longer answer it, so
+/// the task could only ever take up room.
+pub const DEFAULT_PARKED_TTL: Duration = {
+    assert!(NONCE_TTL_SECS > 0, "the nonce TTL must be positive");
+    Duration::from_secs(NONCE_TTL_SECS.unsigned_abs())
+};
 
 /// A [`TaskStore`] holding at most `capacity` tasks.
 ///
-/// The bound is enforced in `create` only. `update`, `begin_cancel` and `get`
-/// never remove a task, so a task disappears only when it is evicted to make
-/// room for a new one.
+/// The bound is enforced in `create` only. Apart from that eviction, a task
+/// disappears only when it expires: every method first drops the
+/// `AuthRequired` tasks parked for longer than `parked_ttl`.
 pub struct BoundedTaskStore {
     capacity: NonZeroUsize,
+    parked_ttl: Duration,
+    /// `Instant::now`, unless a test injects its own clock.
+    now: Box<dyn Fn() -> Instant + Send + Sync>,
     tasks: Mutex<Tasks>,
 }
 
 #[derive(Default)]
 struct Tasks {
-    entries: HashMap<TaskId, StoredTask>,
+    entries: HashMap<TaskId, Entry>,
     /// Ids of the finished tasks, the one that finished earliest first. A
     /// finished state never changes (see `update`), so each finished task is
-    /// queued once, and it leaves the queue only when it is evicted. The queue
-    /// therefore always holds exactly the finished entries.
+    /// queued once, and it leaves the queue only when it is evicted. Only
+    /// `AuthRequired` tasks expire, so the queue always holds exactly the
+    /// finished entries.
     terminal: VecDeque<TaskId>,
+    /// The `order` the next task to enter a parked state gets.
+    next_park: u64,
+}
+
+struct Entry {
+    stored: StoredTask,
+    /// Set while the task is parked.
+    parked: Option<Parked>,
+}
+
+/// When a task last entered a parked state.
+struct Parked {
+    /// For the age.
+    since: Instant,
+    /// For the eviction order: the clock is read under the lock and never goes
+    /// back, so a lower `order` was parked no later, and ties are broken.
+    order: u64,
 }
 
 impl BoundedTaskStore {
-    /// An empty store that holds at most `capacity` tasks. The type rules out
-    /// a zero capacity, which could hold no task at all.
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    /// An empty store that holds at most `capacity` tasks, and drops an
+    /// `AuthRequired` task once it has been parked for longer than
+    /// `parked_ttl`. The type rules out a zero capacity, which could hold no
+    /// task at all.
+    pub fn new(capacity: NonZeroUsize, parked_ttl: Duration) -> Self {
+        Self::with_clock(capacity, parked_ttl, Instant::now)
+    }
+
+    fn with_clock(
+        capacity: NonZeroUsize,
+        parked_ttl: Duration,
+        now: impl Fn() -> Instant + Send + Sync + 'static,
+    ) -> Self {
         Self {
             capacity,
+            parked_ttl,
+            now: Box::new(now),
             tasks: Mutex::new(Tasks::default()),
         }
     }
 
-    /// Locks the tasks, ignoring poisoning: the tokio lock that
-    /// `InMemoryTaskStore` uses never poisons either.
-    fn lock(&self) -> MutexGuard<'_, Tasks> {
-        self.tasks.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Locks the tasks and drops the expired ones, so that every method sees
+    /// an expired task as one that never existed. Returns the time it swept
+    /// at. Poisoning is ignored: the tokio lock that `InMemoryTaskStore` uses
+    /// never poisons either.
+    fn lock(&self) -> (MutexGuard<'_, Tasks>, Instant) {
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = (self.now)();
+        tasks
+            .entries
+            .retain(|_, entry| !entry.expired(now, self.parked_ttl));
+        (tasks, now)
+    }
+}
+
+impl Entry {
+    /// Whether the task is `AuthRequired` and has been parked for longer than
+    /// `ttl`. At exactly `ttl` it is still kept.
+    fn expired(&self, now: Instant, ttl: Duration) -> bool {
+        self.stored.task.status.state == TaskState::AuthRequired
+            && self
+                .parked
+                .as_ref()
+                .is_some_and(|parked| now.saturating_duration_since(parked.since) > ttl)
+    }
+}
+
+/// The parked marker for a task now entering `state`: none unless `state` is
+/// parked, and otherwise a new one, taking the next `order`. Every write of a
+/// parked state restarts the age, as each `AuthRequired` carries a fresh
+/// challenge.
+fn park(next_park: &mut u64, state: &TaskState, now: Instant) -> Option<Parked> {
+    if !matches!(state, TaskState::AuthRequired | TaskState::InputRequired) {
+        return None;
+    }
+    let order = *next_park;
+    *next_park += 1;
+    Some(Parked { since: now, order })
+}
+
+impl Tasks {
+    /// Evicts one task to make room: the one that finished earliest, else the
+    /// one parked earliest. Returns false, evicting nothing, when every task is
+    /// running.
+    fn evict_one(&mut self) -> bool {
+        let victim = self.terminal.pop_front().or_else(|| {
+            self.entries
+                .iter()
+                .filter_map(|(id, entry)| Some((entry.parked.as_ref()?.order, id)))
+                .min()
+                .map(|(_, id)| id.clone())
+        });
+        match victim {
+            Some(id) => self.entries.remove(&id).is_some(),
+            None => false,
+        }
     }
 }
 
@@ -64,33 +173,37 @@ impl BoundedTaskStore {
 impl TaskStore for BoundedTaskStore {
     /// Stores `task` as version 1.
     ///
-    /// When the store is full, the task that finished earliest is evicted
-    /// first. If no task has finished, nothing is evicted and this fails with
-    /// `INTERNAL_ERROR`. Of the A2A codes, `INVALID_REQUEST` would blame the
-    /// caller, who sent a valid task, and none names a full store. Evicting a
-    /// live task would silently lose its work. The failure is the server's, so
-    /// the detail is logged and the client gets the generic message.
+    /// When the store is full, the expired tasks are already gone, and one
+    /// more task is evicted: the one that finished earliest, else the one
+    /// parked earliest. If every task is running, nothing is evicted and this
+    /// fails with `INTERNAL_ERROR`. Of the A2A codes, `INVALID_REQUEST` would
+    /// blame the caller, who sent a valid task, and none names a full store.
+    /// Evicting a running task would silently lose its work. The failure is
+    /// the server's, so the detail is logged and the client gets the generic
+    /// message.
     async fn create(&self, task: Task) -> Result<TaskVersion, A2AError> {
-        let mut guard = self.lock();
+        let (mut guard, now) = self.lock();
         let tasks = &mut *guard;
         if tasks.entries.contains_key(&task.id) {
             return Err(sanitized_internal_error("task already exists"));
         }
-        if tasks.entries.len() >= self.capacity.get() {
-            let Some(oldest) = tasks.terminal.pop_front() else {
-                return Err(sanitized_internal_error(format!(
-                    "task store is full of live tasks ({} of {})",
-                    tasks.entries.len(),
-                    self.capacity
-                )));
-            };
-            tasks.entries.remove(&oldest);
+        if tasks.entries.len() >= self.capacity.get() && !tasks.evict_one() {
+            return Err(sanitized_internal_error(format!(
+                "task store is full of running tasks ({} of {})",
+                tasks.entries.len(),
+                self.capacity
+            )));
         }
         let id = task.id.clone();
         let finished = task.status.state.is_terminal();
-        tasks
-            .entries
-            .insert(id.clone(), StoredTask { task, version: 1 });
+        let parked = park(&mut tasks.next_park, &task.status.state, now);
+        tasks.entries.insert(
+            id.clone(),
+            Entry {
+                stored: StoredTask { task, version: 1 },
+                parked,
+            },
+        );
         if finished {
             tasks.terminal.push_back(id);
         }
@@ -98,45 +211,49 @@ impl TaskStore for BoundedTaskStore {
     }
 
     async fn update(&self, task: Task) -> Result<TaskVersion, A2AError> {
-        let mut guard = self.lock();
+        let (mut guard, now) = self.lock();
         let tasks = &mut *guard;
         let entry = tasks
             .entries
             .get_mut(&task.id)
             .ok_or_else(|| A2AError::task_not_found(&task.id))?;
+        let state = &entry.stored.task.status.state;
         // A finished state can be re-applied (idempotent re-emission, e.g. from
         // cancel flows) but never replaced by a different state.
-        if entry.task.status.state.is_terminal() && entry.task.status.state != task.status.state {
+        if state.is_terminal() && *state != task.status.state {
             return Err(A2AError::invalid_request(format!(
                 "task {} is in terminal state {:?} and cannot transition to {:?}",
-                task.id, entry.task.status.state, task.status.state
+                task.id, state, task.status.state
             )));
         }
-        let finishes = !entry.task.status.state.is_terminal() && task.status.state.is_terminal();
-        entry.version += 1;
-        let version = entry.version;
+        let finishes = !state.is_terminal() && task.status.state.is_terminal();
+        entry.stored.version += 1;
+        let version = entry.stored.version;
         if finishes {
             tasks.terminal.push_back(task.id.clone());
         }
-        entry.task = task;
+        entry.parked = park(&mut tasks.next_park, &task.status.state, now);
+        entry.stored.task = task;
         Ok(version)
     }
 
     async fn get(&self, task_id: &str) -> Result<Option<Task>, A2AError> {
         Ok(self
             .lock()
+            .0
             .entries
             .get(task_id)
-            .map(|entry| entry.task.clone()))
+            .map(|entry| entry.stored.task.clone()))
     }
 
     async fn list(&self, req: &ListTasksRequest) -> Result<ListTasksResponse, A2AError> {
         let mut matching: Vec<Task> = self
             .lock()
+            .0
             .entries
             .values()
-            .filter(|entry| matches_filters(&entry.task, req))
-            .map(|entry| entry.task.clone())
+            .filter(|entry| matches_filters(&entry.stored.task, req))
+            .map(|entry| entry.stored.task.clone())
             .collect();
         // Sorted by id, so that pages are deterministic.
         matching.sort_by(|a, b| a.id.cmp(&b.id));
@@ -179,21 +296,22 @@ impl TaskStore for BoundedTaskStore {
     /// Takes the task from its non-finished state to `CANCELED`, under the same
     /// lock as the check, so two concurrent cancels cannot both succeed.
     async fn begin_cancel(&self, task_id: &str) -> Result<Task, A2AError> {
-        let mut guard = self.lock();
+        let (mut guard, _) = self.lock();
         let tasks = &mut *guard;
         let entry = tasks
             .entries
             .get_mut(task_id)
             .ok_or_else(|| A2AError::task_not_found(task_id))?;
-        if entry.task.status.state.is_terminal() {
+        if entry.stored.task.status.state.is_terminal() {
             return Err(A2AError::task_not_cancelable(task_id));
         }
-        entry.version += 1;
-        entry.task.status.state = TaskState::Canceled;
+        entry.stored.version += 1;
+        entry.stored.task.status.state = TaskState::Canceled;
         // Same value as `chrono::Utc::now()`. `chrono` is not a direct dependency
         // of this crate, so the conversion from `SystemTime` stands in for it.
-        entry.task.status.timestamp = Some(SystemTime::now().into());
-        let task = entry.task.clone();
+        entry.stored.task.status.timestamp = Some(SystemTime::now().into());
+        entry.parked = None;
+        let task = entry.stored.task.clone();
         tasks.terminal.push_back(task_id.to_string());
         Ok(task)
     }
@@ -245,15 +363,56 @@ fn sanitized_internal_error(detail: impl Display) -> A2AError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::sync::Arc;
 
     use a2a::{error_code, Message, Part, Role, TaskStatus};
     use a2a_server::InMemoryTaskStore;
 
     use super::*;
 
+    const TTL: Duration = Duration::from_secs(60);
+
+    /// A clock that moves only when the test advances it.
+    #[derive(Clone)]
+    struct TestClock(Arc<Mutex<Instant>>);
+
+    impl TestClock {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Instant::now())))
+        }
+
+        fn now(&self) -> Instant {
+            *self.0.lock().unwrap()
+        }
+
+        fn advance(&self, by: Duration) {
+            *self.0.lock().unwrap() += by;
+        }
+    }
+
+    /// A store with a parked TTL of `TTL`, reading `clock`.
+    fn clocked_store(capacity: usize, clock: &TestClock) -> BoundedTaskStore {
+        let clock = clock.clone();
+        BoundedTaskStore::with_clock(
+            NonZeroUsize::new(capacity).expect("non-zero capacity"),
+            TTL,
+            move || clock.now(),
+        )
+    }
+
+    /// A store whose clock never moves, so nothing ever expires.
     fn store(capacity: usize) -> BoundedTaskStore {
-        BoundedTaskStore::new(NonZeroUsize::new(capacity).expect("non-zero capacity"))
+        clocked_store(capacity, &TestClock::new())
+    }
+
+    /// Creates `id` as `Submitted` and then moves it to `state`, as the
+    /// handler does with a task the listener parks.
+    async fn create_then_set(store: &BoundedTaskStore, id: &str, state: TaskState) {
+        store
+            .create(task(id, "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        store.update(task(id, "c1", state)).await.unwrap();
     }
 
     fn task(id: &str, context_id: &str, state: TaskState) -> Task {
@@ -575,7 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_at_capacity_with_only_live_tasks_fails_and_evicts_nothing() {
+    async fn create_at_capacity_with_only_running_tasks_fails_and_evicts_nothing() {
         let store = store(2);
         store
             .create(task("t1", "c1", TaskState::Working))
@@ -597,7 +756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_tasks_are_never_evicted() {
+    async fn running_tasks_are_never_evicted() {
         let store = store(3);
         store
             .create(task("live", "c1", TaskState::Working))
@@ -641,6 +800,247 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed_ids(&store).await, ["t3"]);
+    }
+
+    #[test]
+    fn the_default_parked_ttl_is_the_nonce_ttl() {
+        assert_eq!(DEFAULT_PARKED_TTL, Duration::from_secs(60));
+    }
+
+    /// A store holding `t1`, parked `AuthRequired` and now just past the TTL,
+    /// and `t2`, working. Each method is checked on a fresh one, so each is
+    /// shown to drop the expired task by itself.
+    async fn store_with_an_expired_task() -> BoundedTaskStore {
+        let clock = TestClock::new();
+        let store = clocked_store(4, &clock);
+        create_then_set(&store, "t1", TaskState::AuthRequired).await;
+        store
+            .create(task("t2", "c1", TaskState::Working))
+            .await
+            .unwrap();
+        clock.advance(TTL + Duration::from_nanos(1));
+        store
+    }
+
+    #[tokio::test]
+    async fn an_expired_auth_required_task_reads_as_one_that_never_existed() {
+        let store = store_with_an_expired_task().await;
+        assert_eq!(store.get("t1").await.unwrap(), None);
+
+        let store = store_with_an_expired_task().await;
+        assert_eq!(listed_ids(&store).await, ["t2"]);
+        let resp = store.list(&list_all()).await.unwrap();
+        assert_eq!(resp.total_size, 1);
+
+        let store = store_with_an_expired_task().await;
+        let expired = store
+            .update(task("t1", "c1", TaskState::Working))
+            .await
+            .unwrap_err();
+        let unknown = store
+            .update(task("missing", "c1", TaskState::Working))
+            .await
+            .unwrap_err();
+        assert_eq!(expired.code, error_code::TASK_NOT_FOUND);
+        assert_eq!(expired.message, unknown.message.replace("missing", "t1"));
+
+        let store = store_with_an_expired_task().await;
+        let expired = store.begin_cancel("t1").await.unwrap_err();
+        let unknown = store.begin_cancel("missing").await.unwrap_err();
+        assert_eq!(expired.code, error_code::TASK_NOT_FOUND);
+        assert_eq!(expired.message, unknown.message.replace("missing", "t1"));
+
+        let store = store_with_an_expired_task().await;
+        let recreated = task("t1", "c1", TaskState::Submitted);
+        assert_eq!(store.create(recreated.clone()).await.unwrap(), 1);
+        assert_eq!(store.get("t1").await.unwrap(), Some(recreated));
+    }
+
+    /// Expired means older than the TTL: at exactly the TTL the task stays.
+    #[tokio::test]
+    async fn an_auth_required_task_expires_only_once_older_than_the_ttl() {
+        let clock = TestClock::new();
+        let store = clocked_store(4, &clock);
+        create_then_set(&store, "t1", TaskState::AuthRequired).await;
+
+        clock.advance(TTL);
+        assert!(store.get("t1").await.unwrap().is_some());
+        clock.advance(Duration::from_nanos(1));
+        assert_eq!(store.get("t1").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn re_parking_restarts_the_age() {
+        let clock = TestClock::new();
+        let store = clocked_store(4, &clock);
+        create_then_set(&store, "again", TaskState::AuthRequired).await;
+        create_then_set(&store, "via_working", TaskState::AuthRequired).await;
+
+        clock.advance(TTL);
+        store
+            .update(task("again", "c1", TaskState::AuthRequired))
+            .await
+            .unwrap();
+        store
+            .update(task("via_working", "c1", TaskState::Working))
+            .await
+            .unwrap();
+        store
+            .update(task("via_working", "c1", TaskState::AuthRequired))
+            .await
+            .unwrap();
+
+        clock.advance(TTL);
+        assert_eq!(listed_ids(&store).await, ["again", "via_working"]);
+        clock.advance(Duration::from_nanos(1));
+        assert!(listed_ids(&store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn leaving_the_parked_state_stops_the_expiry() {
+        let clock = TestClock::new();
+        let store = clocked_store(4, &clock);
+        for id in ["canceled", "completed", "working"] {
+            create_then_set(&store, id, TaskState::AuthRequired).await;
+        }
+        store
+            .update(task("working", "c1", TaskState::Working))
+            .await
+            .unwrap();
+        store
+            .update(task("completed", "c1", TaskState::Completed))
+            .await
+            .unwrap();
+        store.begin_cancel("canceled").await.unwrap();
+
+        clock.advance(TTL * 10);
+        assert_eq!(
+            listed_ids(&store).await,
+            ["canceled", "completed", "working"]
+        );
+    }
+
+    #[tokio::test]
+    async fn input_required_never_expires_by_age() {
+        let clock = TestClock::new();
+        let store = clocked_store(4, &clock);
+        create_then_set(&store, "t1", TaskState::InputRequired).await;
+        store
+            .create(task("t2", "c1", TaskState::InputRequired))
+            .await
+            .unwrap();
+
+        clock.advance(TTL * 1000);
+        assert_eq!(listed_ids(&store).await, ["t1", "t2"]);
+        assert_eq!(
+            store
+                .update(task("t1", "c1", TaskState::Working))
+                .await
+                .unwrap(),
+            3
+        );
+    }
+
+    /// The order is by when a task was parked, not when it was created, and a
+    /// running task is never the one evicted.
+    #[tokio::test]
+    async fn a_full_store_with_no_finished_task_evicts_the_earliest_parked() {
+        let clock = TestClock::new();
+        let store = clocked_store(4, &clock);
+        store
+            .create(task("working", "c1", TaskState::Working))
+            .await
+            .unwrap();
+        store
+            .create(task("submitted", "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        store
+            .create(task("auth", "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        create_then_set(&store, "input", TaskState::InputRequired).await;
+        clock.advance(Duration::from_secs(1));
+        store
+            .update(task("auth", "c1", TaskState::AuthRequired))
+            .await
+            .unwrap();
+
+        store
+            .create(task("new1", "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed_ids(&store).await,
+            ["auth", "new1", "submitted", "working"]
+        );
+        store
+            .create(task("new2", "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed_ids(&store).await,
+            ["new1", "new2", "submitted", "working"]
+        );
+
+        let err = store
+            .create(task("new3", "c1", TaskState::Submitted))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, error_code::INTERNAL_ERROR);
+        assert_eq!(
+            listed_ids(&store).await,
+            ["new1", "new2", "submitted", "working"]
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_tasks_are_evicted_before_parked_ones() {
+        let clock = TestClock::new();
+        let store = clocked_store(3, &clock);
+        create_then_set(&store, "parked", TaskState::AuthRequired).await;
+        store
+            .create(task("working", "c1", TaskState::Working))
+            .await
+            .unwrap();
+        clock.advance(Duration::from_secs(1));
+        create_then_set(&store, "done", TaskState::Completed).await;
+
+        store
+            .create(task("new", "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        assert_eq!(listed_ids(&store).await, ["new", "parked", "working"]);
+    }
+
+    /// Unsigned messages park tasks as fast as anyone can send them. They must
+    /// not lock signed callers out, and they must not outlive their nonce.
+    #[tokio::test]
+    async fn a_store_filled_with_auth_required_tasks_still_admits_new_ones() {
+        let clock = TestClock::new();
+        let store = {
+            let clock = clock.clone();
+            BoundedTaskStore::with_clock(DEFAULT_TASK_CAPACITY, DEFAULT_PARKED_TTL, move || {
+                clock.now()
+            })
+        };
+        let capacity = DEFAULT_TASK_CAPACITY.get();
+        for i in 0..capacity {
+            create_then_set(&store, &format!("unsigned{i:04}"), TaskState::AuthRequired).await;
+            clock.advance(Duration::from_millis(1));
+        }
+
+        store
+            .create(task("signed", "c1", TaskState::Submitted))
+            .await
+            .unwrap();
+        assert_eq!(store.get("unsigned0000").await.unwrap(), None);
+        assert!(store.get("unsigned0001").await.unwrap().is_some());
+        let resp = store.list(&list_all()).await.unwrap();
+        assert_eq!(resp.total_size, i32::try_from(capacity).unwrap());
+
+        clock.advance(DEFAULT_PARKED_TTL);
+        assert_eq!(listed_ids(&store).await, ["signed"]);
     }
 
     /// One operation of the parity script.
