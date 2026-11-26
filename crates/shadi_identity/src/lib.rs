@@ -26,6 +26,7 @@ pub mod did_proof;
 pub mod grant;
 #[cfg(feature = "openpgp")]
 pub mod openpgp;
+pub mod provider;
 pub mod ssh;
 pub mod trust_anchor;
 pub mod verifier;
@@ -44,6 +45,7 @@ pub use did_proof::{
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
 pub use grant::{issue_grant, verify_grant, ChannelGrant, GrantAction, GrantRole};
+pub use provider::DidKeyProvider;
 pub use trust_anchor::{DeclaredKeysAnchor, KeyListFetcher, PublishedKeysAnchor, TrustAnchor};
 pub use verifier::{DidKeyVerifier, DID_JWT_AUDIENCE};
 pub use vp_layer::{looks_like_vp, split_vp, wrap_vp, VP_MAX_BYTES};
