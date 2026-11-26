@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn request_invite_needs_a_peer_did_under_open_admission() {
         {
-            let _env = crate::commands::MemberDidsEnv::set(None);
+            let _env = crate::commands::AdmissionEnv::open();
             let err = owner_config("owner", "avatar", "127.0.0.1:47357")
                 .expect_err("open admission needs a peer DID");
             let err = err.to_string();
@@ -89,7 +89,7 @@ mod tests {
             .to_string();
             assert!(err.starts_with("request-invite: open admission"), "{err}");
         }
-        let _env = crate::commands::MemberDidsEnv::set(Some("did:key:zMember"));
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
         let config = owner_config("owner", "avatar", "127.0.0.1:47357").expect("closed");
         assert_eq!(config.peer_agent_id, "owner");
         assert_eq!(config.destination, Some(owner_service_name("owner")));

@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn open_peer_accepts_native_and_slim_specs() {
-        let _env = crate::commands::MemberDidsEnv::set(Some("did:key:zMember"));
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
         let claude = open_peer("claude-code", "127.0.0.1:47357").expect("claude");
         assert_eq!(claude.label(), "claude-code");
         let copilot = open_peer("copilot", "127.0.0.1:47357").expect("copilot");
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn slim_from_self_does_not_open_a2a_client_to_own_listener() {
         // Open admission: it dials nobody, so it needs no peer DID.
-        let _env = crate::commands::MemberDidsEnv::set(None);
+        let _env = crate::commands::AdmissionEnv::open();
         let prev = std::env::var("SHADI_AGENT_ID").ok();
         std::env::set_var("SHADI_AGENT_ID", "claude-code");
         let peer = open_peer("slim:claude-code", "127.0.0.1:47357").expect("self slim");
@@ -289,8 +289,8 @@ mod tests {
 
     #[test]
     fn open_peer_refuses_a_slim_peer_without_a_did_under_open_admission() {
-        // Holds the env lock throughout; its drop restores SLIM_MEMBER_DIDS.
-        let _env = crate::commands::MemberDidsEnv::set(None);
+        // Holds the env lock throughout; its drop restores both admission variables.
+        let _env = crate::commands::AdmissionEnv::open();
         let prev_agent = std::env::var_os("SHADI_AGENT_ID");
         std::env::set_var("SHADI_AGENT_ID", "avatar");
 
@@ -306,6 +306,8 @@ mod tests {
         // Local peers never dial SLIM.
         assert!(open_peer("claude-code", "127.0.0.1:47357").is_ok());
 
+        // Closed: the switch unset, the allow-list set (open + a list would conflict).
+        std::env::remove_var("SHADI_SLIM_ADMISSION");
         std::env::set_var("SLIM_MEMBER_DIDS", "did:key:zMember");
         match open_peer("slim:peer@10.0.0.1:9", "127.0.0.1:47357").expect("closed") {
             HandoffPeer::Slim { agent_id, .. } => assert_eq!(agent_id, "peer"),

@@ -1422,11 +1422,51 @@ fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String
     ))
 }
 
+/// The admission mode this listener starts under, from `SHADI_SLIM_ADMISSION`.
+///
+/// Read before any SLIM connection. A bad value or the open/`SLIM_MEMBER_DIDS`
+/// conflict stops startup, and so does open admission: this build's listener
+/// has no verifier for it yet (never a fall back to the allow-list).
+fn listener_admission() -> Result<shadi_identity::SlimAdmission, String> {
+    let mode = shadi_identity::slim_admission_from_env()
+        .map_err(|e| format!("SLIM admission error: {e}"))?;
+    match mode {
+        shadi_identity::SlimAdmission::Closed => Ok(mode),
+        shadi_identity::SlimAdmission::Open => Err(
+            "SHADI_SLIM_ADMISSION=open is not supported by this build's listener yet".to_string(),
+        ),
+    }
+}
+
+/// How many DIDs `SLIM_MEMBER_DIDS` lists (comma-separated, blanks skipped).
+fn member_did_count() -> usize {
+    std::env::var("SLIM_MEMBER_DIDS")
+        .map(|v| v.split(',').filter(|s| !s.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// The startup line stating the effective admission mode. Only the count of
+/// allow-listed DIDs, never the DIDs.
+fn admission_banner(mode: shadi_identity::SlimAdmission, member_count: usize) -> String {
+    match mode {
+        shadi_identity::SlimAdmission::Closed => {
+            let noun = if member_count == 1 { "DID" } else { "DIDs" };
+            format!("SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, {member_count} {noun})")
+        }
+        shadi_identity::SlimAdmission::Open => {
+            "SLIM admission: open (any did:key may connect; the admission gate decides)".to_string()
+        }
+    }
+}
+
 /// Start a SLIM A2A listener that forwards incoming tasks to `adapter`.
 ///
 /// Listens indefinitely under `agntcy/shadi/<agent_id>-a2a` until Ctrl-C.
 /// Coding-agent adapters authenticate via DID/keys only — see
-/// [`shadi_identity::require_did_auth_from_env`].
+/// [`shadi_identity::require_did_auth_from_env`]. Only closed admission is
+/// supported: startup checks run in this order, the sandbox, then
+/// [`listener_admission`] (before connecting to SLIM), then the SLIM
+/// connection and app, then `credential_gate`.
 fn run_slim_listener(
     agent_id: &str,
     adapter: Arc<dyn CliAdapter>,
@@ -1438,6 +1478,9 @@ fn run_slim_listener(
     verbose: bool,
 ) -> Result<(), String> {
     require_sandbox_enforced(agent_id, endpoint)?;
+    // Before any SLIM connection, so a refused mode leaves nothing half-started.
+    // (`credential_gate` below stays where it was: it needs the listener's DID.)
+    let admission = listener_admission()?;
 
     let access = ClientAccess::from_env(Some(agent_id))?;
 
@@ -1470,6 +1513,14 @@ fn run_slim_listener(
     eprintln!(
         "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
          CLI tool. Only expose this listener to trusted SLIM peers."
+    );
+    // The effective admission mode, counts only (never the DIDs).
+    let member_count = member_did_count();
+    eprintln!("{}", admission_banner(admission, member_count));
+    tracing::info!(
+        admission = admission.as_str(),
+        member_dids = member_count,
+        "SLIM listener admission mode"
     );
     // An announced listener is found through its dir-runtime descriptor
     // instead (one record per listener).
@@ -2844,7 +2895,7 @@ test push ... FAILED
             slim_endpoint: Some("127.0.0.1:47357".to_string()),
         };
 
-        let open = crate::commands::MemberDidsEnv::set(None);
+        let open = crate::commands::AdmissionEnv::open();
         // An empty lease DID and the `--slim-endpoint` fallback both have none.
         let err = require_handoff_peer_did(&nodid(None, None), "nodid").unwrap_err();
         assert!(
@@ -2885,12 +2936,91 @@ test push ... FAILED
         drop(open);
 
         // Closed mode: the allow-list decides, so a missing DID is fine.
-        let _closed = crate::commands::MemberDidsEnv::set(Some("did:key:zMember"));
+        let _closed = crate::commands::AdmissionEnv::closed("did:key:zMember");
         assert!(require_handoff_peer_did(&nodid(None, None), "nodid").is_ok());
         assert!(require_handoff_peer_did(&unleased, "ghost").is_ok());
 
         drop(_lease);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn listener_admission_starts_closed_and_refuses_the_rest() {
+        use shadi_identity::SlimAdmission;
+        const DID: &str = "did:key:zMember";
+
+        // Closed: the switch unset or blank, whatever SLIM_MEMBER_DIDS says
+        // (the allow-list is required later, when the app is built).
+        for admission in [None, Some(""), Some("  ")] {
+            for members in [None, Some(DID)] {
+                let _env = crate::commands::AdmissionEnv::set(admission, members);
+                assert_eq!(listener_admission(), Ok(SlimAdmission::Closed));
+            }
+        }
+
+        // Open: not supported by this build's listener yet.
+        for admission in ["open", " OPEN "] {
+            let _env = crate::commands::AdmissionEnv::set(Some(admission), None);
+            assert_eq!(
+                listener_admission(),
+                Err(
+                    "SHADI_SLIM_ADMISSION=open is not supported by this build's listener yet"
+                        .to_string()
+                )
+            );
+        }
+
+        // Open + an allow-list: the conflict, not the "not supported" refusal.
+        let _env = crate::commands::AdmissionEnv::set(Some("open"), Some(DID));
+        let err = listener_admission().unwrap_err();
+        assert!(err.starts_with("SLIM admission error: "), "{err}");
+        assert!(err.contains("contradict"), "{err}");
+        assert!(!err.contains(DID), "{err}");
+        drop(_env);
+
+        // A bad value stops startup, with or without an allow-list.
+        for bad in ["opne", "closed", "true", "1"] {
+            for members in [None, Some(DID)] {
+                let _env = crate::commands::AdmissionEnv::set(Some(bad), members);
+                let err = listener_admission().unwrap_err();
+                assert!(err.contains("SHADI_SLIM_ADMISSION must be"), "{bad}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn member_did_count_counts_non_blank_entries() {
+        for (members, count) in [
+            (None, 0),
+            (Some(""), 0),
+            (Some(" , ,"), 0),
+            (Some("did:key:zA"), 1),
+            (Some(" did:key:zA , did:key:zB,,"), 2),
+        ] {
+            let _env = crate::commands::AdmissionEnv::set(None, members);
+            assert_eq!(member_did_count(), count, "{members:?}");
+        }
+    }
+
+    #[test]
+    fn admission_banner_states_the_mode_and_only_a_count() {
+        use shadi_identity::SlimAdmission;
+        assert_eq!(
+            admission_banner(SlimAdmission::Closed, 3),
+            "SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, 3 DIDs)"
+        );
+        assert_eq!(
+            admission_banner(SlimAdmission::Closed, 1),
+            "SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, 1 DID)"
+        );
+        assert_eq!(
+            admission_banner(SlimAdmission::Closed, 0),
+            "SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, 0 DIDs)"
+        );
+        // The count is ignored when open: there is no allow-list to count.
+        let open = "SLIM admission: open (any did:key may connect; the admission gate decides)";
+        assert_eq!(admission_banner(SlimAdmission::Open, 0), open);
+        assert_eq!(admission_banner(SlimAdmission::Open, 5), open);
     }
 
     fn bound_envelope(
@@ -4877,6 +5007,7 @@ test push ... FAILED
         };
         let vars = [
             ("SHADI_SLIM_AUTH", Some("did".to_string())),
+            ("SHADI_SLIM_ADMISSION", None),
             ("SLIM_HUMAN_SEED", Some(seed.to_string())),
             (
                 "SLIM_MEMBER_DIDS",

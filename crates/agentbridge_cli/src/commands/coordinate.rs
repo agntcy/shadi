@@ -1047,7 +1047,7 @@ mod tests {
 
     #[test]
     fn build_agents_constructs_native_and_slim_specs() {
-        let _env = crate::commands::MemberDidsEnv::set(Some("did:key:zMember"));
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
         let specs = vec![
             "claude-code".to_string(),
             "copilot".to_string(),
@@ -1134,7 +1134,7 @@ mod tests {
             "slim:peer@127.0.0.1:47357".to_string(),
         ];
         {
-            let _env = crate::commands::MemberDidsEnv::set(None);
+            let _env = crate::commands::AdmissionEnv::open();
             let err = build_agents(&specs, "127.0.0.1:47357", "test-session")
                 .err()
                 .expect("open admission needs a peer DID");
@@ -1148,7 +1148,7 @@ mod tests {
             let local = vec!["claude-code".to_string()];
             assert!(build_agents(&local, "127.0.0.1:47357", "test-session").is_ok());
         }
-        let _env = crate::commands::MemberDidsEnv::set(Some("did:key:zMember"));
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
         let agents = build_agents(&specs, "127.0.0.1:47357", "test-session").expect("closed");
         assert_eq!(agents.len(), 2);
     }

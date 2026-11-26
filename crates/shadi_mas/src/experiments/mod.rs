@@ -612,40 +612,36 @@ fn canonical_slim_name(agent_id: &str) -> String {
 /// Fail early, before any SLIM connection, when `flow` would dial a peer under
 /// open admission with no DID to pin.
 ///
-/// Without a member allow-list (see [`shadi_identity::member_allow_list_configured`])
-/// the only thing a caller can trust is the peer it dialled, so it needs that
-/// peer's DID. `Ok` when an allow-list is configured (whatever `peer_did` is: the
-/// list decides) or when `peer_did` is a non-blank value. `flow` names the
-/// operation in the error. Under the explicit admission switch (commit 13) this
-/// is the single place that changes.
+/// The mode is the explicit `SHADI_SLIM_ADMISSION` switch
+/// ([`shadi_identity::slim_admission_from_env`]); a bad value, or `open` together
+/// with `SLIM_MEMBER_DIDS`, is an error here too. Under closed admission
+/// `SLIM_MEMBER_DIDS` is the allow-list and decides, so this is `Ok` whatever
+/// `peer_did` is. Under open admission the only thing a caller can trust is the
+/// peer it dialled, so it needs that peer's DID: `Ok` only for a non-blank
+/// `peer_did`. `flow` names the operation in the error.
 pub fn require_peer_did_when_open(peer_did: Option<&str>, flow: &str) -> Result<(), String> {
-    if shadi_identity::member_allow_list_configured() {
-        return Ok(());
-    }
-    match peer_did {
-        Some(did) if !did.trim().is_empty() => Ok(()),
-        _ => Err(format!(
-            "{flow}: open admission has no member allow-list, so the peer's DID is \
-             required to pin it; address the peer by did:key:… (or set SLIM_MEMBER_DIDS)"
-        )),
+    match shadi_identity::slim_admission_from_env().map_err(|e| e.to_string())? {
+        shadi_identity::SlimAdmission::Closed => Ok(()),
+        shadi_identity::SlimAdmission::Open => match peer_did {
+            Some(did) if !did.trim().is_empty() => Ok(()),
+            _ => Err(open_needs_peer_did(flow)),
+        },
     }
 }
 
-/// DID auth for a send's SLIM app.
+/// DID auth for a send's SLIM app, by the explicit admission mode
+/// ([`shadi_identity::slim_admission_from_env`]).
+/// - Closed (`SHADI_SLIM_ADMISSION` unset or blank): the `SLIM_MEMBER_DIDS`
+///   allow-list (required), whatever `peer_did` is. `peer_did` is unverified (a
+///   Directory record can name any DID), so it must never widen or replace the
+///   preregistered allow-list.
+/// - Open with a `peer_did`: the verifier is pinned to that peer (and this agent).
+/// - Open without a `peer_did`: the error from [`require_peer_did_when_open`].
+///   Callers that know up front they have no peer DID run that check before
+///   connecting; this is the backstop.
 ///
-/// Interim selection rule, until the explicit `SHADI_SLIM_ADMISSION` switch lands
-/// (commit 13): `SLIM_MEMBER_DIDS` decides the mode.
-/// - Set to a non-blank value (closed mode): the `SLIM_MEMBER_DIDS` allow-list,
-///   exactly as before open admission, whatever `peer_did` is. `peer_did` is
-///   unverified (a Directory record can name any DID), so it must never widen
-///   or replace the preregistered allow-list.
-/// - Unset or blank and `peer_did` is known: the verifier is pinned to that peer
-///   (and this agent).
-/// - Unset or blank and no `peer_did`: an error from
-///   [`require_peer_did_when_open`]. Callers that know up front they have no
-///   peer DID run that check before connecting; this is the backstop.
-///
-/// An empty `peer_did` is an error in both modes (a caller bug, not "no pin").
+/// A bad `SHADI_SLIM_ADMISSION`, or `open` together with `SLIM_MEMBER_DIDS`, is an
+/// error. An empty `peer_did` is an error in both modes (a caller bug, not "no pin").
 fn slim_app_auth(
     agent_id: &str,
     peer_did: Option<&str>,
@@ -653,14 +649,24 @@ fn slim_app_auth(
     if peer_did == Some("") {
         return Err("peer DID is empty; refusing to dial without a pinned peer".to_string());
     }
-    require_peer_did_when_open(peer_did, "SLIM send")?;
-    let closed = shadi_identity::member_allow_list_configured();
-    match peer_did {
-        Some(peer_did) if !closed => {
+    let mode = shadi_identity::slim_admission_from_env().map_err(|e| e.to_string())?;
+    tracing::debug!(admission = mode.as_str(), "SLIM send admission mode");
+    match (mode, peer_did) {
+        (shadi_identity::SlimAdmission::Open, Some(peer_did)) if !peer_did.trim().is_empty() => {
             shadi_identity::require_did_auth_for_peer(agent_id, peer_did).map_err(|e| e.to_string())
         }
-        _ => shadi_identity::require_did_auth_from_env(agent_id).map_err(|e| e.to_string()),
+        (shadi_identity::SlimAdmission::Open, _) => Err(open_needs_peer_did("SLIM send")),
+        (shadi_identity::SlimAdmission::Closed, _) => {
+            shadi_identity::require_did_auth_from_env(agent_id).map_err(|e| e.to_string())
+        }
     }
+}
+
+fn open_needs_peer_did(flow: &str) -> String {
+    format!(
+        "{flow}: open admission has no member allow-list, so the peer's DID is \
+         required to pin it; address the peer by did:key:…"
+    )
 }
 
 fn format_slim_error(err: slim_bindings::SlimError) -> String {
@@ -1065,101 +1071,223 @@ mod transport_tests {
 
     static SLIM_ENV: Mutex<()> = Mutex::new(());
 
+    /// Sets `SHADI_SLIM_ADMISSION` / `SLIM_MEMBER_DIDS` (`None`: removed) and
+    /// restores both on drop. Hold `SLIM_ENV` for the whole test.
+    struct AdmissionEnv {
+        prev: [(&'static str, Option<std::ffi::OsString>); 2],
+    }
+
+    impl AdmissionEnv {
+        fn set(admission: Option<&str>, members: Option<&str>) -> Self {
+            let prev = [
+                (
+                    "SHADI_SLIM_ADMISSION",
+                    std::env::var_os("SHADI_SLIM_ADMISSION"),
+                ),
+                ("SLIM_MEMBER_DIDS", std::env::var_os("SLIM_MEMBER_DIDS")),
+            ];
+            for (key, value) in [
+                ("SHADI_SLIM_ADMISSION", admission),
+                ("SLIM_MEMBER_DIDS", members),
+            ] {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { prev }
+        }
+    }
+
+    impl Drop for AdmissionEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.prev {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     #[test]
-    fn require_peer_did_when_open_only_needs_a_did_without_an_allow_list() {
-        use std::env;
+    fn require_peer_did_when_open_is_keyed_on_the_explicit_mode() {
         let _guard = SLIM_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let peer = shadi_identity::AgentIdentity::derive(b"human", "peer")
             .unwrap()
             .did();
 
-        // Closed: the allow-list decides, whatever peer_did is.
-        env::set_var("SLIM_MEMBER_DIDS", &peer);
-        assert!(require_peer_did_when_open(None, "coordinate").is_ok());
-        assert!(require_peer_did_when_open(Some(&peer), "coordinate").is_ok());
-        assert!(require_peer_did_when_open(Some(""), "coordinate").is_ok());
-
-        // Open: unset and blank behave alike.
-        for unset in [None, Some(""), Some("  ")] {
-            match unset {
-                Some(v) => env::set_var("SLIM_MEMBER_DIDS", v),
-                None => env::remove_var("SLIM_MEMBER_DIDS"),
-            }
-            assert!(require_peer_did_when_open(Some(&peer), "handoff").is_ok());
-            let err =
-                require_peer_did_when_open(None, "handoff to slim:peer").expect_err("no peer DID");
-            assert_eq!(
-                err,
-                "handoff to slim:peer: open admission has no member allow-list, so the \
-                 peer's DID is required to pin it; address the peer by did:key:… \
-                 (or set SLIM_MEMBER_DIDS)"
-            );
-            for blank in ["", "  "] {
-                let err = require_peer_did_when_open(Some(blank), "request-invite")
-                    .expect_err("blank peer DID");
-                assert!(err.starts_with("request-invite: open admission"), "{err}");
+        // Closed (switch unset or blank): the allow-list decides, whatever
+        // peer_did is, and whether or not SLIM_MEMBER_DIDS is set (the builders
+        // enforce that later).
+        for admission in [None, Some(""), Some("  ")] {
+            for members in [None, Some(peer.as_str())] {
+                let _env = AdmissionEnv::set(admission, members);
+                assert!(require_peer_did_when_open(None, "coordinate").is_ok());
+                assert!(require_peer_did_when_open(Some(&peer), "coordinate").is_ok());
+                assert!(require_peer_did_when_open(Some(""), "coordinate").is_ok());
             }
         }
 
-        env::remove_var("SLIM_MEMBER_DIDS");
+        // Open: a non-blank peer DID is needed; SLIM_MEMBER_DIDS unset or blank.
+        for admission in ["open", " OPEN "] {
+            for members in [None, Some(""), Some("  ")] {
+                let _env = AdmissionEnv::set(Some(admission), members);
+                assert!(require_peer_did_when_open(Some(&peer), "handoff").is_ok());
+                let err = require_peer_did_when_open(None, "handoff to slim:peer")
+                    .expect_err("no peer DID");
+                assert_eq!(
+                    err,
+                    "handoff to slim:peer: open admission has no member allow-list, so the \
+                     peer's DID is required to pin it; address the peer by did:key:…"
+                );
+                for blank in ["", "  "] {
+                    let err = require_peer_did_when_open(Some(blank), "request-invite")
+                        .expect_err("blank peer DID");
+                    assert!(err.starts_with("request-invite: open admission"), "{err}");
+                }
+            }
+        }
     }
 
     #[test]
-    fn slim_app_auth_keeps_the_allow_list_when_closed_and_pins_the_peer_otherwise() {
+    fn require_peer_did_when_open_propagates_bad_and_conflicting_settings() {
+        let _guard = SLIM_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let peer = shadi_identity::AgentIdentity::derive(b"human", "peer")
+            .unwrap()
+            .did();
+
+        // Even with a peer DID, and even though closed would not need one.
+        for bad in ["opne", "closed", "true", "1"] {
+            let _env = AdmissionEnv::set(Some(bad), None);
+            let err = require_peer_did_when_open(Some(&peer), "coordinate").expect_err(bad);
+            assert!(err.contains("SHADI_SLIM_ADMISSION"), "{err}");
+        }
+        let _env = AdmissionEnv::set(Some("open"), Some(&peer));
+        let err = require_peer_did_when_open(Some(&peer), "coordinate").expect_err("D3");
+        assert!(err.contains("contradict"), "{err}");
+        assert!(!err.contains(&peer), "no DIDs in the error: {err}");
+    }
+
+    #[test]
+    fn slim_app_auth_closed_keeps_the_member_allow_list() {
         use shadi_identity::AgentIdentity;
-        use std::env;
         let _guard = SLIM_ENV.lock().unwrap_or_else(|e| e.into_inner());
 
         let did = |name: &str| AgentIdentity::derive(b"human", name).unwrap().did();
-        let (own, peer, listed, unlisted) =
-            (did("avatar"), did("peer"), did("listed"), did("unlisted"));
-        env::set_var("SHADI_SLIM_AUTH", "did");
-        env::set_var("SLIM_HUMAN_SEED", "human");
-
-        // Closed mode: SLIM_MEMBER_DIDS wins whatever peer_did says.
-        env::set_var("SLIM_MEMBER_DIDS", format!("{peer},{listed}"));
+        let (peer, listed, unlisted) = (did("peer"), did("listed"), did("unlisted"));
+        env_did_mode();
         let allow_list = vec![peer.clone(), listed.clone()];
-        let known = slim_app_auth("avatar", Some(&peer)).unwrap();
-        assert_eq!(jwks_kids(&known), allow_list, "not pinned to the peer");
-        // An unverified peer_did naming an unlisted DID must not be trusted.
-        let unlisted_peer = slim_app_auth("avatar", Some(&unlisted)).unwrap();
-        assert_eq!(jwks_kids(&unlisted_peer), allow_list);
-        assert!(!jwks_kids(&unlisted_peer).contains(&unlisted));
-        // A malformed peer_did does not matter either: the allow-list decides.
-        let malformed = slim_app_auth("avatar", Some("not-a-did")).unwrap();
-        assert_eq!(jwks_kids(&malformed), allow_list);
-        let none = slim_app_auth("avatar", None).unwrap();
-        assert_eq!(jwks_kids(&none), allow_list);
-        // Some(""): an error in closed mode too, never "no pin".
-        let err = slim_app_auth("avatar", Some("")).err().expect("empty peer");
-        assert!(err.contains("peer DID is empty"), "{err}");
+        let members = format!("{peer},{listed}");
 
-        // Unset or blank SLIM_MEMBER_DIDS: a known peer is pinned (peer + own).
-        for unset in [None, Some(""), Some("  "), Some(" \t\n")] {
-            match unset {
-                Some(v) => env::set_var("SLIM_MEMBER_DIDS", v),
-                None => env::remove_var("SLIM_MEMBER_DIDS"),
-            }
-            let pinned = slim_app_auth("avatar", Some(&peer)).unwrap();
-            assert_eq!(
-                jwks_kids(&pinned),
-                vec![peer.clone(), own.clone()],
-                "SLIM_MEMBER_DIDS={unset:?}"
-            );
-            assert!(slim_app_auth("avatar", Some("not-a-did")).is_err());
-            // No peer and no allow-list: the clear open-admission error, not the
-            // env path's "requires SLIM_MEMBER_DIDS".
-            let err = slim_app_auth("avatar", None).err().expect("no peer");
-            assert!(err.contains("SLIM send: open admission"), "{err}");
-            assert!(err.contains("peer's DID is required"), "{err}");
-            assert!(!err.contains("requires SLIM_MEMBER_DIDS"), "{err}");
+        // Switch unset or blank is closed: SLIM_MEMBER_DIDS wins whatever peer_did says.
+        for admission in [None, Some(""), Some("  ")] {
+            let _env = AdmissionEnv::set(admission, Some(&members));
+            let known = slim_app_auth("avatar", Some(&peer)).unwrap();
+            assert_eq!(jwks_kids(&known), allow_list, "not pinned to the peer");
+            // An unverified peer_did naming an unlisted DID must not be trusted.
+            let unlisted_peer = slim_app_auth("avatar", Some(&unlisted)).unwrap();
+            assert_eq!(jwks_kids(&unlisted_peer), allow_list);
+            assert!(!jwks_kids(&unlisted_peer).contains(&unlisted));
+            // A malformed peer_did does not matter either: the allow-list decides.
+            let malformed = slim_app_auth("avatar", Some("not-a-did")).unwrap();
+            assert_eq!(jwks_kids(&malformed), allow_list);
+            let none = slim_app_auth("avatar", None).unwrap();
+            assert_eq!(jwks_kids(&none), allow_list);
+            // Some(""): an error in closed mode too, never "no pin".
             let err = slim_app_auth("avatar", Some("")).err().expect("empty peer");
             assert!(err.contains("peer DID is empty"), "{err}");
         }
 
-        env::remove_var("SLIM_MEMBER_DIDS");
-        env::remove_var("SHADI_SLIM_AUTH");
-        env::remove_var("SLIM_HUMAN_SEED");
+        // Closed without SLIM_MEMBER_DIDS: required, exactly as on main (no
+        // fallback to pinning the peer).
+        for members in [None, Some("")] {
+            let _env = AdmissionEnv::set(None, members);
+            for peer_did in [Some(peer.as_str()), None] {
+                let err = slim_app_auth("avatar", peer_did)
+                    .err()
+                    .expect("no allow-list");
+                if members.is_none() {
+                    assert_eq!(
+                        err,
+                        "auth configuration error: SHADI_SLIM_AUTH=did requires SLIM_MEMBER_DIDS"
+                    );
+                } else {
+                    assert!(err.contains("allow-list is empty"), "{err}");
+                }
+                assert!(!err.contains("open admission"), "{err}");
+            }
+        }
+        clear_did_mode();
+    }
+
+    #[test]
+    fn slim_app_auth_open_pins_the_dialled_peer() {
+        use shadi_identity::AgentIdentity;
+        let _guard = SLIM_ENV.lock().unwrap_or_else(|e| e.into_inner());
+
+        let did = |name: &str| AgentIdentity::derive(b"human", name).unwrap().did();
+        let (own, peer) = (did("avatar"), did("peer"));
+        env_did_mode();
+
+        for admission in ["open", " Open "] {
+            for members in [None, Some(""), Some("  "), Some(" \t\n")] {
+                let _env = AdmissionEnv::set(Some(admission), members);
+                let pinned = slim_app_auth("avatar", Some(&peer)).unwrap();
+                assert_eq!(
+                    jwks_kids(&pinned),
+                    vec![peer.clone(), own.clone()],
+                    "{admission:?} / SLIM_MEMBER_DIDS={members:?}"
+                );
+                assert!(slim_app_auth("avatar", Some("not-a-did")).is_err());
+                // No peer: the clear open-admission error, not "requires SLIM_MEMBER_DIDS".
+                let err = slim_app_auth("avatar", None).err().expect("no peer");
+                assert!(err.contains("SLIM send: open admission"), "{err}");
+                assert!(err.contains("peer's DID is required"), "{err}");
+                assert!(!err.contains("requires SLIM_MEMBER_DIDS"), "{err}");
+                let err = slim_app_auth("avatar", Some("")).err().expect("empty peer");
+                assert!(err.contains("peer DID is empty"), "{err}");
+            }
+        }
+        clear_did_mode();
+    }
+
+    #[test]
+    fn slim_app_auth_rejects_a_bad_switch_and_the_open_allow_list_conflict() {
+        use shadi_identity::AgentIdentity;
+        let _guard = SLIM_ENV.lock().unwrap_or_else(|e| e.into_inner());
+
+        let did = |name: &str| AgentIdentity::derive(b"human", name).unwrap().did();
+        let (peer, listed) = (did("peer"), did("listed"));
+        env_did_mode();
+
+        // Open + a non-blank SLIM_MEMBER_DIDS: D3, never a fallback to either.
+        let _env = AdmissionEnv::set(Some("open"), Some(&listed));
+        for peer_did in [Some(peer.as_str()), None] {
+            let err = slim_app_auth("avatar", peer_did).err().expect("conflict");
+            assert!(err.contains("contradict"), "{err}");
+            assert!(!err.contains(&listed), "no DIDs in the error: {err}");
+        }
+
+        // A bad value is neither closed (with a valid allow-list) nor open.
+        for bad in ["opne", "closed", "true", "1", "open;"] {
+            let _env = AdmissionEnv::set(Some(bad), Some(&listed));
+            for peer_did in [Some(peer.as_str()), None] {
+                let err = slim_app_auth("avatar", peer_did).err().expect(bad);
+                assert!(err.contains("SHADI_SLIM_ADMISSION must be"), "{err}");
+            }
+        }
+        clear_did_mode();
+    }
+
+    fn env_did_mode() {
+        std::env::set_var("SHADI_SLIM_AUTH", "did");
+        std::env::set_var("SLIM_HUMAN_SEED", "human");
+    }
+
+    fn clear_did_mode() {
+        std::env::remove_var("SHADI_SLIM_AUTH");
+        std::env::remove_var("SLIM_HUMAN_SEED");
     }
 
     struct Allow;

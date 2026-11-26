@@ -154,6 +154,12 @@ fn did_auth_for(agent: &AgentIdentity, member_dids: &str) -> Result<SlimAuth, Id
 /// (comma-separated `did:key`s). Returns `None` for any other mode, signalling the
 /// caller to fall back to its own shared secret. This is the single env contract
 /// shared by every SHADI `create_app` site.
+///
+/// This builds the `SLIM_MEMBER_DIDS` allow-list, so it supports only
+/// [`SlimAdmission::Closed`]: under `SHADI_SLIM_ADMISSION=open` it returns
+/// `Some(Err(..))`, and a bad or conflicting admission setting is the same
+/// `Some(Err(..))`. Flows that support open admission use
+/// [`require_did_auth_for_peer`] instead.
 pub fn did_auth_from_env(agent_id: &str) -> Option<Result<SlimAuth, IdentityError>> {
     let mode = std::env::var("SHADI_SLIM_AUTH").unwrap_or_default();
     if !mode.eq_ignore_ascii_case("did") {
@@ -168,7 +174,8 @@ pub fn did_auth_from_env(agent_id: &str) -> Option<Result<SlimAuth, IdentityErro
 /// Coding-agent adapters (the CLI tools `agentbridge` wraps) must always
 /// authenticate to the SLIM mesh via DID/keys — never a shared secret — so
 /// callers that admit those adapters should use this instead of
-/// [`did_auth_from_env`].
+/// [`did_auth_from_env`]. Like it, this is closed-admission only and returns an
+/// error under `SHADI_SLIM_ADMISSION=open`.
 pub fn require_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
     did_auth_from_env(agent_id).unwrap_or_else(|| {
         Err(IdentityError::Config(
@@ -179,17 +186,111 @@ pub fn require_did_auth_from_env(agent_id: &str) -> Result<SlimAuth, IdentityErr
     })
 }
 
-/// Whether a member allow-list is configured: `SLIM_MEMBER_DIDS` is set and not
-/// blank after trimming.
+/// Environment variable that selects the admission mode.
+const SLIM_ADMISSION_VAR: &str = "SHADI_SLIM_ADMISSION";
+
+/// Longest copy of a rejected `SHADI_SLIM_ADMISSION` value echoed in an error.
+const ADMISSION_ECHO_MAX_CHARS: usize = 32;
+
+/// Which peers a DID-mode app admits, as selected by `SHADI_SLIM_ADMISSION`.
 ///
-/// This is the interim "closed mode" test. A caller that dials a peer pins the
-/// peer's DID only when this is `false` (open admission, where any `did:key`
-/// may connect); when it is `true` the allow-list decides. The explicit
-/// admission switch (`SHADI_SLIM_ADMISSION`) replaces this predicate, so every
-/// caller must go through it rather than read `SLIM_MEMBER_DIDS` itself.
-pub fn member_allow_list_configured() -> bool {
-    std::env::var("SLIM_MEMBER_DIDS").is_ok_and(|v| !v.trim().is_empty())
+/// The switch is explicit: nothing infers the mode from whether
+/// `SLIM_MEMBER_DIDS` happens to be set. Only meaningful under
+/// `SHADI_SLIM_AUTH=did`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlimAdmission {
+    /// `SLIM_MEMBER_DIDS` is the required allow-list (the default).
+    Closed,
+    /// Any `did:key` may connect to a listener; a caller that dials a peer pins
+    /// that peer's DID.
+    Open,
 }
+
+impl SlimAdmission {
+    /// The lowercase name: `"closed"` or `"open"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SlimAdmission::Closed => "closed",
+            SlimAdmission::Open => "open",
+        }
+    }
+}
+
+impl std::fmt::Display for SlimAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Short, printable copy of an untrusted value for an error message: control
+/// characters stripped, at most [`ADMISSION_ECHO_MAX_CHARS`] characters.
+fn sanitized_echo(raw: &str) -> String {
+    let mut chars = raw.chars().filter(|c| !c.is_control());
+    let mut out: String = chars.by_ref().take(ADMISSION_ECHO_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// Parse the admission switch from the raw `SHADI_SLIM_ADMISSION` and
+/// `SLIM_MEMBER_DIDS` values (`None`: unset). Pure (no environment access).
+///
+/// - `raw` unset or blank after trimming: [`SlimAdmission::Closed`].
+/// - `raw` is `open` (trimmed; ASCII case-insensitive, like the `did` check of
+///   `SHADI_SLIM_AUTH`): [`SlimAdmission::Open`].
+/// - anything else: [`IdentityError::Config`] naming the variable and the
+///   accepted values; never silently closed or open.
+/// - `open` together with a non-blank `member_dids`: [`IdentityError::Config`],
+///   because the two contradict. Neither wins.
+///
+/// Closed does not look at `member_dids`: the allow-list builders require it.
+pub fn parse_slim_admission(
+    raw: Option<&str>,
+    member_dids: Option<&str>,
+) -> Result<SlimAdmission, IdentityError> {
+    let mode = match raw.map(str::trim) {
+        None | Some("") => SlimAdmission::Closed,
+        Some(v) if v.eq_ignore_ascii_case("open") => SlimAdmission::Open,
+        Some(v) => {
+            return Err(IdentityError::Config(format!(
+                "{SLIM_ADMISSION_VAR} must be unset, empty, or \"open\" \
+                 (unset or empty means closed: SLIM_MEMBER_DIDS is the allow-list); got \"{}\"",
+                sanitized_echo(v)
+            )));
+        }
+    };
+    if mode == SlimAdmission::Open && member_dids.is_some_and(|m| !m.trim().is_empty()) {
+        return Err(IdentityError::Config(format!(
+            "{SLIM_ADMISSION_VAR}=open and SLIM_MEMBER_DIDS contradict each other: unset \
+             SLIM_MEMBER_DIDS for open admission, or unset {SLIM_ADMISSION_VAR} to use the \
+             allow-list"
+        )));
+    }
+    Ok(mode)
+}
+
+/// The admission mode from the environment (`SHADI_SLIM_ADMISSION`, with the
+/// `SLIM_MEMBER_DIDS` conflict check); see [`parse_slim_admission`].
+///
+/// Every consumer goes through this rather than reading either variable itself.
+/// A value that is not valid Unicode is an error, like any other bad value.
+pub fn slim_admission_from_env() -> Result<SlimAdmission, IdentityError> {
+    let raw = match std::env::var(SLIM_ADMISSION_VAR) {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(IdentityError::Config(format!(
+                "{SLIM_ADMISSION_VAR} must be unset, empty, or \"open\" (value is not valid Unicode)"
+            )));
+        }
+    };
+    let members = std::env::var_os("SLIM_MEMBER_DIDS").map(|v| v.to_string_lossy().into_owned());
+    parse_slim_admission(raw.as_deref(), members.as_deref())
+}
+
+const OPEN_NOT_SUPPORTED_BY_ALLOW_LIST: &str =
+    "SHADI_SLIM_ADMISSION=open has no member allow-list; this flow does not support open admission";
 
 /// DID auth for a caller that dialled exactly `peer_did`, from the environment.
 ///
@@ -251,6 +352,13 @@ pub fn agent_identity_from_env(agent_id: &str) -> Result<AgentIdentity, Identity
 }
 
 fn resolve_did_env(agent_id: &str) -> Result<SlimAuth, IdentityError> {
+    // Fail closed: a bad or conflicting admission setting stops here, and open
+    // admission has no allow-list for this builder to use.
+    if slim_admission_from_env()? == SlimAdmission::Open {
+        return Err(IdentityError::Config(
+            OPEN_NOT_SUPPORTED_BY_ALLOW_LIST.to_string(),
+        ));
+    }
     let agent = agent_identity_from_env(agent_id)?;
     let members = std::env::var("SLIM_MEMBER_DIDS").map_err(|_| {
         IdentityError::Config("SHADI_SLIM_AUTH=did requires SLIM_MEMBER_DIDS".to_string())
@@ -400,6 +508,7 @@ mod tests {
         let _guard = crate::auth::lock_slim_auth_env();
         let member = AgentIdentity::derive(b"human", "avatar").unwrap().did();
 
+        env::remove_var("SHADI_SLIM_ADMISSION");
         env::remove_var("SHADI_SLIM_AUTH");
         assert!(did_auth_from_env("avatar").is_none());
         // require_did_auth_from_env never falls back — not-DID-mode is a hard error.
@@ -567,24 +676,248 @@ mod tests {
         env::remove_var("SHADI_SLIM_AUTH");
     }
 
+    fn config_msg(r: Result<SlimAdmission, IdentityError>) -> String {
+        match r {
+            Err(IdentityError::Config(msg)) => msg,
+            other => panic!("expected a config error, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn member_allow_list_configured_means_set_and_not_blank() {
+    fn parse_slim_admission_unset_or_blank_is_closed() {
+        for raw in [None, Some(""), Some("  "), Some(" \t\n")] {
+            assert_eq!(
+                parse_slim_admission(raw, None).unwrap(),
+                SlimAdmission::Closed,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_slim_admission_open_is_trimmed_and_ascii_case_insensitive() {
+        for raw in ["open", " OPEN ", "Open", "\topen\n"] {
+            assert_eq!(
+                parse_slim_admission(Some(raw), None).unwrap(),
+                SlimAdmission::Open,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_slim_admission_rejects_anything_else_naming_the_variable() {
+        for raw in [
+            "opne",
+            "closed",
+            "true",
+            "1",
+            "open;",
+            "o pen",
+            "ópen",
+            "open open",
+        ] {
+            let msg = config_msg(parse_slim_admission(Some(raw), None));
+            assert!(msg.contains("SHADI_SLIM_ADMISSION"), "{msg}");
+            assert!(msg.contains("\"open\""), "{msg}");
+            assert!(msg.contains(&format!("got \"{raw}\"")), "{msg}");
+            // A bad value is never closed, even with an allow-list present.
+            assert!(parse_slim_admission(Some(raw), Some("did:key:zA")).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_slim_admission_sanitizes_and_caps_the_echoed_value() {
+        let msg = config_msg(parse_slim_admission(Some("bad\u{1b}[31m\r\nvalue\0"), None));
+        assert!(msg.contains("got \"bad[31mvalue\""), "{msg}");
+        assert!(!msg.chars().any(char::is_control), "{msg:?}");
+
+        let long = "x".repeat(1000);
+        let msg = config_msg(parse_slim_admission(Some(&long), None));
+        assert!(msg.contains(&format!("\"{}…\"", "x".repeat(32))), "{msg}");
+        assert!(!msg.contains(&"x".repeat(33)), "{msg}");
+        assert!(msg.len() < 400, "{}", msg.len());
+
+        // Exactly at the cap: no ellipsis.
+        let exact = "y".repeat(32);
+        let msg = config_msg(parse_slim_admission(Some(&exact), None));
+        assert!(msg.contains(&format!("\"{exact}\"")), "{msg}");
+    }
+
+    #[test]
+    fn parse_slim_admission_open_with_member_dids_is_a_conflict() {
+        let did = AgentIdentity::derive(b"human", "peer").unwrap().did();
+        for members in [did.as_str(), "  did:key:zA  ", "a,b"] {
+            let msg = config_msg(parse_slim_admission(Some("open"), Some(members)));
+            assert!(msg.contains("contradict"), "{msg}");
+            assert!(
+                msg.contains("unset SLIM_MEMBER_DIDS for open admission"),
+                "{msg}"
+            );
+            assert!(
+                msg.contains("unset SHADI_SLIM_ADMISSION to use the allow-list"),
+                "{msg}"
+            );
+            assert!(
+                !msg.contains(members.trim()),
+                "the DIDs are not echoed: {msg}"
+            );
+        }
+        for blank in ["", "  ", " \t\n"] {
+            assert_eq!(
+                parse_slim_admission(Some("open"), Some(blank)).unwrap(),
+                SlimAdmission::Open,
+                "{blank:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_slim_admission_closed_ignores_member_dids() {
+        for members in [None, Some(""), Some("did:key:zA"), Some("not even a did")] {
+            for raw in [None, Some(""), Some("  ")] {
+                assert_eq!(
+                    parse_slim_admission(raw, members).unwrap(),
+                    SlimAdmission::Closed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slim_admission_names() {
+        assert_eq!(SlimAdmission::Closed.as_str(), "closed");
+        assert_eq!(SlimAdmission::Open.as_str(), "open");
+        assert_eq!(SlimAdmission::Closed.to_string(), "closed");
+        assert_eq!(SlimAdmission::Open.to_string(), "open");
+    }
+
+    #[test]
+    fn slim_admission_from_env_reads_both_variables() {
         use std::env;
         let _guard = crate::auth::lock_slim_auth_env();
-        let did = AgentIdentity::derive(b"human", "peer").unwrap().did();
-
+        env::remove_var("SHADI_SLIM_ADMISSION");
         env::remove_var("SLIM_MEMBER_DIDS");
-        assert!(!member_allow_list_configured(), "unset");
-        for blank in ["", "  ", " \t\n"] {
-            env::set_var("SLIM_MEMBER_DIDS", blank);
-            assert!(!member_allow_list_configured(), "{blank:?}");
+        assert_eq!(slim_admission_from_env().unwrap(), SlimAdmission::Closed);
+
+        env::set_var("SHADI_SLIM_ADMISSION", "  ");
+        env::set_var("SLIM_MEMBER_DIDS", "did:key:zA");
+        assert_eq!(slim_admission_from_env().unwrap(), SlimAdmission::Closed);
+
+        env::set_var("SHADI_SLIM_ADMISSION", " Open ");
+        let msg = config_msg(slim_admission_from_env());
+        assert!(msg.contains("contradict"), "{msg}");
+        env::set_var("SLIM_MEMBER_DIDS", "  ");
+        assert_eq!(slim_admission_from_env().unwrap(), SlimAdmission::Open);
+        env::remove_var("SLIM_MEMBER_DIDS");
+        assert_eq!(slim_admission_from_env().unwrap(), SlimAdmission::Open);
+
+        env::set_var("SHADI_SLIM_ADMISSION", "opne");
+        let msg = config_msg(slim_admission_from_env());
+        assert!(msg.contains("SHADI_SLIM_ADMISSION"), "{msg}");
+
+        env::remove_var("SHADI_SLIM_ADMISSION");
+        env::remove_var("SLIM_MEMBER_DIDS");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slim_admission_from_env_rejects_a_non_unicode_value() {
+        use std::os::unix::ffi::OsStrExt;
+        let _guard = crate::auth::lock_slim_auth_env();
+        std::env::remove_var("SLIM_MEMBER_DIDS");
+        std::env::set_var(
+            "SHADI_SLIM_ADMISSION",
+            std::ffi::OsStr::from_bytes(b"open\xff"),
+        );
+        let msg = config_msg(slim_admission_from_env());
+        assert!(msg.contains("SHADI_SLIM_ADMISSION"), "{msg}");
+        assert!(msg.contains("not valid Unicode"), "{msg}");
+        std::env::remove_var("SHADI_SLIM_ADMISSION");
+    }
+
+    #[test]
+    fn allow_list_builders_fail_closed_under_open_and_on_a_bad_switch() {
+        use std::env;
+        let _guard = crate::auth::lock_slim_auth_env();
+        env::set_var("SHADI_SLIM_AUTH", "did");
+        env::set_var("SLIM_HUMAN_SEED", "human");
+        env::remove_var("SLIM_MEMBER_DIDS");
+
+        // Open: not an allow-list flow, whatever else is configured.
+        env::set_var("SHADI_SLIM_ADMISSION", "OPEN");
+        match did_auth_from_env("avatar") {
+            Some(Err(IdentityError::Config(msg))) => assert_eq!(
+                msg,
+                "SHADI_SLIM_ADMISSION=open has no member allow-list; this flow does not \
+                 support open admission"
+            ),
+            _ => panic!("open admission must be Some(Err(Config))"),
         }
-        env::set_var("SLIM_MEMBER_DIDS", &did);
-        assert!(member_allow_list_configured(), "a did:key");
-        env::set_var("SLIM_MEMBER_DIDS", format!("  {did} "));
-        assert!(member_allow_list_configured(), "a padded did:key");
+        match require_did_auth_from_env("avatar") {
+            Err(IdentityError::Config(msg)) => {
+                assert!(msg.contains("does not support open admission"), "{msg}")
+            }
+            _ => panic!("open admission must be a config error"),
+        }
 
+        // Open + SLIM_MEMBER_DIDS: the conflict, not a fallback to the list.
+        let member = AgentIdentity::derive(b"human", "avatar").unwrap().did();
+        env::set_var("SLIM_MEMBER_DIDS", &member);
+        for r in [
+            did_auth_from_env("avatar").expect("did mode"),
+            require_did_auth_from_env("avatar"),
+        ] {
+            match r {
+                Err(IdentityError::Config(msg)) => assert!(msg.contains("contradict"), "{msg}"),
+                _ => panic!("conflict must be a config error"),
+            }
+        }
+
+        // A bad value surfaces the same way, even with a valid allow-list.
+        env::set_var("SHADI_SLIM_ADMISSION", "opne");
+        for r in [
+            did_auth_from_env("avatar").expect("did mode"),
+            require_did_auth_from_env("avatar"),
+        ] {
+            match r {
+                Err(IdentityError::Config(msg)) => {
+                    assert!(msg.contains("SHADI_SLIM_ADMISSION must be"), "{msg}")
+                }
+                _ => panic!("a bad value must be a config error"),
+            }
+        }
+
+        // Closed (unset or blank) is unchanged: the allow-list builds.
+        for closed in [None, Some(""), Some("  ")] {
+            match closed {
+                Some(v) => env::set_var("SHADI_SLIM_ADMISSION", v),
+                None => env::remove_var("SHADI_SLIM_ADMISSION"),
+            }
+            let auth = require_did_auth_from_env("avatar").expect("closed");
+            assert_eq!(jwks_kids(&auth), vec![member.clone()]);
+            assert!(matches!(
+                did_auth_from_env("avatar"),
+                Some(Ok(SlimAuth::Did { .. }))
+            ));
+        }
+        // Closed without SLIM_MEMBER_DIDS: required, as on main.
         env::remove_var("SLIM_MEMBER_DIDS");
+        match require_did_auth_from_env("avatar") {
+            Err(IdentityError::Config(msg)) => {
+                assert_eq!(msg, "SHADI_SLIM_AUTH=did requires SLIM_MEMBER_DIDS")
+            }
+            _ => panic!("closed needs SLIM_MEMBER_DIDS"),
+        }
+
+        // Outside DID mode the admission switch is not consulted.
+        env::set_var("SHADI_SLIM_ADMISSION", "opne");
+        env::set_var("SHADI_SLIM_AUTH", "shared-secret");
+        assert!(did_auth_from_env("avatar").is_none());
+
+        env::remove_var("SHADI_SLIM_ADMISSION");
+        env::remove_var("SHADI_SLIM_AUTH");
+        env::remove_var("SLIM_HUMAN_SEED");
     }
 
     #[test]

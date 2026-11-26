@@ -19,34 +19,58 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Holds `test_env_lock` with `SLIM_MEMBER_DIDS` set to `value` (`None`:
-/// unset) and restores the previous value on drop. `Some(did)` is closed
-/// mode, `None` is open admission.
+/// Holds `test_env_lock` with `SHADI_SLIM_ADMISSION` and `SLIM_MEMBER_DIDS` set
+/// to the given values (`None`: unset) and restores both on drop.
+/// [`Self::closed`] is closed admission (the allow-list), [`Self::open`] is
+/// open admission (`SHADI_SLIM_ADMISSION=open`, no allow-list).
 #[cfg(test)]
-pub(crate) struct MemberDidsEnv {
-    prev: Option<std::ffi::OsString>,
+pub(crate) struct AdmissionEnv {
+    prev: [(&'static str, Option<std::ffi::OsString>); 2],
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
-impl MemberDidsEnv {
-    pub(crate) fn set(value: Option<&str>) -> Self {
+impl AdmissionEnv {
+    pub(crate) fn set(admission: Option<&str>, members: Option<&str>) -> Self {
         let lock = test_env_lock();
-        let prev = std::env::var_os("SLIM_MEMBER_DIDS");
-        match value {
-            Some(v) => std::env::set_var("SLIM_MEMBER_DIDS", v),
-            None => std::env::remove_var("SLIM_MEMBER_DIDS"),
+        let prev = [
+            (
+                "SHADI_SLIM_ADMISSION",
+                std::env::var_os("SHADI_SLIM_ADMISSION"),
+            ),
+            ("SLIM_MEMBER_DIDS", std::env::var_os("SLIM_MEMBER_DIDS")),
+        ];
+        for (key, value) in [
+            ("SHADI_SLIM_ADMISSION", admission),
+            ("SLIM_MEMBER_DIDS", members),
+        ] {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
         }
         Self { prev, _lock: lock }
+    }
+
+    /// Closed admission: the switch unset, `SLIM_MEMBER_DIDS` = `members`.
+    pub(crate) fn closed(members: &str) -> Self {
+        Self::set(None, Some(members))
+    }
+
+    /// Open admission: `SHADI_SLIM_ADMISSION=open`, `SLIM_MEMBER_DIDS` unset.
+    pub(crate) fn open() -> Self {
+        Self::set(Some("open"), None)
     }
 }
 
 #[cfg(test)]
-impl Drop for MemberDidsEnv {
+impl Drop for AdmissionEnv {
     fn drop(&mut self) {
-        match self.prev.take() {
-            Some(v) => std::env::set_var("SLIM_MEMBER_DIDS", v),
-            None => std::env::remove_var("SLIM_MEMBER_DIDS"),
+        for (key, value) in self.prev.iter_mut() {
+            match value.take() {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }
