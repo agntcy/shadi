@@ -196,6 +196,7 @@ dependencies = [
  "agntcy-shadi-identity",
  "agntcy-shadi-mas",
  "agntcy-shadi-sandbox",
+ "async-trait",
  "futures",
  "libc",
  "serde",
