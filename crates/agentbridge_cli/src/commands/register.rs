@@ -1599,8 +1599,11 @@ fn open_listener_app(
     };
     let name = agentbridge::member_source::peer_slim_name(agent_id, Some(&did));
     let name_ref = Arc::new(parse_name(&name)?);
-    let app = shadi_identity::create_app(service, name_ref.clone(), &auth)
-        .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
+    let app =
+        shadi_identity::create_app(service, name_ref.clone(), &auth).map_err(|e| match e {
+            shadi_identity::IdentityError::Slim(e) => format!("SLIM create_app failed: {e:?}"),
+            e => format!("SLIM create_app failed: {e}"),
+        })?;
     app.subscribe(name_ref.clone(), Some(connection_id))
         .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
     let tool_name_ref = subscribe_tool_name(&app, agent_id, &name, connection_id)?;

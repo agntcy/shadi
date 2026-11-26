@@ -373,7 +373,7 @@ impl LiveA2ATaskAdapter {
                     }
                 };
                 let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
-                    .map_err(format_slim_error)?;
+                    .map_err(|e| e.to_string())?;
                 app.subscribe(local_name_ref.clone(), Some(connection_id))
                     .map_err(format_slim_error)?;
 
