@@ -43,12 +43,12 @@ async fn did_admission_accepts_member_rejects_nonmember() {
 
     // Member is in the allow-list JWKS → admitted.
     assert!(
-        verifier.verify(&member_token).await.is_ok(),
+        verifier.verify(&member_token).is_ok(),
         "a member DID must be admitted"
     );
     // Intruder's key is absent from the JWKS → no trusted key → InvalidSignature.
     assert!(
-        verifier.verify(&intruder_token).await.is_err(),
+        verifier.verify(&intruder_token).is_err(),
         "a non-member DID must be rejected by the allow-list"
     );
 }
@@ -78,7 +78,7 @@ async fn a_node_keeps_minting_credentials_rather_than_holding_one() {
 
     let first = provider.get_token().expect("mint the first DID-JWT");
     assert!(
-        verifier.verify(&first).await.is_ok(),
+        verifier.verify(&first).is_ok(),
         "a freshly minted credential must be admitted"
     );
 
@@ -92,7 +92,7 @@ async fn a_node_keeps_minting_credentials_rather_than_holding_one() {
         "get_token must sign fresh claims rather than return a cached token"
     );
     assert!(
-        verifier.verify(&second).await.is_ok(),
+        verifier.verify(&second).is_ok(),
         "the node must keep authenticating once its first credential has lapsed"
     );
 }
