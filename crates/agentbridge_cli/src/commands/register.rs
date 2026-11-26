@@ -497,6 +497,8 @@ struct AgentBridgeExecutor {
     verbose: bool,
     egress: Arc<dyn AgentVerifier>,
     gate: Option<Arc<CredentialGate>>,
+    /// Bind each admitted message to the verified peer of its SLIM session.
+    session_bound: bool,
 }
 
 /// What a credential-gated listener needs, built once at startup.
@@ -544,6 +546,54 @@ fn credential_gate(
     CredentialGate::load(path, listener_did)
         .map(Arc::new)
         .map(Some)
+}
+
+/// Whose SLIM session a message arrived on, as far as admission cares.
+///
+/// A DID proof only says who signed the payload, not who sent it, so on a
+/// session-bound listener the signer must also be the verified peer of the
+/// session the message came in on; otherwise a member could relay another
+/// agent's proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionPeer {
+    /// The listener is not session-bound (HTTP, JSON-RPC, gRPC, or SLIM
+    /// without open admission): there is no session peer to compare against.
+    NotBound,
+    /// Session-bound, but the request carried no verified peer subject.
+    PeerUnknown,
+    /// Session-bound, with the peer subject the transport verified.
+    Peer(String),
+}
+
+impl SessionPeer {
+    /// The mode for one request. A listener that is not session-bound never
+    /// looks at the params, so a caller cannot spoof the key where the
+    /// transport does not set it.
+    fn from_service_params(session_bound: bool, params: &A2AServiceParams) -> Self {
+        if !session_bound {
+            return Self::NotBound;
+        }
+        params
+            .get(shadi_a2a::SLIM_PEER_SUBJECT_METADATA_KEY)
+            .and_then(|values| values.first())
+            .filter(|subject| !subject.is_empty())
+            .map_or(Self::PeerUnknown, |subject| Self::Peer(subject.clone()))
+    }
+}
+
+/// Why a message proven by `did` may not run on the SLIM session of
+/// `session_peer`, or `None` when it may.
+fn relayed_reason(session_peer: &SessionPeer, did: &str) -> Option<String> {
+    match session_peer {
+        SessionPeer::NotBound => None,
+        SessionPeer::PeerUnknown => Some(format!(
+            "message proven by {did} arrived over a SLIM session with no verified peer"
+        )),
+        SessionPeer::Peer(peer) if peer == did => None,
+        SessionPeer::Peer(peer) => Some(format!(
+            "message proven by {did} arrived over the SLIM session of {peer}"
+        )),
+    }
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -827,11 +877,11 @@ impl AgentExecutor for AgentBridgeExecutor {
                 return refuse(TaskState::Rejected, reason);
             }
         }
-        let (raw, sender_did) = match ctx
-            .message
-            .as_ref()
-            .map(|m| admit_message(m, self.gate.as_deref(), &task_id))
-        {
+        let (raw, sender_did) = match ctx.message.as_ref().map(|m| {
+            let session_peer =
+                SessionPeer::from_service_params(self.session_bound, &ctx.service_params);
+            admit_message(m, self.gate.as_deref(), &task_id, &session_peer)
+        }) {
             Some(MessageAdmission::Proven {
                 did,
                 human_did,
@@ -1061,6 +1111,7 @@ impl AgentBridgeRequestHandler {
         verbose: bool,
         egress: Arc<dyn AgentVerifier>,
         gate: Option<Arc<CredentialGate>>,
+        session_bound: bool,
     ) -> Self {
         let agent_did = agent_did.filter(|did| !did.is_empty()).map(str::to_string);
         Self {
@@ -1072,6 +1123,7 @@ impl AgentBridgeRequestHandler {
                     verbose,
                     egress,
                     gate,
+                    session_bound,
                 },
                 InMemoryTaskStore::new(),
             ),
@@ -1417,6 +1469,7 @@ fn run_slim_listener(
         verbose,
         egress::policy(),
         gate,
+        false,
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
@@ -1636,6 +1689,7 @@ fn admit_message(
     message: &Message,
     gate: Option<&CredentialGate>,
     task_id: &str,
+    session_peer: &SessionPeer,
 ) -> MessageAdmission {
     let text = extract_text(message);
     if text == "(no text parts)" || !shadi_identity::looks_like_did_proof(text.as_bytes()) {
@@ -1656,6 +1710,11 @@ fn admit_message(
             };
         }
     };
+    // Before any binding or credential work, so a relayed message never spends
+    // the signer's nonce.
+    if let Some(reason) = relayed_reason(session_peer, &verified.did) {
+        return MessageAdmission::Forged { reason };
+    }
     match admit_binding(
         verified.did,
         &verified.payload,
@@ -2006,6 +2065,7 @@ fn run_unicast_listener(
         verbose,
         egress::policy(),
         gate,
+        false,
     ));
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -2811,7 +2871,12 @@ test push ... FAILED
 
     #[test]
     fn admit_unsigned_message_parks_auth_required() {
-        match admit_message(&sample_request("plain task").message, None, "t") {
+        match admit_message(
+            &sample_request("plain task").message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::AuthRequired { reason, .. } => {
                 assert!(reason.contains("DID proof required"), "{reason}");
             }
@@ -2850,6 +2915,7 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            false,
         )
     }
 
@@ -3001,6 +3067,7 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            false,
         );
         let (alice, mallory) = (
             shadi_identity::AgentIdentity::generate().unwrap(),
@@ -3073,6 +3140,7 @@ test push ... FAILED
             false,
             policy,
             None,
+            false,
         );
         let request = sample_request(String::from_utf8(envelope).unwrap());
         let response = handler
@@ -3516,7 +3584,12 @@ test push ... FAILED
             text.lines().nth(2).unwrap().to_string()
         };
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
-        match admit_message(&sample_request(forged).message, None, "t") {
+        match admit_message(
+            &sample_request(forged).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("forged DID"), "{reason}");
             }
@@ -3534,7 +3607,12 @@ test push ... FAILED
         let id = shadi_identity::AgentIdentity::generate().unwrap();
         let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
         let text = String::from_utf8(envelope).unwrap();
-        match admit_message(&sample_request(text).message, None, "t") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven { did, payload, .. } => {
                 assert_eq!(did, id.did());
                 assert_eq!(payload, "real prompt");
@@ -3573,7 +3651,12 @@ test push ... FAILED
     fn without_a_gate_the_vp_layer_is_stripped_not_prompted() {
         let layered = shadi_identity::wrap_vp("tok~en", b"real prompt").unwrap();
         let (did, text) = signed(&layered);
-        match admit_message(&sample_request(text).message, None, "t") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven {
                 did: proven,
                 payload,
@@ -3590,7 +3673,12 @@ test push ... FAILED
     #[test]
     fn without_a_gate_a_plain_payload_is_unchanged() {
         let (_, text) = signed(b"real prompt");
-        match admit_message(&sample_request(text).message, None, "t") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven { payload, .. } => assert_eq!(payload, "real prompt"),
             _ => panic!("honest proof must be admitted"),
         }
@@ -3600,7 +3688,12 @@ test push ... FAILED
     fn a_gate_with_no_presentation_issues_a_challenge() {
         let (_dir, gate) = gate_fixture();
         let (_, text) = signed(b"real prompt");
-        match admit_message(&sample_request(text).message, Some(&gate), "task-7") {
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-7",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::AuthRequired {
                 reason,
                 challenge: Some(json),
@@ -3670,7 +3763,7 @@ test push ... FAILED
         let MessageAdmission::AuthRequired {
             challenge: Some(json),
             ..
-        } = admit_message(&msg, Some(&gate), "task-1")
+        } = admit_message(&msg, Some(&gate), "task-1", &SessionPeer::NotBound)
         else {
             panic!("an unpresented message must be challenged");
         };
@@ -3703,7 +3796,12 @@ test push ... FAILED
     #[test]
     fn a_presentation_the_sender_builds_is_admitted_by_the_listener() {
         let (_dir, gate, did, text) = answered_challenge();
-        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven {
                 did: proven,
                 payload,
@@ -3734,11 +3832,129 @@ test push ... FAILED
         let (_dir, gate, _, text) = answered_challenge();
         let msg = sample_request(text).message;
         assert!(matches!(
-            admit_message(&msg, Some(&gate), "task-1"),
+            admit_message(&msg, Some(&gate), "task-1", &SessionPeer::NotBound),
             MessageAdmission::Proven { .. }
         ));
-        let fresh = challenge_of(admit_message(&msg, Some(&gate), "task-1"));
+        let fresh = challenge_of(admit_message(
+            &msg,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ));
         assert_eq!(fresh.task_id, "task-1");
+    }
+
+    #[test]
+    fn a_proof_from_another_peers_session_is_a_relay() {
+        let peer = |did: &str| SessionPeer::Peer(did.to_string());
+        assert!(relayed_reason(&SessionPeer::NotBound, "did:key:zA").is_none());
+        assert!(relayed_reason(&peer("did:key:zA"), "did:key:zA").is_none());
+        let other = relayed_reason(&peer("did:key:zB"), "did:key:zA").unwrap();
+        assert!(
+            other.contains("did:key:zA") && other.contains("did:key:zB"),
+            "{other}"
+        );
+        let unknown = relayed_reason(&SessionPeer::PeerUnknown, "did:key:zA").unwrap();
+        assert!(unknown.contains("no verified peer"), "{unknown}");
+    }
+
+    #[test]
+    fn the_session_peer_is_read_only_where_the_listener_is_session_bound() {
+        let params = |values: &[&str]| -> A2AServiceParams {
+            let values = values.iter().map(|v| v.to_string()).collect();
+            [(
+                shadi_a2a::SLIM_PEER_SUBJECT_METADATA_KEY.to_string(),
+                values,
+            )]
+            .into()
+        };
+        // Unbound: a spoofed key is never read.
+        assert_eq!(
+            SessionPeer::from_service_params(false, &params(&["did:key:zA"])),
+            SessionPeer::NotBound
+        );
+        assert_eq!(
+            SessionPeer::from_service_params(false, &A2AServiceParams::new()),
+            SessionPeer::NotBound
+        );
+        // Bound: the first value, or unknown when absent or empty.
+        assert_eq!(
+            SessionPeer::from_service_params(true, &params(&["did:key:zA"])),
+            SessionPeer::Peer("did:key:zA".to_string())
+        );
+        for missing in [params(&[]), params(&[""]), A2AServiceParams::new()] {
+            assert_eq!(
+                SessionPeer::from_service_params(true, &missing),
+                SessionPeer::PeerUnknown
+            );
+        }
+    }
+
+    #[test]
+    fn a_relayed_message_is_rejected_before_its_nonce_is_spent() {
+        let (_dir, gate, did, text) = answered_challenge();
+        let msg = sample_request(text).message;
+        for relayed in [
+            SessionPeer::PeerUnknown,
+            SessionPeer::Peer("did:key:zMallory".to_string()),
+        ] {
+            match admit_message(&msg, Some(&gate), "task-1", &relayed) {
+                MessageAdmission::Forged { reason } => {
+                    assert!(reason.contains("SLIM session"), "{reason}")
+                }
+                _ => panic!("a relayed message must be rejected"),
+            }
+        }
+        // The nonce survived both relays, so the real peer can still use it.
+        match admit_message(&msg, Some(&gate), "task-1", &SessionPeer::Peer(did.clone())) {
+            MessageAdmission::Proven {
+                did: proven,
+                payload,
+                ..
+            } => {
+                assert_eq!(proven, did);
+                assert_eq!(payload, "real prompt");
+            }
+            MessageAdmission::Forged { reason } => panic!("forged: {reason}"),
+            MessageAdmission::AuthRequired { reason, .. } => panic!("auth required: {reason}"),
+        }
+        // And only once: the real peer's own replay is rechallenged.
+        let replay = admit_message(&msg, Some(&gate), "task-1", &SessionPeer::Peer(did));
+        assert_eq!(challenge_of(replay).task_id, "task-1");
+    }
+
+    #[test]
+    fn an_unbound_listener_admits_as_before_whatever_the_transport_says() {
+        let (_dir, gate, did, text) = answered_challenge();
+        let msg = sample_request(text).message;
+        match admit_message(&msg, Some(&gate), "task-1", &SessionPeer::NotBound) {
+            MessageAdmission::Proven {
+                did: proven,
+                payload,
+                ..
+            } => {
+                assert_eq!(proven, did);
+                assert_eq!(payload, "real prompt");
+            }
+            _ => panic!("an unbound listener must run no relay check"),
+        }
+    }
+
+    #[test]
+    fn a_session_bound_listener_still_asks_an_unsigned_message_for_a_proof() {
+        // The relay check needs a proven DID, so it never masks the earlier gate.
+        let unsigned = sample_request("plain task").message;
+        for peer in [
+            SessionPeer::PeerUnknown,
+            SessionPeer::Peer("did:key:zA".to_string()),
+        ] {
+            match admit_message(&unsigned, None, "t", &peer) {
+                MessageAdmission::AuthRequired { reason, .. } => {
+                    assert!(reason.contains("DID proof required"), "{reason}")
+                }
+                _ => panic!("an unsigned message must still be parked"),
+            }
+        }
     }
 
     #[test]
@@ -3749,6 +3965,7 @@ test push ... FAILED
             &sample_request(text).message,
             Some(&other_gate),
             "task-1",
+            &SessionPeer::NotBound,
         ));
         assert_eq!(fresh.aud, LISTENER_DID);
         assert!(!fresh.nonce.is_empty());
@@ -3765,7 +3982,12 @@ test push ... FAILED
             };
             format!("{}{swap}{}", &token[..at], &token[at + 1..])
         });
-        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("signature"), "{reason}")
             }
@@ -3778,7 +4000,12 @@ test push ... FAILED
         let (_dir, gate) = gate_fixture();
         let (_, text) = signed(b"SHADI-VP/1\nnot-a-field\n\nprompt");
         for gate in [None, Some(&gate)] {
-            match admit_message(&sample_request(text.clone()).message, gate, "t") {
+            match admit_message(
+                &sample_request(text.clone()).message,
+                gate,
+                "t",
+                &SessionPeer::NotBound,
+            ) {
                 MessageAdmission::Forged { reason } => assert!(!reason.is_empty()),
                 _ => panic!("a malformed layer must be rejected"),
             }
@@ -4169,6 +4396,7 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            false,
         ));
         SlimRpcHandler::new(handler).register(server.as_ref());
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
