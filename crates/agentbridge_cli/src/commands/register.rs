@@ -859,17 +859,19 @@ impl AgentExecutor for AgentBridgeExecutor {
             shadi_a2a::set_remote_parent(&span, message);
         }
         let _guard = span.enter();
-        let refuse_with = |state, reason: String, challenge: Option<&str>| {
-            let reason = format!("{reason} ({evaluation_id})");
-            terminal_task(
-                task_id.clone(),
-                context_id.clone(),
-                state,
-                reason,
-                challenge,
-            )
-        };
-        let refuse = |state, reason: String| refuse_with(state, reason, None);
+        let refuse_with =
+            |state, reason: String, challenge: Option<&str>, retry_after_secs: Option<u64>| {
+                let reason = format!("{reason} ({evaluation_id})");
+                terminal_task(
+                    task_id.clone(),
+                    context_id.clone(),
+                    state,
+                    reason,
+                    challenge,
+                    retry_after_secs,
+                )
+            };
+        let refuse = |state, reason: String| refuse_with(state, reason, None, None);
         if let Some(message) = ctx.message.as_ref() {
             if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
                 span.record("a2a.outcome", "rejected");
@@ -897,12 +899,21 @@ impl AgentExecutor for AgentBridgeExecutor {
                 span.record("peer.did", did.as_str());
                 (payload, Some(did))
             }
-            Some(MessageAdmission::AuthRequired { reason, challenge }) => {
+            Some(MessageAdmission::AuthRequired {
+                reason,
+                challenge,
+                retry_after_secs,
+            }) => {
                 // Non-terminal: the client re-proves and sends again with this
                 // task id, and the stored task carries on from here.
                 span.record("a2a.outcome", "auth_required");
                 tracing::info!(%reason, "parked a task until the sender proves its DID");
-                return refuse_with(TaskState::AuthRequired, reason, challenge.as_deref());
+                return refuse_with(
+                    TaskState::AuthRequired,
+                    reason,
+                    challenge.as_deref(),
+                    retry_after_secs,
+                );
             }
             Some(MessageAdmission::Forged { reason }) => {
                 span.record("a2a.outcome", "rejected");
@@ -1640,10 +1651,15 @@ fn terminal_task(
     state: TaskState,
     reason: String,
     challenge: Option<&str>,
+    retry_after_secs: Option<u64>,
 ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
     let message = Message::new(Role::Agent, vec![Part::text(reason)]);
     let message = match challenge {
         Some(challenge) => shadi_a2a::insert_challenge(message, challenge),
+        None => message,
+    };
+    let message = match retry_after_secs {
+        Some(secs) => shadi_a2a::insert_retry_after(message, secs),
         None => message,
     };
     let task = Task {
@@ -1676,6 +1692,9 @@ enum MessageAdmission {
         reason: String,
         /// A serialised challenge for the caller to answer, when one is due.
         challenge: Option<String>,
+        /// Seconds the caller should wait before sending again, when no
+        /// challenge could be issued yet.
+        retry_after_secs: Option<u64>,
     },
     Forged {
         reason: String,
@@ -1720,6 +1739,7 @@ fn admit_message(
         return MessageAdmission::AuthRequired {
             reason: "DID proof required on the message".to_string(),
             challenge: None,
+            retry_after_secs: None,
         };
     }
     let verified = match shadi_identity::unwrap_signed_message(text.as_bytes()) {
@@ -1731,6 +1751,7 @@ fn admit_message(
             return MessageAdmission::AuthRequired {
                 reason: "DID proof required on the message".to_string(),
                 challenge: None,
+                retry_after_secs: None,
             };
         }
     };
@@ -1809,17 +1830,27 @@ fn admit_credential(
     }
 }
 
-/// Park the caller with a fresh challenge bound to `did`.
+/// Park the caller with a fresh challenge bound to `did`. A full nonce store
+/// parks it with no challenge and a retry-after instead: the caller has done
+/// nothing wrong, so the task stays resumable.
 fn challenge_for(gate: &CredentialGate, task_id: &str, did: &str, now: i64) -> MessageAdmission {
     let forged = |reason: String| MessageAdmission::Forged { reason };
     let challenge = match gate.nonces.issue(task_id, did, now) {
         Ok(challenge) => challenge,
+        Err(err @ shadi_credential::CredentialError::ChallengeCapacity { retry_after_secs }) => {
+            return MessageAdmission::AuthRequired {
+                reason: format!("listener busy: {err}"),
+                challenge: None,
+                retry_after_secs: Some(retry_after_secs),
+            };
+        }
         Err(err) => return forged(err.to_string()),
     };
     match serde_json::to_string(&challenge) {
         Ok(json) => MessageAdmission::AuthRequired {
             reason: "credential required: answer the challenge with a presentation".to_string(),
             challenge: Some(json),
+            retry_after_secs: None,
         },
         Err(err) => forged(err.to_string()),
     }
@@ -1847,6 +1878,7 @@ fn admit_binding(
         return MessageAdmission::AuthRequired {
             reason: "agent binding required: this listener admits agents by human DID".to_string(),
             challenge: None,
+            retry_after_secs: None,
         };
     }
 
@@ -1856,6 +1888,7 @@ fn admit_binding(
             return MessageAdmission::AuthRequired {
                 reason: format!("agent binding is malformed: {err}"),
                 challenge: None,
+                retry_after_secs: None,
             };
         }
     };
@@ -3841,6 +3874,7 @@ test push ... FAILED
             MessageAdmission::AuthRequired {
                 reason,
                 challenge: Some(json),
+                retry_after_secs: None,
             } => {
                 assert!(reason.contains("credential required"), "{reason}");
                 let challenge: shadi_credential::Challenge = serde_json::from_str(&json).unwrap();
@@ -4115,6 +4149,137 @@ test push ... FAILED
         assert!(!fresh.nonce.is_empty());
     }
 
+    /// Fills `gate`'s nonce store at `now`, one challenge each for other peers.
+    fn fill_nonces(gate: &CredentialGate, now: i64) -> Vec<shadi_credential::Challenge> {
+        (0..shadi_credential::nonce::MAX_NONCES)
+            .map(|i| {
+                let did = format!("did:key:zPeer{i}");
+                gate.nonces.issue("other", &did, now).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_full_nonce_store_parks_a_new_did_until_a_slot_expires() {
+        let (_dir, gate) = gate_fixture();
+        fill_nonces(&gate, 0);
+        match challenge_for(&gate, "task-9", "did:key:zNew", 10) {
+            MessageAdmission::AuthRequired {
+                reason,
+                challenge: None,
+                retry_after_secs: Some(50),
+            } => assert!(reason.contains("retry in 50s"), "{reason}"),
+            MessageAdmission::Forged { reason } => {
+                panic!("a busy listener must not reject: {reason}")
+            }
+            _ => panic!("expected a retry-after park"),
+        }
+        let expired = shadi_credential::nonce::NONCE_TTL_SECS + 1;
+        let fresh = challenge_of(challenge_for(&gate, "task-9", "did:key:zNew", expired));
+        assert_eq!(fresh.task_id, "task-9");
+    }
+
+    #[test]
+    fn a_full_nonce_store_parks_an_unpresented_message_with_a_retry_after() {
+        let (_dir, gate) = gate_fixture();
+        fill_nonces(&gate, i64::try_from(now_unix()).unwrap());
+        let (_, text) = signed(b"real prompt");
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ) {
+            MessageAdmission::AuthRequired {
+                reason,
+                challenge: None,
+                retry_after_secs: Some(secs),
+            } => {
+                assert!((1..=60).contains(&secs), "{secs}");
+                assert!(reason.contains("listener busy"), "{reason}");
+            }
+            MessageAdmission::Forged { reason } => {
+                panic!("a busy listener must not reject: {reason}")
+            }
+            _ => panic!("expected a retry-after park"),
+        }
+    }
+
+    fn gated_handler(gate: Arc<CredentialGate>) -> AgentBridgeRequestHandler {
+        AgentBridgeRequestHandler::new(
+            Arc::new(SilentAdapter(shadi_mas::AgentId("claude-code".to_string()))),
+            "claude-code",
+            Some(LISTENER_DID),
+            None,
+            Some("127.0.0.1:4311"),
+            A2ABinding::Jsonrpc,
+            Arc::new(Notify::new()),
+            false,
+            egress::policy(),
+            Some(gate),
+            false,
+        )
+    }
+
+    async fn sent_task(handler: &AgentBridgeRequestHandler, req: SendMessageRequest) -> Task {
+        match handler
+            .send_message(&A2AServiceParams::default(), req)
+            .await
+            .expect("a refusal is a task state, not a transport error")
+        {
+            SendMessageResponse::Task(task) => task,
+            SendMessageResponse::Message(m) => panic!("expected a task, got {m:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_busy_listener_parks_a_resumable_task_with_a_retry_after() {
+        let (_dir, gate) = gate_fixture();
+        let gate = Arc::new(gate);
+        let now = i64::try_from(now_unix()).unwrap();
+        let held = fill_nonces(&gate, now);
+        let handler = gated_handler(Arc::clone(&gate));
+        let (_, text) = signed(b"real prompt");
+
+        let task = sent_task(&handler, sample_request(text.clone())).await;
+        assert_eq!(task.status.state, TaskState::AuthRequired);
+        let status = task.status.message.as_ref().expect("a status message");
+        let secs = shadi_a2a::retry_after_from_message(status).expect("a retry-after hint");
+        assert!((1..=60).contains(&secs), "{secs}");
+        assert_eq!(shadi_a2a::challenge_from_message(status), None);
+        let reason = extract_text(status);
+        assert!(reason.contains("retry in"), "{reason}");
+
+        let fetched = handler
+            .get_task(
+                &A2AServiceParams::default(),
+                GetTaskRequest {
+                    id: task.id.clone(),
+                    history_length: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("a parked task must be fetchable");
+        assert_eq!(fetched.status.state, TaskState::AuthRequired);
+
+        // Once a slot frees, the same task re-sent gets a real challenge.
+        gate.nonces
+            .consume(&held[0].nonce, "other", "did:key:zPeer0", now)
+            .unwrap();
+        let mut again = sample_request(text);
+        again.message.task_id = Some(task.id.clone());
+        again.message.context_id = Some(task.context_id.clone());
+        let resumed = sent_task(&handler, again).await;
+        assert_eq!(resumed.id, task.id);
+        assert_eq!(resumed.status.state, TaskState::AuthRequired);
+        let status = resumed.status.message.as_ref().expect("a status message");
+        assert_eq!(shadi_a2a::retry_after_from_message(status), None);
+        let json = shadi_a2a::challenge_from_message(status).expect("a challenge");
+        let challenge: shadi_credential::Challenge = serde_json::from_str(json).unwrap();
+        assert_eq!(challenge.task_id, task.id);
+    }
+
     #[test]
     fn a_bad_issuer_signature_is_still_forged() {
         let (_dir, gate, _, text) = answered_challenge_with(|token| {
@@ -4203,24 +4368,29 @@ test push ... FAILED
 
     #[tokio::test]
     async fn terminal_task_attaches_the_challenge_only_when_given() {
-        async fn status_message(challenge: Option<&str>) -> Message {
+        async fn status_message(challenge: Option<&str>, retry_after: Option<u64>) -> Message {
             let mut stream = terminal_task(
                 "t".into(),
                 "c".into(),
                 TaskState::AuthRequired,
                 "why".into(),
                 challenge,
+                retry_after,
             );
             match stream.next().await {
                 Some(Ok(StreamResponse::Task(task))) => task.status.message.unwrap(),
                 _ => panic!("expected one task"),
             }
         }
-        let with = status_message(Some("{\"nonce\":\"n\"}")).await;
+        let with = status_message(Some("{\"nonce\":\"n\"}"), None).await;
         assert_eq!(shadi_a2a::challenge_from_message(&with), Some("{\"nonce\":\"n\"}"));
+        assert_eq!(shadi_a2a::retry_after_from_message(&with), None);
         assert_eq!(extract_text(&with), "why");
-        let without = status_message(None).await;
+        let without = status_message(None, None).await;
         assert_eq!(shadi_a2a::challenge_from_message(&without), None);
+        let busy = status_message(None, Some(50)).await;
+        assert_eq!(shadi_a2a::retry_after_from_message(&busy), Some(50));
+        assert_eq!(shadi_a2a::challenge_from_message(&busy), None);
     }
 
     #[test]

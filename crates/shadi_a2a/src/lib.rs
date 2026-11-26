@@ -8,8 +8,9 @@ mod trace_context;
 
 pub use channel::{
     challenge_from_message, dest_did_from_message, insert_challenge, insert_dest_did,
-    request_context, A2AChannel, A2AChannelBuilder, A2AGroupChannel, A2AGroupChannelBuilder,
-    GroupMember, A2A_CHALLENGE_METADATA_KEY, A2A_DST_DID_METADATA_KEY, A2A_SRC_DID_METADATA_KEY,
+    insert_retry_after, request_context, retry_after_from_message, A2AChannel, A2AChannelBuilder,
+    A2AGroupChannel, A2AGroupChannelBuilder, GroupMember, A2A_CHALLENGE_METADATA_KEY,
+    A2A_DST_DID_METADATA_KEY, A2A_RETRY_AFTER_METADATA_KEY, A2A_SRC_DID_METADATA_KEY,
 };
 pub use locator::{A2ABinding, A2ALocator};
 pub use trace_context::set_remote_parent;
