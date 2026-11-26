@@ -427,8 +427,9 @@ so the receive span joins the sender's trace. Nothing signs that value: it only
 links traces. Prompts and replies are recorded only when
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`, as the GenAI
 conventions' `gen_ai.input.messages` and `gen_ai.output.messages`, and only once
-they have passed admission and the egress policy. [Telemetry](telemetry.md)
-covers exporting them.
+they have passed admission and the egress policy. SHADI emits these as
+`tracing` spans and ships no exporter; whatever subscriber the host installs
+decides where they go.
 
 ### TLS certificate resolution
 

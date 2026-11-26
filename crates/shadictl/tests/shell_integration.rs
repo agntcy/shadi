@@ -399,19 +399,6 @@ impl ShellOutput {
     }
 }
 
-/// Create a mock OTEL traces.jsonl file with realistic entries.
-fn write_mock_traces(dir: &Path) -> PathBuf {
-    let path = dir.join("traces.jsonl");
-    let traces = r#"{"span":{"name":"shadi.sandbox.spawn","attributes":{"command":"python agent.py"}},"exit_code":0}
-{"span":{"name":"shadi.policy.patch","attributes":{"patch.add_commands":1}},"exit_code":0}
-{"span":{"name":"shadi.sandbox.spawn","attributes":{"command":"node index.js"}},"exit_code":1}
-{"span":{"name":"shadi.secret.deliver","attributes":{"secret_count":2}},"exit_code":0}
-{"span":{"name":"shadi.sandbox.spawn","attributes":{"command":"cargo build"}},"exit_code":0}
-"#;
-    std::fs::write(&path, traces).expect("write mock traces");
-    path
-}
-
 // ── navigation ───────────────────────────────────────────────
 
 #[test]
@@ -421,7 +408,6 @@ fn given_shell_when_help_then_output_lists_all_commands() {
         .stdout_contains("SHADI interactive shell commands")
         .stdout_contains("/help")
         .stdout_contains("/policy query")
-        .stdout_contains("/trace list")
         .stdout_contains("/sessions")
         .stdout_contains("/config");
 }
@@ -516,29 +502,10 @@ fn given_shell_when_policy_diff_no_baseline_then_stderr_shows_usage() {
         .stderr_contains("usage: /policy diff");
 }
 
-// ── trace ────────────────────────────────────────────────────
-
-#[test]
-fn given_shell_when_trace_list_no_file_then_stderr_shows_error() {
-    run_shell("/trace list\n/exit\n")
-        .assert_success()
-        .stderr_contains("traces.jsonl");
-}
-
-#[test]
-fn given_shell_when_bare_trace_then_stderr_shows_usage() {
-    run_shell("/trace\n/exit\n")
-        .assert_success()
-        .stderr_contains("usage: /trace");
-}
-
 // ── full walkthrough (detached) ──────────────────────────────
 
 #[test]
 fn given_shell_when_full_walkthrough_then_output_covers_all_commands() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let trace_file = write_mock_traces(dir.path());
-
     let out = run_shell_with_env(
         "/help\n\
          /status\n\
@@ -546,15 +513,13 @@ fn given_shell_when_full_walkthrough_then_output_covers_all_commands() {
          /config\n\
          /policy explain\n\
          /policy diff profile:strict\n\
-         /trace list\n\
-         /trace summary\n\
          /secrets backend\n\
          /secrets rules\n\
          /detach\n\
          /clear\n\
          /exit\n",
         &[],
-        &[("SHADI_OTEL_FILE", trace_file.to_str().unwrap())],
+        &[],
     );
 
     out.assert_success()
@@ -563,8 +528,6 @@ fn given_shell_when_full_walkthrough_then_output_covers_all_commands() {
         .stdout_contains("not attached")
         .stdout_contains("effective_policy")
         .stdout_contains("sources")
-        .stdout_contains("shadi.sandbox.spawn")
-        .stdout_contains("shadi.policy.patch")
         .stdout_contains("Backend:");
 }
 
@@ -695,7 +658,6 @@ fn given_socket_arg_when_shell_starts_then_pre_attached() {
 fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mock = MockSandbox::start(dir.path());
-    let trace_file = write_mock_traces(dir.path());
 
     let input = format!(
         "/help\n\
@@ -704,8 +666,6 @@ fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
          /config\n\
          /policy explain\n\
          /policy diff profile:strict\n\
-         /trace list\n\
-         /trace summary\n\
          /attach {sock}\n\
          /status\n\
          /policy query\n\
@@ -724,7 +684,7 @@ fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
     let out = run_shell_with_env(
         &input,
         &[],
-        &[("SHADI_OTEL_FILE", trace_file.to_str().unwrap())],
+        &[],
     );
 
     out.assert_success()
@@ -737,8 +697,6 @@ fn given_attached_session_when_full_walkthrough_then_all_operations_succeed() {
         .stdout_contains("effective_policy")
         .stdout_contains("sources")
         // traces
-        .stdout_contains("shadi.sandbox.spawn")
-        .stdout_contains("shadi.policy.patch")
         // attach + connected status
         .stdout_contains("attached to")
         .stdout_contains("connected")

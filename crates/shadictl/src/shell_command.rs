@@ -25,7 +25,6 @@ use crate::secrets_command;
 use crate::slim_a2a;
 use crate::slim_shell::SlimShellState;
 use crate::snapshot_command;
-use crate::trace_command::{resolve_trace_file, trace_list, trace_summary};
 use shadi_sandbox::{control, PolicyPatch};
 
 const COMMANDS: &[(&str, &str)] = &[
@@ -40,8 +39,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/policy patch", "Patch the policy of the attached session"),
     ("/policy explain", "Explain resolved policy and source inputs"),
     ("/policy diff", "Diff effective policy against a baseline profile"),
-    ("/trace list", "List recent trace log entries"),
-    ("/trace summary", "Summarize trace logs by span name"),
     ("/slim status", "Show native SLIM shell status"),
     ("/slim start node", "Start a local native SLIM node with SHADI mTLS defaults"),
     ("/slim a2a-echo-peer", "Serve one task-backed A2A request over SLIMRPC"),
@@ -113,20 +110,6 @@ Baseline format:
 Examples:
   /policy diff profile:strict
   /policy diff file:./my-policy.json"),
-    ("/trace list", "\
-Usage: /trace list [options]
-
-List recent trace log entries.
-
-Options:
-  --limit N          Maximum entries to show (default: 20)
-  --name SUBSTR      Filter by span name substring
-  --command SUBSTR   Filter by command substring
-  --exit-code CODE   Filter by exit code"),
-    ("/trace summary", "\
-Usage: /trace summary [--limit N]
-
-Summarize trace logs grouped by span name."),
         ("/slim status", "\
 Usage: /slim status
 
@@ -357,7 +340,7 @@ impl Completer for ShellHelper {
         let input = &line[..pos];
         let mut candidates = Vec::new();
 
-        // If input starts with "/policy " or "/trace ", complete subcommands.
+        // If input starts with "/policy ", complete subcommands.
         if let Some(sub_input) = input.strip_prefix("/policy ") {
             let sub_input = sub_input.trim_start();
             // Check if we're past the subcommand into patch flags.
@@ -382,21 +365,6 @@ impl Completer for ShellHelper {
                 return Ok((pos, candidates));
             }
             let subs = ["query", "patch", "explain", "diff"];
-            for sub in subs {
-                if sub.starts_with(sub_input) {
-                    candidates.push(Pair {
-                        display: sub.to_string(),
-                        replacement: sub.to_string(),
-                    });
-                }
-            }
-            let offset = pos - sub_input.len();
-            return Ok((offset, candidates));
-        }
-
-        if let Some(sub_input) = input.strip_prefix("/trace ") {
-            let sub_input = sub_input.trim_start();
-            let subs = ["list", "summary"];
             for sub in subs {
                 if sub.starts_with(sub_input) {
                     candidates.push(Pair {
@@ -592,19 +560,6 @@ impl ShellSession {
             },
             "/policy" => {
                 eprintln!("usage: /policy <query|patch|explain|diff>");
-                LoopAction::Continue
-            }
-            "/trace" if parts.len() >= 2 => match parts[1] {
-                "list" => self.cmd_trace_list(&parts[2..]),
-                "summary" => self.cmd_trace_summary(&parts[2..]),
-                _ => {
-                    eprintln!("unknown trace subcommand: {}", parts[1]);
-                    eprintln!("  available: list, summary");
-                    LoopAction::Continue
-                }
-            },
-            "/trace" => {
-                eprintln!("usage: /trace <list|summary>");
                 LoopAction::Continue
             }
             "/slim" if parts.len() >= 2 => match parts[1] {
@@ -987,71 +942,6 @@ impl ShellSession {
         run_policy_command(PolicyCli {
             command: PolicyCommand::Diff(diff_args),
         });
-        LoopAction::Continue
-    }
-
-    fn cmd_trace_list(&self, args: &[&str]) -> LoopAction {
-        let mut limit: usize = 20;
-        let mut name: Option<String> = None;
-        let mut command: Option<String> = None;
-        let mut exit_code: Option<i32> = None;
-        let mut i = 0;
-        while i < args.len() {
-            match args[i] {
-                "--limit" if i + 1 < args.len() => {
-                    limit = args[i + 1].parse().unwrap_or(20);
-                    i += 2;
-                }
-                "--name" if i + 1 < args.len() => {
-                    name = Some(args[i + 1].to_string());
-                    i += 2;
-                }
-                "--command" if i + 1 < args.len() => {
-                    command = Some(args[i + 1].to_string());
-                    i += 2;
-                }
-                "--exit-code" if i + 1 < args.len() => {
-                    exit_code = args[i + 1].parse().ok();
-                    i += 2;
-                }
-                _ => {
-                    eprintln!("usage: /trace list [--limit N] [--name SUBSTR] [--command SUBSTR] [--exit-code CODE]");
-                    return LoopAction::Continue;
-                }
-            }
-        }
-        let path = resolve_trace_file(None);
-        if let Err(err) = trace_list(
-            &path,
-            limit,
-            name.as_deref(),
-            command.as_deref(),
-            exit_code,
-        ) {
-            eprintln!("error: {}", err);
-        }
-        LoopAction::Continue
-    }
-
-    fn cmd_trace_summary(&self, args: &[&str]) -> LoopAction {
-        let mut limit: usize = 200;
-        let mut i = 0;
-        while i < args.len() {
-            match args[i] {
-                "--limit" if i + 1 < args.len() => {
-                    limit = args[i + 1].parse().unwrap_or(200);
-                    i += 2;
-                }
-                _ => {
-                    eprintln!("usage: /trace summary [--limit N]");
-                    return LoopAction::Continue;
-                }
-            }
-        }
-        let path = resolve_trace_file(None);
-        if let Err(err) = trace_summary(&path, limit) {
-            eprintln!("error: {}", err);
-        }
         LoopAction::Continue
     }
 
@@ -2079,38 +1969,6 @@ mod tests {
         assert_continues(&mut session(), "/policy");
     }
 
-    // ── trace commands ───────────────────────────────────────
-
-    #[test]
-    fn given_no_trace_file_when_trace_list_then_continues() {
-        assert_continues(&mut session(), "/trace list");
-    }
-
-    #[test]
-    fn given_filters_when_trace_list_then_continues() {
-        assert_continues(&mut session(), "/trace list --limit 5 --name spawn");
-    }
-
-    #[test]
-    fn given_no_trace_file_when_trace_summary_then_continues() {
-        assert_continues(&mut session(), "/trace summary");
-    }
-
-    #[test]
-    fn given_limit_when_trace_summary_then_continues() {
-        assert_continues(&mut session(), "/trace summary --limit 10");
-    }
-
-    #[test]
-    fn given_unknown_subcommand_when_trace_then_continues() {
-        assert_continues(&mut session(), "/trace bogus");
-    }
-
-    #[test]
-    fn given_bare_trace_when_invoked_then_shows_usage() {
-        assert_continues(&mut session(), "/trace");
-    }
-
     // ── slim commands ────────────────────────────────────────
 
     #[test]
@@ -2586,28 +2444,6 @@ mod tests {
         assert_continues(&mut session(), "/policy patch --bogus-flag value");
     }
 
-    // ── trace arg parsing ────────────────────────────────────
-
-    #[test]
-    fn given_trace_list_with_command_filter_then_continues() {
-        assert_continues(&mut session(), "/trace list --command python");
-    }
-
-    #[test]
-    fn given_trace_list_with_exit_code_filter_then_continues() {
-        assert_continues(&mut session(), "/trace list --exit-code 0");
-    }
-
-    #[test]
-    fn given_trace_list_with_unknown_flag_then_continues() {
-        assert_continues(&mut session(), "/trace list --bogus");
-    }
-
-    #[test]
-    fn given_trace_summary_with_unknown_flag_then_continues() {
-        assert_continues(&mut session(), "/trace summary --bogus");
-    }
-
     // ── hint delegate ────────────────────────────────────────
 
     #[test]
@@ -2786,22 +2622,6 @@ mod tests {
         assert!(
             candidates.iter().any(|c| c.display == "query"),
             "should complete /policy subcommands"
-        );
-    }
-
-    #[test]
-    fn given_trace_prefix_when_completing_then_returns_subcommands() {
-        let helper = ShellHelper::new(false);
-        let rl_config = Config::builder().build();
-        let mut rl = Editor::with_config(rl_config).unwrap();
-        rl.set_helper(Some(helper));
-        let helper = rl.helper().unwrap();
-        let (start, candidates) =
-            Completer::complete(helper, "/trace ", 7, &Context::new(rl.history())).unwrap();
-        assert_eq!(start, 7);
-        assert!(
-            candidates.iter().any(|c| c.display == "list"),
-            "should complete /trace subcommands"
         );
     }
 
@@ -3164,11 +2984,6 @@ mod tests {
     }
 
     #[test]
-    fn given_session_when_trace_bare_help_then_continues() {
-        assert_continues(&mut session(), "/trace --help");
-    }
-
-    #[test]
     fn given_session_when_snapshot_bare_help_then_continues() {
         assert_continues(&mut session(), "/snapshot --help");
     }
@@ -3382,18 +3197,6 @@ mod tests {
     #[test]
     fn given_session_when_snapshot_show_help_flag_then_continues() {
         assert_continues(&mut session(), "/snapshot show --help");
-    }
-
-    // ── help for trace subcommands ───────────────────────────
-
-    #[test]
-    fn given_session_when_help_trace_list_then_continues() {
-        assert_continues(&mut session(), "/help trace list");
-    }
-
-    #[test]
-    fn given_session_when_help_trace_summary_then_continues() {
-        assert_continues(&mut session(), "/help trace summary");
     }
 
     // ── cmd_attach coverage ──────────────────────────────────

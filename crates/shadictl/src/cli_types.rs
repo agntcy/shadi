@@ -211,16 +211,6 @@ pub(crate) enum CredentialCommand {
     },
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "trace", about = "Inspect local SHADI trace logs")]
-pub(crate) struct TraceCli {
-    #[arg(long, value_name = "PATH")]
-    pub(crate) file: Option<PathBuf>,
-
-    #[command(subcommand)]
-    pub(crate) command: TraceCommand,
-}
-
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
     #[command(name = "config")]
@@ -231,8 +221,6 @@ pub(crate) enum Commands {
     Memory(MemoryCli),
     #[command(name = "credential")]
     Credential(CredentialCli),
-    #[command(name = "trace")]
-    Trace(TraceCli),
     #[command(name = "slim-mas")]
     SlimMas(SlimMasCli),
     #[command(name = "did-from-gpg")]
@@ -812,24 +800,6 @@ pub(crate) struct ShellArgs {
     /// Equivalent to --socket $TMPDIR/shadi-ctl-<name>.sock.
     #[arg(long = "attach", value_name = "NAME", conflicts_with = "socket")]
     pub(crate) attach: Option<String>,
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum TraceCommand {
-    List {
-        #[arg(long, default_value = "50")]
-        limit: usize,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        command: Option<String>,
-        #[arg(long)]
-        exit_code: Option<i32>,
-    },
-    Summary {
-        #[arg(long, default_value = "200")]
-        limit: usize,
-    },
 }
 
 #[derive(Parser, Debug)]

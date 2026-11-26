@@ -84,7 +84,6 @@ nav:
       - Install the CLI: install.md
       - Getting Started: getting_started.md
       - Operations: operations.md
-      - Telemetry: telemetry.md
       - Sandbox and Policies: sandbox.md
   - Integrations:
       - API Guide: api_integration.md

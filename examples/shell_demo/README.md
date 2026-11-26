@@ -283,8 +283,6 @@ shadi(shadi-ctl-...)> /q                  # alias for /exit| Command | Aliases |
 | `/policy patch` | | Patch the policy (see flags below) |
 | `/policy explain` | | Explain resolved policy and sources |
 | `/policy diff` | | Diff against a baseline profile |
-| `/trace list` | | List recent trace entries |
-| `/trace summary` | | Summarize traces by span name |
 | `/history` | | Show command history |
 | `/clear` | | Clear the screen |
 | `/exit` | `/q`, `/quit` | Exit the shell |

@@ -12,7 +12,6 @@ The workspace contains these crates:
 - shadi_mas: SHADI MAS coordination runtime — epochs, engines, ASSEMBLY / CONVERGE. See [SHADI MAS](shadi-mas.md) and [ASSEMBLY and CONVERGE](assembly-converge.md).
 - agentbridge / agentbridge_cli: general-purpose A2A agent interconnect (register, handoff, delegate, coordinate); ships with CLI coding-tool adapters (Claude Code, Copilot, Codex, Cursor Agent) as its flagship use case
 - agent_transport_slim: transport adapter for SLIM/A2A and stdio bridge for SHADI-managed sessions
-- shadi_telemetry: OpenTelemetry tracing/metrics initialization
 
 Platform-specific backends live under agent_secrets/src/platform.
 

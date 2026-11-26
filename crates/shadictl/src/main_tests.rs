@@ -10,7 +10,7 @@
     static GITHUB_PAYLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static STORE_FAILURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn trace_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::lock_test_env()
     }
 
@@ -1665,19 +1665,6 @@
     }
 
     #[test]
-    fn run_named_command_dispatches_trace_variant() {
-        let dir = temp_dir();
-        let trace_file = dir.path().join("trace.jsonl");
-        std::fs::write(&trace_file, "\n").expect("write trace file");
-
-        let code = run_named_command(Commands::Trace(TraceCli {
-            file: Some(trace_file),
-            command: TraceCommand::Summary { limit: 10 },
-        }));
-        assert_eq!(code, ExitCode::SUCCESS);
-    }
-
-    #[test]
     fn run_named_command_dispatches_memory_variant() {
         let dir = temp_dir();
         let db = dir.path().join("memory-dispatch.db");
@@ -1714,7 +1701,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_named_command_dispatches_slim_variant() {
-        let _guard = trace_env_lock();
+        let _guard = test_env_lock();
         let dir = temp_dir();
         let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
         let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
@@ -1758,7 +1745,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_named_command_dispatches_slim_a2a_echo_peer_variant() {
-        let _guard = trace_env_lock();
+        let _guard = test_env_lock();
         let dir = temp_dir();
         let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
         let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
@@ -1796,7 +1783,7 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_named_command_dispatches_slim_a2a_send_variant() {
-        let _guard = trace_env_lock();
+        let _guard = test_env_lock();
         let dir = temp_dir();
         let previous_tmp_dir = std::env::var_os("SHADI_TMP_DIR");
         let previous_endpoint = std::env::var_os("SLIM_ENDPOINT");
@@ -1894,14 +1881,21 @@ members = [{ did = "did:key:zA", role = "human" }]
 
     #[test]
     fn run_cli_subcommand_branch_executes_direct_dispatch() {
-        let dir = temp_dir();
-        let trace_file = dir.path().join("trace.jsonl");
-        std::fs::write(&trace_file, "\n").expect("write trace file");
-
         let mut cli = build_cli();
-        cli.subcommand = Some(Commands::Trace(TraceCli {
-            file: Some(trace_file),
-            command: TraceCommand::Summary { limit: 10 },
+        cli.subcommand = Some(Commands::Policy(PolicyCli {
+            command: PolicyCommand::Diff(PolicyDiffArgs {
+                against: "profile:balanced".to_string(),
+                profile: None,
+                policy_file: None,
+                allow: Vec::new(),
+                read: Vec::new(),
+                write: Vec::new(),
+                deny: Vec::new(),
+                net_block: false,
+                net_allow: Vec::new(),
+                allow_command: Vec::new(),
+                format: OutputFormat::Json,
+            }),
         }));
         cli.run_command.clear();
 
@@ -3967,121 +3961,6 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
-    fn resolve_trace_file_prefers_cli_path() {
-        let _guard = trace_env_lock();
-        let dir = temp_dir();
-        let cli_path = dir.path().join("trace.jsonl");
-        let resolved = resolve_trace_file(Some(cli_path.clone()));
-        assert_eq!(resolved, cli_path);
-
-        std::env::remove_var("SHADI_OTEL_FILE");
-    }
-
-    #[test]
-    fn resolve_trace_file_uses_env_var() {
-        let _guard = trace_env_lock();
-        let dir = temp_dir();
-        let env_path = dir.path().join("env-trace.jsonl");
-        std::env::set_var("SHADI_OTEL_FILE", env_path.to_string_lossy().to_string());
-
-        let resolved = resolve_trace_file(None);
-        assert_eq!(resolved, env_path);
-
-        std::env::remove_var("SHADI_OTEL_FILE");
-    }
-
-    #[test]
-    fn trace_span_name_reads_span_name() {
-        let value = json!({"span": {"name": "shadi.sandbox.run"}});
-        assert_eq!(trace_span_name(&value), Some("shadi.sandbox.run".to_string()));
-    }
-
-    #[test]
-    fn trace_matches_filters_command_and_exit() {
-        let value = json!({
-            "span": {"name": "shadi.sandbox.run"},
-            "fields": {"command": "echo hi", "exit.code": 0}
-        });
-
-        assert!(trace_matches(&value, Some("sandbox"), Some("echo"), Some(0)));
-        assert!(!trace_matches(&value, Some("sandbox"), Some("missing"), Some(0)));
-        assert!(!trace_matches(&value, Some("sandbox"), Some("echo"), Some(1)));
-    }
-
-    #[test]
-    fn read_trace_lines_keeps_tail() {
-        let dir = temp_dir();
-        let path = dir.path().join("traces.jsonl");
-        std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write traces");
-
-        let lines = read_trace_lines(&path, 2).expect("read lines");
-        assert_eq!(lines, vec!["three".to_string(), "four".to_string()]);
-    }
-
-    #[test]
-    fn trace_list_errors_on_missing_file() {
-        let err = trace_list(Path::new("/tmp/does-not-exist.jsonl"), 5, None, None, None)
-            .unwrap_err();
-        assert!(err.contains("failed to open trace file"));
-    }
-
-    #[test]
-    fn trace_summary_counts_span_names() {
-        let dir = temp_dir();
-        let path = dir.path().join("traces.jsonl");
-        let lines = vec![
-            json!({"span": {"name": "shadi.sandbox.run"}}).to_string(),
-            json!({"span": {"name": "shadi.sandbox.run"}}).to_string(),
-            json!({"span": {"name": "shadi.policy.resolve"}}).to_string(),
-        ];
-        std::fs::write(&path, lines.join("\n")).expect("write traces");
-
-        trace_summary(&path, 10).expect("summary");
-    }
-
-    #[test]
-    fn trace_matches_filters_on_missing_fields() {
-        let value = json!({"span": {"name": "shadi.sandbox.run"}});
-        assert!(!trace_matches(&value, Some("sandbox"), Some("echo"), None));
-        assert!(!trace_matches(&value, Some("sandbox"), None, Some(1)));
-    }
-
-    #[test]
-    fn trace_span_name_reads_spans_array() {
-        let value = json!({"spans": [{"name": "shadi.trace"}]});
-        assert_eq!(trace_span_name(&value), Some("shadi.trace".to_string()));
-    }
-
-    #[test]
-    fn resolve_trace_file_defaults_when_unset() {
-        let _guard = trace_env_lock();
-        std::env::remove_var("SHADI_OTEL_FILE");
-        let resolved = resolve_trace_file(None);
-        assert_eq!(resolved, PathBuf::from(".shadi/traces.jsonl"));
-    }
-
-    #[test]
-    fn parse_trace_line_rejects_invalid_json() {
-        assert!(parse_trace_line("not-json").is_none());
-    }
-
-    #[test]
-    fn trace_list_respects_filters() {
-        let dir = temp_dir();
-        let path = dir.path().join("traces.jsonl");
-        let lines = vec![
-            json!({"span": {"name": "shadi.sandbox.run"}, "fields": {"command": "echo hi", "exit.code": 0}})
-                .to_string(),
-            json!({"span": {"name": "shadi.policy.resolve"}, "fields": {"command": "cat", "exit.code": 1}})
-                .to_string(),
-        ];
-        std::fs::write(&path, lines.join("\n")).expect("write traces");
-
-        trace_list(&path, 10, Some("sandbox"), Some("echo"), Some(0)).expect("list");
-        trace_list(&path, 10, Some("policy"), None, Some(1)).expect("list");
-    }
-
-    #[test]
     fn slim_mas_validate_requires_default_group() {
         let dir = temp_dir();
         let config_path = write_mas_config(
@@ -4693,7 +4572,7 @@ members = [{{ did = "shadi://{}", role = "human" }}]
 
     #[test]
     fn restore_env_var_covers_some_and_none() {
-        let _guard = trace_env_lock();
+        let _guard = test_env_lock();
         let previous = std::env::var_os("SHADI_TEST_RESTORE_ENV_VAR");
 
         std::env::set_var("SHADI_TEST_RESTORE_ENV_VAR", "before");
@@ -4714,7 +4593,7 @@ members = [{{ did = "shadi://{}", role = "human" }}]
 
     #[test]
     fn run_controller_command_dispatches_list_routes_and_surfaces_errors() {
-        let _guard = trace_env_lock();
+        let _guard = test_env_lock();
         let previous_cert = std::env::var_os("SLIM_TLS_CERT");
         let previous_key = std::env::var_os("SLIM_TLS_KEY");
         let previous_ca = std::env::var_os("SLIM_TLS_CA");
@@ -4740,7 +4619,7 @@ members = [{{ did = "shadi://{}", role = "human" }}]
 
     #[test]
     fn run_controller_command_dispatches_list_connections_and_surfaces_errors() {
-        let _guard = trace_env_lock();
+        let _guard = test_env_lock();
         let previous_cert = std::env::var_os("SLIM_TLS_CERT");
         let previous_key = std::env::var_os("SLIM_TLS_KEY");
         let previous_ca = std::env::var_os("SLIM_TLS_CA");

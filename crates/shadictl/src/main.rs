@@ -4,7 +4,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::io::BufRead;
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -45,7 +44,6 @@ mod slim_a2a;
 mod slim_controller;
 mod slim_mas_command;
 mod snapshot_command;
-mod trace_command;
 mod trusted_secret_delivery;
 mod shell_command;
 
@@ -59,7 +57,6 @@ use policy_helpers::*;
 use policy_watch::*;
 use sandbox_snapshot::*;
 use slim_mas_command::*;
-use trace_command::*;
 use trusted_secret_delivery::*;
 use shell_command::*;
 
@@ -250,12 +247,8 @@ pub(crate) fn wait_until_executable(path: &std::path::Path) {
 }
 
 fn main() -> ExitCode {
-    shadi_telemetry::init("shadi-core");
     let cli = Cli::parse();
-    let code = run_cli(cli);
-    // Export is batched, so queued spans need flushing before we exit.
-    shadi_telemetry::shutdown();
-    code
+    run_cli(cli)
 }
 
 fn run_named_command(command: Commands) -> ExitCode {
@@ -264,7 +257,6 @@ fn run_named_command(command: Commands) -> ExitCode {
         Commands::Policy(command) => run_policy_command(command),
         Commands::Memory(command) => run_memory_command(command),
         Commands::Credential(command) => run_credential_command(command),
-        Commands::Trace(command) => run_trace_command(command),
         Commands::SlimMas(command) => run_slim_mas_command(command),
         Commands::DidFromGpg(command) => run_did_from_gpg_command(command),
         Commands::DidFromGitHub(command) => run_did_from_github_command(command),
