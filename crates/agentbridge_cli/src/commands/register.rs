@@ -1426,8 +1426,13 @@ fn run_slim_listener(
 
     // Security posture: incoming A2A tasks are executed by the local CLI tool,
     // constrained by whatever SHADI sandbox policy wraps this process (required
-    // above). Sandboxing bounds what a task CAN do; SLIM_MEMBER_DIDS still
-    // decides WHO may send one — only expose this listener to trusted SLIM peers.
+    // above). Sandboxing bounds what a task CAN do. Which DIDs may open a SLIM
+    // session is decided by SLIM_MEMBER_DIDS, the transport allow-list passed to
+    // SLIM's create_app (see shadi_identity::did_auth_from_env). Which messages
+    // are admitted is a separate, message-level check: the OID4VP gate when
+    // --admission-policy is given (built by credential_gate), and
+    // SHADI_MEMBER_HUMAN_DIDS, which startup requires when there is no gate.
+    // Only expose this listener to trusted SLIM peers.
     eprintln!(
         "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
          CLI tool. Only expose this listener to trusted SLIM peers."
