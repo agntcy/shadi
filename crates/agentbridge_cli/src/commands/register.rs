@@ -533,13 +533,7 @@ fn credential_gate(
         // nothing else — anyone can mint one for free. Refuse to start
         // rather than let that pass for an unconfigured listener.
         if allowed_human_dids().is_empty() {
-            return Err(
-                "refusing to start: no --admission-policy and SHADI_MEMBER_HUMAN_DIDS is unset \
-                 — this listener would admit any caller with no credential and no human binding. \
-                 Set --admission-policy, or set SHADI_MEMBER_HUMAN_DIDS to the human DIDs this \
-                 listener admits."
-                    .to_string(),
-            );
+            return Err(no_message_gate_refusal());
         }
         return Ok(None);
     };
@@ -1424,18 +1418,46 @@ fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String
 
 /// The admission mode this listener starts under, from `SHADI_SLIM_ADMISSION`.
 ///
-/// Read before any SLIM connection. A bad value or the open/`SLIM_MEMBER_DIDS`
-/// conflict stops startup, and so does open admission: this build's listener
-/// has no verifier for it yet (never a fall back to the allow-list).
+/// Read before any SLIM connection. A bad value, or `open` together with
+/// `SLIM_MEMBER_DIDS`, stops startup (see [`shadi_identity::slim_admission_from_env`]).
+/// `open` is accepted: the transport then admits any `did:key`, so the
+/// message-level gate is the admission check (see [`open_admission_gate_check`]).
 fn listener_admission() -> Result<shadi_identity::SlimAdmission, String> {
-    let mode = shadi_identity::slim_admission_from_env()
-        .map_err(|e| format!("SLIM admission error: {e}"))?;
-    match mode {
-        shadi_identity::SlimAdmission::Closed => Ok(mode),
-        shadi_identity::SlimAdmission::Open => Err(
-            "SHADI_SLIM_ADMISSION=open is not supported by this build's listener yet".to_string(),
-        ),
+    shadi_identity::slim_admission_from_env().map_err(|e| format!("SLIM admission error: {e}"))
+}
+
+/// Whether the SLIM listener binds each admitted message to the verified peer of
+/// its session. Only open admission does: under closed admission the
+/// `SLIM_MEMBER_DIDS` allow-list already decides who may connect. The HTTP,
+/// JSON-RPC and gRPC listeners never call this: their peer comes from
+/// caller-supplied headers, so they are never session-bound.
+fn listener_session_bound(admission: shadi_identity::SlimAdmission) -> bool {
+    admission == shadi_identity::SlimAdmission::Open
+}
+
+/// The refusal for a listener with neither message gate: no `--admission-policy`
+/// and no `SHADI_MEMBER_HUMAN_DIDS`.
+fn no_message_gate_refusal() -> String {
+    "refusing to start: no --admission-policy and SHADI_MEMBER_HUMAN_DIDS is unset \
+     — this listener would admit any caller with no credential and no human binding. \
+     Set --admission-policy, or set SHADI_MEMBER_HUMAN_DIDS to the human DIDs this \
+     listener admits."
+        .to_string()
+}
+
+/// Open admission admits any `did:key` at the transport, so the message-level gate
+/// is the only admission check. Refuse before SLIM is connected, and before the
+/// listener announces itself, when neither gate is configured. Closed admission is
+/// not checked here: [`credential_gate`] still runs after the app exists, as before.
+fn open_admission_gate_check(
+    admission: shadi_identity::SlimAdmission,
+    has_policy: bool,
+    human_dids: usize,
+) -> Result<(), String> {
+    if admission == shadi_identity::SlimAdmission::Open && !has_policy && human_dids == 0 {
+        return Err(no_message_gate_refusal());
     }
+    Ok(())
 }
 
 /// How many DIDs `SLIM_MEMBER_DIDS` lists (comma-separated, blanks skipped).
@@ -1462,11 +1484,12 @@ fn admission_banner(mode: shadi_identity::SlimAdmission, member_count: usize) ->
 /// Start a SLIM A2A listener that forwards incoming tasks to `adapter`.
 ///
 /// Listens indefinitely under `agntcy/shadi/<agent_id>-a2a` until Ctrl-C.
-/// Coding-agent adapters authenticate via DID/keys only — see
-/// [`shadi_identity::require_did_auth_from_env`]. Only closed admission is
-/// supported: startup checks run in this order, the sandbox, then
-/// [`listener_admission`] (before connecting to SLIM), then the SLIM
-/// connection and app, then `credential_gate`.
+/// Coding-agent adapters authenticate via DID/keys only: closed admission through
+/// [`shadi_identity::require_did_auth_from_env`], open admission through
+/// [`shadi_identity::SlimAuth::did_open`]. Startup checks run in this order: the
+/// sandbox; then [`listener_admission`] and, under open admission,
+/// [`open_admission_gate_check`], both before connecting to SLIM; then the SLIM
+/// connection and app ([`open_listener_app`]); then `credential_gate`.
 fn run_slim_listener(
     agent_id: &str,
     adapter: Arc<dyn CliAdapter>,
@@ -1481,6 +1504,13 @@ fn run_slim_listener(
     // Before any SLIM connection, so a refused mode leaves nothing half-started.
     // (`credential_gate` below stays where it was: it needs the listener's DID.)
     let admission = listener_admission()?;
+    // Open admission is only as strict as its message gate, so refuse a listener
+    // without one before it connects or announces itself.
+    open_admission_gate_check(
+        admission,
+        admission_policy.is_some(),
+        allowed_human_dids().len(),
+    )?;
 
     let access = ClientAccess::from_env(Some(agent_id))?;
 
@@ -1499,16 +1529,19 @@ fn run_slim_listener(
         name: agent_name,
         name_ref,
         tool_name_ref,
-    } = open_listener_app(&service, agent_id, connection_id)?;
+    } = open_listener_app(&service, agent_id, connection_id, admission)?;
 
     // Security posture: incoming A2A tasks are executed by the local CLI tool,
     // constrained by whatever SHADI sandbox policy wraps this process (required
     // above). Sandboxing bounds what a task CAN do. Which DIDs may open a SLIM
-    // session is decided by SLIM_MEMBER_DIDS, the transport allow-list passed to
-    // SLIM's create_app (see shadi_identity::did_auth_from_env). Which messages
-    // are admitted is a separate, message-level check: the OID4VP gate when
-    // --admission-policy is given (built by credential_gate), and
-    // SHADI_MEMBER_HUMAN_DIDS, which startup requires when there is no gate.
+    // session depends on the admission mode. Closed (the default): SLIM_MEMBER_DIDS
+    // is the transport allow-list passed to SLIM's create_app (see
+    // shadi_identity::did_auth_from_env). Open: any did:key that proves its key may
+    // connect, so the transport admits anyone and the message-level check below is
+    // the only gate. That check is the OID4VP gate when --admission-policy is given
+    // (built by credential_gate), and SHADI_MEMBER_HUMAN_DIDS, which startup requires
+    // when there is no gate. Under open admission a message must also come from the
+    // verified peer of its SLIM session (session-bound, see listener_session_bound).
     // Only expose this listener to trusted SLIM peers.
     eprintln!(
         "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
@@ -1578,7 +1611,7 @@ fn run_slim_listener(
         verbose,
         egress::policy(),
         gate,
-        false,
+        listener_session_bound(admission),
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
@@ -1660,13 +1693,24 @@ struct ListenerApp {
     tool_name_ref: Option<Arc<Name>>,
 }
 
+/// The listener's SLIM app under `admission`. Closed admission authenticates with
+/// the `SLIM_MEMBER_DIDS` allow-list. Open admission admits any `did:key` that
+/// proves its key. Both use the agent's DID from `agent_identity_from_env`, so the
+/// listener's DID is the same in either mode.
 fn open_listener_app(
     service: &Service,
     agent_id: &str,
     connection_id: u64,
+    admission: shadi_identity::SlimAdmission,
 ) -> Result<ListenerApp, String> {
-    let auth = shadi_identity::require_did_auth_from_env(agent_id)
-        .map_err(|e| format!("SLIM auth error: {e}"))?;
+    let auth = match admission {
+        shadi_identity::SlimAdmission::Closed => {
+            shadi_identity::require_did_auth_from_env(agent_id)
+        }
+        shadi_identity::SlimAdmission::Open => shadi_identity::agent_identity_from_env(agent_id)
+            .and_then(|agent| shadi_identity::SlimAuth::did_open(&agent)),
+    }
+    .map_err(|e| format!("SLIM auth error: {e}"))?;
     let did = match &auth {
         shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
         shadi_identity::SlimAuth::SharedSecret(_) => String::new(),
@@ -2188,6 +2232,9 @@ fn run_unicast_listener(
     let gate = credential_gate(admission_policy, &did)?;
     let ready = Arc::new(Notify::new());
     let adapter_for_shutdown = Arc::clone(&adapter);
+    // Never session-bound: HTTP, JSON-RPC and gRPC callers name their peer in
+    // headers, which they can spoof. Only the SLIM listener sets this from its
+    // admission mode (see `listener_session_bound`).
     let handler = Arc::new(AgentBridgeRequestHandler::new(
         adapter,
         agent_id,
@@ -2945,7 +2992,7 @@ test push ... FAILED
     }
 
     #[test]
-    fn listener_admission_starts_closed_and_refuses_the_rest() {
+    fn listener_admission_is_closed_by_default_and_refuses_bad_values() {
         use shadi_identity::SlimAdmission;
         const DID: &str = "did:key:zMember";
 
@@ -2958,33 +3005,73 @@ test push ... FAILED
             }
         }
 
-        // Open: not supported by this build's listener yet.
-        for admission in ["open", " OPEN "] {
-            let _env = crate::commands::AdmissionEnv::set(Some(admission), None);
-            assert_eq!(
-                listener_admission(),
-                Err(
-                    "SHADI_SLIM_ADMISSION=open is not supported by this build's listener yet"
-                        .to_string()
-                )
-            );
+        // A bad value stops startup, with or without an allow-list.
+        for bad in ["opne", "closed", "true", "1", "Open1", "yes"] {
+            for members in [None, Some(DID)] {
+                let _env = crate::commands::AdmissionEnv::set(Some(bad), members);
+                let err = listener_admission().unwrap_err();
+                assert!(err.starts_with("SLIM admission error: "), "{bad}: {err}");
+                assert!(err.contains("SHADI_SLIM_ADMISSION must be"), "{bad}: {err}");
+            }
         }
 
-        // Open + an allow-list: the conflict, not the "not supported" refusal.
+        // Open + an allow-list: the conflict, which stops startup.
         let _env = crate::commands::AdmissionEnv::set(Some("open"), Some(DID));
         let err = listener_admission().unwrap_err();
         assert!(err.starts_with("SLIM admission error: "), "{err}");
         assert!(err.contains("contradict"), "{err}");
         assert!(!err.contains(DID), "{err}");
-        drop(_env);
+    }
 
-        // A bad value stops startup, with or without an allow-list.
-        for bad in ["opne", "closed", "true", "1"] {
-            for members in [None, Some(DID)] {
-                let _env = crate::commands::AdmissionEnv::set(Some(bad), members);
-                let err = listener_admission().unwrap_err();
-                assert!(err.contains("SHADI_SLIM_ADMISSION must be"), "{bad}: {err}");
-            }
+    #[test]
+    fn listener_admission_accepts_open_without_an_allow_list() {
+        use shadi_identity::SlimAdmission;
+        for admission in ["open", " OPEN ", "Open"] {
+            let _env = crate::commands::AdmissionEnv::set(Some(admission), None);
+            assert_eq!(
+                listener_admission(),
+                Ok(SlimAdmission::Open),
+                "{admission:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn listener_session_bound_is_derived_from_open_admission_only() {
+        use shadi_identity::SlimAdmission;
+        // The SLIM listener binds its sessions only under open admission. The HTTP,
+        // JSON-RPC and gRPC listeners pass `false` at their own construction site.
+        assert!(!listener_session_bound(SlimAdmission::Closed));
+        assert!(listener_session_bound(SlimAdmission::Open));
+    }
+
+    #[test]
+    fn open_admission_refuses_to_start_without_a_message_gate() {
+        use shadi_identity::SlimAdmission;
+        let _guard = HUMAN_DIDS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("SHADI_MEMBER_HUMAN_DIDS");
+        std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS");
+
+        // The call site's inputs: no --admission-policy, no SHADI_MEMBER_HUMAN_DIDS.
+        let no_humans = allowed_human_dids().len();
+        let err = open_admission_gate_check(SlimAdmission::Open, false, no_humans)
+            .expect_err("open admission with no gate must not start");
+        assert_eq!(err, no_message_gate_refusal());
+        assert!(err.contains("--admission-policy"), "{err}");
+        assert!(err.contains("SHADI_MEMBER_HUMAN_DIDS"), "{err}");
+
+        // Either gate is enough.
+        assert!(open_admission_gate_check(SlimAdmission::Open, true, 0).is_ok());
+        assert!(open_admission_gate_check(SlimAdmission::Open, false, 1).is_ok());
+
+        // Closed admission keeps its existing order: credential_gate decides later.
+        assert!(open_admission_gate_check(SlimAdmission::Closed, false, 0).is_ok());
+
+        match prev {
+            Some(v) => std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", v),
+            None => std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS"),
         }
     }
 
@@ -4910,6 +4997,7 @@ test push ... FAILED
     fn serve_echo(
         agent_id: &str,
         endpoint: &str,
+        admission: shadi_identity::SlimAdmission,
     ) -> (
         std::thread::JoinHandle<()>,
         tokio::sync::oneshot::Sender<()>,
@@ -4918,7 +5006,7 @@ test push ... FAILED
         let access = ClientAccess::from_env(Some(agent_id)).unwrap();
         let connection_id = service.connect(access.client_config(endpoint)).unwrap();
         let ListenerApp { app, did, .. } =
-            open_listener_app(&service, agent_id, connection_id).unwrap();
+            open_listener_app(&service, agent_id, connection_id, admission).unwrap();
         let server = Arc::new(Server::new_with_shared_rx_and_connection(
             app.inner(),
             app.name().as_slim_name(),
@@ -4937,7 +5025,7 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
-            false,
+            listener_session_bound(admission),
         ));
         SlimRpcHandler::new(handler).register(server.as_ref());
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -4970,34 +5058,11 @@ test push ... FAILED
     fn a_listening_agent_calls_out_while_its_listener_runs() {
         const CHILD: &str = "AGENTBRIDGE_TEST_570_CHILD";
         let _guard = super::super::test_env_lock();
-        if std::env::var_os(CHILD).is_none() {
-            let (_, module) = module_path!().split_once("::").unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    &format!("{module}::a_listening_agent_calls_out_while_its_listener_runs"),
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "the child run failed: {status}");
+        if !in_child_process("a_listening_agent_calls_out_while_its_listener_runs", CHILD) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let tls = dir.path().join("shadi-slim-mtls");
-        let script =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/generate_slim_mtls_certs.sh");
-        let generated = std::process::Command::new("bash")
-            .arg(&script)
-            .arg(&tls)
-            .output()
-            .unwrap();
-        assert!(
-            generated.status.success(),
-            "{}",
-            String::from_utf8_lossy(&generated.stderr)
-        );
+        let tls = generate_slim_mtls(dir.path());
 
         let seed = "shadi-570-test-seed";
         let did = |id: &str| {
@@ -5005,70 +5070,18 @@ test push ... FAILED
                 .unwrap()
                 .did()
         };
-        let vars = [
-            ("SHADI_SLIM_AUTH", Some("did".to_string())),
-            ("SHADI_SLIM_ADMISSION", None),
-            ("SLIM_HUMAN_SEED", Some(seed.to_string())),
-            (
-                "SLIM_MEMBER_DIDS",
-                Some(format!("{},{}", did("caller"), did("callee"))),
-            ),
-            (
-                "SLIM_TLS_CERT",
-                Some(tls.join("client-avatar.crt").display().to_string()),
-            ),
-            (
-                "SLIM_TLS_KEY",
-                Some(tls.join("client-avatar.key").display().to_string()),
-            ),
-            (
-                "SLIM_TLS_CA",
-                Some(tls.join("ca.crt").display().to_string()),
-            ),
-            ("SHADI_TMP_DIR", Some(dir.path().display().to_string())),
-            ("SLIM_AUTH_TOKEN_FILE", None),
-            ("SHADI_MEMBER_HUMAN_DIDS", None),
-        ];
-        let saved: Vec<_> = vars
-            .iter()
-            .map(|(k, _)| (*k, std::env::var_os(k)))
-            .collect();
-        for (key, value) in &vars {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-
-        let endpoint = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .to_string();
-        let node = Service::new("issue-570-node".to_string());
-        let server_config = slim_bindings::ServerConfig {
-            endpoint: endpoint.clone(),
-            tls: slim_bindings::TlsServerConfig {
-                insecure: false,
-                source: slim_bindings::TlsSource::File {
-                    cert: tls.join("server.crt").display().to_string(),
-                    key: tls.join("server.key").display().to_string(),
-                },
-                client_ca: slim_bindings::CaSource::File {
-                    path: tls.join("ca.crt").display().to_string(),
-                },
-                include_system_ca_certs_pool: Some(false),
-                tls_version: Some("tls1.3".to_string()),
-                reload_client_ca_file: Some(false),
-            },
-            ..Default::default()
-        };
-        node.run_server(server_config).unwrap();
-        std::thread::sleep(Duration::from_millis(250));
+        let saved = set_env(&mtls_mesh_env(
+            &tls,
+            dir.path(),
+            seed,
+            None,
+            Some(format!("{},{}", did("caller"), did("callee"))),
+        ));
+        let (node, endpoint) = run_mtls_node(&tls);
 
         let listeners = [
-            serve_echo("caller", &endpoint),
-            serve_echo("callee", &endpoint),
+            serve_echo("caller", &endpoint, shadi_identity::SlimAdmission::Closed),
+            serve_echo("callee", &endpoint, shadi_identity::SlimAdmission::Closed),
         ];
         std::thread::sleep(Duration::from_millis(500));
 
@@ -5114,12 +5127,7 @@ test push ... FAILED
         }
         let _ = node.stop_server(endpoint);
         let _ = node.shutdown();
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
+        restore_env(saved);
 
         for (i, reply) in replies.into_iter().enumerate() {
             let reply = reply.unwrap_or_else(|err| panic!("send {i} failed: {err}"));
@@ -5128,5 +5136,202 @@ test push ... FAILED
                 "{reply}"
             );
         }
+    }
+
+    /// Open admission over real SLIM, through the listener `register` runs: the
+    /// listener has no allow-list (`SLIM_MEMBER_DIDS` is unset), and the caller
+    /// is a DID it has never been told about. The transport admits the caller;
+    /// its message is admitted by the session-bound check, and the echo proves
+    /// the task ran.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_open_listener_admits_a_caller_it_has_never_seen() {
+        const CHILD: &str = "AGENTBRIDGE_TEST_OPEN_ADMISSION_CHILD";
+        let _guard = super::super::test_env_lock();
+        if !in_child_process("an_open_listener_admits_a_caller_it_has_never_seen", CHILD) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tls = generate_slim_mtls(dir.path());
+
+        let seed = "shadi-open-admission-test-seed";
+        let callee = shadi_identity::AgentIdentity::derive(seed.as_bytes(), "callee")
+            .unwrap()
+            .did();
+        let saved = set_env(&mtls_mesh_env(&tls, dir.path(), seed, Some("open"), None));
+        let (node, endpoint) = run_mtls_node(&tls);
+
+        let (listener, stop) = serve_echo("callee", &endpoint, shadi_identity::SlimAdmission::Open);
+        std::thread::sleep(Duration::from_millis(500));
+
+        let destination = agentbridge::member_source::did_slim_name(&callee);
+        let send = std::thread::spawn({
+            let endpoint = endpoint.clone();
+            move || {
+                let adapter = egress::live_adapter(LiveA2ATaskAdapterConfig {
+                    endpoint,
+                    agent_id: "stranger".to_string(),
+                    local_name: Some("agntcy/shadi/stranger-a2a".to_string()),
+                    peer_agent_id: "callee".to_string(),
+                    destination,
+                    a2a_url: None,
+                    a2a_binding: None,
+                    peer_did: Some(callee),
+                });
+                adapter
+                    .dispatch(TaskEnvelope {
+                        task_id: "open-admission-0".to_string(),
+                        pattern: PatternKind::Development,
+                        epoch: Epoch(0),
+                        correlation_id: None,
+                        body: b"ping open".to_vec(),
+                    })
+                    .map(|()| adapter.dispatches().unwrap().remove(0).response)
+            }
+        });
+        let reply = send.join().unwrap();
+
+        let _ = stop.send(());
+        let _ = listener.join();
+        let _ = node.stop_server(endpoint);
+        let _ = node.shutdown();
+        restore_env(saved);
+
+        let reply = reply.unwrap_or_else(|err| {
+            panic!("the open listener refused a caller it has never seen: {err}")
+        });
+        assert!(reply.contains("callee heard: ping open"), "{reply}");
+    }
+
+    /// Runs a test body in a child process, which SLIM needs: it installs a global
+    /// tracing subscriber, and these bodies set process-wide env. Returns `true` in
+    /// the child, where the body runs; in the parent it runs the test again as the
+    /// child and returns `false`.
+    #[cfg(not(windows))]
+    fn in_child_process(test: &str, child_var: &str) -> bool {
+        if std::env::var_os(child_var).is_some() {
+            return true;
+        }
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::{test}"), "--nocapture"])
+            .env(child_var, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child run failed: {status}");
+        false
+    }
+
+    /// A fresh directory's mTLS certificates, from `tools/generate_slim_mtls_certs.sh`.
+    #[cfg(not(windows))]
+    fn generate_slim_mtls(dir: &Path) -> PathBuf {
+        let tls = dir.join("shadi-slim-mtls");
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/generate_slim_mtls_certs.sh");
+        let generated = std::process::Command::new("bash")
+            .arg(&script)
+            .arg(&tls)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        tls
+    }
+
+    /// The env a SLIM mesh test runs under: DID auth, the given admission switch
+    /// and allow-list (`None`: unset), the test certs, and no other gates.
+    #[cfg(not(windows))]
+    fn mtls_mesh_env(
+        tls: &Path,
+        tmp: &Path,
+        seed: &str,
+        admission: Option<&str>,
+        members: Option<String>,
+    ) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("SHADI_SLIM_AUTH", Some("did".to_string())),
+            ("SHADI_SLIM_ADMISSION", admission.map(str::to_string)),
+            ("SLIM_HUMAN_SEED", Some(seed.to_string())),
+            ("SLIM_MEMBER_DIDS", members),
+            (
+                "SLIM_TLS_CERT",
+                Some(tls.join("client-avatar.crt").display().to_string()),
+            ),
+            (
+                "SLIM_TLS_KEY",
+                Some(tls.join("client-avatar.key").display().to_string()),
+            ),
+            (
+                "SLIM_TLS_CA",
+                Some(tls.join("ca.crt").display().to_string()),
+            ),
+            ("SHADI_TMP_DIR", Some(tmp.display().to_string())),
+            ("SLIM_AUTH_TOKEN_FILE", None),
+            ("SHADI_MEMBER_HUMAN_DIDS", None),
+        ]
+    }
+
+    /// Sets each variable (`None`: removes it) and returns the previous values,
+    /// for [`restore_env`].
+    #[cfg(not(windows))]
+    fn set_env(
+        vars: &[(&'static str, Option<String>)],
+    ) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        let saved = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        saved
+    }
+
+    #[cfg(not(windows))]
+    fn restore_env(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    /// A SLIM node on a free loopback port, serving mTLS with the certs in `tls`.
+    /// Returns the node and its endpoint.
+    #[cfg(not(windows))]
+    fn run_mtls_node(tls: &Path) -> (Service, String) {
+        let endpoint = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string();
+        let node = Service::new(format!("mtls-node-{}", std::process::id()));
+        let server_config = slim_bindings::ServerConfig {
+            endpoint: endpoint.clone(),
+            tls: slim_bindings::TlsServerConfig {
+                insecure: false,
+                source: slim_bindings::TlsSource::File {
+                    cert: tls.join("server.crt").display().to_string(),
+                    key: tls.join("server.key").display().to_string(),
+                },
+                client_ca: slim_bindings::CaSource::File {
+                    path: tls.join("ca.crt").display().to_string(),
+                },
+                include_system_ca_certs_pool: Some(false),
+                tls_version: Some("tls1.3".to_string()),
+                reload_client_ca_file: Some(false),
+            },
+            ..Default::default()
+        };
+        node.run_server(server_config).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        (node, endpoint)
     }
 }
