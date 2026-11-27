@@ -47,6 +47,53 @@ pub fn set_remote_parent(span: &tracing::Span, message: &Message) {
     }
 }
 
+/// The environment variables a W3C-aware tool reads its parent trace from
+/// (`TRACEPARENT`, `TRACESTATE`), paired with the propagator's header keys.
+pub const TRACE_ENV_VARS: [(&str, &str); 2] =
+    [("traceparent", "TRACEPARENT"), ("tracestate", "TRACESTATE")];
+
+/// Make `span` a child of the trace named by `TRACEPARENT` (and
+/// `TRACESTATE`) in this process's environment, which is how a harness such
+/// as Claude Code or Codex hands its trace to the commands it runs.
+///
+/// A valid in-process parent wins: a send made inside a receive span stays
+/// in that span's trace. Call it before the span is first entered.
+pub fn set_parent_from_env(span: &tracing::Span) {
+    set_parent_from_vars(span, |name| std::env::var(name).ok());
+}
+
+fn set_parent_from_vars(span: &tracing::Span, var: impl Fn(&str) -> Option<String>) {
+    if tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .is_valid()
+    {
+        return;
+    }
+    let fields: HashMap<String, String> = TRACE_ENV_VARS
+        .iter()
+        .filter_map(|(key, name)| Some((key.to_string(), var(name)?)))
+        .collect();
+    let parent =
+        TraceContextPropagator::new().extract_with_context(&opentelemetry::Context::new(), &fields);
+    if parent.span().span_context().is_valid() {
+        let _ = span.set_parent(parent);
+    }
+}
+
+/// The current span's trace context as environment variables
+/// (`TRACEPARENT`, and `TRACESTATE` when there is one), for a subprocess
+/// that should run as a child of this span. Empty when the span is not traced.
+pub fn trace_context_env() -> Vec<(String, String)> {
+    let mut fields = HashMap::new();
+    TraceContextPropagator::new().inject_context(&tracing::Span::current().context(), &mut fields);
+    TRACE_ENV_VARS
+        .iter()
+        .filter_map(|(key, name)| Some((name.to_string(), fields.remove(*key)?)))
+        .collect()
+}
+
 struct MetadataCarrier<'a>(&'a HashMap<String, serde_json::Value>);
 
 impl Extractor for MetadataCarrier<'_> {
@@ -120,6 +167,64 @@ mod tests {
         let mut keys = carrier.keys();
         keys.sort_unstable();
         assert_eq!(keys, ["a2a-dst-did", "count", "traceparent"]);
+    }
+
+    const CALLER_TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
+    const CALLER_SPAN: &str = "b7ad6b7169203331";
+
+    fn caller_env(name: &str) -> Option<String> {
+        (name == "TRACEPARENT").then(|| format!("00-{CALLER_TRACE}-{CALLER_SPAN}-01"))
+    }
+
+    #[test]
+    fn a_root_send_joins_the_callers_trace_from_env() {
+        traced(|| {
+            let send = tracing::info_span!("send");
+            set_parent_from_vars(&send, caller_env);
+            let context = send.context();
+            let parent = context.span().span_context().trace_id();
+            assert_eq!(parent.to_string(), CALLER_TRACE);
+        });
+    }
+
+    #[test]
+    fn a_send_inside_a_traced_span_keeps_its_local_parent() {
+        traced(|| {
+            tracing::info_span!("receive").in_scope(|| {
+                let local = current_trace();
+                let send = tracing::info_span!("send");
+                set_parent_from_vars(&send, caller_env);
+                assert_eq!(send.in_scope(current_trace), local);
+                assert_ne!(local.to_string(), CALLER_TRACE);
+            });
+        });
+    }
+
+    #[test]
+    fn a_malformed_env_traceparent_is_ignored() {
+        traced(|| {
+            let send = tracing::info_span!("send");
+            set_parent_from_vars(&send, |name| {
+                (name == "TRACEPARENT").then(|| "00-not-a-trace".to_string())
+            });
+            assert_ne!(send.in_scope(current_trace).to_string(), CALLER_TRACE);
+        });
+    }
+
+    #[test]
+    fn the_subprocess_env_names_the_current_span() {
+        traced(|| {
+            tracing::info_span!("receive").in_scope(|| {
+                let env = trace_context_env();
+                let (name, value) = env.first().expect("TRACEPARENT");
+                assert_eq!(name, "TRACEPARENT");
+                assert!(value.contains(&current_trace().to_string()), "{value}");
+            });
+        });
+        assert!(
+            trace_context_env().is_empty(),
+            "untraced spans name no parent"
+        );
     }
 
     /// Only a valid remote trace replaces the local parent.

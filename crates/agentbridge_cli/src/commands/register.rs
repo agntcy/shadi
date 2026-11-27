@@ -897,8 +897,11 @@ impl AgentExecutor for AgentBridgeExecutor {
             } else {
                 let prompt_for_cli = prompt;
                 let conversation = conversation_key(sender_did.as_deref(), &context_id);
+                // Taken here, inside the receive span: the blocking thread
+                // does not carry it, and the harness runs as its child.
+                let trace_env = shadi_a2a::trace_context_env();
                 match tokio::task::spawn_blocking(move || {
-                    adapter.execute_prompt_in(&conversation, &prompt_for_cli)
+                    adapter.execute_prompt_in_traced(&conversation, &prompt_for_cli, &trace_env)
                 })
                 .await
                 {
@@ -2951,6 +2954,32 @@ test push ... FAILED
     struct ConversationAdapter {
         id: shadi_mas::AgentId,
         conversations: std::sync::Mutex<Vec<String>>,
+        trace_envs: std::sync::Mutex<Vec<Vec<(String, String)>>>,
+    }
+
+    impl ConversationAdapter {
+        fn new() -> Self {
+            Self {
+                id: shadi_mas::AgentId("claude-code".to_string()),
+                conversations: std::sync::Mutex::new(Vec::new()),
+                trace_envs: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn handler(self: &Arc<Self>) -> AgentBridgeRequestHandler {
+            AgentBridgeRequestHandler::new(
+                self.clone(),
+                "claude-code",
+                None,
+                None,
+                Some("127.0.0.1:4312"),
+                A2ABinding::Jsonrpc,
+                Arc::new(Notify::new()),
+                false,
+                egress::policy(),
+                None,
+            )
+        }
     }
 
     impl CliAdapter for ConversationAdapter {
@@ -2982,26 +3011,21 @@ test push ... FAILED
                 .push(conversation.to_string());
             Ok("ok".to_string())
         }
+        fn execute_prompt_in_traced(
+            &self,
+            conversation: &str,
+            prompt: &str,
+            trace_env: &[(String, String)],
+        ) -> Result<String, agentbridge::CliAdapterError> {
+            self.trace_envs.lock().unwrap().push(trace_env.to_vec());
+            self.execute_prompt_in(conversation, prompt)
+        }
     }
 
     #[tokio::test]
     async fn senders_naming_the_same_context_get_separate_sessions() {
-        let adapter = Arc::new(ConversationAdapter {
-            id: shadi_mas::AgentId("claude-code".to_string()),
-            conversations: std::sync::Mutex::new(Vec::new()),
-        });
-        let handler = AgentBridgeRequestHandler::new(
-            adapter.clone(),
-            "claude-code",
-            None,
-            None,
-            Some("127.0.0.1:4312"),
-            A2ABinding::Jsonrpc,
-            Arc::new(Notify::new()),
-            false,
-            egress::policy(),
-            None,
-        );
+        let adapter = Arc::new(ConversationAdapter::new());
+        let handler = adapter.handler();
         let (alice, mallory) = (
             shadi_identity::AgentIdentity::generate().unwrap(),
             shadi_identity::AgentIdentity::generate().unwrap(),
@@ -3426,6 +3450,65 @@ test push ... FAILED
             .expect("the receive span was exported");
         assert_eq!(receive.span_context.trace_id(), sender.trace_id());
         assert_eq!(receive.parent_span_id, sender.span_id());
+    }
+
+    /// The harness runs as a child of the receive span, not of whatever
+    /// trace the listener's own environment names.
+    #[tokio::test]
+    async fn the_harness_runs_in_the_receive_spans_trace() {
+        use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        install_capture();
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporterBuilder::new().build();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+        let _traced = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+
+        let sender = tracing::info_span!("sender").context();
+        let sender = sender.span().span_context().clone();
+        let adapter = Arc::new(ConversationAdapter::new());
+        let alice = shadi_identity::AgentIdentity::generate().unwrap();
+        let envelope = shadi_identity::wrap_signed_message(&alice, b"task").unwrap();
+        let mut request = sample_request(String::from_utf8(envelope).unwrap());
+        request.message.metadata = Some(std::collections::HashMap::from([(
+            "traceparent".to_string(),
+            serde_json::Value::String(format!(
+                "00-{}-{}-01",
+                sender.trace_id(),
+                sender.span_id()
+            )),
+        )]));
+        adapter
+            .handler()
+            .send_message(&A2AServiceParams::default(), request)
+            .await
+            .unwrap();
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        let receive = spans
+            .iter()
+            .find(|span| span.name == "shadi.a2a.receive")
+            .expect("the receive span was exported");
+        let envs = adapter.trace_envs.lock().unwrap().clone();
+        let [env] = envs.as_slice() else {
+            panic!("the harness ran once: {envs:?}");
+        };
+        let traceparent = env
+            .iter()
+            .find_map(|(name, value)| (name == "TRACEPARENT").then_some(value))
+            .expect("the harness gets a TRACEPARENT");
+        assert_eq!(
+            traceparent,
+            &format!(
+                "00-{}-{}-01",
+                receive.span_context.trace_id(),
+                receive.span_context.span_id()
+            )
+        );
     }
 
     #[tokio::test]
