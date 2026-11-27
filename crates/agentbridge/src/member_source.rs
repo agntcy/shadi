@@ -441,15 +441,28 @@ pub fn find_running_peer_at(
         runtime: runtime.clone(),
     }
     .resolve()?;
+    pick_running_peer(&running, query, at, &runtime.server_addr)
+}
+
+/// [`find_running_peer_at`] over a list already fetched, so a caller asking
+/// about several agents spawns one `dirctl runtime list` rather than one per
+/// agent. `server_addr` only names the runtime in the ambiguity error.
+pub fn pick_running_peer(
+    running: &[CandidateMember],
+    query: &str,
+    at: Option<&A2ALocator>,
+    server_addr: &str,
+) -> Result<Option<CandidateMember>, String> {
     let did = parse_peer_did(query);
     // `resolve` already merged the workloads that say the same thing, so
     // narrowing its answer cannot bring a duplicate back.
     let matches: Vec<CandidateMember> = running
-        .into_iter()
+        .iter()
         .filter(|c| match &did {
             Some(did) => &c.did == did,
             None => matches_local_alias(&c.name, query),
         })
+        .cloned()
         .collect();
     let picked: Vec<&CandidateMember> = match at {
         Some(at) if matches.len() > 1 => matches.iter().filter(|c| has_locator(c, at)).collect(),
@@ -469,8 +482,7 @@ pub fn find_running_peer_at(
                 "Pass --to <did> to pick one (and --a2a-url if a DID runs twice)"
             };
             Err(format!(
-                "ambiguous: {n} running agents match '{query}' at dir-runtime {}:\n{}\n{hint}",
-                runtime.server_addr,
+                "ambiguous: {n} running agents match '{query}' at dir-runtime {server_addr}:\n{}\n{hint}",
                 rows.join("\n")
             ))
         }

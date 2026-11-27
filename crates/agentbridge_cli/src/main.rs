@@ -361,6 +361,12 @@ enum Cmd {
         /// Write a machine-readable run report to this path as JSON.
         #[arg(long)]
         report: Option<String>,
+
+        /// dir-runtime to look `slim:<agent-id>` specs up in when they aren't
+        /// listeners on this host (agents announced with
+        /// `register --dir-announce`).
+        #[arg(long, value_name = "ADDR", default_value = agentbridge::member_source::DEFAULT_RUNTIME_ADDR)]
+        runtime: String,
     },
 }
 
@@ -688,6 +694,7 @@ fn main() {
             assembly,
             session,
             report,
+            runtime,
         } => commands::coordinate::run(commands::coordinate::Options {
             goal: &goal,
             agent_specs: &agents,
@@ -700,6 +707,7 @@ fn main() {
             assembly,
             session: session.clone(),
             report: report.as_deref(),
+            runtime: &runtime,
         }),
     };
 
