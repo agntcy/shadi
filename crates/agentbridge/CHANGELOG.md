@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.5.0...agntcy-agentbridge-v0.6.0) - 2026-11-27
+
+### Added
+
+- [**breaking**] admit previously unknown `did:key` callers to a credential-gated SLIM listener ([#621](https://github.com/agntcy/shadi/pull/621))
+- *(agentbridge)* [**breaking**] name a listener on SLIM after its did:key ([#578](https://github.com/agntcy/shadi/pull/578))
+- *(agentbridge)* name a record agent after its record, and add --name ([#551](https://github.com/agntcy/shadi/pull/551))
+- *(agentbridge)* wire the OID4VP holder and verifier ([#524](https://github.com/agntcy/shadi/pull/524))
+- *(agentbridge)* find running agents through dir-runtime ([#490](https://github.com/agntcy/shadi/pull/490))
+- *(agentbridge)* register --record runs an agent skill from DIR ([#483](https://github.com/agntcy/shadi/pull/483))
+- *(agentbridge)* announce a running register to dir-runtime ([#478](https://github.com/agntcy/shadi/pull/478))
+- *(agentbridge)* [**breaking**] advertise OASF skills, domains and version in the agent card ([#477](https://github.com/agntcy/shadi/pull/477))
+
+### Fixed
+
+- *(agentbridge)* resolve the peer's DID for coordinate's slim: agents ([#605](https://github.com/agntcy/shadi/pull/605))
+- clear the remaining CodeQL secret alerts and bump kube for RUSTSEC-2026-0600 ([#613](https://github.com/agntcy/shadi/pull/613))
+- address CodeQL cleartext-logging alerts and bump url in fuzz lockfiles ([#612](https://github.com/agntcy/shadi/pull/612))
+- *(agentbridge)* let sandboxed Copilot and Cursor run without their own approvals ([#550](https://github.com/agntcy/shadi/pull/550))
+- *(sandbox)* let a Windows sandbox start programs from its working directory ([#554](https://github.com/agntcy/shadi/pull/554))
+- *(agentbridge)* don't pass SHADI's secrets to the harness ([#487](https://github.com/agntcy/shadi/pull/487))
+
+### Other
+
+- *(deps)* build on SLIM 3.5.1 and the a2a-rs 0.4 release ([#614](https://github.com/agntcy/shadi/pull/614))
+- *(shadi_desktop)* [**breaking**] remove the desktop app ([#610](https://github.com/agntcy/shadi/pull/610))
+- *(deps)* lock file maintenance ([#588](https://github.com/agntcy/shadi/pull/588))
+
 ## [0.5.0](https://github.com/agntcy/shadi/compare/agntcy-agentbridge-v0.4.0...agntcy-agentbridge-v0.5.0) - 2026-10-16
 
 ### Added
