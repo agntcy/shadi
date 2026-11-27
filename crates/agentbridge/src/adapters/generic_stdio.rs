@@ -125,7 +125,13 @@ impl GenericStdioAdapter {
         command: &str,
         args: &[&str],
     ) -> Result<Self, CliAdapterError> {
-        let mut child = withhold_shadi_secrets(Command::new(command).args(args))
+        let mut cmd = Command::new(command);
+        cmd.args(args);
+        // A shared harness has no per-request trace environment.
+        for (_, name) in shadi_a2a::TRACE_ENV_VARS {
+            cmd.env_remove(name);
+        }
+        let mut child = withhold_shadi_secrets(&mut cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -377,10 +383,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_spawned_harness_does_not_inherit_shadis_secrets() {
+    fn a_spawned_harness_does_not_inherit_shadis_secrets_or_trace_context() {
         let _guard = crate::env_lock().lock().unwrap();
-        let prior = std::env::var_os("SLIM_HUMAN_SEED");
-        std::env::set_var("SLIM_HUMAN_SEED", "root-secret");
+        let vars = [
+            ("SLIM_HUMAN_SEED", "root-secret"),
+            (
+                "TRACEPARENT",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ),
+            ("TRACESTATE", "listener=1"),
+        ];
+        let prior = vars.map(|(name, value)| {
+            let prior = std::env::var_os(name);
+            std::env::set_var(name, value);
+            (name, prior)
+        });
         // A child speaking the protocol: answer one request with the
         // variable as it sees it.
         let adapter = GenericStdioAdapter::spawn(
@@ -388,16 +405,18 @@ mod tests {
             "/bin/sh",
             &[
                 "-c",
-                r#"read -r _; printf '{"ok":true,"data":"seed=%s"}\n' "${SLIM_HUMAN_SEED-unset}""#,
+                r#"read -r _; printf '{"ok":true,"data":"seed=%s tp=%s ts=%s"}\n' "${SLIM_HUMAN_SEED-unset}" "${TRACEPARENT-unset}" "${TRACESTATE-unset}""#,
             ],
         );
-        match prior {
-            Some(value) => std::env::set_var("SLIM_HUMAN_SEED", value),
-            None => std::env::remove_var("SLIM_HUMAN_SEED"),
+        for (name, value) in prior {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
 
         let out = adapter.unwrap().execute_prompt("ignored").unwrap();
-        assert_eq!(out, "seed=unset");
+        assert_eq!(out, "seed=unset tp=unset ts=unset");
     }
 
     #[test]

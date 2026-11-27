@@ -113,6 +113,7 @@ pub struct LiveA2ATaskAdapter {
     dispatches: Mutex<Vec<LiveTaskDispatchRecord>>,
     policy: Option<Arc<dyn AgentVerifier>>,
     presenter: Option<Presenter>,
+    caller_trace_parent: Option<opentelemetry::Context>,
 }
 
 /// Turns an opaque challenge into a `vp_token`.
@@ -125,7 +126,14 @@ impl LiveA2ATaskAdapter {
             dispatches: Mutex::new(Vec::new()),
             policy: None,
             presenter: None,
+            caller_trace_parent: None,
         }
+    }
+
+    /// Use the caller harness's trace when sending outside an active trace.
+    pub fn with_caller_trace_parent(mut self, parent: opentelemetry::Context) -> Self {
+        self.caller_trace_parent = Some(parent);
+        self
     }
 
     /// Check every task this adapter sends with `policy` as well. The DID
@@ -183,9 +191,9 @@ impl LiveA2ATaskAdapter {
         if let Some(did) = self.config.peer_did.as_deref() {
             span.record("peer.did", did);
         }
-        // A caller harness (Claude Code's Bash tool, `codex exec`) names its
-        // span in TRACEPARENT; a NEXT handoff inside a receive span keeps it.
-        shadi_a2a::set_parent_from_env(&span);
+        if let Some(parent) = &self.caller_trace_parent {
+            shadi_a2a::set_fallback_parent(&span, parent);
+        }
         let _guard = span.enter();
 
         let body = Mutex::new(render_task_message(task));
@@ -807,6 +815,59 @@ mod transport_tests {
         assert!(has("shadi.a2a.send peer.did=did:key:zPeer"), "{lines:#?}");
         assert!(has("shadi.a2a.send a2a.outcome=error"), "{lines:#?}");
         assert!(has("shadi.a2a.send: A2A send failed"), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_send_uses_the_caller_parent_only_without_an_active_trace() {
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, TracerProvider as _,
+        };
+        use opentelemetry_sdk::trace::{InMemorySpanExporterBuilder, SdkTracerProvider};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let exporter = InMemorySpanExporterBuilder::new().build();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+
+        let caller_trace = TraceId::from_bytes([1; 16]);
+        let caller_span = SpanId::from_bytes([2; 8]);
+        let parent = opentelemetry::Context::new().with_remote_span_context(SpanContext::new(
+            caller_trace,
+            caller_span,
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        ));
+        let mut listener = sample_adapter();
+        // Signing must fail before any transport is opened, regardless of the environment.
+        listener.config.agent_id.clear();
+        let caller =
+            LiveA2ATaskAdapter::new(listener.config.clone()).with_caller_trace_parent(parent);
+        assert!(caller.dispatch(sample_task()).is_err());
+        tracing::info_span!("receive").in_scope(|| {
+            assert!(caller.dispatch(sample_task()).is_err());
+        });
+        assert!(listener.dispatch(sample_task()).is_err());
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        let receive = spans.iter().find(|span| span.name == "receive").unwrap();
+        let sends: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "shadi.a2a.send")
+            .collect();
+        assert_eq!(sends.len(), 3);
+        assert_eq!(sends[0].span_context.trace_id(), caller_trace);
+        assert_eq!(sends[0].parent_span_id, caller_span);
+        assert_eq!(
+            sends[1].span_context.trace_id(),
+            receive.span_context.trace_id()
+        );
+        assert_eq!(sends[1].parent_span_id, receive.span_context.span_id());
+        assert_eq!(sends[2].parent_span_id, SpanId::INVALID);
     }
 
     /// A send that never passed its checks leaves no content in a trace.

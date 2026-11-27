@@ -27,6 +27,15 @@ pub(crate) fn live_adapter(config: LiveA2ATaskAdapterConfig) -> LiveA2ATaskAdapt
     agentbridge::live_adapter(config).with_verifier(policy())
 }
 
+/// Caller commands opt in to the harness trace; listener sends do not.
+pub(crate) fn caller_adapter(config: LiveA2ATaskAdapterConfig) -> LiveA2ATaskAdapter {
+    let adapter = live_adapter(config);
+    match shadi_a2a::trace_parent_from_env() {
+        Some(parent) => adapter.with_caller_trace_parent(parent),
+        None => adapter,
+    }
+}
+
 /// Check a message sent without an A2A channel, which is a listener's reply.
 /// `Err` is the reason it may not leave, carrying the evaluation id the
 /// refusal is logged under.

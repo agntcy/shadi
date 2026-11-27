@@ -52,10 +52,8 @@ pub trait CliAdapter: Send + Sync {
 
     /// Same as [`CliAdapter::execute_prompt_in`], run as a child of the trace
     /// that `trace_env` names (`TRACEPARENT`, `TRACESTATE`; see
-    /// `shadi_a2a::trace_context_env`). An adapter that spawns the harness
-    /// replaces any inherited trace variables with these, so the harness
-    /// never joins the trace the listener itself was started in. Default
-    /// implementation ignores the trace.
+    /// `shadi_a2a::trace_context_env`). The default implementation ignores
+    /// `trace_env` and delegates to [`CliAdapter::execute_prompt_in`].
     fn execute_prompt_in_traced(
         &self,
         conversation: &str,

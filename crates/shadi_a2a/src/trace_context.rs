@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use a2a::{Message, SendMessageRequest};
 use opentelemetry::propagation::{Extractor, TextMapPropagator};
 use opentelemetry::trace::TraceContextExt;
+use opentelemetry::Context;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -52,33 +53,33 @@ pub fn set_remote_parent(span: &tracing::Span, message: &Message) {
 pub const TRACE_ENV_VARS: [(&str, &str); 2] =
     [("traceparent", "TRACEPARENT"), ("tracestate", "TRACESTATE")];
 
-/// Make `span` a child of the trace named by `TRACEPARENT` (and
-/// `TRACESTATE`) in this process's environment, which is how a harness such
-/// as Claude Code or Codex hands its trace to the commands it runs.
-///
-/// A valid in-process parent wins: a send made inside a receive span stays
-/// in that span's trace. Call it before the span is first entered.
-pub fn set_parent_from_env(span: &tracing::Span) {
-    set_parent_from_vars(span, |name| std::env::var(name).ok());
+/// Read the valid remote trace parent, if any, passed by a caller harness
+/// in `TRACEPARENT` and `TRACESTATE`. Read at the caller command boundary,
+/// not in a listener or shared send path.
+pub fn trace_parent_from_env() -> Option<Context> {
+    trace_parent_from_vars(|name| std::env::var(name).ok())
 }
 
-fn set_parent_from_vars(span: &tracing::Span, var: impl Fn(&str) -> Option<String>) {
-    if tracing::Span::current()
+fn trace_parent_from_vars(var: impl Fn(&str) -> Option<String>) -> Option<Context> {
+    let fields: HashMap<String, String> = TRACE_ENV_VARS
+        .iter()
+        .filter_map(|(key, name)| Some((key.to_string(), var(name)?)))
+        .collect();
+    let parent = TraceContextPropagator::new().extract_with_context(&Context::new(), &fields);
+    let valid = parent.span().span_context().is_valid();
+    valid.then_some(parent)
+}
+
+/// Set a fallback parent before first entering `span`. An active traced
+/// span takes precedence over the caller's remote context.
+pub fn set_fallback_parent(span: &tracing::Span, parent: &Context) {
+    if !tracing::Span::current()
         .context()
         .span()
         .span_context()
         .is_valid()
     {
-        return;
-    }
-    let fields: HashMap<String, String> = TRACE_ENV_VARS
-        .iter()
-        .filter_map(|(key, name)| Some((key.to_string(), var(name)?)))
-        .collect();
-    let parent =
-        TraceContextPropagator::new().extract_with_context(&opentelemetry::Context::new(), &fields);
-    if parent.span().span_context().is_valid() {
-        let _ = span.set_parent(parent);
+        let _ = span.set_parent(parent.clone());
     }
 }
 
@@ -90,7 +91,10 @@ pub fn trace_context_env() -> Vec<(String, String)> {
     TraceContextPropagator::new().inject_context(&tracing::Span::current().context(), &mut fields);
     TRACE_ENV_VARS
         .iter()
-        .filter_map(|(key, name)| Some((name.to_string(), fields.remove(*key)?)))
+        .filter_map(|(key, name)| {
+            let value = fields.remove(*key)?;
+            (!value.is_empty()).then(|| (name.to_string(), value))
+        })
         .collect()
 }
 
@@ -180,7 +184,7 @@ mod tests {
     fn a_root_send_joins_the_callers_trace_from_env() {
         traced(|| {
             let send = tracing::info_span!("send");
-            set_parent_from_vars(&send, caller_env);
+            set_fallback_parent(&send, &trace_parent_from_vars(caller_env).unwrap());
             let context = send.context();
             let parent = context.span().span_context().trace_id();
             assert_eq!(parent.to_string(), CALLER_TRACE);
@@ -193,7 +197,7 @@ mod tests {
             tracing::info_span!("receive").in_scope(|| {
                 let local = current_trace();
                 let send = tracing::info_span!("send");
-                set_parent_from_vars(&send, caller_env);
+                set_fallback_parent(&send, &trace_parent_from_vars(caller_env).unwrap());
                 assert_eq!(send.in_scope(current_trace), local);
                 assert_ne!(local.to_string(), CALLER_TRACE);
             });
@@ -202,13 +206,10 @@ mod tests {
 
     #[test]
     fn a_malformed_env_traceparent_is_ignored() {
-        traced(|| {
-            let send = tracing::info_span!("send");
-            set_parent_from_vars(&send, |name| {
-                (name == "TRACEPARENT").then(|| "00-not-a-trace".to_string())
-            });
-            assert_ne!(send.in_scope(current_trace).to_string(), CALLER_TRACE);
-        });
+        assert!(trace_parent_from_vars(|name| {
+            (name == "TRACEPARENT").then(|| format!("ff-{CALLER_TRACE}-{CALLER_SPAN}-01"))
+        })
+        .is_none());
     }
 
     #[test]
@@ -219,12 +220,28 @@ mod tests {
                 let (name, value) = env.first().expect("TRACEPARENT");
                 assert_eq!(name, "TRACEPARENT");
                 assert!(value.contains(&current_trace().to_string()), "{value}");
+                assert_eq!(env.len(), 1, "{env:?}");
             });
         });
         assert!(
             trace_context_env().is_empty(),
             "untraced spans name no parent"
         );
+    }
+
+    #[test]
+    fn nonempty_tracestate_is_forwarded_to_the_subprocess() {
+        traced(|| {
+            let parent = trace_parent_from_vars(|name| match name {
+                "TRACESTATE" => Some("vendor=1".to_string()),
+                _ => caller_env(name),
+            })
+            .unwrap();
+            let receive = tracing::info_span!("receive");
+            set_fallback_parent(&receive, &parent);
+            let env = receive.in_scope(trace_context_env);
+            assert!(env.contains(&("TRACESTATE".to_string(), "vendor=1".to_string())));
+        });
     }
 
     /// Only a valid remote trace replaces the local parent.

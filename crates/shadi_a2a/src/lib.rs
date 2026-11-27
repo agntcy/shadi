@@ -12,5 +12,7 @@ pub use channel::{
     GroupMember, A2A_CHALLENGE_METADATA_KEY, A2A_DST_DID_METADATA_KEY, A2A_SRC_DID_METADATA_KEY,
 };
 pub use locator::{A2ABinding, A2ALocator};
-pub use trace_context::{set_parent_from_env, set_remote_parent, trace_context_env, TRACE_ENV_VARS};
+pub use trace_context::{
+    set_fallback_parent, set_remote_parent, trace_context_env, trace_parent_from_env, TRACE_ENV_VARS,
+};
 pub use a2a_slimrpc::{SLIM_SRC_METADATA_KEY, SlimRpcHandler, register_collaborate};

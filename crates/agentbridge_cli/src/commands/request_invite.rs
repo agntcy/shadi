@@ -26,7 +26,7 @@ pub fn run(
         a2a_binding: None,
         peer_did: None,
     };
-    let adapter = super::egress::live_adapter(config);
+    let adapter = super::egress::caller_adapter(config);
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let task = TaskEnvelope {

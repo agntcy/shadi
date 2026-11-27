@@ -412,11 +412,14 @@ dependencies = [
  "agntcy-shadi-identity",
  "agntcy-slim-bindings",
  "agntcy-slim-persistence",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 
