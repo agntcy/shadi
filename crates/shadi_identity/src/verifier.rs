@@ -154,12 +154,23 @@ impl DidKeyVerifier {
             }
         }
 
-        // The key comes from the DID, so a valid signature proves the holder has it.
-        // The signing input is the header and payload exactly as received.
-        let signature = Signature::from_slice(&decode_part(signature_b64, "signature")?)
-            .map_err(|e| reject(format!("bad signature encoding: {e}")))?;
-        key.verify_strict(format!("{header_b64}.{payload_b64}").as_bytes(), &signature)
-            .map_err(|_| reject("signature does not verify against the key in the DID"))?;
+        // The claim checks run before the signature check. They are cheap, so a
+        // token that fails them costs no Ed25519 verification, and none of them
+        // reveals anything the sender did not already put in the token.
+
+        // `aud` comes first, so a token from the other admission mode fails on
+        // its audience, whatever its lifetime. `aud` must be a JSON string exactly
+        // equal to the verifier's audience (`DID_JWT_AUDIENCE` from the public
+        // constructors). A missing, non-string (including an array) or different
+        // value is rejected.
+        match claims.get("aud") {
+            None => return Err(reject("missing aud")),
+            Some(Value::String(aud)) if *aud == self.audience => {}
+            Some(Value::String(_)) => {
+                return Err(reject("aud does not match the expected audience"))
+            }
+            Some(_) => return Err(reject("aud must be a string")),
+        }
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let exp = claims["exp"]
@@ -189,6 +200,13 @@ impl DidKeyVerifier {
             )));
         }
 
+        // The key comes from the DID, so a valid signature proves the holder has it.
+        // The signing input is the header and payload exactly as received.
+        let signature = Signature::from_slice(&decode_part(signature_b64, "signature")?)
+            .map_err(|e| reject(format!("bad signature encoding: {e}")))?;
+        key.verify_strict(format!("{header_b64}.{payload_b64}").as_bytes(), &signature)
+            .map_err(|_| reject("signature does not verify against the key in the DID"))?;
+
         let pubkey_b64 = claims["pubkey"]
             .as_str()
             .ok_or_else(|| reject("missing pubkey claim"))?;
@@ -197,18 +215,6 @@ impl DidKeyVerifier {
             .map_err(|e| reject(format!("bad base64 in pubkey claim: {e}")))?;
         if pubkey.is_empty() {
             return Err(reject("empty pubkey claim"));
-        }
-
-        // `aud` must be a JSON string exactly equal to the verifier's audience
-        // (`DID_JWT_AUDIENCE` from the public constructors). A missing, non-string
-        // (including an array) or different value is rejected.
-        match claims.get("aud") {
-            None => return Err(reject("missing aud")),
-            Some(Value::String(aud)) if *aud == self.audience => {}
-            Some(Value::String(_)) => {
-                return Err(reject("aud does not match the expected audience"))
-            }
-            Some(_) => return Err(reject("aud must be a string")),
         }
 
         Ok(Verified {
@@ -614,6 +620,30 @@ mod tests {
             let msg = reason(any_verifier().verify(&token));
             assert!(msg.contains("aud must be a string"), "{aud}: {msg}");
         }
+    }
+
+    #[test]
+    fn claim_checks_run_before_the_signature_check() {
+        let id = AgentIdentity::generate().unwrap();
+        let other = AgentIdentity::generate().unwrap();
+        let t = now();
+
+        // A closed-mode (stock signer) token: no `aud`, and a lifetime past the
+        // bound. It must fail on `aud`, not on its lifetime or its signature.
+        let mut claims = claims_for(&id.did(), t, t + 3600);
+        claims.as_object_mut().unwrap().remove("aud");
+        let token = mint_with(&other, eddsa_header(), claims);
+        let msg = reason(any_verifier().verify(&token));
+        assert!(msg.contains("missing aud"), "{msg}");
+
+        // An expired token with a bad signature fails on the time check.
+        let token = mint_with(
+            &other,
+            eddsa_header(),
+            claims_for(&id.did(), t - 400, t - 100),
+        );
+        let msg = reason(any_verifier().verify(&token));
+        assert!(msg.contains("expired"), "{msg}");
     }
 
     #[test]
