@@ -10,13 +10,19 @@ use agentbridge::{
         MasRuntime, PatternKind, PreferenceEngine, PreferenceEngineConfig, ResourceEngine,
         ResourceEngineConfig, SemanticEvent, SemanticPayload, UpdateRule,
     },
-    member_source::{find_running_peer_at, resolve_adapter_peer, DirLookupOptions},
+    member_source::{
+        has_locator, parse_peer_did, peer_slim_name, pick_running_peer, runtime_not_running,
+        slim_destination, CandidateMember, DirLookupOptions, MemberSource, RunningAgentSource,
+    },
     open_profile_adapter,
 };
+use shadi_a2a::A2ALocator;
 use shadi_mas::{
     experiments::{LiveA2ATaskAdapter, LiveA2ATaskAdapterConfig},
     TaskAdapter, ToolAdapter, ToolCall, ToolProvider, ToolResult,
 };
+use std::cell::OnceCell;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// One finalized epoch, as the controller scored it.
@@ -204,6 +210,9 @@ pub struct Options<'a> {
     pub assembly: bool,
     pub session: Option<String>,
     pub report: Option<&'a str>,
+    /// dir-runtime to look `slim:<name>` specs up in, for agents announced
+    /// with `register --dir-announce` rather than leased on this host.
+    pub runtime: &'a str,
 }
 
 pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
@@ -219,12 +228,13 @@ pub fn run(opts: Options<'_>) -> anyhow::Result<()> {
         assembly,
         session,
         report,
+        runtime,
     } = opts;
 
     let session = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     println!("session={session}");
 
-    let agents = build_agents(agent_specs, slim_endpoint, &session)?;
+    let agents = build_agents(agent_specs, slim_endpoint, &session, runtime)?;
     if agents.is_empty() {
         anyhow::bail!(
             "no agents specified — use --agents claude-code,cursor-agent,copilot,codex \
@@ -870,45 +880,284 @@ fn truncate(s: &str, max: usize) -> String {
 
 // ─── Agent spec parser ────────────────────────────────────────────────────────
 
-/// The DID of the agent behind a `slim:` spec, looked up the way `delegate`
-/// does: the local lease or published record first, then what dir-runtime
-/// reports, since publishing took DIR access and anything on the host can
-/// announce a workload.
+/// The agent behind a `slim:` spec: the DID the spec names, else the live
+/// lease on this host, else what dir-runtime reports.
+///
+/// One answer carries the DID, the SLIM name to send to and the node the
+/// agent attached to, so the three cannot come from different agents the way
+/// they did when only the DID was looked up here.
 ///
 /// A credential-gated listener challenges the caller, and the caller refuses
-/// to answer a challenge it cannot check the audience of, so without this the
-/// agent drops out of every round. `None` keeps the unauthenticated path
+/// to answer a challenge it cannot check the audience of, so without the DID
+/// the agent drops out of every round. `None` keeps the unauthenticated path
 /// working, which is all a listener without an admission policy needs.
-fn peer_did(agent_id: &str) -> Option<String> {
-    let registry = LocalAdapterRegistry::from_env();
-    let dir = DirLookupOptions {
-        server_addr: std::env::var("DIRECTORY_SERVER")
-            .unwrap_or_else(|_| "prod.gateway.ads.outshift.io:443".to_string()),
-        gh_token: std::env::var("DIRECTORY_CLIENT_GITHUB_TOKEN").ok(),
-        limit: 5,
+fn resolve_peer(
+    agent_id: &str,
+    at: Option<&A2ALocator>,
+    registry: &LocalAdapterRegistry,
+    running: &RunningAgents,
+) -> Option<CandidateMember> {
+    resolve_peer_from(
+        agent_id,
+        || {
+            registry
+                .find_live(agent_id)
+                .map(|records| records.iter().map(|r| r.to_candidate()).collect())
+        },
+        || running.find(agent_id, at),
+        at,
+        &running.runtime.server_addr,
+    )
+}
+
+/// Every agent a dir-runtime reports, asked for at most once.
+///
+/// `dirctl runtime list` is a process spawn that waits up to ten seconds on a
+/// runtime that doesn't answer, and a run asks about each of its `slim:`
+/// agents, so asking per agent costs that again for every one of them.
+struct RunningAgents {
+    runtime: DirLookupOptions,
+    listed: OnceCell<Result<Vec<CandidateMember>, String>>,
+}
+
+impl RunningAgents {
+    fn at(runtime: &str) -> Self {
+        Self {
+            runtime: DirLookupOptions {
+                server_addr: runtime.to_string(),
+                gh_token: None,
+                limit: 0,
+            },
+            listed: OnceCell::new(),
+        }
+    }
+
+    /// The agent `agent_id` names among them, listing them on first use. A
+    /// failed list is kept too: it would fail the same way for every agent.
+    fn find(
+        &self,
+        agent_id: &str,
+        at: Option<&A2ALocator>,
+    ) -> Result<Option<CandidateMember>, String> {
+        let listed = self.listed.get_or_init(|| {
+            RunningAgentSource {
+                skills: Vec::new(),
+                runtime: self.runtime.clone(),
+            }
+            .resolve()
+        });
+        match listed {
+            Ok(running) => pick_running_peer(running, agent_id, at, &self.runtime.server_addr),
+            Err(e) => Err(e.clone()),
+        }
+    }
+}
+
+/// [`resolve_peer`] over lookups passed in: `leased`, this host's live
+/// listeners for the name, and `running`, what a dir-runtime reports. Split
+/// out so the choice between them is exercised without a lease directory or
+/// a `dirctl` on PATH, the way `delegate` splits `resolve_peer_found` out.
+fn resolve_peer_from(
+    agent_id: &str,
+    leased: impl FnOnce() -> Result<Vec<CandidateMember>, String>,
+    running: impl FnOnce() -> Result<Option<CandidateMember>, String>,
+    at: Option<&A2ALocator>,
+    runtime: &str,
+) -> Option<CandidateMember> {
+    // A spec that names the DID has already answered this, and no lookup
+    // can disagree: each one matches on the DID it was given. It carries no
+    // locator, so the listener is addressed by the name its DID gives it,
+    // on the endpoint the run was told to use.
+    if let Some(did) = parse_peer_did(agent_id) {
+        return Some(CandidateMember {
+            name: did.clone(),
+            did,
+            slim_endpoint: None,
+            a2a_url: None,
+            a2a_binding: None,
+            slim_name: None,
+        });
+    }
+
+    // Several live leases of one agent are one answer, not the ambiguity
+    // `resolve_live` reports: they are deduplicated on what makes two
+    // announcements one agent, the same way the dir-runtime list is. Leases
+    // that differ are the ambiguous case, and asking a second source which
+    // of them was meant would answer a question neither was asked.
+    let mut seen = HashSet::new();
+    let leased: Vec<CandidateMember> = match leased() {
+        Ok(candidates) => candidates
+            .into_iter()
+            .filter(|candidate| seen.insert(candidate.identity_key()))
+            .collect(),
+        Err(e) => {
+            eprintln!("[agentbridge] couldn't read this host's leases for '{agent_id}': {e}");
+            Vec::new()
+        }
     };
-    if let Ok(peer) = resolve_adapter_peer(agent_id, &registry, Some(&dir)) {
-        return Some(peer.did);
+    // The spec's `@host:port` picks among several, as `--a2a-url` does for
+    // `delegate`.
+    let picked: Vec<&CandidateMember> = match at {
+        Some(at) if leased.len() > 1 => leased.iter().filter(|c| has_locator(c, at)).collect(),
+        _ => Vec::new(),
+    };
+    match (picked.as_slice(), leased.as_slice()) {
+        ([peer], _) => return Some((*peer).clone()),
+        (_, [peer]) => return Some(peer.clone()),
+        (_, []) => {}
+        (_, several) => {
+            // One agent listening on more than one node: which node is
+            // unknown, but who it is isn't, and the endpoint has a fallback
+            // where the DID and the listener's name have none.
+            if let Some(peer) = one_agent_on_several_nodes(several) {
+                return Some(peer);
+            }
+            let n = several.len();
+            match at {
+                Some(at) => eprintln!(
+                    "[agentbridge] '{agent_id}' is {n} live listeners on this host that are not \
+                     one agent, and {} at {}: name it by its did:key. {NO_DID_CONSEQUENCE}",
+                    if picked.is_empty() {
+                        "none of them is"
+                    } else {
+                        "more than one is"
+                    },
+                    at.display_uri()
+                ),
+                None => eprintln!(
+                    "[agentbridge] '{agent_id}' is {n} live listeners on this host that are not \
+                     one agent: name it by its did:key, or add @host:port to the spec to pick \
+                     one. {NO_DID_CONSEQUENCE}"
+                ),
+            }
+            return None;
+        }
     }
 
     // An agent registered with `--dir-announce` has no local lease, so a
     // name only resolves here.
-    let runtime = DirLookupOptions {
-        server_addr: std::env::var("DIRECTORY_CLIENT_SERVER_ADDRESS")
-            .unwrap_or_else(|_| "localhost:8888".to_string()),
-        gh_token: None,
-        limit: 0,
-    };
-    find_running_peer_at(agent_id, &runtime, None)
-        .ok()
-        .flatten()
-        .map(|peer| peer.did)
+    match running() {
+        // Everything a dir-runtime reports, the workload wrote about itself:
+        // the same claim `delegate` reports before it dispatches, and the
+        // DID this run then puts in a credential's audience. Drop this once
+        // agntcy/shadi#504 checks that the DID answers there.
+        Ok(Some(peer)) => {
+            eprintln!(
+                "[agentbridge] '{}' ({}) was found through dir-runtime {runtime}: its DID and \
+                 address are what it announced about itself, and nothing checks that the DID \
+                 answers there yet",
+                peer.name, peer.did
+            );
+            Some(peer)
+        }
+        Ok(None) => {
+            eprintln!(
+                "[agentbridge] nothing on this host leases '{agent_id}' and dir-runtime \
+                 {runtime} doesn't report it. {NO_DID_CONSEQUENCE}"
+            );
+            None
+        }
+        // No dir-runtime running is normal — it's optional — but with no
+        // lease either there is still no DID, so say so.
+        Err(e) if runtime_not_running(&e) => {
+            eprintln!(
+                "[agentbridge] nothing on this host leases '{agent_id}' and no dir-runtime is \
+                 listening at {runtime} to ask. {NO_DID_CONSEQUENCE}"
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("[agentbridge] couldn't ask dir-runtime {runtime} about '{agent_id}': {e}");
+            eprintln!("[agentbridge] {NO_DID_CONSEQUENCE}");
+            None
+        }
+    }
+}
+
+/// The one agent `leases` all describe, when they differ only in where it is
+/// listening: same DID, same name to send to. Its endpoint is dropped, so the
+/// spec's `@host:port` or the run's `--slim-endpoint` picks the node, which is
+/// the only thing the leases don't agree on.
+fn one_agent_on_several_nodes(leases: &[CandidateMember]) -> Option<CandidateMember> {
+    let first = leases.first()?;
+    let destination = slim_destination(first);
+    leases
+        .iter()
+        .all(|lease| lease.did == first.did && slim_destination(lease) == destination)
+        .then(|| CandidateMember {
+            slim_endpoint: None,
+            a2a_url: None,
+            a2a_binding: None,
+            ..first.clone()
+        })
+}
+
+/// What follows from having no DID for a peer: `register --slim-endpoint`
+/// refuses to start without `--admission-policy`, so the listener challenges,
+/// and a caller that cannot check the challenge's audience doesn't answer.
+/// The run then finalizes without that agent (agntcy/shadi#595).
+const NO_DID_CONSEQUENCE: &str = "It will be called without a credential, which a listener \
+                                  registered with an admission policy refuses, and the run \
+                                  will finalize without it";
+
+/// How to reach a `slim:` agent: the SLIM node to attach to, the name to send
+/// to there, and the DID to prove a credential's audience against.
+#[derive(Debug, PartialEq, Eq)]
+struct SlimTarget {
+    endpoint: String,
+    destination: String,
+    peer_did: Option<String>,
+}
+
+/// Where a `slim:<agent-id>[@<host:port>]` spec dials, given what `peer`
+/// resolved to and the run's `--slim-endpoint` default.
+///
+/// All three come from one `peer`, so a DID is never paired with another
+/// agent's name or node.
+fn slim_target(
+    agent_id: &str,
+    spec_endpoint: Option<&str>,
+    peer: Option<&CandidateMember>,
+    slim_endpoint: &str,
+) -> SlimTarget {
+    SlimTarget {
+        // The spec's `@host:port` is the caller's override; else the node the
+        // agent says it attached to, spelled as it gave it, since the scheme
+        // says whether to use TLS.
+        endpoint: spec_endpoint
+            .map(str::to_string)
+            .or_else(|| peer.and_then(|p| p.slim_endpoint.clone()))
+            .unwrap_or_else(|| slim_endpoint.to_string()),
+        destination: match peer {
+            Some(peer) => slim_destination(peer),
+            // Nothing here knows it: its tool's channel, which a listener
+            // still answers on for one release.
+            None => peer_slim_name(agent_id, None),
+        },
+        peer_did: peer.map(|p| p.did.clone()),
+    }
 }
 
 fn build_agents(
     specs: &[String],
     slim_endpoint: &str,
     session: &str,
+    runtime: &str,
+) -> anyhow::Result<Vec<AgentEntry>> {
+    let registry = LocalAdapterRegistry::from_env();
+    let running = RunningAgents::at(runtime);
+    build_agents_with(specs, slim_endpoint, session, |agent_id, at| {
+        resolve_peer(agent_id, at, &registry, &running)
+    })
+}
+
+/// [`build_agents`], with how a `slim:` spec's peer is resolved passed in, so
+/// a test can build the specs without this host's leases or a `dirctl`.
+fn build_agents_with(
+    specs: &[String],
+    slim_endpoint: &str,
+    session: &str,
+    resolve: impl Fn(&str, Option<&A2ALocator>) -> Option<CandidateMember>,
 ) -> anyhow::Result<Vec<AgentEntry>> {
     let mut agents = Vec::new();
     for spec in specs {
@@ -934,22 +1183,29 @@ fn build_agents(
             (spec.clone(), Arc::new(CliToolAdapter::new(adapter)))
         } else if let Some(rest) = spec.strip_prefix("slim:") {
             // Format: slim:<agent-id>  or  slim:<agent-id>@<host:port>
-            let (agent_id, endpoint) = rest
-                .split_once('@')
-                .map(|(id, ep)| (id.to_string(), ep.to_string()))
-                .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
+            let (agent_id, spec_endpoint) = match rest.split_once('@') {
+                Some((id, ep)) => (id.to_string(), Some(ep.to_string())),
+                None => (rest.to_string(), None),
+            };
+            // It names a node, so it also says which instance of an agent
+            // that runs more than once was meant.
+            let at = spec_endpoint.as_deref().map(A2ALocator::slim);
+            let peer = resolve(&agent_id, at.as_ref());
+            let target = slim_target(
+                &agent_id,
+                spec_endpoint.as_deref(),
+                peer.as_ref(),
+                slim_endpoint,
+            );
             let config = LiveA2ATaskAdapterConfig {
-                endpoint: endpoint.clone(),
+                endpoint: target.endpoint,
                 agent_id: "coordinator".to_string(),
                 local_name: Some(format!("agntcy/shadi/coordinator-{session}-a2a-client")),
                 peer_agent_id: agent_id.clone(),
-                destination: Some(agentbridge::member_source::local_slim_name(
-                    &agent_id,
-                    &agentbridge::local_registry::LocalAdapterRegistry::from_env(),
-                )),
+                destination: Some(target.destination),
                 a2a_url: None,
                 a2a_binding: None,
-                peer_did: peer_did(&agent_id),
+                peer_did: target.peer_did,
             };
             let slim_adapter = Arc::new(SlimToolAdapter {
                 agent_id: agent_id.clone(),
@@ -977,6 +1233,193 @@ mod tests {
     use super::*;
     use agentbridge::mas::UpdateClass;
     use shadi_mas::{SemanticPayload, ToolResult};
+
+    /// A listener as a lease or a dir-runtime workload describes it.
+    fn candidate(name: &str, did: &str, endpoint: Option<&str>, slim_name: Option<&str>) -> CandidateMember {
+        CandidateMember {
+            name: name.to_string(),
+            did: did.to_string(),
+            slim_endpoint: endpoint.map(str::to_string),
+            a2a_url: None,
+            a2a_binding: None,
+            slim_name: slim_name.map(str::to_string),
+        }
+    }
+
+    fn no_leases() -> Result<Vec<CandidateMember>, String> {
+        Ok(Vec::new())
+    }
+
+    fn nothing_running() -> Result<Option<CandidateMember>, String> {
+        Ok(None)
+    }
+
+    /// The bug this guards (agntcy/shadi#595): the spec named the DID, and
+    /// the DID was dropped because nothing here had heard of it, leaving the
+    /// caller unable to check a listener's challenge.
+    #[test]
+    fn a_spec_that_names_a_did_is_addressed_under_it_even_when_nothing_knows_it() {
+        let peer = resolve_peer_from(
+            "did:key:z6MkUnknown",
+            no_leases,
+            nothing_running,
+            None,
+            "localhost:8888",
+        )
+        .expect("the spec named the DID");
+        assert_eq!(peer.did, "did:key:z6MkUnknown");
+        // Its listener's name comes from the DID, and the node is the run's.
+        let target = slim_target("did:key:z6MkUnknown", None, Some(&peer), "127.0.0.1:47357");
+        assert_eq!(target.destination, "agntcy/shadi/z6MkUnknown-a2a");
+        assert_eq!(target.endpoint, "127.0.0.1:47357");
+        assert_eq!(target.peer_did.as_deref(), Some("did:key:z6MkUnknown"));
+    }
+
+    /// A listener's SLIM name is a name for its DID, so the spec may give it
+    /// instead, and no lookup is needed to know whose it is.
+    #[test]
+    fn a_spec_that_names_a_listeners_slim_channel_resolves_to_its_did() {
+        let did = shadi_identity::AgentIdentity::generate().expect("identity").did();
+        let channel = agentbridge::member_source::did_slim_name(&did).expect("slim name");
+        let peer = resolve_peer_from(&channel, no_leases, nothing_running, None, "localhost:8888")
+            .expect("the channel names the DID");
+        assert_eq!(peer.did, did);
+    }
+
+    #[test]
+    fn leases_of_one_agent_are_one_answer_and_leases_that_differ_are_none() {
+        let one = || Ok(vec![candidate("copilot", "did:key:zOne", Some("node:47357"), None)]);
+        let twice = || {
+            Ok(vec![
+                candidate("copilot", "did:key:zOne", Some("node:47357"), None),
+                // The same agent, leased by a second process.
+                candidate("copilot", "did:key:zOne", Some("node:47357"), None),
+            ])
+        };
+        let two_agents = || {
+            Ok(vec![
+                candidate("copilot", "did:key:zOne", Some("node:47357"), None),
+                candidate("copilot", "did:key:zTwo", Some("node:47358"), None),
+            ])
+        };
+        let resolve = |leases: &dyn Fn() -> Result<Vec<CandidateMember>, String>| {
+            resolve_peer_from("copilot", leases, nothing_running, None, "localhost:8888")
+        };
+        assert_eq!(resolve(&one).expect("one lease").did, "did:key:zOne");
+        assert_eq!(
+            resolve(&twice).expect("one agent, leased twice").did,
+            "did:key:zOne",
+            "a second lease of one agent is not an ambiguity"
+        );
+        assert!(
+            resolve(&two_agents).is_none(),
+            "two agents sharing a name have no single DID"
+        );
+    }
+
+    /// The bug this guards: leases are deduplicated on everything that makes
+    /// two announcements one agent, locators included, so one agent on two
+    /// nodes looked like two agents and lost both its DID and the name its
+    /// listener holds — the tool's channel is only answered for one release.
+    #[test]
+    fn one_agent_listening_on_two_nodes_keeps_its_did_and_name() {
+        let two_nodes = || {
+            Ok(vec![
+                candidate(
+                    "copilot",
+                    "did:key:zOne",
+                    Some("node-a:47357"),
+                    Some("agntcy/shadi/zOne-a2a"),
+                ),
+                candidate(
+                    "copilot",
+                    "did:key:zOne",
+                    Some("node-b:47357"),
+                    Some("agntcy/shadi/zOne-a2a"),
+                ),
+            ])
+        };
+        let peer = resolve_peer_from("copilot", two_nodes, nothing_running, None, "localhost:8888")
+            .expect("one agent, two nodes");
+        assert_eq!(peer.did, "did:key:zOne");
+        // Only the node was in doubt, so the run's own endpoint decides it.
+        let target = slim_target("copilot", None, Some(&peer), "run-node:47357");
+        assert_eq!(target.destination, "agntcy/shadi/zOne-a2a");
+        assert_eq!(target.endpoint, "run-node:47357");
+        assert_eq!(target.peer_did.as_deref(), Some("did:key:zOne"));
+    }
+
+    /// The spec's `@host:port` names an instance, not just an address.
+    #[test]
+    fn the_specs_endpoint_picks_between_two_listeners_of_one_name() {
+        let two = || {
+            Ok(vec![
+                candidate("copilot", "did:key:zOne", Some("node:47357"), None),
+                candidate("copilot", "did:key:zTwo", Some("node:47358"), None),
+            ])
+        };
+        let at = A2ALocator::slim("node:47358");
+        let peer = resolve_peer_from("copilot", two, nothing_running, Some(&at), "localhost:8888")
+            .expect("the endpoint picks one");
+        assert_eq!(peer.did, "did:key:zTwo");
+    }
+
+    /// The bug this guards: the DID came from dir-runtime while the name and
+    /// node came from elsewhere, so the task went to the tool's channel on
+    /// the run's own node under a DID announced for another one.
+    #[test]
+    fn an_announced_peer_is_dialled_where_and_as_it_announced() {
+        let announced = candidate(
+            "copilot",
+            "did:key:zAnnounced",
+            Some("https://node-b:47357"),
+            Some("agntcy/shadi/zAnnounced-a2a"),
+        );
+        let peer = resolve_peer_from(
+            "copilot",
+            no_leases,
+            || Ok(Some(announced.clone())),
+            None,
+            "localhost:8888",
+        )
+        .expect("dir-runtime reported it");
+        let target = slim_target("copilot", None, Some(&peer), "127.0.0.1:47357");
+        assert_eq!(target.destination, "agntcy/shadi/zAnnounced-a2a");
+        assert_eq!(
+            target.endpoint, "https://node-b:47357",
+            "the announced node keeps its scheme"
+        );
+        assert_eq!(target.peer_did.as_deref(), Some("did:key:zAnnounced"));
+    }
+
+    #[test]
+    fn a_failed_lookup_leaves_the_tools_channel_and_no_did() {
+        let peer = resolve_peer_from(
+            "copilot",
+            || Err("lease dir unreadable".to_string()),
+            || Err("dirctl not found in PATH".to_string()),
+            None,
+            "localhost:8888",
+        );
+        assert!(peer.is_none());
+        let target = slim_target("copilot", None, None, "127.0.0.1:47357");
+        assert_eq!(target.destination, "agntcy/shadi/copilot-a2a");
+        assert_eq!(target.peer_did, None);
+    }
+
+    /// The spec's `@host:port` outranks what the peer announced.
+    #[test]
+    fn the_specs_endpoint_outranks_the_announced_one() {
+        let peer = candidate(
+            "copilot",
+            "did:key:zOne",
+            Some("node-b:47357"),
+            Some("agntcy/shadi/zOne-a2a"),
+        );
+        let target = slim_target("copilot", Some("node-c:47357"), Some(&peer), "node-a:47357");
+        assert_eq!(target.endpoint, "node-c:47357");
+        assert_eq!(target.destination, "agntcy/shadi/zOne-a2a");
+    }
 
     struct MockTool;
 
@@ -1084,7 +1527,8 @@ mod tests {
             "cursor-agent".to_string(),
             "slim:peer@127.0.0.1:47357".to_string(),
         ];
-        let agents = build_agents(&specs, "127.0.0.1:47357", "test-session").expect("build");
+        let agents = build_agents_with(&specs, "127.0.0.1:47357", "test-session", |_, _| None)
+            .expect("build");
         let ids: Vec<&str> = agents.iter().map(|a| a.id.0.as_str()).collect();
         assert_eq!(
             ids,
@@ -1159,7 +1603,9 @@ mod tests {
     #[test]
     fn build_agents_rejects_unknown_specs() {
         let specs = vec!["totally-unknown".to_string()];
-        assert!(build_agents(&specs, "127.0.0.1:47357", "test-session").is_err());
+        assert!(
+            build_agents_with(&specs, "127.0.0.1:47357", "test-session", |_, _| None).is_err()
+        );
     }
 
     struct ReplyTool(&'static str);
