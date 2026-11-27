@@ -39,14 +39,18 @@ pub enum SlimAuth {
     },
 }
 
-/// Which DID-JWT implementation a DID-mode app signs and verifies with. The
-/// constructors choose it; closed admission never uses [`DidTokens::DidKey`].
+/// Which DID-JWT implementation a DID-mode app signs and verifies with.
+///
+/// Every constructor chooses [`DidTokens::DidKey`], open and closed admission
+/// alike, so the two modes accept each other's tokens and differ only in which
+/// DIDs they admit (agntcy/shadi#630).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DidTokens {
-    /// SLIM's stock JWT signer and JWKS verifier (closed admission).
+    /// SLIM's stock JWT signer and JWKS verifier. No constructor chooses it:
+    /// [`DidKeyVerifier`] refuses its tokens, which carry no `aud`, so it suits
+    /// only a mesh of stock SLIM apps.
     SlimJwt,
-    /// shadi's [`DidKeyProvider`] and [`DidKeyVerifier`] (open admission): the
-    /// listener, and a caller pinned to the peer it dials.
+    /// shadi's [`DidKeyProvider`] and [`DidKeyVerifier`].
     DidKey,
 }
 
@@ -54,8 +58,8 @@ pub enum DidTokens {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlimMembers {
     /// Peers whose `did:key` is in `jwks` (the cryptographic allow-list): each `kid`
-    /// is an admitted DID. Closed admission checks it with SLIM's stock JWT verifier;
-    /// a caller pinned to its peer checks it with [`DidKeyVerifier`].
+    /// is an admitted DID. Closed admission and a caller pinned to its peer both
+    /// check it with [`DidKeyVerifier`].
     AllowList { jwks: String },
     /// Any `did:key` that proves its key, with [`DidKeyVerifier::any_did_key`]. Only
     /// a [`DidTokens::DidKey`] app can admit this.
@@ -63,7 +67,7 @@ pub enum SlimMembers {
 }
 
 const CUSTOM_IDENTITY_NOT_A_CONFIG: &str =
-    "open admission builds a custom SLIM identity, which is not a config pair; create the app with create_app";
+    "DID-JWT tokens (DidTokens::DidKey) build a custom SLIM identity, which is not a config pair; create the app with create_app";
 
 const OPEN_NEEDS_DID_KEY_TOKENS: &str =
     "open admission needs DID-JWT tokens (DidTokens::DidKey); the stock JWT signer cannot admit any did:key";
@@ -80,7 +84,7 @@ impl SlimAuth {
             members: SlimMembers::AllowList {
                 jwks: jwks_from_dids(member_dids)?,
             },
-            tokens: DidTokens::SlimJwt,
+            tokens: DidTokens::DidKey,
         })
     }
 
@@ -97,9 +101,10 @@ impl SlimAuth {
 
     /// Build the `(provider, verifier)` config pair for an app named `name`.
     ///
-    /// Only the stock DID mode (closed admission) and the shared secret have a config
-    /// pair. Open admission fails closed here: it is a custom identity, built by
-    /// [`create_app`], and this never falls back to an allow-list or a shared secret.
+    /// Only the shared secret and [`DidTokens::SlimJwt`] have a config pair.
+    /// [`DidTokens::DidKey`], which every constructor chooses, fails closed here: it
+    /// is a custom identity, built by [`create_app`], and this never falls back to
+    /// stock tokens or a shared secret.
     pub fn configs(
         &self,
         name: &Name,
@@ -553,9 +558,6 @@ const OPEN_NOT_SUPPORTED_BY_ALLOW_LIST: &str =
 /// credential, the caller's own among them. Needs `SHADI_SLIM_AUTH=did` and
 /// `SLIM_HUMAN_SEED`; a missing or malformed `peer_did` is an error, never a
 /// fallback to the env allow-list.
-///
-/// This is an open-admission flow: its tokens are DID-JWTs ([`DidTokens::DidKey`]),
-/// which open listeners accept.
 pub fn require_did_auth_for_peer(
     agent_id: &str,
     peer_did: &str,
@@ -659,18 +661,31 @@ mod tests {
     }
 
     #[test]
-    fn did_configs_are_jwt_provider_and_verifier() {
+    fn stock_jwt_configs_are_the_did_provider_and_member_jwks_verifier() {
         let agent = AgentIdentity::generate().unwrap();
         let peer = AgentIdentity::generate().unwrap();
         let name = Name::from_string("org/ns/app".to_string()).unwrap();
-        let auth = SlimAuth::did(&agent, [agent.did().as_str(), peer.did().as_str()]).unwrap();
+        let dids = [agent.did(), peer.did()];
+        let jwks = jwks_from_dids(dids.iter().map(String::as_str)).unwrap();
+        let pem = agent.to_pkcs8_pem().unwrap();
+        let auth = SlimAuth::Did {
+            signing_pem: pem.clone(),
+            did: agent.did(),
+            members: SlimMembers::AllowList { jwks: jwks.clone() },
+            tokens: DidTokens::SlimJwt,
+        };
+
         let (p, v) = auth.configs(&name).unwrap();
         assert!(matches!(p, IdentityProviderConfig::Jwt { .. }));
         assert!(matches!(v, IdentityVerifierConfig::Jwt { .. }));
+        assert_eq!(p, config::did_provider_config(&pem, &agent.did(), None));
+        assert_eq!(v, config::did_verifier_config(&jwks, None));
     }
 
+    /// agntcy/shadi#630: closed admission signs the same DID-JWTs as open
+    /// admission, so the two accept each other's tokens.
     #[test]
-    fn allow_list_configs_are_the_did_provider_and_member_jwks_verifier() {
+    fn closed_auth_signs_did_jwts_over_the_member_allow_list() {
         let agent = AgentIdentity::generate().unwrap();
         let peer = AgentIdentity::generate().unwrap();
         let name = Name::from_string("org/ns/app".to_string()).unwrap();
@@ -678,16 +693,19 @@ mod tests {
         let auth = SlimAuth::did(&agent, dids.iter().map(String::as_str)).unwrap();
         let jwks = jwks_from_dids(dids.iter().map(String::as_str)).unwrap();
         match &auth {
-            SlimAuth::Did { members, .. } => {
-                assert_eq!(members, &SlimMembers::AllowList { jwks: jwks.clone() })
+            SlimAuth::Did {
+                members, tokens, ..
+            } => {
+                assert_eq!(members, &SlimMembers::AllowList { jwks });
+                assert_eq!(*tokens, DidTokens::DidKey);
             }
             SlimAuth::SharedSecret(_) => panic!("expected DID auth"),
         }
-
-        let (p, v) = auth.configs(&name).unwrap();
-        let pem = agent.to_pkcs8_pem().unwrap();
-        assert_eq!(p, config::did_provider_config(&pem, &agent.did(), None));
-        assert_eq!(v, config::did_verifier_config(&jwks, None));
+        match auth.configs(&name) {
+            Err(IdentityError::Config(msg)) => assert!(msg.contains("create_app"), "{msg}"),
+            Err(e) => panic!("expected a config error, got {e:?}"),
+            Ok(_) => panic!("DID-JWT auth must not yield a stock config pair"),
+        }
     }
 
     #[test]
@@ -1424,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_admission_stays_on_the_stock_jwt_configs() {
+    fn closed_admission_builds_a_did_jwt_app_over_its_allow_list() {
         let agent = AgentIdentity::derive(b"seed", "agent-x").unwrap();
         let member = AgentIdentity::derive(b"seed", "peer").unwrap().did();
         let name = Name::from_string("org/ns/closed".to_string()).unwrap();
@@ -1437,16 +1455,12 @@ mod tests {
                 auth,
                 SlimAuth::Did {
                     members: SlimMembers::AllowList { .. },
-                    tokens: DidTokens::SlimJwt,
+                    tokens: DidTokens::DidKey,
                     ..
                 }
             ));
-            let (p, v) = auth.configs(&name).unwrap();
-            assert!(matches!(p, IdentityProviderConfig::Jwt { .. }));
-            assert!(matches!(v, IdentityVerifierConfig::Jwt { .. }));
         }
 
-        // Closed creates its app through the stock config pair, as before.
         let service = Service::new("shadi-identity-closed-regression-test".to_string());
         let closed_name = Arc::new(name);
         create_app(&service, closed_name, &auths[0]).expect("closed app is created");

@@ -790,3 +790,53 @@ fn closed_listener_admits_its_member_and_refuses_an_unlisted_caller() {
         "an unlisted caller reached the closed listener: {result:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mixed modes: open and closed peers reach each other (agntcy/shadi#630).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_caller_reaches_an_open_listener() {
+    let node = Node::start("closed-to-open");
+    let listener_id = AgentIdentity::generate().unwrap();
+    let listener_host = node.join("listener");
+    let listener = open_listener(&listener_host, &listener_id);
+
+    let caller_id = AgentIdentity::generate().unwrap();
+    let auth = SlimAuth::did(
+        &caller_id,
+        [caller_id.did().as_str(), listener_id.did().as_str()],
+    )
+    .unwrap();
+    let caller_host = node.join("caller");
+    let caller = caller_app(&caller_host, &auth);
+
+    let (caller_session, listener_session) = open_session(&listener, &caller);
+    exchange_one_message_each_way(&caller_session, &listener_session);
+    end_session(&caller, caller_session);
+    end_session(&listener, listener_session);
+}
+
+#[test]
+fn pinned_caller_reaches_a_closed_listener() {
+    let node = Node::start("pinned-to-closed");
+    let listener_id = AgentIdentity::generate().unwrap();
+    let seed = fresh_seed();
+    let caller_did = AgentIdentity::derive(&seed, "caller").unwrap().did();
+    let listener_auth = SlimAuth::did(
+        &listener_id,
+        [listener_id.did().as_str(), caller_did.as_str()],
+    )
+    .unwrap();
+    let listener_host = node.join("listener");
+    let listener = listener_app(&listener_host, &listener_auth);
+
+    let auth = build_did_auth_for_peer(&seed, "caller", &listener_id.did()).unwrap();
+    let caller_host = node.join("caller");
+    let caller = caller_app(&caller_host, &auth);
+
+    let (caller_session, listener_session) = open_session(&listener, &caller);
+    exchange_one_message_each_way(&caller_session, &listener_session);
+    end_session(&caller, caller_session);
+    end_session(&listener, listener_session);
+}
