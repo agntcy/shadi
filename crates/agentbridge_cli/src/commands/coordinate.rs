@@ -1016,18 +1016,20 @@ fn resolve_peer_from(
             match at {
                 Some(at) => eprintln!(
                     "[agentbridge] '{agent_id}' is {n} live listeners on this host that are not \
-                     one agent, and {} at {}: name it by its did:key. {NO_DID_CONSEQUENCE}",
+                     one agent, and {} at {}: name it by its did:key. {}",
                     if picked.is_empty() {
                         "none of them is"
                     } else {
                         "more than one is"
                     },
-                    at.display_uri()
+                    at.display_uri(),
+                    no_did_consequence()
                 ),
                 None => eprintln!(
                     "[agentbridge] '{agent_id}' is {n} live listeners on this host that are not \
                      one agent: name it by its did:key, or add @host:port to the spec to pick \
-                     one. {NO_DID_CONSEQUENCE}"
+                     one. {}",
+                    no_did_consequence()
                 ),
             }
             return None;
@@ -1053,7 +1055,8 @@ fn resolve_peer_from(
         Ok(None) => {
             eprintln!(
                 "[agentbridge] nothing on this host leases '{agent_id}' and dir-runtime \
-                 {runtime} doesn't report it. {NO_DID_CONSEQUENCE}"
+                 {runtime} doesn't report it. {}",
+                no_did_consequence()
             );
             None
         }
@@ -1062,13 +1065,14 @@ fn resolve_peer_from(
         Err(e) if runtime_not_running(&e) => {
             eprintln!(
                 "[agentbridge] nothing on this host leases '{agent_id}' and no dir-runtime is \
-                 listening at {runtime} to ask. {NO_DID_CONSEQUENCE}"
+                 listening at {runtime} to ask. {}",
+                no_did_consequence()
             );
             None
         }
         Err(e) => {
             eprintln!("[agentbridge] couldn't ask dir-runtime {runtime} about '{agent_id}': {e}");
-            eprintln!("[agentbridge] {NO_DID_CONSEQUENCE}");
+            eprintln!("[agentbridge] {}", no_did_consequence());
             None
         }
     }
@@ -1092,13 +1096,19 @@ fn one_agent_on_several_nodes(leases: &[CandidateMember]) -> Option<CandidateMem
         })
 }
 
-/// What follows from having no DID for a peer: `register --slim-endpoint`
-/// refuses to start without `--admission-policy`, so the listener challenges,
-/// and a caller that cannot check the challenge's audience doesn't answer.
-/// The run then finalizes without that agent (agntcy/shadi#595).
-const NO_DID_CONSEQUENCE: &str = "It will be called without a credential, which a listener \
-                                  registered with an admission policy refuses, and the run \
-                                  will finalize without it";
+/// What follows from having no DID for a peer, which the admission mode
+/// decides. Closed: the listener's challenge goes unanswered and the run
+/// finalizes without that agent. Open, or a mode that won't parse:
+/// `require_peer_did_when_open` refuses the spec and no run starts.
+fn no_did_consequence() -> &'static str {
+    match shadi_identity::slim_admission_from_env() {
+        Ok(shadi_identity::SlimAdmission::Closed) => {
+            "It will be called without a credential, which a listener registered with an \
+             admission policy refuses, and the run will finalize without it"
+        }
+        _ => "Open admission has nothing else to pin the call to, so the run will not start",
+    }
+}
 
 /// How to reach a `slim:` agent: the SLIM node to attach to, the name to send
 /// to there, and the DID to prove a credential's audience against.
@@ -1413,6 +1423,24 @@ mod tests {
         let target = slim_target("copilot", None, None, "127.0.0.1:47357");
         assert_eq!(target.destination, "agntcy/shadi/copilot-a2a");
         assert_eq!(target.peer_did, None);
+    }
+
+    /// Having no DID costs different things in the two modes: closed drops
+    /// that one agent and runs on, open refuses the spec and never starts.
+    /// One sentence for both would be wrong half the time.
+    #[test]
+    fn the_consequence_of_no_did_follows_the_admission_mode() {
+        {
+            let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
+            assert!(no_did_consequence().contains("finalize without it"));
+        }
+        {
+            let _env = crate::commands::AdmissionEnv::open();
+            assert!(no_did_consequence().contains("will not start"));
+        }
+        // A mode that can't be read refuses the spec too, whatever the DID is.
+        let _env = crate::commands::AdmissionEnv::set(Some("sideways"), None);
+        assert!(no_did_consequence().contains("will not start"));
     }
 
     /// The spec's `@host:port` outranks what the peer announced.
