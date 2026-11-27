@@ -13,11 +13,18 @@ use crate::CredentialError;
 /// Short enough that a leaked challenge goes stale fast, long enough for one round trip.
 pub const NONCE_TTL_SECS: i64 = 60;
 
+/// The longest retry-after a full store hands out: the wait until the earliest
+/// live nonce expires, which is never more than a nonce's lifetime. Whatever
+/// keeps a busy-parked task around must outlive this wait.
+pub const MAX_RETRY_AFTER_SECS: i64 = NONCE_TTL_SECS;
+
 /// Hard bound on parked nonces; the TTL alone is bounded only by inbound rate.
+/// When full, a slot comes only from a DID holding a spare or from the caller's
+/// own; a new DID is refused until one expires, never handed another's only one.
 pub const MAX_NONCES: usize = 4096;
 
-/// Hard bound on nonces live for one DID. Caps a single peer's share of the
-/// store so flooding it evicts only that peer's own entries, never another's.
+/// Hard bound on nonces live for one DID. Past it a peer's next issue replaces
+/// its own oldest, so flooding from one DID never evicts another's.
 pub const MAX_NONCES_PER_DID: usize = 2;
 
 /// What the listener puts in the challenge. `expires_at` is advisory for the
@@ -58,6 +65,35 @@ fn rejected() -> CredentialError {
     CredentialError::NonceNotConsumable("challenge nonce is not valid".into())
 }
 
+// Names no DID or nonce, for the same reason as `rejected`. The wait is until
+// the earliest live nonce expires, the soonest a slot can free on its own.
+fn exhausted(map: &HashMap<String, Issued>, now: i64) -> CredentialError {
+    let earliest = map.values().map(|v| v.expires_at).min().unwrap_or(now);
+    let wait = earliest.saturating_sub(now).clamp(1, MAX_RETRY_AFTER_SECS);
+    CredentialError::ChallengeCapacity {
+        retry_after_secs: wait.unsigned_abs(),
+    }
+}
+
+/// The nonce a full store gives up for `did`: the oldest held by a DID that
+/// has a newer one, else `did`'s own oldest. `None` means every slot is some
+/// other peer's only challenge.
+fn backstop_victim(map: &HashMap<String, Issued>, did: &str) -> Option<String> {
+    let mut held: HashMap<&str, usize> = HashMap::new();
+    for v in map.values() {
+        *held.entry(v.did.as_str()).or_default() += 1;
+    }
+    map.iter()
+        .filter(|(_, v)| held[v.did.as_str()] > 1)
+        .min_by_key(|(_, v)| v.seq)
+        .or_else(|| {
+            map.iter()
+                .filter(|(_, v)| v.did == did)
+                .min_by_key(|(_, v)| v.seq)
+        })
+        .map(|(k, _)| k.clone())
+}
+
 impl NonceStore {
     /// `aud` is this listener's own DID, the only audience it will accept.
     /// Every challenge is stamped with `aud` and `dcql_query`.
@@ -76,6 +112,9 @@ impl NonceStore {
     }
 
     /// `did` is the peer the challenge is for; only it can consume the nonce.
+    /// A full store evicts per [`MAX_NONCES`]; a new DID that would cost another
+    /// peer its only challenge gets [`CredentialError::ChallengeCapacity`] and
+    /// the store is left as it was.
     pub fn issue(&self, task_id: &str, did: &str, now: i64) -> Result<Challenge, CredentialError> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes)
@@ -104,14 +143,8 @@ impl NonceStore {
         // Backstop: the sweep and the per-DID evictions above leave the map at
         // most at the cap, so one eviction makes room.
         if g.map.len() >= MAX_NONCES {
-            if let Some(oldest) = g
-                .map
-                .iter()
-                .min_by_key(|(_, v)| v.seq)
-                .map(|(k, _)| k.clone())
-            {
-                g.map.remove(&oldest);
-            }
+            let victim = backstop_victim(&g.map, did).ok_or_else(|| exhausted(&g.map, now))?;
+            g.map.remove(&victim);
         }
         let seq = g.next_seq;
         g.next_seq += 1;
@@ -223,25 +256,138 @@ mod tests {
         assert!(!err.to_string().contains("nope-nonce"));
     }
 
-    #[test]
-    fn cap_evicts_oldest() {
-        let s = store();
-        let first = s.issue("t", "d0", 0).unwrap();
-        let second = s.issue("t", "d1", 0).unwrap();
-        for i in 2..=MAX_NONCES {
-            s.issue("t", &format!("d{i}"), 0).unwrap();
-        }
-        assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
-        assert!(s.consume(&first.nonce, "t", "d0", 1).is_err());
-        assert!(s.consume(&second.nonce, "t", "d1", 1).is_ok());
+    /// `n` DIDs `{prefix}0..`, one nonce each.
+    fn one_each(s: &NonceStore, prefix: &str, n: usize, now: i64) -> Vec<Challenge> {
+        (0..n)
+            .map(|i| s.issue("t", &format!("{prefix}{i}"), now).unwrap())
+            .collect()
+    }
+
+    fn snapshot(s: &NonceStore) -> (Vec<(String, String, u64)>, u64) {
+        let g = s.inner.lock().unwrap();
+        let mut entries: Vec<_> = g
+            .map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.did.clone(), v.seq))
+            .collect();
+        entries.sort();
+        (entries, g.next_seq)
     }
 
     #[test]
-    fn expired_entries_reclaimed_on_issue() {
+    fn full_store_refuses_a_new_did_and_keeps_every_peer() {
         let s = store();
-        for i in 0..MAX_NONCES {
-            s.issue("t", &format!("d{i}"), 0).unwrap();
+        let all = one_each(&s, "d", MAX_NONCES, 0);
+        let err = s.issue("t", "newcomer", 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CredentialError::ChallengeCapacity {
+                    retry_after_secs: 60
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
+        assert!(s.consume(&all[0].nonce, "t", "d0", 1).is_ok());
+    }
+
+    fn retry_after(err: CredentialError) -> u64 {
+        match err {
+            CredentialError::ChallengeCapacity { retry_after_secs } => retry_after_secs,
+            other => panic!("expected a capacity refusal, got {other}"),
         }
+    }
+
+    #[test]
+    fn refusal_says_when_the_earliest_slot_frees() {
+        let s = store();
+        one_each(&s, "d", MAX_NONCES, 0);
+        let err = s.issue("t", "newcomer", 10).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "challenge capacity exhausted, retry in 50s"
+        );
+        assert_eq!(retry_after(err), 50);
+        let last = NONCE_TTL_SECS - 1;
+        assert_eq!(retry_after(s.issue("t", "newcomer", last).unwrap_err()), 1);
+    }
+
+    #[test]
+    fn refusal_wait_is_clamped_to_the_ttl() {
+        let s = store();
+        one_each(&s, "d", MAX_NONCES, 1_000);
+        let skewed = s.issue("t", "newcomer", 0).unwrap_err();
+        assert_eq!(retry_after(skewed), NONCE_TTL_SECS.unsigned_abs());
+    }
+
+    #[test]
+    fn full_store_evicts_the_oldest_spare_nonce() {
+        let s = store();
+        let single = s.issue("t", "single", 0).unwrap();
+        let m2_old = s.issue("t", "m2", 0).unwrap();
+        let m1_old = s.issue("t", "m1", 0).unwrap();
+        let m1_new = s.issue("t", "m1", 0).unwrap();
+        let m2_new = s.issue("t", "m2", 0).unwrap();
+        one_each(&s, "d", MAX_NONCES - 5, 0);
+
+        let c = s.issue("t", "newcomer", 0).unwrap();
+        assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
+        assert!(s.consume(&m2_old.nonce, "t", "m2", 1).is_err());
+        for (n, did) in [
+            (&m2_new, "m2"),
+            (&m1_old, "m1"),
+            (&m1_new, "m1"),
+            (&single, "single"),
+            (&c, "newcomer"),
+        ] {
+            assert!(s.consume(&n.nonce, "t", did, 1).is_ok(), "{did}");
+        }
+    }
+
+    #[test]
+    fn full_store_lets_a_known_did_replace_its_own_nonce() {
+        let s = store();
+        let all = one_each(&s, "d", MAX_NONCES, 0);
+        let again = s.issue("t", "d7", 0).unwrap();
+        assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
+        assert!(s.consume(&all[7].nonce, "t", "d7", 1).is_err());
+        assert!(s.consume(&again.nonce, "t", "d7", 1).is_ok());
+        assert!(s.consume(&all[0].nonce, "t", "d0", 1).is_ok());
+    }
+
+    #[test]
+    fn refusal_leaves_the_store_unchanged_until_a_slot_expires() {
+        let s = store();
+        s.issue("t", "early", 0).unwrap();
+        one_each(&s, "d", MAX_NONCES - 1, 10);
+        let before = snapshot(&s);
+        let err = s.issue("t", "newcomer", 5).unwrap_err();
+        assert_eq!(retry_after(err), 55);
+        assert_eq!(snapshot(&s), before);
+
+        let now = NONCE_TTL_SECS + 1;
+        let c = s.issue("t", "newcomer", now).unwrap();
+        assert_eq!(s.inner.lock().unwrap().map.len(), MAX_NONCES);
+        assert!(s.consume(&c.nonce, "t", "newcomer", now).is_ok());
+    }
+
+    #[test]
+    fn refusal_names_neither_did_nor_nonce() {
+        let s = store();
+        let all = one_each(&s, "d", MAX_NONCES, 0);
+        let msg = s
+            .issue("t", "did:key:zNewcomer", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(!msg.contains("zNewcomer"), "{msg}");
+        assert!(all.iter().all(|c| !msg.contains(&c.nonce)), "{msg}");
+    }
+
+    #[test]
+    fn expired_slots_admit_a_new_did() {
+        let s = store();
+        one_each(&s, "d", MAX_NONCES, 0);
         let now = NONCE_TTL_SECS + 1;
         let c = s.issue("t", "d", now).unwrap();
         assert_eq!(s.inner.lock().unwrap().map.len(), 1);

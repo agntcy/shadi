@@ -277,7 +277,7 @@ impl SlimShellState {
             None => shadi_identity::SlimAuth::SharedSecret(self.shared_secret()?),
         };
         let app = shadi_identity::create_app(self.client_service_mut(), local_name.clone(), &auth)
-            .map_err(format_slim_error)?;
+            .map_err(|e| e.to_string())?;
 
         app.subscribe(local_name, Some(connection_id))
             .map_err(format_slim_error)?;

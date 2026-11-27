@@ -42,6 +42,10 @@ pub enum CredentialError {
     /// [`Self::Refused`]; only the type tells a caller to re-challenge.
     #[error("refused: {0}")]
     NonceNotConsumable(String),
+    /// The nonce store is full of other peers' only challenges. Retriable:
+    /// a slot frees within `retry_after_secs`. Names no DID or nonce.
+    #[error("challenge capacity exhausted, retry in {retry_after_secs}s")]
+    ChallengeCapacity { retry_after_secs: u64 },
 }
 
 /// `s` made safe to put in an error: control characters dropped, cut to 64

@@ -901,6 +901,13 @@ fn build_agents(
                 .split_once('@')
                 .map(|(id, ep)| (id.to_string(), ep.to_string()))
                 .unwrap_or_else(|| (rest.to_string(), slim_endpoint.to_string()));
+            // The config below names no peer DID, so under open admission there
+            // is nothing to pin: refuse now rather than at the first dispatch.
+            shadi_mas::experiments::require_peer_did_when_open(
+                None,
+                &format!("coordinate slim:{agent_id}"),
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
             let config = LiveA2ATaskAdapterConfig {
                 endpoint: endpoint.clone(),
                 agent_id: "coordinator".to_string(),
@@ -1040,6 +1047,7 @@ mod tests {
 
     #[test]
     fn build_agents_constructs_native_and_slim_specs() {
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
         let specs = vec![
             "claude-code".to_string(),
             "copilot".to_string(),
@@ -1117,6 +1125,32 @@ mod tests {
         assert_eq!(executed["mean_reference_gap"], 2.0);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_agents_refuses_a_slim_spec_without_a_peer_did_under_open_admission() {
+        let specs = vec![
+            "claude-code".to_string(),
+            "slim:peer@127.0.0.1:47357".to_string(),
+        ];
+        {
+            let _env = crate::commands::AdmissionEnv::open();
+            let err = build_agents(&specs, "127.0.0.1:47357", "test-session")
+                .err()
+                .expect("open admission needs a peer DID");
+            let err = err.to_string();
+            assert!(
+                err.starts_with("coordinate slim:peer: open admission"),
+                "{err}"
+            );
+            assert!(err.contains("did:key"), "{err}");
+            // Specs that never dial a peer are unaffected.
+            let local = vec!["claude-code".to_string()];
+            assert!(build_agents(&local, "127.0.0.1:47357", "test-session").is_ok());
+        }
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
+        let agents = build_agents(&specs, "127.0.0.1:47357", "test-session").expect("closed");
+        assert_eq!(agents.len(), 2);
     }
 
     #[test]

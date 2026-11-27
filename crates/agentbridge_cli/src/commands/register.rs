@@ -9,8 +9,7 @@ use a2a::*;
 use a2a_grpc::GrpcHandler;
 use a2a_pb::proto::a2a_service_server::A2aServiceServer;
 use a2a_server::{
-    AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
-    ServiceParams as A2AServiceParams,
+    AgentExecutor, DefaultRequestHandler, RequestHandler, ServiceParams as A2AServiceParams,
 };
 use agent_secrets::{AgentVerifier, RequestContext, SessionContext};
 use agent_transport_slim::client_access::ClientAccess;
@@ -18,6 +17,9 @@ use agentbridge::{
     adapters::{
         generic_stdio::GenericStdioAdapter,
         profile::{bundled_profile_ids, load_profile, ProfileAdapter},
+    },
+    bounded_task_store::{
+        BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY, PARKED_OWNER_METADATA_KEY,
     },
     dir_registry::DirError,
     local_registry::{LocalAdapterRecord, LocalAdapterRegistry},
@@ -497,6 +499,8 @@ struct AgentBridgeExecutor {
     verbose: bool,
     egress: Arc<dyn AgentVerifier>,
     gate: Option<Arc<CredentialGate>>,
+    /// Bind each admitted message to the verified peer of its SLIM session.
+    session_bound: bool,
 }
 
 /// What a credential-gated listener needs, built once at startup.
@@ -531,19 +535,61 @@ fn credential_gate(
         // nothing else — anyone can mint one for free. Refuse to start
         // rather than let that pass for an unconfigured listener.
         if allowed_human_dids().is_empty() {
-            return Err(
-                "refusing to start: no --admission-policy and SHADI_MEMBER_HUMAN_DIDS is unset \
-                 — this listener would admit any caller with no credential and no human binding. \
-                 Set --admission-policy, or set SHADI_MEMBER_HUMAN_DIDS to the human DIDs this \
-                 listener admits."
-                    .to_string(),
-            );
+            return Err(no_message_gate_refusal());
         }
         return Ok(None);
     };
     CredentialGate::load(path, listener_did)
         .map(Arc::new)
         .map(Some)
+}
+
+/// Whose SLIM session a message arrived on, as far as admission cares.
+///
+/// A DID proof only says who signed the payload, not who sent it, so on a
+/// session-bound listener the signer must also be the verified peer of the
+/// session the message came in on; otherwise a member could relay another
+/// agent's proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionPeer {
+    /// The listener is not session-bound (HTTP, JSON-RPC, gRPC, or SLIM
+    /// without open admission): there is no session peer to compare against.
+    NotBound,
+    /// Session-bound, but the request carried no verified peer subject.
+    PeerUnknown,
+    /// Session-bound, with the peer subject the transport verified.
+    Peer(String),
+}
+
+impl SessionPeer {
+    /// The mode for one request. A listener that is not session-bound never
+    /// looks at the params, so a caller cannot spoof the key where the
+    /// transport does not set it.
+    fn from_service_params(session_bound: bool, params: &A2AServiceParams) -> Self {
+        if !session_bound {
+            return Self::NotBound;
+        }
+        params
+            .get(shadi_a2a::SLIM_PEER_SUBJECT_METADATA_KEY)
+            .and_then(|values| values.first())
+            .filter(|subject| !subject.is_empty())
+            .map_or(Self::PeerUnknown, |subject| Self::Peer(subject.clone()))
+    }
+}
+
+/// Why a message proven by `did` may not run on the SLIM session of
+/// `session_peer`, or `None` when it may.
+fn relayed_reason(session_peer: &SessionPeer, did: &str) -> Option<String> {
+    match session_peer {
+        SessionPeer::NotBound => None,
+        SessionPeer::PeerUnknown => Some(format!(
+            "message proven by {did} arrived over a SLIM session with no verified peer"
+        )),
+        SessionPeer::Peer(peer) if peer == did => None,
+        SessionPeer::Peer(peer) => Some(format!(
+            "message proven by {did} arrived over the SLIM session of {peer}"
+        )),
+    }
 }
 
 fn preview(s: &str, max: usize) -> String {
@@ -682,6 +728,28 @@ struct HandoffTarget {
     slim_endpoint: Option<String>,
 }
 
+impl HandoffTarget {
+    /// Whether the send goes over SLIM, as opposed to a unicast A2A locator.
+    /// Same rule as the transport's: no locator, or a SLIM-binding one.
+    fn dials_slim(&self) -> bool {
+        self.a2a_url.is_none() || !self.a2a_binding.unwrap_or(A2ABinding::Grpc).is_unicast()
+    }
+}
+
+/// Refuse a `NEXT` hop over SLIM to a peer whose DID is unknown, under open
+/// admission, where the DID is the only thing there is to pin. `peer_did` is
+/// `None` for a lease with an empty DID and for the `--slim-endpoint` fallback.
+/// A unicast hop dials no SLIM, so it is unaffected.
+fn require_handoff_peer_did(target: &HandoffTarget, to: &str) -> Result<(), String> {
+    if !target.dials_slim() {
+        return Ok(());
+    }
+    shadi_mas::experiments::require_peer_did_when_open(
+        target.peer_did.as_deref(),
+        &format!("NEXT handoff to {to}"),
+    )
+}
+
 /// Resolve a `NEXT` peer from on-host leases. Prefer the unicast locator when
 /// the lease has one so an HTTP-only collab can token-pass without a SLIM node.
 fn resolve_handoff_target(
@@ -758,6 +826,7 @@ fn dispatch_peer_handoff(
 ) -> Result<(), String> {
     let registry = LocalAdapterRegistry::from_env();
     let target = resolve_handoff_target(to, slim_fallback, &registry)?;
+    require_handoff_peer_did(&target, to)?;
     let adapter = super::egress::live_adapter(LiveA2ATaskAdapterConfig {
         endpoint: target.slim_endpoint.clone().unwrap_or_default(),
         agent_id: from.to_string(),
@@ -809,7 +878,11 @@ impl AgentExecutor for AgentBridgeExecutor {
             shadi_a2a::set_remote_parent(&span, message);
         }
         let _guard = span.enter();
-        let refuse_with = |state, reason: String, challenge: Option<&str>| {
+        let refuse_with = |state,
+                           reason: String,
+                           challenge: Option<&str>,
+                           retry_after_secs: Option<u64>,
+                           owner: Option<&str>| {
             let reason = format!("{reason} ({evaluation_id})");
             terminal_task(
                 task_id.clone(),
@@ -817,9 +890,11 @@ impl AgentExecutor for AgentBridgeExecutor {
                 state,
                 reason,
                 challenge,
+                retry_after_secs,
+                owner,
             )
         };
-        let refuse = |state, reason: String| refuse_with(state, reason, None);
+        let refuse = |state, reason: String| refuse_with(state, reason, None, None, None);
         if let Some(message) = ctx.message.as_ref() {
             if let Some(reason) = wrong_destination_reason(self.agent_did.as_deref(), message) {
                 span.record("a2a.outcome", "rejected");
@@ -827,11 +902,11 @@ impl AgentExecutor for AgentBridgeExecutor {
                 return refuse(TaskState::Rejected, reason);
             }
         }
-        let (raw, sender_did) = match ctx
-            .message
-            .as_ref()
-            .map(|m| admit_message(m, self.gate.as_deref(), &task_id))
-        {
+        let (raw, sender_did) = match ctx.message.as_ref().map(|m| {
+            let session_peer =
+                SessionPeer::from_service_params(self.session_bound, &ctx.service_params);
+            admit_message(m, self.gate.as_deref(), &task_id, &session_peer)
+        }) {
             Some(MessageAdmission::Proven {
                 did,
                 human_did,
@@ -847,12 +922,23 @@ impl AgentExecutor for AgentBridgeExecutor {
                 span.record("peer.did", did.as_str());
                 (payload, Some(did))
             }
-            Some(MessageAdmission::AuthRequired { reason, challenge }) => {
+            Some(MessageAdmission::AuthRequired {
+                reason,
+                challenge,
+                retry_after_secs,
+                owner,
+            }) => {
                 // Non-terminal: the client re-proves and sends again with this
                 // task id, and the stored task carries on from here.
                 span.record("a2a.outcome", "auth_required");
                 tracing::info!(%reason, "parked a task until the sender proves its DID");
-                return refuse_with(TaskState::AuthRequired, reason, challenge.as_deref());
+                return refuse_with(
+                    TaskState::AuthRequired,
+                    reason,
+                    challenge.as_deref(),
+                    retry_after_secs,
+                    owner.as_deref(),
+                );
             }
             Some(MessageAdmission::Forged { reason }) => {
                 span.record("a2a.outcome", "rejected");
@@ -1047,6 +1133,20 @@ struct AgentBridgeRequestHandler {
     slim_endpoint: Option<String>,
     a2a_listen: Option<String>,
     a2a_binding: A2ABinding,
+    session_bound: bool,
+}
+
+/// Task reads and control (`get_task`, `list_tasks`, `cancel_task`,
+/// `subscribe_to_task`) never pass through the executor's admission gate, so on
+/// a session-bound listener any peer admitted at the SLIM level could read,
+/// list, cancel or follow other callers' tasks. Refuse them there.
+fn refuse_task_access(session_bound: bool, method: &str) -> Result<(), A2AError> {
+    if session_bound {
+        return Err(A2AError::unsupported_operation(format!(
+            "{method}: task access is unavailable on a session-bound listener"
+        )));
+    }
+    Ok(())
 }
 
 impl AgentBridgeRequestHandler {
@@ -1061,6 +1161,7 @@ impl AgentBridgeRequestHandler {
         verbose: bool,
         egress: Arc<dyn AgentVerifier>,
         gate: Option<Arc<CredentialGate>>,
+        session_bound: bool,
     ) -> Self {
         let agent_did = agent_did.filter(|did| !did.is_empty()).map(str::to_string);
         Self {
@@ -1072,8 +1173,9 @@ impl AgentBridgeRequestHandler {
                     verbose,
                     egress,
                     gate,
+                    session_bound,
                 },
-                InMemoryTaskStore::new(),
+                BoundedTaskStore::new(DEFAULT_TASK_CAPACITY, DEFAULT_PARKED_TTL),
             ),
             ready,
             agent_id: agent_id.to_string(),
@@ -1081,6 +1183,7 @@ impl AgentBridgeRequestHandler {
             slim_endpoint: slim_endpoint.map(str::to_string),
             a2a_listen: a2a_listen.map(str::to_string),
             a2a_binding,
+            session_bound,
         }
     }
 }
@@ -1115,6 +1218,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
         params: &A2AServiceParams,
         req: GetTaskRequest,
     ) -> Result<Task, A2AError> {
+        refuse_task_access(self.session_bound, "get_task")?;
         self.inner.get_task(params, req).await
     }
 
@@ -1123,6 +1227,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
         params: &A2AServiceParams,
         req: ListTasksRequest,
     ) -> Result<ListTasksResponse, A2AError> {
+        refuse_task_access(self.session_bound, "list_tasks")?;
         self.inner.list_tasks(params, req).await
     }
 
@@ -1131,6 +1236,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
         params: &A2AServiceParams,
         req: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
+        refuse_task_access(self.session_bound, "cancel_task")?;
         self.inner.cancel_task(params, req).await
     }
 
@@ -1139,6 +1245,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
         params: &A2AServiceParams,
         req: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+        refuse_task_access(self.session_bound, "subscribe_to_task")?;
         self.inner.subscribe_to_task(params, req).await
     }
 
@@ -1317,11 +1424,80 @@ fn require_sandbox_enforced(agent_id: &str, endpoint: &str) -> Result<(), String
     ))
 }
 
+/// The admission mode this listener starts under, from `SHADI_SLIM_ADMISSION`.
+///
+/// Read before any SLIM connection. A bad value, or `open` together with
+/// `SLIM_MEMBER_DIDS`, stops startup (see [`shadi_identity::slim_admission_from_env`]).
+/// `open` is accepted: the transport then admits any `did:key`, so the
+/// message-level gate is the admission check (see [`open_admission_gate_check`]).
+fn listener_admission() -> Result<shadi_identity::SlimAdmission, String> {
+    shadi_identity::slim_admission_from_env().map_err(|e| format!("SLIM admission error: {e}"))
+}
+
+/// Whether the SLIM listener binds each admitted message to the verified peer of
+/// its session. Only open admission does: under closed admission the
+/// `SLIM_MEMBER_DIDS` allow-list already decides who may connect. The HTTP,
+/// JSON-RPC and gRPC listeners never call this: their peer comes from
+/// caller-supplied headers, so they are never session-bound.
+fn listener_session_bound(admission: shadi_identity::SlimAdmission) -> bool {
+    admission == shadi_identity::SlimAdmission::Open
+}
+
+/// The refusal for a listener with neither message gate: no `--admission-policy`
+/// and no `SHADI_MEMBER_HUMAN_DIDS`.
+fn no_message_gate_refusal() -> String {
+    "refusing to start: no --admission-policy and SHADI_MEMBER_HUMAN_DIDS is unset \
+     — this listener would admit any caller with no credential and no human binding. \
+     Set --admission-policy, or set SHADI_MEMBER_HUMAN_DIDS to the human DIDs this \
+     listener admits."
+        .to_string()
+}
+
+/// Open admission admits any `did:key` at the transport, so the message-level gate
+/// is the only admission check. Refuse before SLIM is connected, and before the
+/// listener announces itself, when neither gate is configured. Closed admission is
+/// not checked here: [`credential_gate`] still runs after the app exists, as before.
+fn open_admission_gate_check(
+    admission: shadi_identity::SlimAdmission,
+    has_policy: bool,
+    human_dids: usize,
+) -> Result<(), String> {
+    if admission == shadi_identity::SlimAdmission::Open && !has_policy && human_dids == 0 {
+        return Err(no_message_gate_refusal());
+    }
+    Ok(())
+}
+
+/// How many DIDs `SLIM_MEMBER_DIDS` lists (comma-separated, blanks skipped).
+fn member_did_count() -> usize {
+    std::env::var("SLIM_MEMBER_DIDS")
+        .map(|v| v.split(',').filter(|s| !s.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// The startup line stating the effective admission mode. Only the count of
+/// allow-listed DIDs, never the DIDs.
+fn admission_banner(mode: shadi_identity::SlimAdmission, member_count: usize) -> String {
+    match mode {
+        shadi_identity::SlimAdmission::Closed => {
+            let noun = if member_count == 1 { "DID" } else { "DIDs" };
+            format!("SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, {member_count} {noun})")
+        }
+        shadi_identity::SlimAdmission::Open => {
+            "SLIM admission: open (any did:key may connect; the admission gate decides)".to_string()
+        }
+    }
+}
+
 /// Start a SLIM A2A listener that forwards incoming tasks to `adapter`.
 ///
 /// Listens indefinitely under `agntcy/shadi/<agent_id>-a2a` until Ctrl-C.
-/// Coding-agent adapters authenticate via DID/keys only — see
-/// [`shadi_identity::require_did_auth_from_env`].
+/// Coding-agent adapters authenticate via DID/keys only: closed admission through
+/// [`shadi_identity::require_did_auth_from_env`], open admission through
+/// [`shadi_identity::SlimAuth::did_open`]. Startup checks run in this order: the
+/// sandbox; then [`listener_admission`] and, under open admission,
+/// [`open_admission_gate_check`], both before connecting to SLIM; then the SLIM
+/// connection and app ([`open_listener_app`]); then `credential_gate`.
 fn run_slim_listener(
     agent_id: &str,
     adapter: Arc<dyn CliAdapter>,
@@ -1333,6 +1509,16 @@ fn run_slim_listener(
     verbose: bool,
 ) -> Result<(), String> {
     require_sandbox_enforced(agent_id, endpoint)?;
+    // Before any SLIM connection, so a refused mode leaves nothing half-started.
+    // (`credential_gate` below stays where it was: it needs the listener's DID.)
+    let admission = listener_admission()?;
+    // Open admission is only as strict as its message gate, so refuse a listener
+    // without one before it connects or announces itself.
+    open_admission_gate_check(
+        admission,
+        admission_policy.is_some(),
+        allowed_human_dids().len(),
+    )?;
 
     let access = ClientAccess::from_env(Some(agent_id))?;
 
@@ -1351,15 +1537,31 @@ fn run_slim_listener(
         name: agent_name,
         name_ref,
         tool_name_ref,
-    } = open_listener_app(&service, agent_id, connection_id)?;
+    } = open_listener_app(&service, agent_id, connection_id, admission)?;
 
     // Security posture: incoming A2A tasks are executed by the local CLI tool,
     // constrained by whatever SHADI sandbox policy wraps this process (required
-    // above). Sandboxing bounds what a task CAN do; SLIM_MEMBER_DIDS still
-    // decides WHO may send one — only expose this listener to trusted SLIM peers.
+    // above). Sandboxing bounds what a task CAN do. Which DIDs may open a SLIM
+    // session depends on the admission mode. Closed (the default): SLIM_MEMBER_DIDS
+    // is the transport allow-list passed to SLIM's create_app (see
+    // shadi_identity::did_auth_from_env). Open: any did:key that proves its key may
+    // connect, so the transport admits anyone and the message-level check below is
+    // the only gate. That check is the OID4VP gate when --admission-policy is given
+    // (built by credential_gate), and SHADI_MEMBER_HUMAN_DIDS, which startup requires
+    // when there is no gate. Under open admission a message must also come from the
+    // verified peer of its SLIM session (session-bound, see listener_session_bound).
+    // Only expose this listener to trusted SLIM peers.
     eprintln!(
         "⚠️  Incoming A2A tasks on {agent_name} are executed by the local '{agent_id}' \
          CLI tool. Only expose this listener to trusted SLIM peers."
+    );
+    // The effective admission mode, counts only (never the DIDs).
+    let member_count = member_did_count();
+    eprintln!("{}", admission_banner(admission, member_count));
+    tracing::info!(
+        admission = admission.as_str(),
+        member_dids = member_count,
+        "SLIM listener admission mode"
     );
     // An announced listener is found through its dir-runtime descriptor
     // instead (one record per listener).
@@ -1417,6 +1619,7 @@ fn run_slim_listener(
         verbose,
         egress::policy(),
         gate,
+        listener_session_bound(admission),
     ));
     SlimRpcHandler::new(handler).register(server.as_ref());
 
@@ -1498,21 +1701,35 @@ struct ListenerApp {
     tool_name_ref: Option<Arc<Name>>,
 }
 
+/// The listener's SLIM app under `admission`. Closed admission authenticates with
+/// the `SLIM_MEMBER_DIDS` allow-list. Open admission admits any `did:key` that
+/// proves its key. Both use the agent's DID from `agent_identity_from_env`, so the
+/// listener's DID is the same in either mode.
 fn open_listener_app(
     service: &Service,
     agent_id: &str,
     connection_id: u64,
+    admission: shadi_identity::SlimAdmission,
 ) -> Result<ListenerApp, String> {
-    let auth = shadi_identity::require_did_auth_from_env(agent_id)
-        .map_err(|e| format!("SLIM auth error: {e}"))?;
+    let auth = match admission {
+        shadi_identity::SlimAdmission::Closed => {
+            shadi_identity::require_did_auth_from_env(agent_id)
+        }
+        shadi_identity::SlimAdmission::Open => shadi_identity::agent_identity_from_env(agent_id)
+            .and_then(|agent| shadi_identity::SlimAuth::did_open(&agent)),
+    }
+    .map_err(|e| format!("SLIM auth error: {e}"))?;
     let did = match &auth {
         shadi_identity::SlimAuth::Did { did, .. } => did.clone(),
         shadi_identity::SlimAuth::SharedSecret(_) => String::new(),
     };
     let name = agentbridge::member_source::peer_slim_name(agent_id, Some(&did));
     let name_ref = Arc::new(parse_name(&name)?);
-    let app = shadi_identity::create_app(service, name_ref.clone(), &auth)
-        .map_err(|e| format!("SLIM create_app failed: {e:?}"))?;
+    let app =
+        shadi_identity::create_app(service, name_ref.clone(), &auth).map_err(|e| match e {
+            shadi_identity::IdentityError::Slim(e) => format!("SLIM create_app failed: {e:?}"),
+            e => format!("SLIM create_app failed: {e}"),
+        })?;
     app.subscribe(name_ref.clone(), Some(connection_id))
         .map_err(|e| format!("SLIM subscribe failed: {e:?}"))?;
     let tool_name_ref = subscribe_tool_name(&app, agent_id, &name, connection_id)?;
@@ -1557,16 +1774,26 @@ fn parse_name(name: &str) -> Result<Name, String> {
 /// Emitted as `StreamResponse::Task`, which the handler persists, so the task
 /// the client is told about exists in the store — `AuthRequired` is
 /// non-terminal in the protocol and has to be fetchable to be resumed.
+///
+/// `owner` is the proven DID a resumable park waits on. It is stamped under
+/// [`PARKED_OWNER_METADATA_KEY`], so the task store caps that DID's parks
+/// without touching anyone else's.
 fn terminal_task(
     task_id: String,
     context_id: String,
     state: TaskState,
     reason: String,
     challenge: Option<&str>,
+    retry_after_secs: Option<u64>,
+    owner: Option<&str>,
 ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
     let message = Message::new(Role::Agent, vec![Part::text(reason)]);
     let message = match challenge {
         Some(challenge) => shadi_a2a::insert_challenge(message, challenge),
+        None => message,
+    };
+    let message = match retry_after_secs {
+        Some(secs) => shadi_a2a::insert_retry_after(message, secs),
         None => message,
     };
     let task = Task {
@@ -1579,7 +1806,11 @@ fn terminal_task(
         },
         artifacts: None,
         history: None,
-        metadata: None,
+        metadata: owner.map(|owner| {
+            [(PARKED_OWNER_METADATA_KEY.to_string(), owner.into())]
+                .into_iter()
+                .collect()
+        }),
     };
     Box::pin(futures::stream::once(async move {
         Ok(StreamResponse::Task(task))
@@ -1599,6 +1830,12 @@ enum MessageAdmission {
         reason: String,
         /// A serialised challenge for the caller to answer, when one is due.
         challenge: Option<String>,
+        /// Seconds the caller should wait before sending again, when no
+        /// challenge could be issued yet.
+        retry_after_secs: Option<u64>,
+        /// The proven DID a resumable park waits on: set with a challenge or
+        /// a retry-after, `None` for a refusal the caller cannot resume.
+        owner: Option<String>,
     },
     Forged {
         reason: String,
@@ -1636,12 +1873,15 @@ fn admit_message(
     message: &Message,
     gate: Option<&CredentialGate>,
     task_id: &str,
+    session_peer: &SessionPeer,
 ) -> MessageAdmission {
     let text = extract_text(message);
     if text == "(no text parts)" || !shadi_identity::looks_like_did_proof(text.as_bytes()) {
         return MessageAdmission::AuthRequired {
             reason: "DID proof required on the message".to_string(),
             challenge: None,
+            retry_after_secs: None,
+            owner: None,
         };
     }
     let verified = match shadi_identity::unwrap_signed_message(text.as_bytes()) {
@@ -1653,9 +1893,16 @@ fn admit_message(
             return MessageAdmission::AuthRequired {
                 reason: "DID proof required on the message".to_string(),
                 challenge: None,
+                retry_after_secs: None,
+                owner: None,
             };
         }
     };
+    // Before any binding or credential work, so a relayed message never spends
+    // the signer's nonce.
+    if let Some(reason) = relayed_reason(session_peer, &verified.did) {
+        return MessageAdmission::Forged { reason };
+    }
     match admit_binding(
         verified.did,
         &verified.payload,
@@ -1726,17 +1973,29 @@ fn admit_credential(
     }
 }
 
-/// Park the caller with a fresh challenge bound to `did`.
+/// Park the caller with a fresh challenge bound to `did`. A full nonce store
+/// parks it with no challenge and a retry-after instead: the caller has done
+/// nothing wrong, so the task stays resumable.
 fn challenge_for(gate: &CredentialGate, task_id: &str, did: &str, now: i64) -> MessageAdmission {
     let forged = |reason: String| MessageAdmission::Forged { reason };
     let challenge = match gate.nonces.issue(task_id, did, now) {
         Ok(challenge) => challenge,
+        Err(err @ shadi_credential::CredentialError::ChallengeCapacity { retry_after_secs }) => {
+            return MessageAdmission::AuthRequired {
+                reason: format!("listener busy: {err}"),
+                challenge: None,
+                retry_after_secs: Some(retry_after_secs),
+                owner: Some(did.to_string()),
+            };
+        }
         Err(err) => return forged(err.to_string()),
     };
     match serde_json::to_string(&challenge) {
         Ok(json) => MessageAdmission::AuthRequired {
             reason: "credential required: answer the challenge with a presentation".to_string(),
             challenge: Some(json),
+            retry_after_secs: None,
+            owner: Some(did.to_string()),
         },
         Err(err) => forged(err.to_string()),
     }
@@ -1764,6 +2023,8 @@ fn admit_binding(
         return MessageAdmission::AuthRequired {
             reason: "agent binding required: this listener admits agents by human DID".to_string(),
             challenge: None,
+            retry_after_secs: None,
+            owner: None,
         };
     }
 
@@ -1773,6 +2034,8 @@ fn admit_binding(
             return MessageAdmission::AuthRequired {
                 reason: format!("agent binding is malformed: {err}"),
                 challenge: None,
+                retry_after_secs: None,
+                owner: None,
             };
         }
     };
@@ -1995,6 +2258,9 @@ fn run_unicast_listener(
     let gate = credential_gate(admission_policy, &did)?;
     let ready = Arc::new(Notify::new());
     let adapter_for_shutdown = Arc::clone(&adapter);
+    // Never session-bound: HTTP, JSON-RPC and gRPC callers name their peer in
+    // headers, which they can spoof. Only the SLIM listener sets this from its
+    // admission mode (see `listener_session_bound`).
     let handler = Arc::new(AgentBridgeRequestHandler::new(
         adapter,
         agent_id,
@@ -2006,6 +2272,7 @@ fn run_unicast_listener(
         verbose,
         egress::policy(),
         gate,
+        false,
     ));
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -2679,6 +2946,196 @@ test push ... FAILED
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn a_slim_handoff_needs_the_peer_did_under_open_admission() {
+        let (dir, registry) = scratch_registry();
+        let _lease = registry
+            .publish(&handoff_record(
+                "withdid",
+                "did:key:zWithDid",
+                "127.0.0.1:47357",
+                "",
+            ))
+            .unwrap();
+        // `publish` refuses an empty DID, so a lease without one (an older
+        // writer's) is built directly.
+        let nodid = |a2a_url: Option<&str>, a2a_binding: Option<A2ABinding>| HandoffTarget {
+            peer_agent_id: "nodid".to_string(),
+            peer_did: None,
+            slim_name: "agntcy/shadi/nodid-a2a".to_string(),
+            a2a_url: a2a_url.map(str::to_string),
+            a2a_binding,
+            slim_endpoint: Some("127.0.0.1:47357".to_string()),
+        };
+
+        let open = crate::commands::AdmissionEnv::open();
+        // An empty lease DID and the `--slim-endpoint` fallback both have none.
+        let err = require_handoff_peer_did(&nodid(None, None), "nodid").unwrap_err();
+        assert!(
+            err.starts_with("NEXT handoff to nodid: open admission"),
+            "{err}"
+        );
+        let slim_locator = nodid(Some("slim://127.0.0.1:47357"), Some(A2ABinding::Slim));
+        assert!(require_handoff_peer_did(&slim_locator, "nodid").is_err());
+        let unleased = resolve_handoff_target("ghost", Some("127.0.0.1:9"), &registry).unwrap();
+        assert_eq!(unleased.peer_did, None);
+        let err = require_handoff_peer_did(&unleased, "ghost").unwrap_err();
+        assert!(
+            err.starts_with("NEXT handoff to ghost: open admission"),
+            "{err}"
+        );
+        // A leased DID is pinned; a unicast hop dials no SLIM.
+        let leased = resolve_handoff_target("withdid", None, &registry).unwrap();
+        assert_eq!(leased.peer_did.as_deref(), Some("did:key:zWithDid"));
+        assert!(require_handoff_peer_did(&leased, "withdid").is_ok());
+        let grpc = nodid(Some("http://127.0.0.1:50153"), Some(A2ABinding::Grpc));
+        assert!(!grpc.dials_slim());
+        assert!(require_handoff_peer_did(&grpc, "nodid").is_ok());
+
+        // The hop fails with that message before anything is built or dialled.
+        let prev_tmp = std::env::var_os("SHADI_TMP_DIR");
+        let empty = std::env::temp_dir().join(format!("ab-handoff-empty-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("SHADI_TMP_DIR", &empty);
+        let err = dispatch_peer_handoff("avatar", "ghost", Some("127.0.0.1:9"), "prompt", "reply")
+            .unwrap_err();
+        match prev_tmp {
+            Some(v) => std::env::set_var("SHADI_TMP_DIR", v),
+            None => std::env::remove_var("SHADI_TMP_DIR"),
+        }
+        assert!(
+            err.starts_with("NEXT handoff to ghost: open admission"),
+            "{err}"
+        );
+        drop(open);
+
+        // Closed mode: the allow-list decides, so a missing DID is fine.
+        let _closed = crate::commands::AdmissionEnv::closed("did:key:zMember");
+        assert!(require_handoff_peer_did(&nodid(None, None), "nodid").is_ok());
+        assert!(require_handoff_peer_did(&unleased, "ghost").is_ok());
+
+        drop(_lease);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn listener_admission_is_closed_by_default_and_refuses_bad_values() {
+        use shadi_identity::SlimAdmission;
+        const DID: &str = "did:key:zMember";
+
+        // Closed: the switch unset or blank, whatever SLIM_MEMBER_DIDS says
+        // (the allow-list is required later, when the app is built).
+        for admission in [None, Some(""), Some("  ")] {
+            for members in [None, Some(DID)] {
+                let _env = crate::commands::AdmissionEnv::set(admission, members);
+                assert_eq!(listener_admission(), Ok(SlimAdmission::Closed));
+            }
+        }
+
+        // A bad value stops startup, with or without an allow-list.
+        for bad in ["opne", "closed", "true", "1", "Open1", "yes"] {
+            for members in [None, Some(DID)] {
+                let _env = crate::commands::AdmissionEnv::set(Some(bad), members);
+                let err = listener_admission().unwrap_err();
+                assert!(err.starts_with("SLIM admission error: "), "{bad}: {err}");
+                assert!(err.contains("SHADI_SLIM_ADMISSION must be"), "{bad}: {err}");
+            }
+        }
+
+        // Open + an allow-list: the conflict, which stops startup.
+        let _env = crate::commands::AdmissionEnv::set(Some("open"), Some(DID));
+        let err = listener_admission().unwrap_err();
+        assert!(err.starts_with("SLIM admission error: "), "{err}");
+        assert!(err.contains("contradict"), "{err}");
+        assert!(!err.contains(DID), "{err}");
+    }
+
+    #[test]
+    fn listener_admission_accepts_open_without_an_allow_list() {
+        use shadi_identity::SlimAdmission;
+        for admission in ["open", " OPEN ", "Open"] {
+            let _env = crate::commands::AdmissionEnv::set(Some(admission), None);
+            assert_eq!(
+                listener_admission(),
+                Ok(SlimAdmission::Open),
+                "{admission:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn listener_session_bound_is_derived_from_open_admission_only() {
+        use shadi_identity::SlimAdmission;
+        // The SLIM listener binds its sessions only under open admission. The HTTP,
+        // JSON-RPC and gRPC listeners pass `false` at their own construction site.
+        assert!(!listener_session_bound(SlimAdmission::Closed));
+        assert!(listener_session_bound(SlimAdmission::Open));
+    }
+
+    #[test]
+    fn open_admission_refuses_to_start_without_a_message_gate() {
+        use shadi_identity::SlimAdmission;
+        let _guard = HUMAN_DIDS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("SHADI_MEMBER_HUMAN_DIDS");
+        std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS");
+
+        // The call site's inputs: no --admission-policy, no SHADI_MEMBER_HUMAN_DIDS.
+        let no_humans = allowed_human_dids().len();
+        let err = open_admission_gate_check(SlimAdmission::Open, false, no_humans)
+            .expect_err("open admission with no gate must not start");
+        assert_eq!(err, no_message_gate_refusal());
+        assert!(err.contains("--admission-policy"), "{err}");
+        assert!(err.contains("SHADI_MEMBER_HUMAN_DIDS"), "{err}");
+
+        // Either gate is enough.
+        assert!(open_admission_gate_check(SlimAdmission::Open, true, 0).is_ok());
+        assert!(open_admission_gate_check(SlimAdmission::Open, false, 1).is_ok());
+
+        // Closed admission keeps its existing order: credential_gate decides later.
+        assert!(open_admission_gate_check(SlimAdmission::Closed, false, 0).is_ok());
+
+        match prev {
+            Some(v) => std::env::set_var("SHADI_MEMBER_HUMAN_DIDS", v),
+            None => std::env::remove_var("SHADI_MEMBER_HUMAN_DIDS"),
+        }
+    }
+
+    #[test]
+    fn member_did_count_counts_non_blank_entries() {
+        for (members, count) in [
+            (None, 0),
+            (Some(""), 0),
+            (Some(" , ,"), 0),
+            (Some("did:key:zA"), 1),
+            (Some(" did:key:zA , did:key:zB,,"), 2),
+        ] {
+            let _env = crate::commands::AdmissionEnv::set(None, members);
+            assert_eq!(member_did_count(), count, "{members:?}");
+        }
+    }
+
+    #[test]
+    fn admission_banner_states_the_mode_and_only_a_count() {
+        use shadi_identity::SlimAdmission;
+        assert_eq!(
+            admission_banner(SlimAdmission::Closed, 3),
+            "SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, 3 DIDs)"
+        );
+        assert_eq!(
+            admission_banner(SlimAdmission::Closed, 1),
+            "SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, 1 DID)"
+        );
+        assert_eq!(
+            admission_banner(SlimAdmission::Closed, 0),
+            "SLIM admission: closed (SLIM_MEMBER_DIDS allow-list, 0 DIDs)"
+        );
+        // The count is ignored when open: there is no allow-list to count.
+        let open = "SLIM admission: open (any did:key may connect; the admission gate decides)";
+        assert_eq!(admission_banner(SlimAdmission::Open, 0), open);
+        assert_eq!(admission_banner(SlimAdmission::Open, 5), open);
+    }
+
     fn bound_envelope(
         human: &shadi_identity::AgentIdentity,
         agent: &shadi_identity::AgentIdentity,
@@ -2811,7 +3268,12 @@ test push ... FAILED
 
     #[test]
     fn admit_unsigned_message_parks_auth_required() {
-        match admit_message(&sample_request("plain task").message, None, "t") {
+        match admit_message(
+            &sample_request("plain task").message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::AuthRequired { reason, .. } => {
                 assert!(reason.contains("DID proof required"), "{reason}");
             }
@@ -2839,6 +3301,10 @@ test push ... FAILED
     }
 
     fn silent_handler() -> AgentBridgeRequestHandler {
+        silent_handler_with(false)
+    }
+
+    fn silent_handler_with(session_bound: bool) -> AgentBridgeRequestHandler {
         AgentBridgeRequestHandler::new(
             Arc::new(SilentAdapter(shadi_mas::AgentId("claude-code".to_string()))),
             "claude-code",
@@ -2850,7 +3316,124 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            session_bound,
         )
+    }
+
+    #[test]
+    fn task_access_is_refused_only_where_the_listener_is_session_bound() {
+        let err = refuse_task_access(true, "get_task").expect_err("session-bound refuses");
+        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
+        let message = err.to_string();
+        assert!(message.contains("get_task"), "{message}");
+        assert!(message.contains("session-bound"), "{message}");
+        assert!(refuse_task_access(false, "get_task").is_ok());
+    }
+
+    /// Runs one of the four task RPCs against `handler`, as the `Err` it
+    /// produced (the success types are not all `Debug`).
+    async fn task_rpc_error(handler: &AgentBridgeRequestHandler, method: &str) -> Option<A2AError> {
+        let params = A2AServiceParams::default();
+        let id = "no-such-task".to_string();
+        match method {
+            "get_task" => handler
+                .get_task(
+                    &params,
+                    GetTaskRequest {
+                        id,
+                        history_length: None,
+                        tenant: None,
+                    },
+                )
+                .await
+                .err(),
+            "list_tasks" => handler
+                .list_tasks(
+                    &params,
+                    ListTasksRequest {
+                        context_id: None,
+                        status: None,
+                        page_size: None,
+                        page_token: None,
+                        history_length: None,
+                        status_timestamp_after: None,
+                        include_artifacts: None,
+                        tenant: None,
+                    },
+                )
+                .await
+                .err(),
+            "cancel_task" => handler
+                .cancel_task(
+                    &params,
+                    CancelTaskRequest {
+                        id,
+                        metadata: None,
+                        tenant: None,
+                    },
+                )
+                .await
+                .err(),
+            "subscribe_to_task" => handler
+                .subscribe_to_task(&params, SubscribeToTaskRequest { id, tenant: None })
+                .await
+                .err(),
+            other => panic!("not a task RPC: {other}"),
+        }
+    }
+
+    const TASK_RPCS: [&str; 4] = ["get_task", "list_tasks", "cancel_task", "subscribe_to_task"];
+
+    #[tokio::test]
+    async fn a_session_bound_handler_refuses_get_task() {
+        let err = task_rpc_error(&silent_handler_with(true), "get_task").await;
+        let err = err.expect("get_task must be refused");
+        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
+        assert!(err.to_string().contains("get_task"), "{err}");
+        assert!(err.to_string().contains("session-bound"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_session_bound_handler_refuses_list_tasks() {
+        let err = task_rpc_error(&silent_handler_with(true), "list_tasks").await;
+        let err = err.expect("list_tasks must be refused");
+        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
+        assert!(err.to_string().contains("list_tasks"), "{err}");
+        assert!(err.to_string().contains("session-bound"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_session_bound_handler_refuses_cancel_task() {
+        let err = task_rpc_error(&silent_handler_with(true), "cancel_task").await;
+        let err = err.expect("cancel_task must be refused");
+        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
+        assert!(err.to_string().contains("cancel_task"), "{err}");
+        assert!(err.to_string().contains("session-bound"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_session_bound_handler_refuses_subscribe_to_task() {
+        let err = task_rpc_error(&silent_handler_with(true), "subscribe_to_task").await;
+        let err = err.expect("subscribe_to_task must be refused");
+        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
+        assert!(err.to_string().contains("subscribe_to_task"), "{err}");
+        assert!(err.to_string().contains("session-bound"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_handler_that_is_not_session_bound_still_delegates_the_task_rpcs() {
+        let handler = silent_handler_with(false);
+        for method in TASK_RPCS {
+            // The guard stays out of the way: a missing task is the inner
+            // handler's task-not-found, and list_tasks simply succeeds.
+            match (method, task_rpc_error(&handler, method).await) {
+                ("list_tasks", None) => {}
+                (_, Some(err)) => {
+                    assert_eq!(err.code, error_code::TASK_NOT_FOUND, "{method}: {err}");
+                }
+                (_, None) => panic!("{method} on a missing task must not succeed"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -3001,6 +3584,7 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            false,
         );
         let (alice, mallory) = (
             shadi_identity::AgentIdentity::generate().unwrap(),
@@ -3073,6 +3657,7 @@ test push ... FAILED
             false,
             policy,
             None,
+            false,
         );
         let request = sample_request(String::from_utf8(envelope).unwrap());
         let response = handler
@@ -3516,7 +4101,12 @@ test push ... FAILED
             text.lines().nth(2).unwrap().to_string()
         };
         let forged = format!("SHADI-DID-PROOF/1\n{}\n{}\ntask", impostor.did(), sig_line);
-        match admit_message(&sample_request(forged).message, None, "t") {
+        match admit_message(
+            &sample_request(forged).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("forged DID"), "{reason}");
             }
@@ -3534,7 +4124,12 @@ test push ... FAILED
         let id = shadi_identity::AgentIdentity::generate().unwrap();
         let envelope = shadi_identity::wrap_signed_message(&id, b"real prompt").unwrap();
         let text = String::from_utf8(envelope).unwrap();
-        match admit_message(&sample_request(text).message, None, "t") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven { did, payload, .. } => {
                 assert_eq!(did, id.did());
                 assert_eq!(payload, "real prompt");
@@ -3573,7 +4168,12 @@ test push ... FAILED
     fn without_a_gate_the_vp_layer_is_stripped_not_prompted() {
         let layered = shadi_identity::wrap_vp("tok~en", b"real prompt").unwrap();
         let (did, text) = signed(&layered);
-        match admit_message(&sample_request(text).message, None, "t") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven {
                 did: proven,
                 payload,
@@ -3590,7 +4190,12 @@ test push ... FAILED
     #[test]
     fn without_a_gate_a_plain_payload_is_unchanged() {
         let (_, text) = signed(b"real prompt");
-        match admit_message(&sample_request(text).message, None, "t") {
+        match admit_message(
+            &sample_request(text).message,
+            None,
+            "t",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven { payload, .. } => assert_eq!(payload, "real prompt"),
             _ => panic!("honest proof must be admitted"),
         }
@@ -3600,10 +4205,17 @@ test push ... FAILED
     fn a_gate_with_no_presentation_issues_a_challenge() {
         let (_dir, gate) = gate_fixture();
         let (_, text) = signed(b"real prompt");
-        match admit_message(&sample_request(text).message, Some(&gate), "task-7") {
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-7",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::AuthRequired {
                 reason,
                 challenge: Some(json),
+                retry_after_secs: None,
+                ..
             } => {
                 assert!(reason.contains("credential required"), "{reason}");
                 let challenge: shadi_credential::Challenge = serde_json::from_str(&json).unwrap();
@@ -3670,7 +4282,7 @@ test push ... FAILED
         let MessageAdmission::AuthRequired {
             challenge: Some(json),
             ..
-        } = admit_message(&msg, Some(&gate), "task-1")
+        } = admit_message(&msg, Some(&gate), "task-1", &SessionPeer::NotBound)
         else {
             panic!("an unpresented message must be challenged");
         };
@@ -3703,7 +4315,12 @@ test push ... FAILED
     #[test]
     fn a_presentation_the_sender_builds_is_admitted_by_the_listener() {
         let (_dir, gate, did, text) = answered_challenge();
-        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Proven {
                 did: proven,
                 payload,
@@ -3734,11 +4351,129 @@ test push ... FAILED
         let (_dir, gate, _, text) = answered_challenge();
         let msg = sample_request(text).message;
         assert!(matches!(
-            admit_message(&msg, Some(&gate), "task-1"),
+            admit_message(&msg, Some(&gate), "task-1", &SessionPeer::NotBound),
             MessageAdmission::Proven { .. }
         ));
-        let fresh = challenge_of(admit_message(&msg, Some(&gate), "task-1"));
+        let fresh = challenge_of(admit_message(
+            &msg,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ));
         assert_eq!(fresh.task_id, "task-1");
+    }
+
+    #[test]
+    fn a_proof_from_another_peers_session_is_a_relay() {
+        let peer = |did: &str| SessionPeer::Peer(did.to_string());
+        assert!(relayed_reason(&SessionPeer::NotBound, "did:key:zA").is_none());
+        assert!(relayed_reason(&peer("did:key:zA"), "did:key:zA").is_none());
+        let other = relayed_reason(&peer("did:key:zB"), "did:key:zA").unwrap();
+        assert!(
+            other.contains("did:key:zA") && other.contains("did:key:zB"),
+            "{other}"
+        );
+        let unknown = relayed_reason(&SessionPeer::PeerUnknown, "did:key:zA").unwrap();
+        assert!(unknown.contains("no verified peer"), "{unknown}");
+    }
+
+    #[test]
+    fn the_session_peer_is_read_only_where_the_listener_is_session_bound() {
+        let params = |values: &[&str]| -> A2AServiceParams {
+            let values = values.iter().map(|v| v.to_string()).collect();
+            [(
+                shadi_a2a::SLIM_PEER_SUBJECT_METADATA_KEY.to_string(),
+                values,
+            )]
+            .into()
+        };
+        // Unbound: a spoofed key is never read.
+        assert_eq!(
+            SessionPeer::from_service_params(false, &params(&["did:key:zA"])),
+            SessionPeer::NotBound
+        );
+        assert_eq!(
+            SessionPeer::from_service_params(false, &A2AServiceParams::new()),
+            SessionPeer::NotBound
+        );
+        // Bound: the first value, or unknown when absent or empty.
+        assert_eq!(
+            SessionPeer::from_service_params(true, &params(&["did:key:zA"])),
+            SessionPeer::Peer("did:key:zA".to_string())
+        );
+        for missing in [params(&[]), params(&[""]), A2AServiceParams::new()] {
+            assert_eq!(
+                SessionPeer::from_service_params(true, &missing),
+                SessionPeer::PeerUnknown
+            );
+        }
+    }
+
+    #[test]
+    fn a_relayed_message_is_rejected_before_its_nonce_is_spent() {
+        let (_dir, gate, did, text) = answered_challenge();
+        let msg = sample_request(text).message;
+        for relayed in [
+            SessionPeer::PeerUnknown,
+            SessionPeer::Peer("did:key:zMallory".to_string()),
+        ] {
+            match admit_message(&msg, Some(&gate), "task-1", &relayed) {
+                MessageAdmission::Forged { reason } => {
+                    assert!(reason.contains("SLIM session"), "{reason}")
+                }
+                _ => panic!("a relayed message must be rejected"),
+            }
+        }
+        // The nonce survived both relays, so the real peer can still use it.
+        match admit_message(&msg, Some(&gate), "task-1", &SessionPeer::Peer(did.clone())) {
+            MessageAdmission::Proven {
+                did: proven,
+                payload,
+                ..
+            } => {
+                assert_eq!(proven, did);
+                assert_eq!(payload, "real prompt");
+            }
+            MessageAdmission::Forged { reason } => panic!("forged: {reason}"),
+            MessageAdmission::AuthRequired { reason, .. } => panic!("auth required: {reason}"),
+        }
+        // And only once: the real peer's own replay is rechallenged.
+        let replay = admit_message(&msg, Some(&gate), "task-1", &SessionPeer::Peer(did));
+        assert_eq!(challenge_of(replay).task_id, "task-1");
+    }
+
+    #[test]
+    fn an_unbound_listener_admits_as_before_whatever_the_transport_says() {
+        let (_dir, gate, did, text) = answered_challenge();
+        let msg = sample_request(text).message;
+        match admit_message(&msg, Some(&gate), "task-1", &SessionPeer::NotBound) {
+            MessageAdmission::Proven {
+                did: proven,
+                payload,
+                ..
+            } => {
+                assert_eq!(proven, did);
+                assert_eq!(payload, "real prompt");
+            }
+            _ => panic!("an unbound listener must run no relay check"),
+        }
+    }
+
+    #[test]
+    fn a_session_bound_listener_still_asks_an_unsigned_message_for_a_proof() {
+        // The relay check needs a proven DID, so it never masks the earlier gate.
+        let unsigned = sample_request("plain task").message;
+        for peer in [
+            SessionPeer::PeerUnknown,
+            SessionPeer::Peer("did:key:zA".to_string()),
+        ] {
+            match admit_message(&unsigned, None, "t", &peer) {
+                MessageAdmission::AuthRequired { reason, .. } => {
+                    assert!(reason.contains("DID proof required"), "{reason}")
+                }
+                _ => panic!("an unsigned message must still be parked"),
+            }
+        }
     }
 
     #[test]
@@ -3749,9 +4484,143 @@ test push ... FAILED
             &sample_request(text).message,
             Some(&other_gate),
             "task-1",
+            &SessionPeer::NotBound,
         ));
         assert_eq!(fresh.aud, LISTENER_DID);
         assert!(!fresh.nonce.is_empty());
+    }
+
+    /// Fills `gate`'s nonce store at `now`, one challenge each for other peers.
+    fn fill_nonces(gate: &CredentialGate, now: i64) -> Vec<shadi_credential::Challenge> {
+        (0..shadi_credential::nonce::MAX_NONCES)
+            .map(|i| {
+                let did = format!("did:key:zPeer{i}");
+                gate.nonces.issue("other", &did, now).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_full_nonce_store_parks_a_new_did_until_a_slot_expires() {
+        let (_dir, gate) = gate_fixture();
+        fill_nonces(&gate, 0);
+        match challenge_for(&gate, "task-9", "did:key:zNew", 10) {
+            MessageAdmission::AuthRequired {
+                reason,
+                challenge: None,
+                retry_after_secs: Some(50),
+                ..
+            } => assert!(reason.contains("retry in 50s"), "{reason}"),
+            MessageAdmission::Forged { reason } => {
+                panic!("a busy listener must not reject: {reason}")
+            }
+            _ => panic!("expected a retry-after park"),
+        }
+        let expired = shadi_credential::nonce::NONCE_TTL_SECS + 1;
+        let fresh = challenge_of(challenge_for(&gate, "task-9", "did:key:zNew", expired));
+        assert_eq!(fresh.task_id, "task-9");
+    }
+
+    #[test]
+    fn a_full_nonce_store_parks_an_unpresented_message_with_a_retry_after() {
+        let (_dir, gate) = gate_fixture();
+        fill_nonces(&gate, i64::try_from(now_unix()).unwrap());
+        let (_, text) = signed(b"real prompt");
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ) {
+            MessageAdmission::AuthRequired {
+                reason,
+                challenge: None,
+                retry_after_secs: Some(secs),
+                ..
+            } => {
+                assert!((1..=60).contains(&secs), "{secs}");
+                assert!(reason.contains("listener busy"), "{reason}");
+            }
+            MessageAdmission::Forged { reason } => {
+                panic!("a busy listener must not reject: {reason}")
+            }
+            _ => panic!("expected a retry-after park"),
+        }
+    }
+
+    fn gated_handler(gate: Arc<CredentialGate>) -> AgentBridgeRequestHandler {
+        AgentBridgeRequestHandler::new(
+            Arc::new(SilentAdapter(shadi_mas::AgentId("claude-code".to_string()))),
+            "claude-code",
+            Some(LISTENER_DID),
+            None,
+            Some("127.0.0.1:4311"),
+            A2ABinding::Jsonrpc,
+            Arc::new(Notify::new()),
+            false,
+            egress::policy(),
+            Some(gate),
+            false,
+        )
+    }
+
+    async fn sent_task(handler: &AgentBridgeRequestHandler, req: SendMessageRequest) -> Task {
+        match handler
+            .send_message(&A2AServiceParams::default(), req)
+            .await
+            .expect("a refusal is a task state, not a transport error")
+        {
+            SendMessageResponse::Task(task) => task,
+            SendMessageResponse::Message(m) => panic!("expected a task, got {m:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_busy_listener_parks_a_resumable_task_with_a_retry_after() {
+        let (_dir, gate) = gate_fixture();
+        let gate = Arc::new(gate);
+        let now = i64::try_from(now_unix()).unwrap();
+        let held = fill_nonces(&gate, now);
+        let handler = gated_handler(Arc::clone(&gate));
+        let (_, text) = signed(b"real prompt");
+
+        let task = sent_task(&handler, sample_request(text.clone())).await;
+        assert_eq!(task.status.state, TaskState::AuthRequired);
+        let status = task.status.message.as_ref().expect("a status message");
+        let secs = shadi_a2a::retry_after_from_message(status).expect("a retry-after hint");
+        assert!((1..=60).contains(&secs), "{secs}");
+        assert_eq!(shadi_a2a::challenge_from_message(status), None);
+        let reason = extract_text(status);
+        assert!(reason.contains("retry in"), "{reason}");
+
+        let fetched = handler
+            .get_task(
+                &A2AServiceParams::default(),
+                GetTaskRequest {
+                    id: task.id.clone(),
+                    history_length: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("a parked task must be fetchable");
+        assert_eq!(fetched.status.state, TaskState::AuthRequired);
+
+        // Once a slot frees, the same task re-sent gets a real challenge.
+        gate.nonces
+            .consume(&held[0].nonce, "other", "did:key:zPeer0", now)
+            .unwrap();
+        let mut again = sample_request(text);
+        again.message.task_id = Some(task.id.clone());
+        again.message.context_id = Some(task.context_id.clone());
+        let resumed = sent_task(&handler, again).await;
+        assert_eq!(resumed.id, task.id);
+        assert_eq!(resumed.status.state, TaskState::AuthRequired);
+        let status = resumed.status.message.as_ref().expect("a status message");
+        assert_eq!(shadi_a2a::retry_after_from_message(status), None);
+        let json = shadi_a2a::challenge_from_message(status).expect("a challenge");
+        let challenge: shadi_credential::Challenge = serde_json::from_str(json).unwrap();
+        assert_eq!(challenge.task_id, task.id);
     }
 
     #[test]
@@ -3765,7 +4634,12 @@ test push ... FAILED
             };
             format!("{}{swap}{}", &token[..at], &token[at + 1..])
         });
-        match admit_message(&sample_request(text).message, Some(&gate), "task-1") {
+        match admit_message(
+            &sample_request(text).message,
+            Some(&gate),
+            "task-1",
+            &SessionPeer::NotBound,
+        ) {
             MessageAdmission::Forged { reason } => {
                 assert!(reason.contains("signature"), "{reason}")
             }
@@ -3778,7 +4652,12 @@ test push ... FAILED
         let (_dir, gate) = gate_fixture();
         let (_, text) = signed(b"SHADI-VP/1\nnot-a-field\n\nprompt");
         for gate in [None, Some(&gate)] {
-            match admit_message(&sample_request(text.clone()).message, gate, "t") {
+            match admit_message(
+                &sample_request(text.clone()).message,
+                gate,
+                "t",
+                &SessionPeer::NotBound,
+            ) {
                 MessageAdmission::Forged { reason } => assert!(!reason.is_empty()),
                 _ => panic!("a malformed layer must be rejected"),
             }
@@ -3832,24 +4711,30 @@ test push ... FAILED
 
     #[tokio::test]
     async fn terminal_task_attaches_the_challenge_only_when_given() {
-        async fn status_message(challenge: Option<&str>) -> Message {
+        async fn status_message(challenge: Option<&str>, retry_after: Option<u64>) -> Message {
             let mut stream = terminal_task(
                 "t".into(),
                 "c".into(),
                 TaskState::AuthRequired,
                 "why".into(),
                 challenge,
+                retry_after,
+                None,
             );
             match stream.next().await {
                 Some(Ok(StreamResponse::Task(task))) => task.status.message.unwrap(),
                 _ => panic!("expected one task"),
             }
         }
-        let with = status_message(Some("{\"nonce\":\"n\"}")).await;
+        let with = status_message(Some("{\"nonce\":\"n\"}"), None).await;
         assert_eq!(shadi_a2a::challenge_from_message(&with), Some("{\"nonce\":\"n\"}"));
+        assert_eq!(shadi_a2a::retry_after_from_message(&with), None);
         assert_eq!(extract_text(&with), "why");
-        let without = status_message(None).await;
+        let without = status_message(None, None).await;
         assert_eq!(shadi_a2a::challenge_from_message(&without), None);
+        let busy = status_message(None, Some(50)).await;
+        assert_eq!(shadi_a2a::retry_after_from_message(&busy), Some(50));
+        assert_eq!(shadi_a2a::challenge_from_message(&busy), None);
     }
 
     #[test]
@@ -4137,20 +5022,23 @@ test push ... FAILED
         }
     }
 
-    /// A SLIM listener for `agent_id` that echoes its tasks, as `register` runs one.
+    /// A SLIM listener for `agent_id` that echoes its tasks, as `register` runs one,
+    /// including its startup refusal of an open listener with no message gate.
     #[cfg(not(windows))]
     fn serve_echo(
         agent_id: &str,
         endpoint: &str,
+        admission: shadi_identity::SlimAdmission,
     ) -> (
         std::thread::JoinHandle<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
+        open_admission_gate_check(admission, false, allowed_human_dids().len()).unwrap();
         let service = Service::new(format!("echo-listener-{agent_id}"));
         let access = ClientAccess::from_env(Some(agent_id)).unwrap();
         let connection_id = service.connect(access.client_config(endpoint)).unwrap();
         let ListenerApp { app, did, .. } =
-            open_listener_app(&service, agent_id, connection_id).unwrap();
+            open_listener_app(&service, agent_id, connection_id, admission).unwrap();
         let server = Arc::new(Server::new_with_shared_rx_and_connection(
             app.inner(),
             app.name().as_slim_name(),
@@ -4169,6 +5057,7 @@ test push ... FAILED
             false,
             egress::policy(),
             None,
+            listener_session_bound(admission),
         ));
         SlimRpcHandler::new(handler).register(server.as_ref());
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -4201,34 +5090,11 @@ test push ... FAILED
     fn a_listening_agent_calls_out_while_its_listener_runs() {
         const CHILD: &str = "AGENTBRIDGE_TEST_570_CHILD";
         let _guard = super::super::test_env_lock();
-        if std::env::var_os(CHILD).is_none() {
-            let (_, module) = module_path!().split_once("::").unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    &format!("{module}::a_listening_agent_calls_out_while_its_listener_runs"),
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "the child run failed: {status}");
+        if !in_child_process("a_listening_agent_calls_out_while_its_listener_runs", CHILD) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let tls = dir.path().join("shadi-slim-mtls");
-        let script =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/generate_slim_mtls_certs.sh");
-        let generated = std::process::Command::new("bash")
-            .arg(&script)
-            .arg(&tls)
-            .output()
-            .unwrap();
-        assert!(
-            generated.status.success(),
-            "{}",
-            String::from_utf8_lossy(&generated.stderr)
-        );
+        let tls = generate_slim_mtls(dir.path());
 
         let seed = "shadi-570-test-seed";
         let did = |id: &str| {
@@ -4236,69 +5102,18 @@ test push ... FAILED
                 .unwrap()
                 .did()
         };
-        let vars = [
-            ("SHADI_SLIM_AUTH", Some("did".to_string())),
-            ("SLIM_HUMAN_SEED", Some(seed.to_string())),
-            (
-                "SLIM_MEMBER_DIDS",
-                Some(format!("{},{}", did("caller"), did("callee"))),
-            ),
-            (
-                "SLIM_TLS_CERT",
-                Some(tls.join("client-avatar.crt").display().to_string()),
-            ),
-            (
-                "SLIM_TLS_KEY",
-                Some(tls.join("client-avatar.key").display().to_string()),
-            ),
-            (
-                "SLIM_TLS_CA",
-                Some(tls.join("ca.crt").display().to_string()),
-            ),
-            ("SHADI_TMP_DIR", Some(dir.path().display().to_string())),
-            ("SLIM_AUTH_TOKEN_FILE", None),
-            ("SHADI_MEMBER_HUMAN_DIDS", None),
-        ];
-        let saved: Vec<_> = vars
-            .iter()
-            .map(|(k, _)| (*k, std::env::var_os(k)))
-            .collect();
-        for (key, value) in &vars {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-
-        let endpoint = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .to_string();
-        let node = Service::new("issue-570-node".to_string());
-        let server_config = slim_bindings::ServerConfig {
-            endpoint: endpoint.clone(),
-            tls: slim_bindings::TlsServerConfig {
-                insecure: false,
-                source: slim_bindings::TlsSource::File {
-                    cert: tls.join("server.crt").display().to_string(),
-                    key: tls.join("server.key").display().to_string(),
-                },
-                client_ca: slim_bindings::CaSource::File {
-                    path: tls.join("ca.crt").display().to_string(),
-                },
-                include_system_ca_certs_pool: Some(false),
-                tls_version: Some("tls1.3".to_string()),
-                reload_client_ca_file: Some(false),
-            },
-            ..Default::default()
-        };
-        node.run_server(server_config).unwrap();
-        std::thread::sleep(Duration::from_millis(250));
+        let saved = set_env(&mtls_mesh_env(
+            &tls,
+            dir.path(),
+            seed,
+            None,
+            Some(format!("{},{}", did("caller"), did("callee"))),
+        ));
+        let (node, endpoint) = run_mtls_node(&tls);
 
         let listeners = [
-            serve_echo("caller", &endpoint),
-            serve_echo("callee", &endpoint),
+            serve_echo("caller", &endpoint, shadi_identity::SlimAdmission::Closed),
+            serve_echo("callee", &endpoint, shadi_identity::SlimAdmission::Closed),
         ];
         std::thread::sleep(Duration::from_millis(500));
 
@@ -4344,12 +5159,7 @@ test push ... FAILED
         }
         let _ = node.stop_server(endpoint);
         let _ = node.shutdown();
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
+        restore_env(saved);
 
         for (i, reply) in replies.into_iter().enumerate() {
             let reply = reply.unwrap_or_else(|err| panic!("send {i} failed: {err}"));
@@ -4358,5 +5168,329 @@ test push ... FAILED
                 "{reply}"
             );
         }
+    }
+
+    /// Open admission over real SLIM, through the listener `register` runs: no
+    /// allow-list (`SLIM_MEMBER_DIDS` is unset), the human-DID gate its startup
+    /// requires, and a caller it has never been told about. The transport admits
+    /// the caller; its bound message passes the session-bound check and the human
+    /// gate, and the echo proves the task ran.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_open_listener_admits_a_caller_it_has_never_seen() {
+        const CHILD: &str = "AGENTBRIDGE_TEST_OPEN_ADMISSION_CHILD";
+        let _guard = super::super::test_env_lock();
+        if !in_child_process("an_open_listener_admits_a_caller_it_has_never_seen", CHILD) {
+            return;
+        }
+        let reply = with_open_listener("shadi-open-admission-test-seed", |mesh| {
+            let stranger = mesh.agent("stranger");
+            mesh.send_bound("stranger", &stranger, b"ping open")
+        });
+        let reply = reply.unwrap_or_else(|err| {
+            panic!("the open listener refused a caller it has never seen: {err}")
+        });
+        let json = response_json(&reply);
+        assert!(json.contains("callee heard: ping open"), "{json}");
+    }
+
+    /// Open admission binds each message to its SLIM session: a caller the
+    /// transport admitted cannot pass off another agent's signed, bound message.
+    /// The envelope is valid (the agent it names signed it, and its human is
+    /// admitted), so the session binding is the only thing refusing it.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_open_listener_refuses_a_message_relayed_over_another_callers_session() {
+        const CHILD: &str = "AGENTBRIDGE_TEST_OPEN_RELAY_CHILD";
+        let _guard = super::super::test_env_lock();
+        if !in_child_process(
+            "an_open_listener_refuses_a_message_relayed_over_another_callers_session",
+            CHILD,
+        ) {
+            return;
+        }
+        let relayed = with_open_listener("shadi-open-relay-test-seed", |mesh| {
+            let stranger = mesh.agent("stranger");
+            mesh.send_bound("relay", &stranger, b"ping relayed")
+        });
+        let relayed = relayed.unwrap_or_else(|err| panic!("the relayed send failed: {err}"));
+        let a2a::SendMessageResponse::Task(task) = &relayed else {
+            panic!("expected a refused task: {relayed:?}");
+        };
+        assert_eq!(task.status.state, TaskState::Rejected, "{relayed:?}");
+        let json = response_json(&relayed);
+        assert!(json.contains("arrived over the SLIM session of"), "{json}");
+        assert!(!json.contains("callee heard"), "{json}");
+    }
+
+    /// An open SLIM mesh for one test: the env, the node, and `callee` listening
+    /// under open admission with the human-DID gate set to `human`.
+    #[cfg(not(windows))]
+    struct OpenMesh {
+        seed: &'static str,
+        endpoint: String,
+        human: shadi_identity::AgentIdentity,
+    }
+
+    #[cfg(not(windows))]
+    impl OpenMesh {
+        /// The agent `id` derives to under this mesh's seed, as the env derives it.
+        fn agent(&self, id: &str) -> shadi_identity::AgentIdentity {
+            shadi_identity::AgentIdentity::derive(self.seed.as_bytes(), id).unwrap()
+        }
+
+        /// Sends, over a session `sender` opens to `callee`, a message `signer`
+        /// signed carrying `payload` and a binding from this mesh's human.
+        fn send_bound(
+            &self,
+            sender: &str,
+            signer: &shadi_identity::AgentIdentity,
+            payload: &[u8],
+        ) -> Result<a2a::SendMessageResponse, String> {
+            let envelope = bound_envelope(&self.human, signer, "agent", now_unix() + 300, payload);
+            send_text_over_slim(
+                &self.endpoint,
+                sender,
+                &self.agent("callee").did(),
+                String::from_utf8(envelope).unwrap(),
+            )
+        }
+    }
+
+    /// Runs `body` against an open mesh, then tears it down and restores the env.
+    #[cfg(not(windows))]
+    fn with_open_listener<T>(seed: &'static str, body: impl FnOnce(&OpenMesh) -> T) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let tls = generate_slim_mtls(dir.path());
+        let human = shadi_identity::AgentIdentity::generate().unwrap();
+        let mut env = mtls_mesh_env(&tls, dir.path(), seed, Some("open"), None);
+        for (key, value) in &mut env {
+            if *key == "SHADI_MEMBER_HUMAN_DIDS" {
+                *value = Some(human.did());
+            }
+        }
+        let saved = set_env(&env);
+        let (node, endpoint) = run_mtls_node(&tls);
+        let (listener, stop) = serve_echo("callee", &endpoint, shadi_identity::SlimAdmission::Open);
+        std::thread::sleep(Duration::from_millis(500));
+
+        let mesh = OpenMesh {
+            seed,
+            endpoint: endpoint.clone(),
+            human,
+        };
+        let result = body(&mesh);
+
+        let _ = stop.send(());
+        let _ = listener.join();
+        let _ = node.stop_server(endpoint);
+        let _ = node.shutdown();
+        restore_env(saved);
+        result
+    }
+
+    /// Sends `text` as one A2A message over a SLIM session `agent_id` opens to the
+    /// listener of `peer_did`, pinned to that DID as an open-admission caller is.
+    /// Unlike the live adapter it sends the text as given, so a test chooses whose
+    /// DID-proof envelope rides on whose session.
+    #[cfg(not(windows))]
+    fn send_text_over_slim(
+        endpoint: &str,
+        agent_id: &str,
+        peer_did: &str,
+        text: String,
+    ) -> Result<a2a::SendMessageResponse, String> {
+        use a2a_client::transport::{ServiceParams, Transport};
+
+        let service = Service::new(format!("text-sender-{agent_id}-{}", std::process::id()));
+        let sent = (|| -> Result<a2a::SendMessageResponse, String> {
+            let access = ClientAccess::from_env(Some(agent_id))?;
+            let connection_id = service
+                .connect(access.client_config(endpoint))
+                .map_err(|e| e.to_string())?;
+            let local = Arc::new(parse_name(&format!("agntcy/shadi/{agent_id}-text-sender"))?);
+            let remote = agentbridge::member_source::did_slim_name(peer_did)
+                .ok_or_else(|| format!("{peer_did} has no SLIM name"))?;
+            let remote = Arc::new(parse_name(&remote)?);
+            let auth = shadi_identity::require_did_auth_for_peer(agent_id, peer_did)
+                .map_err(|e| e.to_string())?;
+            let shadi_identity::SlimAuth::Did { did, .. } = &auth else {
+                return Err("an open-admission caller authenticates with its DID".to_string());
+            };
+            let session = agent_secrets::SessionContext::new(agent_id, "text-sender")
+                .with_proven_did(did.clone());
+            let app = shadi_identity::create_app(&service, local.clone(), &auth)
+                .map_err(|e| e.to_string())?;
+            app.subscribe(local, Some(connection_id))
+                .map_err(|e| e.to_string())?;
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            // slim_rpc captures the current runtime handle when the channel is built.
+            let channel = {
+                let _enter = runtime.enter();
+                shadi_a2a::A2AChannelBuilder::new(
+                    app,
+                    remote,
+                    Arc::new(agent_secrets::DidProofVerifier),
+                    session,
+                )
+                .connection_id(connection_id)
+                .build()
+            };
+            let request = a2a::SendMessageRequest {
+                message: shadi_a2a::insert_dest_did(
+                    Message::new(Role::User, vec![Part::text(text)]),
+                    peer_did,
+                ),
+                configuration: None,
+                metadata: None,
+                tenant: None,
+            };
+            runtime
+                .block_on(channel.send_message(&ServiceParams::new(), &request))
+                .map_err(|e| e.to_string())
+        })();
+        let _ = service.shutdown();
+        sent
+    }
+
+    /// The response as JSON, to assert on the text a listener sent back.
+    #[cfg(not(windows))]
+    fn response_json(response: &a2a::SendMessageResponse) -> String {
+        serde_json::to_string(response).unwrap()
+    }
+
+    /// Runs a test body in a child process, which SLIM needs: it installs a global
+    /// tracing subscriber, and these bodies set process-wide env. Returns `true` in
+    /// the child, where the body runs; in the parent it runs the test again as the
+    /// child and returns `false`.
+    #[cfg(not(windows))]
+    fn in_child_process(test: &str, child_var: &str) -> bool {
+        if std::env::var_os(child_var).is_some() {
+            return true;
+        }
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::{test}"), "--nocapture"])
+            .env(child_var, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child run failed: {status}");
+        false
+    }
+
+    /// A fresh directory's mTLS certificates, from `tools/generate_slim_mtls_certs.sh`.
+    #[cfg(not(windows))]
+    fn generate_slim_mtls(dir: &Path) -> PathBuf {
+        let tls = dir.join("shadi-slim-mtls");
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/generate_slim_mtls_certs.sh");
+        let generated = std::process::Command::new("bash")
+            .arg(&script)
+            .arg(&tls)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        tls
+    }
+
+    /// The env a SLIM mesh test runs under: DID auth, the given admission switch
+    /// and allow-list (`None`: unset), the test certs, and no other gates.
+    #[cfg(not(windows))]
+    fn mtls_mesh_env(
+        tls: &Path,
+        tmp: &Path,
+        seed: &str,
+        admission: Option<&str>,
+        members: Option<String>,
+    ) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("SHADI_SLIM_AUTH", Some("did".to_string())),
+            ("SHADI_SLIM_ADMISSION", admission.map(str::to_string)),
+            ("SLIM_HUMAN_SEED", Some(seed.to_string())),
+            ("SLIM_MEMBER_DIDS", members),
+            (
+                "SLIM_TLS_CERT",
+                Some(tls.join("client-avatar.crt").display().to_string()),
+            ),
+            (
+                "SLIM_TLS_KEY",
+                Some(tls.join("client-avatar.key").display().to_string()),
+            ),
+            (
+                "SLIM_TLS_CA",
+                Some(tls.join("ca.crt").display().to_string()),
+            ),
+            ("SHADI_TMP_DIR", Some(tmp.display().to_string())),
+            ("SLIM_AUTH_TOKEN_FILE", None),
+            ("SHADI_MEMBER_HUMAN_DIDS", None),
+        ]
+    }
+
+    /// Sets each variable (`None`: removes it) and returns the previous values,
+    /// for [`restore_env`].
+    #[cfg(not(windows))]
+    fn set_env(
+        vars: &[(&'static str, Option<String>)],
+    ) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        let saved = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        saved
+    }
+
+    #[cfg(not(windows))]
+    fn restore_env(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    /// A SLIM node on a free loopback port, serving mTLS with the certs in `tls`.
+    /// Returns the node and its endpoint.
+    #[cfg(not(windows))]
+    fn run_mtls_node(tls: &Path) -> (Service, String) {
+        let endpoint = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string();
+        let node = Service::new(format!("mtls-node-{}", std::process::id()));
+        let server_config = slim_bindings::ServerConfig {
+            endpoint: endpoint.clone(),
+            tls: slim_bindings::TlsServerConfig {
+                insecure: false,
+                source: slim_bindings::TlsSource::File {
+                    cert: tls.join("server.crt").display().to_string(),
+                    key: tls.join("server.key").display().to_string(),
+                },
+                client_ca: slim_bindings::CaSource::File {
+                    path: tls.join("ca.crt").display().to_string(),
+                },
+                include_system_ca_certs_pool: Some(false),
+                tls_version: Some("tls1.3".to_string()),
+                reload_client_ca_file: Some(false),
+            },
+            ..Default::default()
+        };
+        node.run_server(server_config).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        (node, endpoint)
     }
 }

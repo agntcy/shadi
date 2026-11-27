@@ -26,13 +26,16 @@ pub mod did_proof;
 pub mod grant;
 #[cfg(feature = "openpgp")]
 pub mod openpgp;
+pub mod provider;
 pub mod ssh;
 pub mod trust_anchor;
+pub mod verifier;
 pub mod vp_layer;
 
 pub use auth::{
-    agent_identity_from_env, build_did_auth, create_app, did_auth_from_env,
-    require_did_auth_from_env, SlimAuth,
+    agent_identity_from_env, build_did_auth, build_did_auth_for_peer, create_app,
+    did_auth_from_env, parse_slim_admission, require_did_auth_for_peer, require_did_auth_from_env,
+    slim_admission_from_env, DidTokens, SlimAdmission, SlimAuth, SlimMembers,
 };
 pub use binding::{
     issue_binding, looks_like_binding, split_binding, verify_binding, VerifiedBinding,
@@ -42,7 +45,9 @@ pub use did_proof::{
     VerifiedPayload, DID_PROOF_HEADER_MAX_BYTES, DID_PROOF_PAYLOAD_MAX_BYTES,
 };
 pub use grant::{issue_grant, verify_grant, ChannelGrant, GrantAction, GrantRole};
+pub use provider::DidKeyProvider;
 pub use trust_anchor::{DeclaredKeysAnchor, KeyListFetcher, PublishedKeysAnchor, TrustAnchor};
+pub use verifier::{DidKeyVerifier, DID_JWT_AUDIENCE};
 pub use vp_layer::{looks_like_vp, split_vp, wrap_vp, VP_MAX_BYTES};
 
 /// Multicodec prefix for an Ed25519 public key (`0xed` varint-encoded).
@@ -55,6 +60,8 @@ pub enum IdentityError {
     InvalidDid(String),
     Config(String),
     Proof(String),
+    /// SLIM refused an operation (e.g. [`create_app`]); displays as SLIM's own message.
+    Slim(slim_bindings::SlimError),
 }
 
 impl fmt::Display for IdentityError {
@@ -65,11 +72,25 @@ impl fmt::Display for IdentityError {
             IdentityError::InvalidDid(e) => write!(f, "invalid did:key: {e}"),
             IdentityError::Config(e) => write!(f, "auth configuration error: {e}"),
             IdentityError::Proof(e) => write!(f, "DID proof error: {e}"),
+            IdentityError::Slim(e) => write!(f, "{e}"),
         }
     }
 }
 
-impl std::error::Error for IdentityError {}
+impl std::error::Error for IdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            IdentityError::Slim(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<slim_bindings::SlimError> for IdentityError {
+    fn from(e: slim_bindings::SlimError) -> Self {
+        IdentityError::Slim(e)
+    }
+}
 
 /// An Ed25519 agent identity: the signing key plus its `did:key`.
 pub struct AgentIdentity {

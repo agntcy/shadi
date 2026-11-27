@@ -33,6 +33,10 @@ pub const A2A_DST_DID_METADATA_KEY: &str = "a2a-dst-did";
 /// `Message.metadata` key carrying an `AUTH_REQUIRED` challenge.
 pub const A2A_CHALLENGE_METADATA_KEY: &str = "a2a-challenge";
 
+/// `Message.metadata` key on an `AUTH_REQUIRED` park the listener could not
+/// challenge yet: whole seconds, as a JSON number, before re-sending.
+pub const A2A_RETRY_AFTER_METADATA_KEY: &str = "a2a-retry-after";
+
 fn secret_err_to_a2a(err: SecretError) -> A2AError {
     A2AError::internal(format!("SHADI auth error: {err}"))
 }
@@ -81,6 +85,26 @@ pub fn challenge_from_message(message: &Message) -> Option<&str> {
         .and_then(|metadata| metadata.get(A2A_CHALLENGE_METADATA_KEY))
         .and_then(|value| value.as_str())
         .filter(|c| !c.is_empty())
+}
+
+/// Tell the caller of a parked task to wait `secs` before sending again.
+pub fn insert_retry_after(mut message: Message, secs: u64) -> Message {
+    message
+        .metadata
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(A2A_RETRY_AFTER_METADATA_KEY.to_string(), secs.into());
+    message
+}
+
+/// Retry-after seconds from `Message.metadata`. Anything but a positive
+/// integer reads as no hint.
+pub fn retry_after_from_message(message: &Message) -> Option<u64> {
+    message
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(A2A_RETRY_AFTER_METADATA_KEY))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|secs| *secs > 0)
 }
 
 /// What a verifier sees of an outbound message, on an [`A2AChannel`] or in a
@@ -1090,6 +1114,47 @@ mod tests {
         assert_eq!(dest_did_from_message(&unlabeled), None);
         let empty = insert_dest_did(unlabeled, "");
         assert_eq!(dest_did_from_message(&empty), None);
+    }
+
+    #[test]
+    fn retry_after_round_trips_as_a_json_number() {
+        let message = insert_retry_after(
+            Message::new(Role::Agent, vec![Part::text("busy".to_string())]),
+            50,
+        );
+        assert_eq!(retry_after_from_message(&message), Some(50));
+        assert_eq!(
+            message
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get(A2A_RETRY_AFTER_METADATA_KEY)),
+            Some(&serde_json::json!(50))
+        );
+        let both = insert_challenge(message, "{}");
+        assert_eq!(retry_after_from_message(&both), Some(50));
+        assert_eq!(challenge_from_message(&both), Some("{}"));
+    }
+
+    #[test]
+    fn a_missing_or_garbage_retry_after_reads_as_none() {
+        let plain = Message::new(Role::Agent, vec![Part::text("busy".to_string())]);
+        assert_eq!(retry_after_from_message(&plain), None);
+        for garbage in [
+            serde_json::json!("50"),
+            serde_json::json!(-5),
+            serde_json::json!(1.5),
+            serde_json::json!(0),
+            serde_json::json!(null),
+            serde_json::json!({"secs": 50}),
+        ] {
+            let mut message = plain.clone();
+            message.metadata = Some(
+                [(A2A_RETRY_AFTER_METADATA_KEY.to_string(), garbage.clone())]
+                    .into_iter()
+                    .collect(),
+            );
+            assert_eq!(retry_after_from_message(&message), None, "{garbage}");
+        }
     }
 
     #[test]

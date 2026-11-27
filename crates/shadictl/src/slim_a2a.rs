@@ -8,11 +8,13 @@ use a2a::event::StreamResponse;
 use a2a::*;
 use a2a_client::A2AClient;
 use a2a_server::{
-    AgentExecutor, DefaultRequestHandler, InMemoryTaskStore, RequestHandler,
-    ServiceParams as A2AServiceParams,
+    AgentExecutor, DefaultRequestHandler, RequestHandler, ServiceParams as A2AServiceParams,
 };
 use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretResult, SessionContext};
 use agent_transport_slim::client_access::ClientAccess;
+use agentbridge::bounded_task_store::{
+    BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY,
+};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use shadi_a2a::{A2AChannelBuilder, A2AGroupChannelBuilder, SLIM_SRC_METADATA_KEY, SlimRpcHandler};
@@ -130,7 +132,7 @@ impl SlimA2AHandler {
                 SlimA2AExecutor {
                     agent_name: agent_name.clone(),
                 },
-                InMemoryTaskStore::new(),
+                BoundedTaskStore::new(DEFAULT_TASK_CAPACITY, DEFAULT_PARKED_TTL),
             ),
             card: a2a_agent_card(&agent_name, &target),
             request_seen,
@@ -262,7 +264,7 @@ pub(crate) fn run_a2a_echo_peer(args: SlimA2AEchoPeerArgs) -> Result<(), String>
         .map_err(format_slim_error)?;
     let peer_name_ref = Arc::new(parse_name(&peer_name)?);
     let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
-        .map_err(format_slim_error)?;
+        .map_err(|e| e.to_string())?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
@@ -523,7 +525,7 @@ fn run_a2a_send_once(args: &SlimA2ASendArgs) -> Result<String, String> {
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let remote_name_ref = Arc::new(parse_name(&destination)?);
     let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
-        .map_err(format_slim_error)?;
+        .map_err(|e| e.to_string())?;
     app.subscribe(local_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
@@ -619,7 +621,7 @@ fn run_a2a_collaborate_once(args: &SlimA2ACollaborateArgs) -> Result<String, Str
         .map_err(format_slim_error)?;
     let local_name_ref = Arc::new(parse_name(&local_name)?);
     let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
-        .map_err(format_slim_error)?;
+        .map_err(|e| e.to_string())?;
     app.subscribe(local_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
