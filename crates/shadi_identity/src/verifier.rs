@@ -158,7 +158,7 @@ impl DidKeyVerifier {
         // token that fails them costs no Ed25519 verification, and none of them
         // reveals anything the sender did not already put in the token.
 
-        // `aud` comes first, so a token from the other admission mode fails on
+        // `aud` comes first, so a stock SLIM token, which has none, fails on
         // its audience, whatever its lifetime. `aud` must be a JSON string exactly
         // equal to the verifier's audience (`DID_JWT_AUDIENCE` from the public
         // constructors). A missing, non-string (including an array) or different
@@ -628,8 +628,8 @@ mod tests {
         let other = AgentIdentity::generate().unwrap();
         let t = now();
 
-        // A closed-mode (stock signer) token: no `aud`, and a lifetime past the
-        // bound. It must fail on `aud`, not on its lifetime or its signature.
+        // A stock SLIM signer's token: no `aud`, and a lifetime past the bound.
+        // It must fail on `aud`, not on its lifetime or its signature.
         let mut claims = claims_for(&id.did(), t, t + 3600);
         claims.as_object_mut().unwrap().remove("aud");
         let token = mint_with(&other, eddsa_header(), claims);
