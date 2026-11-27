@@ -19,7 +19,8 @@ use agentbridge::{
         profile::{bundled_profile_ids, load_profile, ProfileAdapter},
     },
     bounded_task_store::{
-        BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY, PARKED_OWNER_METADATA_KEY,
+        refuse_push_config, BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY,
+        PARKED_OWNER_METADATA_KEY,
     },
     dir_registry::DirError,
     local_registry::{LocalAdapterRecord, LocalAdapterRegistry},
@@ -1203,6 +1204,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
         self.ready.notify_waiters();
+        refuse_push_config(&req)?;
         // Admission is the executor's job now: the handler creates the task
         // before calling it, so a message that fails the DID gate still leaves
         // a task the client can fetch and resume.
@@ -1215,6 +1217,7 @@ impl RequestHandler for AgentBridgeRequestHandler {
         req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         self.ready.notify_waiters();
+        refuse_push_config(&req)?;
         // See send_message: the executor gates the message, so the task exists
         // in the store either way.
         self.inner.send_streaming_message(params, req).await
@@ -3418,6 +3421,54 @@ test push ... FAILED
         let err = task_rpc_error(&silent_handler_with(false), "get_task").await;
         let err = err.expect("get_task on a missing task must not succeed");
         assert_eq!(err.code, error_code::TASK_NOT_FOUND, "{err}");
+    }
+
+    /// agntcy/shadi#629: a push config failed only after the task was stored,
+    /// and the orphaned `Submitted` task was never evicted.
+    #[tokio::test]
+    async fn a_push_config_is_refused_before_a_task_is_stored() {
+        let handler = silent_handler();
+        let params = A2AServiceParams::default();
+        let push_request = || {
+            let mut request = sample_request("plain task");
+            request.configuration = Some(
+                serde_json::from_value(serde_json::json!({
+                    "taskPushNotificationConfig": { "url": "https://example.invalid/hook" }
+                }))
+                .unwrap(),
+            );
+            request
+        };
+        let err = handler
+            .send_message(&params, push_request())
+            .await
+            .expect_err("send_message must refuse a push config");
+        assert_eq!(err.code, error_code::PUSH_NOTIFICATION_NOT_SUPPORTED);
+        let err = handler
+            .send_streaming_message(&params, push_request())
+            .await
+            .err()
+            .expect("send_streaming_message must refuse a push config");
+        assert_eq!(err.code, error_code::PUSH_NOTIFICATION_NOT_SUPPORTED);
+
+        let stored = handler
+            .inner
+            .list_tasks(
+                &params,
+                ListTasksRequest {
+                    context_id: None,
+                    status: None,
+                    page_size: None,
+                    page_token: None,
+                    history_length: None,
+                    status_timestamp_after: None,
+                    include_artifacts: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("list the store");
+        assert!(stored.tasks.is_empty(), "{:?}", stored.tasks);
     }
 
     #[tokio::test]
