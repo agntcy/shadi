@@ -21,7 +21,7 @@ const TOKEN_REREAD: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientIdentity {
-    pub cert: PathBuf,
+    pub pem: PathBuf,
     pub key: PathBuf,
 }
 
@@ -36,9 +36,9 @@ pub struct ClientAccess {
 }
 
 impl ClientAccess {
-    pub fn mtls(cert: PathBuf, key: PathBuf, ca: PathBuf) -> Self {
+    pub fn mtls(pem: PathBuf, key: PathBuf, ca: PathBuf) -> Self {
         Self {
-            identity: Some(ClientIdentity { cert, key }),
+            identity: Some(ClientIdentity { pem, key }),
             ca: Some(ca),
             token_file: None,
         }
@@ -61,7 +61,7 @@ impl ClientAccess {
                 .map(PathBuf::from)
         };
         let identity = match (path("SLIM_TLS_CERT"), path("SLIM_TLS_KEY")) {
-            (Some(cert), Some(key)) => Some(ClientIdentity { cert, key }),
+            (Some(pem), Some(key)) => Some(ClientIdentity { pem, key }),
             (None, None) => None,
             _ => return Err("SLIM_TLS_CERT and SLIM_TLS_KEY must be set together".to_string()),
         };
@@ -102,7 +102,7 @@ impl ClientAccess {
         };
 
         if let Some(identity) = &access.identity {
-            ensure_file(&identity.cert, "SLIM client certificate")?;
+            ensure_file(&identity.pem, "SLIM client certificate")?;
             ensure_file(&identity.key, "SLIM client key")?;
         }
         if let Some(ca) = &access.ca {
@@ -117,7 +117,7 @@ impl ClientAccess {
             insecure_skip_verify: false,
             source: match &self.identity {
                 Some(identity) => TlsSource::File {
-                    cert: identity.cert.display().to_string(),
+                    cert: identity.pem.display().to_string(),
                     key: identity.key.display().to_string(),
                 },
                 None => TlsSource::None,
@@ -182,19 +182,19 @@ fn default_identity(base: &Path, agent_id: Option<&str>) -> Result<ClientIdentit
     let candidates: Vec<ClientIdentity> = stems
         .iter()
         .map(|stem| ClientIdentity {
-            cert: base.join(format!("{stem}.crt")),
+            pem: base.join(format!("{stem}.crt")),
             key: base.join(format!("{stem}.key")),
         })
         .collect();
     if let Some(found) = candidates
         .iter()
-        .find(|c| c.cert.is_file() && c.key.is_file())
+        .find(|c| c.pem.is_file() && c.key.is_file())
     {
         return Ok(found.clone());
     }
     let checked = candidates
         .iter()
-        .map(|c| format!("{} + {}", c.cert.display(), c.key.display()))
+        .map(|c| format!("{} + {}", c.pem.display(), c.key.display()))
         .collect::<Vec<_>>()
         .join(", ");
     Err(format!(
@@ -298,7 +298,7 @@ mod tests {
         )
         .expect("access");
 
-        assert_eq!(access.identity, Some(ClientIdentity { cert, key }));
+        assert_eq!(access.identity, Some(ClientIdentity { pem: cert, key }));
     }
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         )
         .expect("access");
 
-        assert_eq!(access.identity, Some(ClientIdentity { cert, key }));
+        assert_eq!(access.identity, Some(ClientIdentity { pem: cert, key }));
         assert_eq!(access.ca, Some(ca));
         assert!(!access.tls().include_system_ca_certs_pool);
     }

@@ -37,8 +37,6 @@ changes from the workspace.
 Install the local tooling SHADI expects:
 
 - Rust stable with Cargo
-- Python 3.12
-- `uv` for Python workflows
 - `just` for the common repo tasks
 - `mkdocs` if you want to preview the docs site locally
 
@@ -145,7 +143,7 @@ access on verified sessions.
 
 !!! note
 
-    If you need the full identity lifecycle, DID verification flow, or Python
+    If you need the full identity lifecycle, DID verification flow, or Rust
     integration surface, continue to [API Guide](api_integration.md).
 
 ## Next Steps

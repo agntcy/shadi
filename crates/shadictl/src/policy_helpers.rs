@@ -11,7 +11,7 @@ pub(crate) fn format_policy(
 }
 
 /// Map this binary's `Cli` and `PolicyFile` onto the layering rules in
-/// `shadi_sandbox::resolve`, which the desktop app resolves policy with too.
+/// `shadi_sandbox::resolve`.
 pub(crate) fn resolve_policy(cli: &Cli, file_policy: &PolicyFile) -> Result<ResolvedPolicy, String> {
     let overrides = PolicyOverrides {
         profile: cli.profile.map(|profile| match profile {
@@ -58,7 +58,7 @@ pub(crate) fn writable_read_warnings(policy: &SandboxPolicy, reads: &[PathBuf]) 
 }
 
 pub(crate) fn profile_defaults(profile: Option<LauncherProfile>) -> PolicyFile {
-    // The sandbox axes live in shadi_sandbox so the desktop panel gets the same
+    // The sandbox axes live in shadi_sandbox so other callers get the same
     // profiles without restating them; everything below them is empty in every
     // profile and stays here with the rest of the policy-file schema.
     let defaults = match profile.unwrap_or(LauncherProfile::Balanced) {

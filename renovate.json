@@ -10,7 +10,6 @@
   "semanticCommitType": "chore",
   "enabledManagers": [
     "cargo",
-    "npm",
     "github-actions",
     "rust-toolchain"
   ],
@@ -81,31 +80,15 @@
       "enabled": false
     },
     {
-      "description": "pnpm 11 rejects lockfile entries published less than a day ago (minimumReleaseAge defaults to 1440 minutes), so an earlier npm bump fails install in CI.",
-      "matchManagers": [
-        "npm"
-      ],
-      "minimumReleaseAge": "1 day"
-    },
-    {
-      "description": "@vitejs/plugin-react tracks vite majors (6 imports vite/internal, which only vite 8 exports), so a plugin bump on its own breaks the dev server.",
-      "matchPackageNames": [
-        "vite",
-        "@vitejs/plugin-react"
-      ],
-      "groupName": "vite"
-    },
-    {
       "matchManagers": [
         "github-actions"
       ],
       "groupName": "github actions"
     },
     {
-      "description": "The workflow toolchain pins and rust-toolchain.toml / packageManager must move together, or CI installs one version and cargo or pnpm runs another. Last, so it overrides the groups above.",
+      "description": "The workflow toolchain pins and rust-toolchain.toml must move together, or CI installs one version and cargo runs another. Last, so it overrides the groups above.",
       "matchPackageNames": [
-        "rust",
-        "pnpm"
+        "rust"
       ],
       "groupName": "toolchains"
     }

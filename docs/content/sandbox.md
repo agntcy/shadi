@@ -173,10 +173,6 @@ allowances needed for the broker endpoint and, on macOS, local Unix sockets.
 | `--git-snapshot-dir DIR` | Override the default snapshot root at `${SHADI_TMP_DIR:-./.tmp}/git-snapshots`. |
 | `--git-snapshot-untracked` | Include an explicit untracked-file inventory in the artifact. |
 
-!!! note
-
-    `net_allow` is honored by the Python sandbox runner. It injects a `sitecustomize.py` hook that blocks connections outside the allowlist (best-effort; not OS-enforced).
-
 ## Compiled defaults, aliases, and deny
 
 `--allow`, `--read`, and `--write` only add paths. Each OS backend also
@@ -446,6 +442,18 @@ group via `setsid()` in `pre_exec`. When `SandboxedChild::kill()` is called,
 SHADI sends `SIGKILL` to the entire process group using `killpg()`, ensuring
 that any grandchild processes spawned by the agent are also terminated. This
 mirrors the Windows Job-object pattern (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
+
+When `shadictl` itself receives `SIGTERM`, `SIGINT`, `SIGHUP`, or `SIGQUIT`, it
+first sends `SIGTERM` to the child's process group and waits up to 10 seconds,
+so the agent can clean up (for example, `agentbridge register --record` removes
+its config root). If the child, or any process it left in its process group, is
+still running after that, or a second signal arrives, the group gets `SIGKILL`.
+`shadictl` exits with the child's own status. When `shadictl` is PID 1 in a
+container, the processes the child leaves behind become its children, and it
+reaps them as they exit, so their zombies don't hold up the stop. The child is
+in its own session,
+so a Ctrl-C in the terminal reaches it only this way. On Windows the child is
+killed at once.
 
 ### Mach IPC hardening (macOS)
 

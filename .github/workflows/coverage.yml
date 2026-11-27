@@ -51,9 +51,7 @@ jobs:
             echo "workspace=true" >>"$GITHUB_OUTPUT"; exit 0
           fi
           echo "Changed files:"; printf '%s\n' "$changed" | sed 's/^/  /'
-          # apps/shadi_desktop is its own workspace and is excluded from every
-          # build here, so a desktop-only change cannot affect these jobs.
-          if printf '%s\n' "$changed" | grep -qvE '(^docs/|\.md$|^LICENSE$|^CODEOWNERS$|^\.gitignore$|^apps/shadi_desktop/|^\.github/ISSUE_TEMPLATE/)'; then
+          if printf '%s\n' "$changed" | grep -qvE '(^docs/|\.md$|^LICENSE$|^CODEOWNERS$|^\.gitignore$|^\.github/ISSUE_TEMPLATE/)'; then
             echo "workspace=true" >>"$GITHUB_OUTPUT"
           else
             echo "workspace=false" >>"$GITHUB_OUTPUT"
@@ -64,8 +62,6 @@ jobs:
     needs: changes
     permissions:
       contents: read
-    env:
-      PYO3_PYTHON: python
     steps:
       - name: Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -75,12 +71,6 @@ jobs:
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: 1.99.0
-
-      - name: Setup Python
-        if: needs.changes.outputs.workspace == 'true'
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.15"
 
       - name: Install Linux dependencies
         if: needs.changes.outputs.workspace == 'true'

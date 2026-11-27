@@ -4,7 +4,6 @@ set dotenv-load := true
 set dotenv-filename := ".just.env"
 
 import 'just/vars.just'
-import 'just/platform.just'
 import 'just/core.just'
 
 [default]

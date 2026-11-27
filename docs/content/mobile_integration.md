@@ -2,7 +2,7 @@
 
 **Status: planned, not yet implemented.** There is no Swift/Kotlin binding
 layer, FFI crate, or mobile build target in the repository today — the Rust
-core is only exposed via the [Python bindings](api_integration.md) and the
+core is only exposed through the [Rust crates](api_integration.md) and the
 `shadictl` CLI.
 
 The intent is to eventually expose the same core (secrets, encrypted memory,

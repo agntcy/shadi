@@ -27,8 +27,6 @@ jobs:
       contents: write
       pull-requests: read
       id-token: write
-    env:
-      PYO3_PYTHON: python
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -133,8 +131,6 @@ jobs:
           - name: Windows x86_64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-    env:
-      PYO3_PYTHON: python
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -349,8 +345,6 @@ jobs:
           - name: Windows x86_64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-    env:
-      PYO3_PYTHON: python
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -511,8 +505,6 @@ jobs:
     concurrency:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
-    env:
-      PYO3_PYTHON: python
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

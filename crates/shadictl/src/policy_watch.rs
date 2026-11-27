@@ -40,9 +40,9 @@ use shadi_sandbox::{
     CONTROL_LINE_MAX_BYTES,
 };
 
-// The caller's half of this protocol lives in the library, so `shadictl`, the
-// shell's session commands and SHADI Desktop all speak it through one
-// implementation. Only the listener below is shadictl's own.
+// The caller's half of this protocol lives in the library, so `shadictl` and the
+// shell's session commands speak it through one implementation. Only the
+// listener below is shadictl's own.
 pub(crate) use shadi_sandbox::control::{
     default_socket_path, named_socket_path, query_policy, query_resources, resolve_session_socket,
     send_patch, send_terminate, session_name_from_path,

@@ -35,8 +35,8 @@ pub struct SqlCipherStore {
 // SqlCipherStore serializes all access to the underlying `rusqlite::Connection`
 // behind a `Mutex`. `Connection` is `Send` but not `Sync` (it caches prepared
 // statements internally via a `RefCell`), so callers that need to share a
-// store across threads — e.g. the PyO3 bindings, where `#[pyclass]` types must
-// be `Sync` — rely on this wrapper rather than synchronizing at the call site.
+// store across threads — e.g. one shared behind an `Arc` — rely on this wrapper
+// rather than synchronizing at the call site.
 impl SqlCipherStore {
     pub fn open(path: &Path, key: &str) -> Result<Self, MemoryError> {
         let conn = Connection::open_with_flags(

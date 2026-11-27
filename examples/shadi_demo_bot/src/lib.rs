@@ -1349,7 +1349,7 @@ fn run_slim_echo_peer(args: SlimEchoPeerArgs) -> Result<(), String> {
         None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
     };
     let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
-        .map_err(format_slim_error)?;
+        .map_err(|e| e.to_string())?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
@@ -1413,7 +1413,7 @@ fn run_a2a_echo_peer(args: A2AEchoPeerArgs) -> Result<(), String> {
         None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
     };
     let app = shadi_identity::create_app(&service, peer_name_ref.clone(), &auth)
-        .map_err(format_slim_error)?;
+        .map_err(|e| e.to_string())?;
     app.subscribe(peer_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 
@@ -1526,7 +1526,7 @@ fn run_a2a_send_once(args: &A2ASendArgs) -> Result<String, String> {
         None => shadi_identity::SlimAuth::SharedSecret(args.shared_secret.clone()),
     };
     let app = shadi_identity::create_app(&service, local_name_ref.clone(), &auth)
-        .map_err(format_slim_error)?;
+        .map_err(|e| e.to_string())?;
     app.subscribe(local_name_ref.clone(), Some(connection_id))
         .map_err(format_slim_error)?;
 

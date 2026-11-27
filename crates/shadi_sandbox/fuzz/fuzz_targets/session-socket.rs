@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use shadi_sandbox::control;
 
 // resolve_session_socket takes either a session name or a socket path from a
-// caller — `--session <name>`, or a path from the desktop panel. A value that
+// caller — `--session <name>` or a socket path. A value that
 // looks like a path is used verbatim, which is the caller naming a socket
 // explicitly; anything else is a name and must land inside socket_dir() under
 // a sanitised filename. The name branch is the one that must not be able to

@@ -4,7 +4,6 @@
 param(
     [ValidateSet('lcov', 'html')]
     [string]$Mode = 'lcov',
-    [string]$PythonBin = $(if ($env:PYO3_PYTHON) { $env:PYO3_PYTHON } else { 'python3.12' }),
     [string]$RustflagsValue = $(if ($env:RUSTFLAGS) { $env:RUSTFLAGS } else { '' })
 )
 
@@ -57,7 +56,6 @@ function Set-OpenSslEnvironment {
 }
 
 $previousShadiKeychainTests = $env:SHADI_KEYCHAIN_TESTS
-$previousPython = $env:PYO3_PYTHON
 $hadRustflags = Test-Path Env:RUSTFLAGS
 $previousRustflags = $env:RUSTFLAGS
 $previousLlvmCov = $env:LLVM_COV
@@ -81,7 +79,6 @@ try {
     }
 
     $env:SHADI_KEYCHAIN_TESTS = if ($env:SHADI_KEYCHAIN_TESTS) { $env:SHADI_KEYCHAIN_TESTS } else { '1' }
-    $env:PYO3_PYTHON = $PythonBin
     $env:LLVM_COV = $llvmCov
     $env:LLVM_PROFDATA = $llvmProfdata
 
@@ -120,7 +117,7 @@ try {
         $env:RUSTFLAGS = $RustflagsValue
     }
 
-    & cargo llvm-cov --workspace --exclude shadi_desktop --features coverage @formatArgs --ignore-filename-regex '/rustc-[^/]+'
+    & cargo llvm-cov --workspace --features coverage @formatArgs --ignore-filename-regex '/rustc-[^/]+'
 
     if ($Mode -eq 'lcov') {
         $lcov = Get-Command lcov -ErrorAction SilentlyContinue
@@ -136,12 +133,6 @@ finally {
         Remove-Item Env:SHADI_KEYCHAIN_TESTS -ErrorAction SilentlyContinue
     } else {
         $env:SHADI_KEYCHAIN_TESTS = $previousShadiKeychainTests
-    }
-
-    if ($null -eq $previousPython) {
-        Remove-Item Env:PYO3_PYTHON -ErrorAction SilentlyContinue
-    } else {
-        $env:PYO3_PYTHON = $previousPython
     }
 
     if ($hadRustflags) {

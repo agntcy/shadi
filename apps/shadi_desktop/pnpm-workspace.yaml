@@ -1,5 +1,0 @@
-allowBuilds:
-  esbuild: false
-
-overrides:
-  nanoid: ">=3.3.18 <7"

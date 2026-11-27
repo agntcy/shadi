@@ -60,12 +60,6 @@
         );
     }
 
-    fn write_mas_config(dir: &Path, contents: &str) -> PathBuf {
-        let path = dir.join("mas.toml");
-        std::fs::write(&path, contents).expect("write mas config");
-        path
-    }
-
     fn build_cli() -> Cli {
         Cli {
             profile: None,
@@ -1692,27 +1686,6 @@
     }
 
     #[test]
-    fn run_named_command_dispatches_slim_mas_variant() {
-        let dir = temp_dir();
-        let config = write_mas_config(
-            dir.path(),
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{ did = "did:key:zA", role = "human" }]
-"#,
-        );
-
-        let code = run_named_command(Commands::SlimMas(SlimMasCli {
-            config,
-            command: SlimMasCommand::Validate,
-        }));
-        assert_eq!(code, ExitCode::from(0));
-    }
-
-    #[test]
     fn run_named_command_dispatches_slim_variant() {
         let _guard = trace_env_lock();
         let dir = temp_dir();
@@ -2249,7 +2222,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         test_store_fail_put(private_key);
 
         let code = run_derive_agent_did_command(DeriveAgentDidArgs {
-            secret: Some(root_key),
+            key_ref: Some(root_key),
             input: None,
             agent_name: "agent-store-failure".to_string(),
             prefix: "agents".to_string(),
@@ -2264,7 +2237,7 @@ members = [{ did = "did:key:zA", role = "human" }]
     #[test]
     fn run_cli_derive_agent_did_missing_secret_returns_error() {
         let code = run_derive_agent_did_command(DeriveAgentDidArgs {
-            secret: None,
+            key_ref: None,
             input: None,
             agent_name: "agent-missing-secret".to_string(),
             prefix: "agents".to_string(),
@@ -2465,7 +2438,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: None,
+            human_key_ref: None,
             input: None,
             agent_names: vec!["agent-missing-seed".to_string()],
             prefix: "agents".to_string(),
@@ -2485,7 +2458,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: Some(seed_key),
+            human_key_ref: Some(seed_key),
             input: None,
             agent_names: vec![unique_key("missing-human-did-agent")],
             prefix: "agents".to_string(),
@@ -2508,7 +2481,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: Some(seed_key),
+            human_key_ref: Some(seed_key),
             input: None,
             agent_names: vec![unique_key("out-dir-conflict-agent")],
             prefix: "agents".to_string(),
@@ -2534,7 +2507,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Seed,
-            human_secret: Some(seed_key),
+            human_key_ref: Some(seed_key),
             input: None,
             agent_names: vec![agent_name.clone()],
             prefix: "agents".to_string(),
@@ -3397,7 +3370,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Ssh,
-            human_secret: None,
+            human_key_ref: None,
             input: Some(key_path.clone()),
             agent_names: vec![agent.clone()],
             prefix: prefix.clone(),
@@ -3415,7 +3388,7 @@ members = [{ did = "did:key:zA", role = "human" }]
         let code = run_verify_agent_identity_command(VerifyAgentIdentityArgs {
             ssh_passphrase_secret: None,
             source: HumanIdentitySource::Ssh,
-            human_secret: None,
+            human_key_ref: None,
             input: Some(key_path),
             agent_name: agent,
             prefix,
@@ -3443,7 +3416,7 @@ members = [{ did = "did:key:zA", role = "human" }]
             let code = run_derive_agent_identity_command(DeriveAgentIdentityArgs {
                 ssh_passphrase_secret: None,
                 source,
-                human_secret: None,
+                human_key_ref: None,
                 input: Some(key_path.clone()),
                 agent_names: vec![agent.clone()],
                 prefix: prefix.clone(),
@@ -4082,108 +4055,6 @@ members = [{ did = "did:key:zA", role = "human" }]
     }
 
     #[test]
-    fn slim_mas_validate_requires_default_group() {
-        let dir = temp_dir();
-        let config_path = write_mas_config(
-            dir.path(),
-            r#"
-[groups.team-a]
-members = [{ did = "did:key:zA", role = "human" }]
-"#,
-        );
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::Validate,
-        };
-
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
-    }
-
-    #[test]
-    fn slim_mas_list_members_errors_for_missing_group() {
-        let dir = temp_dir();
-        let config_path = write_mas_config(
-            dir.path(),
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{ did = "did:key:zA", role = "human" }]
-"#,
-        );
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::ListMembers {
-                group: Some("team-b".to_string()),
-            },
-        };
-
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
-    }
-
-    #[test]
-    fn slim_mas_admit_allows_member_from_shadi_key() {
-        let dir = temp_dir();
-        let key = unique_key("secops/member_did");
-        let config = format!(
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{{ did = "shadi://{}", role = "human" }}]
-"#,
-            key
-        );
-        let config_path = write_mas_config(
-            dir.path(),
-            &config,
-        );
-
-        test_store_put(&key, b"did:key:zMember");
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::Admit {
-                group: None,
-                did: format!("shadi://{}", key),
-                role: Some("human".to_string()),
-            },
-        };
-
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(0));
-    }
-
-    #[test]
-    fn slim_mas_admit_denies_wrong_role() {
-        let dir = temp_dir();
-        let config_path = write_mas_config(
-            dir.path(),
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{ did = "did:key:zMember", role = "human" }]
-"#,
-        );
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::Admit {
-                group: None,
-                did: "did:key:zMember".to_string(),
-                role: Some("agent".to_string()),
-            },
-        };
-
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(3));
-    }
-
-    #[test]
     fn run_memory_command_init_succeeds_with_explicit_key() {
         let dir = temp_dir();
         let db = dir.path().join("memory.db");
@@ -4283,144 +4154,6 @@ members = [{ did = "did:key:zMember", role = "human" }]
         let err = read_memory_payload(Some("inline".to_string()), Some(PathBuf::from("payload.txt")))
             .unwrap_err();
         assert!(err.contains("use either payload or payload-file"));
-    }
-
-    #[test]
-    fn slim_mas_list_groups_and_members_succeed() {
-        let dir = temp_dir();
-        let config_path = write_mas_config(
-            dir.path(),
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [
-  { did = "did:key:zA", role = "human" },
-  { did = "did:key:zB" }
-]
-"#,
-        );
-
-        let list_groups = SlimMasCli {
-            config: config_path.clone(),
-            command: SlimMasCommand::ListGroups,
-        };
-        assert_eq!(run_slim_mas_command(list_groups), ExitCode::from(0));
-
-        let list_members = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::ListMembers { group: None },
-        };
-        assert_eq!(run_slim_mas_command(list_members), ExitCode::from(0));
-    }
-
-    #[test]
-    fn slim_mas_validate_succeeds_with_default_group() {
-        let dir = temp_dir();
-        let config_path = write_mas_config(
-            dir.path(),
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{ did = "did:key:zA" }]
-"#,
-        );
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::Validate,
-        };
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(0));
-    }
-
-    #[test]
-    fn slim_mas_admit_errors_when_group_missing() {
-        let dir = temp_dir();
-        let config_path = write_mas_config(
-            dir.path(),
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{ did = "did:key:zMember", role = "human" }]
-"#,
-        );
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::Admit {
-                group: Some("team-b".to_string()),
-                did: "did:key:zMember".to_string(),
-                role: Some("human".to_string()),
-            },
-        };
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
-    }
-
-    #[test]
-    fn slim_mas_admit_errors_when_did_reference_cannot_be_resolved() {
-        let dir = temp_dir();
-        let missing_key = unique_key("missing/member");
-        let config_path = write_mas_config(
-            dir.path(),
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{ did = "did:key:zMember", role = "human" }]
-"#,
-        );
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::Admit {
-                group: None,
-                did: format!("shadi://{}", missing_key),
-                role: Some("human".to_string()),
-            },
-        };
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
-    }
-
-    #[test]
-    fn slim_mas_list_members_errors_when_group_did_reference_is_missing() {
-        let dir = temp_dir();
-        let missing_key = unique_key("missing/member");
-        let config = format!(
-            r#"
-[mas]
-default_group = "team-a"
-
-[groups.team-a]
-members = [{{ did = "shadi://{}", role = "human" }}]
-"#,
-            missing_key
-        );
-        let config_path = write_mas_config(
-            dir.path(),
-            &config,
-        );
-
-        let cli = SlimMasCli {
-            config: config_path,
-            command: SlimMasCommand::ListMembers { group: None },
-        };
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
-    }
-
-    #[test]
-    fn slim_mas_returns_error_for_missing_config_file() {
-        let dir = temp_dir();
-        let cli = SlimMasCli {
-            config: dir.path().join("missing.toml"),
-            command: SlimMasCommand::ListGroups,
-        };
-        assert_eq!(run_slim_mas_command(cli), ExitCode::from(2));
     }
 
     #[test]

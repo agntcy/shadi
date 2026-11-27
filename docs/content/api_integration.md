@@ -63,166 +63,67 @@ Most applications integrate SHADI in three layers:
 2. **Secrets access**: gate reads and writes to the secret store.
 3. **Sandbox execution** (optional): run agents with OS-level restrictions.
 
-## Language Bindings
+## Rust API
 
-SHADI exposes the same secrets, session, and sandbox surface to both Rust and Python.
+The Rust integration surface lives in `agent_secrets`.
 
-=== "Rust"
+### Core traits and types
 
-    The Rust integration surface lives in `agent_secrets`.
+- `SecretStore`: storage backend (platform keychain by default).
+- `AgentVerifier`: verifies a session before secret access, and each A2A
+  request before it is sent (`verify_request`, which defaults to `verify`).
+- `SessionContext`: session metadata used by `AgentVerifier`.
+- `RequestContext`: one A2A request as `verify_request` sees it: a locally
+  generated `evaluation_id`, the sender-chosen message id, the destination
+  DID, and the message text only when the verifier's `wants_content` is true.
+- `AgentSecretAccess`: gatekeeper for per-session secret access.
+- `SecretBytes`: zeroizing wrapper for secret material.
 
-    #### Core traits and types
+### Example: verify then access secrets
 
-    - `SecretStore`: storage backend (platform keychain by default).
-    - `AgentVerifier`: verifies a session before secret access, and each A2A
-      request before it is sent (`verify_request`, which defaults to `verify`).
-    - `SessionContext`: session metadata used by `AgentVerifier`.
-    - `RequestContext`: one A2A request as `verify_request` sees it: a locally
-      generated `evaluation_id`, the sender-chosen message id, the destination
-      DID, and the message text only when the verifier's `wants_content` is true.
-    - `AgentSecretAccess`: gatekeeper for per-session secret access.
-    - `SecretBytes`: zeroizing wrapper for secret material.
+```rust
+use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretError, SessionContext};
 
-    #### Example: verify then access secrets
+struct AllowVerifier;
 
-    ```rust
-    use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretError, SessionContext};
-
-    struct AllowVerifier;
-
-    impl AgentVerifier for AllowVerifier {
-        fn verify(&self, session: &SessionContext) -> Result<(), SecretError> {
-            if session.verified {
-                Ok(())
-            } else {
-                Err(SecretError::NotAuthorized)
-            }
+impl AgentVerifier for AllowVerifier {
+    fn verify(&self, session: &SessionContext) -> Result<(), SecretError> {
+        if session.verified {
+            Ok(())
+        } else {
+            Err(SecretError::NotAuthorized)
         }
     }
+}
 
-    fn main() -> Result<(), SecretError> {
-        let store = agent_secrets::default_store();
-        let verifier = AllowVerifier;
-        let access = AgentSecretAccess::new(store.as_ref(), &verifier);
+fn main() -> Result<(), SecretError> {
+    let store = agent_secrets::default_store();
+    let verifier = AllowVerifier;
+    let access = AgentSecretAccess::new(store.as_ref(), &verifier);
 
-        let mut session = SessionContext::new("agent-1", "session-1");
-        session.verified = true;
+    let mut session = SessionContext::new("agent-1", "session-1");
+    session.verified = true;
 
-        access.put_for_session(&session, "app/config", b"secret")?;
-        let secret = access.get_for_session(&session, "app/config")?;
-        let value = secret.expose(|bytes| bytes.to_vec());
+    access.put_for_session(&session, "app/config", b"secret")?;
+    let secret = access.get_for_session(&session, "app/config")?;
+    let value = secret.expose(|bytes| bytes.to_vec());
 
-        println!("secret len: {}", value.len());
-        Ok(())
-    }
-    ```
+    println!("secret len: {}", value.len());
+    Ok(())
+}
+```
 
-    #### SessionContext fields
+### SessionContext fields
 
-    `SessionContext` includes:
+`SessionContext` includes:
 
-    - `agent_id`: logical agent identifier
-    - `session_id`: per-session identifier
-    - `verified`: whether verification succeeded
-    - `claims`: list of DID/VC claims
-    - `did`: the session's derived agent DID, if identity verification set one
+- `agent_id`: logical agent identifier
+- `session_id`: per-session identifier
+- `verified`: whether verification succeeded
+- `claims`: list of DID/VC claims
+- `did`: the session's derived agent DID, if identity verification set one
 
-    Your verifier should set `verified` after validating a DID/VC presentation.
-
-=== "Python"
-
-    The Python bindings are provided by `shadi_py` and expose `ShadiStore`,
-    `PySessionContext`, `SqlCipherMemoryStore`, `SandboxPolicyHandle`, and
-    `run_sandboxed`.
-
-    #### Installing the bindings
-
-    Install the extension module into the current Python environment with maturin:
-
-    ```bash
-    uv run maturin develop --manifest-path crates/shadi_py/Cargo.toml
-    ```
-
-    For Rust-only builds, use:
-
-    ```bash
-    just build
-    ```
-
-    #### Example: Python secret access
-
-    ```python
-    from shadi import ShadiStore, PySessionContext
-
-    store = ShadiStore()
-
-    # Provide a verification callback.
-    # It receives: agent_id, session_id, presentation_bytes, claims.
-    store.set_verifier(lambda agent_id, session_id, presentation, claims: True)
-
-    session = PySessionContext("agent-1", "session-1")
-    store.verify_session(session, b"didvc-presentation")
-
-    store.put(session, "app/config", b"secret")
-    print(store.get(session, "app/config"))
-    store.delete(session, "app/config")
-    ```
-
-    #### Example: integrate with an app session
-
-    ```python
-    from shadi import ShadiStore, PySessionContext
-
-    def verify_didvc(agent_id, session_id, presentation, claims):
-      # Replace with real DID/VC validation.
-      return True
-
-    store = ShadiStore()
-    store.set_verifier(verify_didvc)
-
-    session = PySessionContext("agent-1", "session-1")
-    ok = store.verify_session(session, b"presentation-bytes")
-    if not ok:
-      raise RuntimeError("verification failed")
-
-    # Secrets are now gated by the verified session.
-    store.put(session, "app/config", b"value")
-    ```
-
-    #### Verification flow
-
-    - `set_verifier(callable)` installs a DID/VC verifier callback.
-    - `verify_session(session, presentation)` calls the verifier and sets
-      `session.verified = True` if the callback returns truthy.
-    - `put/get/delete/list_keys` require a verified session.
-
-    #### Example: SQLCipher memory (Python)
-
-    ```python
-    from shadi import SqlCipherMemoryStore
-
-    store = SqlCipherMemoryStore(
-      db_path="./.tmp/shadi-app/app_memory.db",
-      key_name="app/memory_key",
-    )
-
-    store.put("app", "latest_state", "{\"status\":\"ok\"}")
-    latest = store.get_latest("app", "latest_state")
-    print(latest.payload if latest else "no entry")
-    ```
-
-    #### Example: sandboxed execution (Python)
-
-    ```python
-    from shadi import SandboxPolicyHandle, run_sandboxed
-
-    policy = SandboxPolicyHandle()
-    policy.allow_read_path(".")
-    policy.allow_write_path("./.tmp")
-    policy.block_network(False)
-
-    run_sandboxed(["/usr/bin/env", "python", "-V"], policy)
-    ```
+Your verifier should set `verified` after validating a DID/VC presentation.
 
 ## Key provisioning for agents
 
@@ -289,16 +190,6 @@ from GitHub):
 4. In your app, verify sessions using the human DID/VC and then grant secrets
 access to the agent sessions.
 
-## Secret store naming in Rust vs Python
-
-Rust and Python use the same underlying SHADI secret store. The "name" you see
-in examples is just the secret key string (for example, `app/config` or
-`agents/agent-a/did`). There is no separate store per language.
-
-If you see different names between Rust and Python examples, it is only a
-convention difference. Pick a shared key naming scheme and use it consistently
-across both runtimes.
-
 ## Sandbox integration (fundamental)
 
 The sandbox launcher is a core SHADI feature. Agents should run under an OS
@@ -314,17 +205,6 @@ cargo run -p agntcy-shadi-cli -- \
   -- \
   ./your-agent --arg value
 ```
-
-For Python agents, you can run under the sandbox using the JSON policy runner:
-
-```bash
-./.venv/bin/python tools/run_sandboxed_agent.py \
-  --policy ./sandbox.json \
-  -- ./.venv/bin/python ./your_agent.py
-```
-
-`net_allow` in the policy file is enforced by the Python runner using a
-best-effort network guard (not OS-enforced).
 
 If keychain access is restricted in the sandbox, broker a secret outside the
 sandbox and inject it as an environment variable:
@@ -345,15 +225,13 @@ Rust APIs return `SecretError`:
 - `InvalidInput`: key does not exist or malformed input
 - `StorageFailure`: backend failure or OS error
 
-In Python, these errors are reported as `RuntimeError` with the same message.
-
 ## Recommended integration steps
 
 1. Generate or import a human OpenPGP key and store it with `put-key`.
 2. Derive agent DIDs and keypairs with `derive-agent-did`.
 3. Implement a DID/VC verification callback in your app.
 4. Set `session.verified = true` only after verification succeeds.
-5. Use `AgentSecretAccess` (Rust) or `ShadiStore` (Python) to access secrets.
+5. Use `AgentSecretAccess` to access secrets.
 6. Run the agent under a sandbox policy if needed.
 
 ## Next steps

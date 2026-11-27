@@ -11,7 +11,7 @@ hide:
 Contributors to **Secure Host for Agentic AI Dynamic Instantiation (SHADI)** work
 in the open on the runtime, the sandboxing and secrets model, the SLIM/A2A
 transport integration, and agentbridge. If you run SHADI to launch agents
-safely, integrate its Python bindings, or connect coding agents through
+safely, embed its Rust crates, or connect coding agents through
 agentbridge, the links below are where the work happens — repo, Discord, and
 community meetings.
 

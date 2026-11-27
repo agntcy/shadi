@@ -5,14 +5,13 @@ Telemetry is opt-in and only enabled when an exporter or console output is confi
 
 ## Environment Variables
 
-The core runtime (shadictl, shadi_py, and tools), agentbridge, and the SecOps agent
+The core runtime (shadictl), agentbridge, and the SecOps agent
 respect the standard OpenTelemetry variables below.
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP/HTTP endpoint for trace export.
   - Example: `http://localhost:4318`
 - `OTEL_SERVICE_NAME`: Override the service name reported by SHADI components.
-  - Defaults: `shadi-core` (shadictl), `shadi-runtime` (shadi_py / tools), and
-    `agentbridge` (every agentbridge command).
+  - Defaults: `shadi-core` (shadictl) and `agentbridge` (every agentbridge command).
 - `SHADI_OTEL_CONSOLE`: Set to `1` to print spans to stdout when no OTLP endpoint is set.
   agentbridge ignores it: its console output follows `RUST_LOG`.
 - `SHADI_OTEL_FILE`: Write JSON trace logs to a local file (one JSON object per line).

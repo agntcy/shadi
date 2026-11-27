@@ -1197,6 +1197,14 @@ fn build_agents_with(
                 peer.as_ref(),
                 slim_endpoint,
             );
+            // Under open admission the peer's DID is the only pin there is, so
+            // a lookup that found none is refused here rather than at the first
+            // dispatch.
+            shadi_mas::experiments::require_peer_did_when_open(
+                target.peer_did.as_deref(),
+                &format!("coordinate slim:{agent_id}"),
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
             let config = LiveA2ATaskAdapterConfig {
                 endpoint: target.endpoint,
                 agent_id: "coordinator".to_string(),
@@ -1520,6 +1528,7 @@ mod tests {
 
     #[test]
     fn build_agents_constructs_native_and_slim_specs() {
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
         let specs = vec![
             "claude-code".to_string(),
             "copilot".to_string(),
@@ -1598,6 +1607,42 @@ mod tests {
         assert_eq!(executed["mean_reference_gap"], 2.0);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_agents_refuses_a_slim_spec_without_a_peer_did_under_open_admission() {
+        let specs = vec![
+            "claude-code".to_string(),
+            "slim:peer@127.0.0.1:47357".to_string(),
+        ];
+        {
+            let _env = crate::commands::AdmissionEnv::open();
+            let err = build_agents_with(&specs, "127.0.0.1:47357", "test-session", |_, _| None)
+                .err()
+                .expect("open admission needs a peer DID");
+            let err = err.to_string();
+            assert!(
+                err.starts_with("coordinate slim:peer: open admission"),
+                "{err}"
+            );
+            assert!(err.contains("did:key"), "{err}");
+            // Specs that never dial a peer are unaffected.
+            let local = vec!["claude-code".to_string()];
+            assert!(
+                build_agents_with(&local, "127.0.0.1:47357", "test-session", |_, _| None).is_ok()
+            );
+            // A lookup that does find the peer leaves something to pin, which
+            // is the whole point of resolving it.
+            let found = build_agents_with(&specs, "127.0.0.1:47357", "test-session", |_, _| {
+                Some(candidate("peer", "did:key:z6MkPeer", None, None))
+            })
+            .expect("the peer's DID is the pin");
+            assert_eq!(found.len(), 2);
+        }
+        let _env = crate::commands::AdmissionEnv::closed("did:key:zMember");
+        let agents = build_agents_with(&specs, "127.0.0.1:47357", "test-session", |_, _| None)
+            .expect("closed");
+        assert_eq!(agents.len(), 2);
     }
 
     #[test]

@@ -141,9 +141,6 @@ The system can be read as four presentation layers:
 - **Engines**: `DevelopmentEngine` (code artifact), plus the paper
   examples `PreferenceEngine`, `CascadeEngine`, and `ResourceEngine`.
   `Unmapped` has no solver.
-- **Not `slim_mas`**: that crate evaluates SLIM group membership
-  (`shadictl slim-mas`). SHADI MAS decides how an admitted roster
-  advances a shared problem.
 
 See [SHADI MAS](shadi-mas.md) for the event loop, adapters, and file
 map, and [ASSEMBLY and CONVERGE](assembly-converge.md) for the protocol.
@@ -197,7 +194,6 @@ delivery, and the prompt-injection boundary, see
 
     - `crates/shadi_memory/src/lib.rs`: SQLCipher store and query helpers.
     - `crates/shadictl/src/memory_command.rs`: `shadictl memory` helper.
-    - `crates/shadi_py/src/lib.rs`: SQLCipher bindings.
 
     **Transport layer**
 
@@ -215,13 +211,6 @@ delivery, and the prompt-injection boundary, see
     - `crates/shadictl/src/trusted_secret_delivery.rs`: secret resolution, exact-program matching, broker lifecycle, and delegated child verification.
     - `crates/shadictl/src/sandbox_snapshot.rs`: launch orchestration, runtime policy augmentation for broker endpoints, and trusted-secret post-spawn delivery.
     - `crates/shadi_sandbox/src/policy.rs`: minimal-profile and local Unix socket opt-in controls.
-
-## Language bindings
-
-SHADI exposes a Python extension for secrets, SQLCipher memory, and sandbox
-execution, backed by `crates/shadi_py/src/lib.rs`. See
-[API Guide → Language Bindings](api_integration.md#language-bindings) for the
-full Rust and Python surface with examples.
 
 ## CLI policy resolution
 

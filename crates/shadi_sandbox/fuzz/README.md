@@ -13,8 +13,8 @@ fuzzing for its own sake:
 
 - **`session-name`** — checks that `sanitize_session_name` and
   `named_socket_path` hold their safety invariant for every input, not just
-  the cases in the unit tests: a session name can come from a caller (the
-  desktop panel's launch form, `--session <name>`), and the only thing
+  the cases in the unit tests: a session name can come from a caller
+  (`--session <name>`), and the only thing
   standing between an arbitrary name and a path-traversal escape out of
   `socket_dir()` is that sanitizer.
 
