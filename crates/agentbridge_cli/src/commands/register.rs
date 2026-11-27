@@ -595,7 +595,8 @@ fn relayed_reason(session_peer: &SessionPeer, did: &str) -> Option<String> {
 fn preview(s: &str, max: usize) -> String {
     let first_line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or(s);
     if first_line.len() > max {
-        format!("{}…", &first_line[..max])
+        let end = first_line.floor_char_boundary(max);
+        format!("{}…", &first_line[..end])
     } else {
         first_line.to_string()
     }
@@ -2726,6 +2727,12 @@ mod tests {
     fn preview_truncates_to_first_nonblank_line() {
         assert_eq!(preview("\n\nhello world", 5), "hello…");
         assert_eq!(preview("short", 20), "short");
+    }
+
+    #[test]
+    fn preview_truncates_at_a_utf8_boundary() {
+        assert_eq!(preview("café menu", 4), "caf…");
+        assert_eq!(preview("café menu", 5), "café…");
     }
 
     #[test]
