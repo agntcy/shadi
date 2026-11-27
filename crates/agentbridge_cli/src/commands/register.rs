@@ -1136,10 +1136,9 @@ struct AgentBridgeRequestHandler {
     session_bound: bool,
 }
 
-/// Task reads and control (`get_task`, `list_tasks`, `cancel_task`,
-/// `subscribe_to_task`) never pass through the executor's admission gate, so on
-/// a session-bound listener any peer admitted at the SLIM level could read,
-/// list, cancel or follow other callers' tasks. Refuse them there.
+/// `get_task` never passes through the executor's admission gate, so on a
+/// session-bound listener any peer admitted at the SLIM level could read other
+/// callers' tasks. Refuse it there.
 fn refuse_task_access(session_bound: bool, method: &str) -> Result<(), A2AError> {
     if session_bound {
         return Err(A2AError::unsupported_operation(format!(
@@ -1147,6 +1146,14 @@ fn refuse_task_access(session_bound: bool, method: &str) -> Result<(), A2AError>
         )));
     }
     Ok(())
+}
+
+/// `list_tasks`, `cancel_task` and `subscribe_to_task` are refused on every
+/// listener: an HTTP, JSON-RPC or gRPC caller is unauthenticated, and under
+/// closed SLIM admission any member could reach another member's tasks. Only
+/// `get_task` by id stays, for a client fetching its own parked task.
+fn task_control_refused(method: &str) -> A2AError {
+    A2AError::unsupported_operation(format!("{method}: unavailable on an agentbridge listener"))
 }
 
 impl AgentBridgeRequestHandler {
@@ -1224,29 +1231,26 @@ impl RequestHandler for AgentBridgeRequestHandler {
 
     async fn list_tasks(
         &self,
-        params: &A2AServiceParams,
-        req: ListTasksRequest,
+        _params: &A2AServiceParams,
+        _req: ListTasksRequest,
     ) -> Result<ListTasksResponse, A2AError> {
-        refuse_task_access(self.session_bound, "list_tasks")?;
-        self.inner.list_tasks(params, req).await
+        Err(task_control_refused("list_tasks"))
     }
 
     async fn cancel_task(
         &self,
-        params: &A2AServiceParams,
-        req: CancelTaskRequest,
+        _params: &A2AServiceParams,
+        _req: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
-        refuse_task_access(self.session_bound, "cancel_task")?;
-        self.inner.cancel_task(params, req).await
+        Err(task_control_refused("cancel_task"))
     }
 
     async fn subscribe_to_task(
         &self,
-        params: &A2AServiceParams,
-        req: SubscribeToTaskRequest,
+        _params: &A2AServiceParams,
+        _req: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        refuse_task_access(self.session_bound, "subscribe_to_task")?;
-        self.inner.subscribe_to_task(params, req).await
+        Err(task_control_refused("subscribe_to_task"))
     }
 
     async fn create_push_config(
@@ -3382,8 +3386,6 @@ test push ... FAILED
         }
     }
 
-    const TASK_RPCS: [&str; 4] = ["get_task", "list_tasks", "cancel_task", "subscribe_to_task"];
-
     #[tokio::test]
     async fn a_session_bound_handler_refuses_get_task() {
         let err = task_rpc_error(&silent_handler_with(true), "get_task").await;
@@ -3394,46 +3396,71 @@ test push ... FAILED
     }
 
     #[tokio::test]
-    async fn a_session_bound_handler_refuses_list_tasks() {
-        let err = task_rpc_error(&silent_handler_with(true), "list_tasks").await;
-        let err = err.expect("list_tasks must be refused");
-        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
-        assert!(err.to_string().contains("list_tasks"), "{err}");
-        assert!(err.to_string().contains("session-bound"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_session_bound_handler_refuses_cancel_task() {
-        let err = task_rpc_error(&silent_handler_with(true), "cancel_task").await;
-        let err = err.expect("cancel_task must be refused");
-        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
-        assert!(err.to_string().contains("cancel_task"), "{err}");
-        assert!(err.to_string().contains("session-bound"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_session_bound_handler_refuses_subscribe_to_task() {
-        let err = task_rpc_error(&silent_handler_with(true), "subscribe_to_task").await;
-        let err = err.expect("subscribe_to_task must be refused");
-        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
-        assert!(err.to_string().contains("subscribe_to_task"), "{err}");
-        assert!(err.to_string().contains("session-bound"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_handler_that_is_not_session_bound_still_delegates_the_task_rpcs() {
-        let handler = silent_handler_with(false);
-        for method in TASK_RPCS {
-            // The guard stays out of the way: a missing task is the inner
-            // handler's task-not-found, and list_tasks simply succeeds.
-            match (method, task_rpc_error(&handler, method).await) {
-                ("list_tasks", None) => {}
-                (_, Some(err)) => {
-                    assert_eq!(err.code, error_code::TASK_NOT_FOUND, "{method}: {err}");
-                }
-                (_, None) => panic!("{method} on a missing task must not succeed"),
+    async fn every_handler_refuses_list_cancel_and_subscribe() {
+        for session_bound in [false, true] {
+            let handler = silent_handler_with(session_bound);
+            for method in ["list_tasks", "cancel_task", "subscribe_to_task"] {
+                let err = task_rpc_error(&handler, method).await;
+                let err = err.unwrap_or_else(|| panic!("{method} must be refused"));
+                assert_eq!(
+                    err.code,
+                    error_code::UNSUPPORTED_OPERATION,
+                    "{method}: {err}"
+                );
+                assert!(err.to_string().contains(method), "{err}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_handler_that_is_not_session_bound_still_delegates_get_task() {
+        // A missing task is the inner handler's task-not-found.
+        let err = task_rpc_error(&silent_handler_with(false), "get_task").await;
+        let err = err.expect("get_task on a missing task must not succeed");
+        assert_eq!(err.code, error_code::TASK_NOT_FOUND, "{err}");
+    }
+
+    #[tokio::test]
+    async fn another_client_can_neither_list_nor_cancel_a_stored_task() {
+        let handler = silent_handler();
+        let params = A2AServiceParams::default();
+        let task = match handler
+            .send_message(&params, sample_request("plain task"))
+            .await
+            .expect("the gate parks rather than erroring")
+        {
+            SendMessageResponse::Task(task) => task,
+            SendMessageResponse::Message(m) => panic!("expected a task, got {m:?}"),
+        };
+
+        let err = task_rpc_error(&handler, "list_tasks").await;
+        let err = err.expect("list_tasks must be refused");
+        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
+        let err = handler
+            .cancel_task(
+                &params,
+                CancelTaskRequest {
+                    id: task.id.clone(),
+                    metadata: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect_err("cancel_task must be refused");
+        assert_eq!(err.code, error_code::UNSUPPORTED_OPERATION);
+
+        let fetched = handler
+            .get_task(
+                &params,
+                GetTaskRequest {
+                    id: task.id.clone(),
+                    history_length: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("the task is still stored");
+        assert_eq!(fetched.status.state, TaskState::AuthRequired);
     }
 
     #[tokio::test]
