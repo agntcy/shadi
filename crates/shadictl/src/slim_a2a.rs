@@ -13,7 +13,7 @@ use a2a_server::{
 use agent_secrets::{AgentSecretAccess, AgentVerifier, SecretResult, SessionContext};
 use agent_transport_slim::client_access::ClientAccess;
 use agentbridge::bounded_task_store::{
-    BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY,
+    refuse_push_config, BoundedTaskStore, DEFAULT_PARKED_TTL, DEFAULT_TASK_CAPACITY,
 };
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -147,6 +147,7 @@ impl RequestHandler for SlimA2AHandler {
         params: &A2AServiceParams,
         req: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
+        refuse_push_config(&req)?;
         let result = self.inner.send_message(params, req).await;
         if result.is_ok() {
             self.request_seen.notify_waiters();
@@ -159,6 +160,7 @@ impl RequestHandler for SlimA2AHandler {
         params: &A2AServiceParams,
         req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+        refuse_push_config(&req)?;
         let result = self.inner.send_streaming_message(params, req).await;
         if result.is_ok() {
             self.request_seen.notify_waiters();
@@ -1244,6 +1246,57 @@ mod tests {
             .await
             .expect("extended agent card");
         assert_eq!(card.supported_interfaces[0].url, "slimrpc://agntcy/shadi/secops-a");
+    }
+
+    /// agntcy/shadi#629: a push config failed only after the task was stored,
+    /// and the orphaned `Submitted` task was never evicted.
+    #[tokio::test]
+    async fn slim_a2a_handler_refuses_a_push_config_before_storing_a_task() {
+        let handler = SlimA2AHandler::new(
+            "agntcy/shadi/secops-a".to_string(),
+            "slimrpc://agntcy/shadi/secops-a".to_string(),
+            Arc::new(Notify::new()),
+        );
+        let params: A2AServiceParams = HashMap::new();
+        let push_request = || {
+            let mut request = send_request("hello handler");
+            request.configuration = Some(
+                serde_json::from_value(serde_json::json!({
+                    "taskPushNotificationConfig": { "url": "https://example.invalid/hook" }
+                }))
+                .unwrap(),
+            );
+            request
+        };
+        let err = handler
+            .send_message(&params, push_request())
+            .await
+            .expect_err("send_message must refuse a push config");
+        assert_eq!(err.code, error_code::PUSH_NOTIFICATION_NOT_SUPPORTED);
+        let err = handler
+            .send_streaming_message(&params, push_request())
+            .await
+            .err()
+            .expect("send_streaming_message must refuse a push config");
+        assert_eq!(err.code, error_code::PUSH_NOTIFICATION_NOT_SUPPORTED);
+
+        let stored = handler
+            .list_tasks(
+                &params,
+                ListTasksRequest {
+                    context_id: None,
+                    status: None,
+                    page_size: None,
+                    page_token: None,
+                    history_length: None,
+                    status_timestamp_after: None,
+                    include_artifacts: None,
+                    tenant: None,
+                },
+            )
+            .await
+            .expect("list tasks");
+        assert!(stored.tasks.is_empty(), "{:?}", stored.tasks);
     }
 
     #[test]

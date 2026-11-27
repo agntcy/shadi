@@ -41,7 +41,9 @@ use std::num::NonZeroUsize;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use a2a::{A2AError, ListTasksRequest, ListTasksResponse, Task, TaskId, TaskState};
+use a2a::{
+    A2AError, ListTasksRequest, ListTasksResponse, SendMessageRequest, Task, TaskId, TaskState,
+};
 use a2a_server::pagination::resolve_page_size;
 use a2a_server::task_store::{StoredTask, TaskVersion};
 use a2a_server::TaskStore;
@@ -88,6 +90,22 @@ pub const DEFAULT_PARKED_TTL: Duration = {
     };
     Duration::from_secs(longest.unsigned_abs() + PARKED_TTL_GRACE_SECS)
 };
+
+/// Refuses a message that asks for push notifications. A handler without a
+/// push config store calls it before `DefaultRequestHandler`, which stores the
+/// new task as `Submitted` before it saves the push config: the request would
+/// fail and leave a task that never runs and this store never evicts
+/// (agntcy/shadi#629).
+pub fn refuse_push_config(req: &SendMessageRequest) -> Result<(), A2AError> {
+    if req
+        .configuration
+        .as_ref()
+        .is_some_and(|c| c.task_push_notification_config.is_some())
+    {
+        return Err(A2AError::push_notification_not_supported());
+    }
+    Ok(())
+}
 
 /// A [`TaskStore`] holding at most `capacity` tasks.
 ///
