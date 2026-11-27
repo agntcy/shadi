@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.3.0...agntcy-shadi-sandbox-v0.4.0) - 2026-11-27
+
+### Fixed
+
+- *(shadictl)* let the sandboxed child clean up before a stop signal kills it ([#552](https://github.com/agntcy/shadi/pull/552))
+- *(agentbridge)* let sandboxed Copilot and Cursor run without their own approvals ([#550](https://github.com/agntcy/shadi/pull/550))
+- *(sandbox)* let a macOS sandboxed program read its own executable ([#503](https://github.com/agntcy/shadi/pull/503))
+- *(sandbox)* let a Windows sandbox start programs from its working directory ([#554](https://github.com/agntcy/shadi/pull/554))
+- *(sandbox)* refuse proxy mode on Windows instead of leaving it unenforced ([#534](https://github.com/agntcy/shadi/pull/534))
+- *(sandbox)* make Windows AppContainer spawn and path grants work ([#533](https://github.com/agntcy/shadi/pull/533))
+- *(shadictl)* refuse sandboxed peers on the policy control socket ([#527](https://github.com/agntcy/shadi/pull/527))
+
+### Other
+
+- *(shadi_desktop)* [**breaking**] remove the desktop app ([#610](https://github.com/agntcy/shadi/pull/610))
+- *(deps)* lock file maintenance ([#588](https://github.com/agntcy/shadi/pull/588))
+
 ## [0.3.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-sandbox-v0.2.1...agntcy-shadi-sandbox-v0.3.0) - 2026-10-09
 
 ### Added

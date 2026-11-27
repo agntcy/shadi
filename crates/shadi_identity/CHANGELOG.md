@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.4.0...agntcy-shadi-identity-v0.5.0) - 2026-11-27
+
+### Added
+
+- [**breaking**] admit previously unknown `did:key` callers to a credential-gated SLIM listener ([#621](https://github.com/agntcy/shadi/pull/621))
+- *(agentbridge)* wire the OID4VP holder and verifier ([#524](https://github.com/agntcy/shadi/pull/524))
+- *(credential)* [**breaking**] add the OID4VP holder path ([#520](https://github.com/agntcy/shadi/pull/520))
+
+### Fixed
+
+- clear the remaining CodeQL secret alerts and bump kube for RUSTSEC-2026-0600 ([#613](https://github.com/agntcy/shadi/pull/613))
+- address CodeQL cleartext-logging alerts and bump url in fuzz lockfiles ([#612](https://github.com/agntcy/shadi/pull/612))
+
+### Other
+
+- *(deps)* build on SLIM 3.5.1 and the a2a-rs 0.4 release ([#614](https://github.com/agntcy/shadi/pull/614))
+- *(shadi_desktop)* [**breaking**] remove the desktop app ([#610](https://github.com/agntcy/shadi/pull/610))
+- *(deps)* lock file maintenance ([#588](https://github.com/agntcy/shadi/pull/588))
+
 ## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-identity-v0.3.0...agntcy-shadi-identity-v0.4.0) - 2026-10-16
 
 ### Added

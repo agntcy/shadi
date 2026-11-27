@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.4.0...agntcy-shadi-a2a-v0.5.0) - 2026-11-27
+
+### Added
+
+- [**breaking**] admit previously unknown `did:key` callers to a credential-gated SLIM listener ([#621](https://github.com/agntcy/shadi/pull/621))
+- *(agentbridge)* wire the OID4VP holder and verifier ([#524](https://github.com/agntcy/shadi/pull/524))
+- *(agentbridge)* find running agents through dir-runtime ([#490](https://github.com/agntcy/shadi/pull/490))
+
+### Other
+
+- *(deps)* build on SLIM 3.5.1 and the a2a-rs 0.4 release ([#614](https://github.com/agntcy/shadi/pull/614))
+
 ## [0.4.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-a2a-v0.3.0...agntcy-shadi-a2a-v0.4.0) - 2026-10-16
 
 ### Added

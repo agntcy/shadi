@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.5.0...agntcy-shadi-agent-transport-slim-v0.6.0) - 2026-11-27
+
+### Added
+
+- [**breaking**] admit previously unknown `did:key` callers to a credential-gated SLIM listener ([#621](https://github.com/agntcy/shadi/pull/621))
+
+### Fixed
+
+- address CodeQL cleartext-logging alerts and bump url in fuzz lockfiles ([#612](https://github.com/agntcy/shadi/pull/612))
+
+### Other
+
+- *(deps)* build on SLIM 3.5.1 and the a2a-rs 0.4 release ([#614](https://github.com/agntcy/shadi/pull/614))
+
 ## [0.5.0](https://github.com/agntcy/shadi/compare/agntcy-shadi-agent-transport-slim-v0.4.0...agntcy-shadi-agent-transport-slim-v0.5.0) - 2026-10-16
 
 ### Added
